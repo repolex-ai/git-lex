@@ -386,7 +386,7 @@ fn cmd_init() {
 
     // Ensure .store/ is in .gitignore (it's a local cache, not committed)
     let gitignore = root.join(".gitignore");
-    let ignore_entry = ".lex/.store/";
+    let ignore_entry = ".lex/oxigraph/";
     if gitignore.exists() {
         let existing = fs::read_to_string(&gitignore).unwrap_or_default();
         if !existing.contains(ignore_entry) {
@@ -507,6 +507,52 @@ fn cmd_status() {
         }
         _ => {
             println!("  global config — lex drivers NOT installed (run 'git lex init')");
+        }
+    }
+
+    // Document lexification status
+    let output = Command::new("git")
+        .args(["ls-tree", "-r", "--name-only", "HEAD"])
+        .output();
+    if let Ok(o) = output {
+        if o.status.success() {
+            let stdout = String::from_utf8_lossy(&o.stdout);
+            let docs: Vec<&str> = stdout
+                .lines()
+                .filter(|f| {
+                    let f = f.to_lowercase();
+                    (f.ends_with(".md") || f.ends_with(".txt"))
+                        && !f.starts_with(".lex/")
+                        && !f.starts_with(".git")
+                })
+                .collect();
+
+            if !docs.is_empty() {
+                // Load all .nq content to check for mentions
+                let lex_nq = load_lex_nquads();
+
+                let mut lexified = Vec::new();
+                let mut unlexified = Vec::new();
+
+                for doc in &docs {
+                    if lex_nq.contains(doc) {
+                        lexified.push(*doc);
+                    } else {
+                        unlexified.push(*doc);
+                    }
+                }
+
+                println!();
+                println!("  Documents:");
+                for doc in &lexified {
+                    println!("    {}  — lexified", doc);
+                }
+                for doc in &unlexified {
+                    println!("    {}  — unlexified", doc);
+                }
+                println!();
+                println!("  {}/{} lexified", lexified.len(), lexified.len() + unlexified.len());
+            }
         }
     }
 }
@@ -848,7 +894,7 @@ fn load_lex_nquads() -> String {
 
 /// Get the persistent store path.
 fn store_path() -> Option<PathBuf> {
-    find_git_root().map(|r| r.join(".lex").join(".store"))
+    find_git_root().map(|r| r.join(".lex").join("oxigraph"))
 }
 
 /// Open the persistent store, or None if it doesn't exist.
@@ -864,7 +910,7 @@ fn open_store() -> Option<Store> {
 /// Create or open the persistent store.
 fn open_or_create_store() -> Store {
     let path = store_path().expect("not in a git repo");
-    fs::create_dir_all(&path).expect("failed to create .lex/.store/");
+    fs::create_dir_all(&path).expect("failed to create .lex/oxigraph/");
     Store::open(&path).expect("failed to open store")
 }
 
@@ -907,13 +953,24 @@ fn cmd_sync() {
 
 /// Add default prefixes to a query. Injects any standard prefixes not already declared.
 fn add_prefixes(query: &str) -> String {
+    // Get first commit SHA for content ontology prefix
+    let first_commit = Command::new("git")
+        .args(["rev-list", "--max-parents=0", "HEAD"])
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim()[..8].to_string())
+        .unwrap_or_default();
+    let o_prefix = format!("PREFIX o: <https://repolex.ai/ont/{}/>", first_commit);
+
     let defaults = [
-        ("git:", "PREFIX git: <https://repolex.ai/ontology/git-lex/>"),
-        ("lex:", "PREFIX lex: <https://repolex.ai/ontology/git-lex/>"),
-        ("rdf:", "PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>"),
-        ("rdfs:", "PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>"),
-        ("owl:", "PREFIX owl: <http://www.w3.org/2002/07/owl#>"),
-        ("xsd:", "PREFIX xsd: <http://www.w3.org/2001/XMLSchema#>"),
+        ("lex:", "PREFIX lex: <https://repolex.ai/ontology/git-lex/>".to_string()),
+        ("lex-o:", "PREFIX lex-o: <https://repolex.ai/ontology/lex-upper/>".to_string()),
+        ("o:", o_prefix),
+        ("rdf:", "PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>".to_string()),
+        ("rdfs:", "PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>".to_string()),
+        ("owl:", "PREFIX owl: <http://www.w3.org/2002/07/owl#>".to_string()),
+        ("xsd:", "PREFIX xsd: <http://www.w3.org/2001/XMLSchema#>".to_string()),
     ];
     let upper = query.to_uppercase();
     let mut prefix_block = String::new();
@@ -974,6 +1031,7 @@ fn run_query(store: &Store, query: &str, store_type: &str) {
                             Term::NamedNode(n) => n.as_str().to_string(),
                             Term::Literal(l) => l.value().to_string(),
                             Term::BlankNode(b) => format!("_:{}", b.as_str()),
+                            Term::Triple(t) => format!("<< {} {} {} >>", t.subject, t.predicate, t.object),
                         })
                         .unwrap_or_default();
                     parts.push(format!("{}={}", var, val));
