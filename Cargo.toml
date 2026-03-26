@@ -1,0 +1,15 @@
+[package]
+name = "git-lex"
+version = "0.0.1"
+edition = "2024"
+description = "Git extensions for knowledge graphs"
+license = "Unlicense"
+repository = "https://github.com/repolex-ai/git-lex"
+
+[[bin]]
+name = "git-lex"
+path = "src/main.rs"
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+oxigraph = "0.5.6"
