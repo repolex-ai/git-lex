@@ -110,7 +110,7 @@ fn get_repo_id() -> String {
 
 fn base_uri() -> String {
     let repo_id = get_repo_id();
-    format!("https://lex.repolex.ai/r/{}", repo_id)
+    format!("https://repolex.ai/r/{}", repo_id)
 }
 
 /// Escape a string for use in N-Quads literals.
@@ -158,38 +158,38 @@ fn cmd_log(author: Option<String>, n: usize, format: String) {
 
         if format == "nq" {
             println!(
-                "{} <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://lex.repolex.ai/ontology/git/Commit> {} .",
+                "{} <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://repolex.ai/ontology/git-lex/Commit> {} .",
                 commit_uri, graph
             );
             println!(
-                "{} <https://lex.repolex.ai/ontology/git/sha> \"{}\" {} .",
+                "{} <https://repolex.ai/ontology/git-lex/hexsha> \"{}\" {} .",
                 commit_uri, sha, graph
             );
             println!(
-                "{} <https://lex.repolex.ai/ontology/git/authorEmail> \"{}\" {} .",
+                "{} <https://repolex.ai/ontology/git-lex/authorEmail> \"{}\" {} .",
                 commit_uri,
                 nq_escape(email),
                 graph
             );
             println!(
-                "{} <https://lex.repolex.ai/ontology/git/authorName> \"{}\" {} .",
+                "{} <https://repolex.ai/ontology/git-lex/authorName> \"{}\" {} .",
                 commit_uri,
                 nq_escape(name),
                 graph
             );
             println!(
-                "{} <https://lex.repolex.ai/ontology/git/date> \"{}\"^^<http://www.w3.org/2001/XMLSchema#dateTime> {} .",
+                "{} <https://repolex.ai/ontology/git-lex/date> \"{}\"^^<http://www.w3.org/2001/XMLSchema#dateTime> {} .",
                 commit_uri, date, graph
             );
             println!(
-                "{} <https://lex.repolex.ai/ontology/git/message> \"{}\" {} .",
+                "{} <https://repolex.ai/ontology/git-lex/message> \"{}\" {} .",
                 commit_uri,
                 nq_escape(subject),
                 graph
             );
             for parent in parents.split_whitespace() {
                 println!(
-                    "{} <https://lex.repolex.ai/ontology/git/parent> <{}/commit/{}> {} .",
+                    "{} <https://repolex.ai/ontology/git-lex/parent> <{}/commit/{}> {} .",
                     commit_uri, base, parent, graph
                 );
             }
@@ -243,25 +243,25 @@ fn cmd_tree(git_ref: String, format: String) {
 
         if format == "nq" {
             println!(
-                "{} <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://lex.repolex.ai/ontology/git/Blob> {} .",
+                "{} <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://repolex.ai/ontology/git-lex/Blob> {} .",
                 file_uri, graph
             );
             println!(
-                "{} <https://lex.repolex.ai/ontology/git/path> \"{}\" {} .",
+                "{} <https://repolex.ai/ontology/git-lex/path> \"{}\" {} .",
                 file_uri,
                 nq_escape(path),
                 graph
             );
             println!(
-                "{} <https://lex.repolex.ai/ontology/git/blobHash> \"{}\" {} .",
+                "{} <https://repolex.ai/ontology/git-lex/blobHash> \"{}\" {} .",
                 file_uri, blob_hash, graph
             );
             println!(
-                "{} <https://lex.repolex.ai/ontology/git/size> \"{}\"^^<http://www.w3.org/2001/XMLSchema#integer> {} .",
+                "{} <https://repolex.ai/ontology/git-lex/size> \"{}\"^^<http://www.w3.org/2001/XMLSchema#integer> {} .",
                 file_uri, size, graph
             );
             println!(
-                "{} <https://lex.repolex.ai/ontology/git/objectType> \"{}\" {} .",
+                "{} <https://repolex.ai/ontology/git-lex/type> \"{}\" {} .",
                 file_uri, obj_type, graph
             );
         } else {
@@ -293,17 +293,17 @@ fn cmd_refs(format: String) {
 
                 if format == "nq" {
                     println!(
-                        "{} <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://lex.repolex.ai/ontology/git/Branch> {} .",
+                        "{} <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://repolex.ai/ontology/git-lex/Branch> {} .",
                         ref_uri, graph
                     );
                     println!(
-                        "{} <https://lex.repolex.ai/ontology/git/name> \"{}\" {} .",
+                        "{} <https://repolex.ai/ontology/git-lex/shortName> \"{}\" {} .",
                         ref_uri,
                         nq_escape(name),
                         graph
                     );
                     println!(
-                        "{} <https://lex.repolex.ai/ontology/git/points> <{}/commit/{}> {} .",
+                        "{} <https://repolex.ai/ontology/git-lex/commit> <{}/commit/{}> {} .",
                         ref_uri, base, sha, graph
                     );
                 } else {
@@ -330,17 +330,17 @@ fn cmd_refs(format: String) {
 
                 if format == "nq" {
                     println!(
-                        "{} <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://lex.repolex.ai/ontology/git/Tag> {} .",
+                        "{} <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://repolex.ai/ontology/git-lex/Tag> {} .",
                         ref_uri, graph
                     );
                     println!(
-                        "{} <https://lex.repolex.ai/ontology/git/name> \"{}\" {} .",
+                        "{} <https://repolex.ai/ontology/git-lex/shortName> \"{}\" {} .",
                         ref_uri,
                         nq_escape(name),
                         graph
                     );
                     println!(
-                        "{} <https://lex.repolex.ai/ontology/git/points> <{}/commit/{}> {} .",
+                        "{} <https://repolex.ai/ontology/git-lex/commit> <{}/commit/{}> {} .",
                         ref_uri, base, sha, graph
                     );
                 } else {
@@ -532,17 +532,17 @@ fn generate_git_nquads() -> String {
                 let (sha, email, name, date, subject, parents) = (f[0], f[1], f[2], f[3], f[4], f[5]);
                 let (committer_email, committer_name, committer_date) = (f[6], f[7], f[8]);
                 let cu = format!("<{}/commit/{}>", base, sha);
-                nq.push_str(&format!("{} <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://lex.repolex.ai/ontology/git/Commit> {} .\n", cu, graph));
-                nq.push_str(&format!("{} <https://lex.repolex.ai/ontology/git/sha> \"{}\" {} .\n", cu, sha, graph));
-                nq.push_str(&format!("{} <https://lex.repolex.ai/ontology/git/authorEmail> \"{}\" {} .\n", cu, nq_escape(email), graph));
-                nq.push_str(&format!("{} <https://lex.repolex.ai/ontology/git/authorName> \"{}\" {} .\n", cu, nq_escape(name), graph));
-                nq.push_str(&format!("{} <https://lex.repolex.ai/ontology/git/authorDate> \"{}\"^^<http://www.w3.org/2001/XMLSchema#dateTime> {} .\n", cu, date, graph));
-                nq.push_str(&format!("{} <https://lex.repolex.ai/ontology/git/committerEmail> \"{}\" {} .\n", cu, nq_escape(committer_email), graph));
-                nq.push_str(&format!("{} <https://lex.repolex.ai/ontology/git/committerName> \"{}\" {} .\n", cu, nq_escape(committer_name), graph));
-                nq.push_str(&format!("{} <https://lex.repolex.ai/ontology/git/committerDate> \"{}\"^^<http://www.w3.org/2001/XMLSchema#dateTime> {} .\n", cu, committer_date, graph));
-                nq.push_str(&format!("{} <https://lex.repolex.ai/ontology/git/message> \"{}\" {} .\n", cu, nq_escape(subject), graph));
+                nq.push_str(&format!("{} <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://repolex.ai/ontology/git-lex/Commit> {} .\n", cu, graph));
+                nq.push_str(&format!("{} <https://repolex.ai/ontology/git-lex/hexsha> \"{}\" {} .\n", cu, sha, graph));
+                nq.push_str(&format!("{} <https://repolex.ai/ontology/git-lex/authorEmail> \"{}\" {} .\n", cu, nq_escape(email), graph));
+                nq.push_str(&format!("{} <https://repolex.ai/ontology/git-lex/authorName> \"{}\" {} .\n", cu, nq_escape(name), graph));
+                nq.push_str(&format!("{} <https://repolex.ai/ontology/git-lex/authoredDate> \"{}\"^^<http://www.w3.org/2001/XMLSchema#dateTime> {} .\n", cu, date, graph));
+                nq.push_str(&format!("{} <https://repolex.ai/ontology/git-lex/committerEmail> \"{}\" {} .\n", cu, nq_escape(committer_email), graph));
+                nq.push_str(&format!("{} <https://repolex.ai/ontology/git-lex/committerName> \"{}\" {} .\n", cu, nq_escape(committer_name), graph));
+                nq.push_str(&format!("{} <https://repolex.ai/ontology/git-lex/committedDate> \"{}\"^^<http://www.w3.org/2001/XMLSchema#dateTime> {} .\n", cu, committer_date, graph));
+                nq.push_str(&format!("{} <https://repolex.ai/ontology/git-lex/message> \"{}\" {} .\n", cu, nq_escape(subject), graph));
                 for parent in parents.split_whitespace() {
-                    nq.push_str(&format!("{} <https://lex.repolex.ai/ontology/git/parent> <{}/commit/{}> {} .\n", cu, base, parent, graph));
+                    nq.push_str(&format!("{} <https://repolex.ai/ontology/git-lex/parent> <{}/commit/{}> {} .\n", cu, base, parent, graph));
                 }
             }
         }
@@ -573,11 +573,11 @@ fn generate_git_nquads() -> String {
                     if meta.len() < 4 { continue; }
                     let (obj_type, blob_hash, size) = (meta[1], meta[2], meta[3]);
                     let fu = format!("<{}/tree/{}/{}>", base, ref_sha, nq_escape(path));
-                    nq.push_str(&format!("{} <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://lex.repolex.ai/ontology/git/Blob> {} .\n", fu, graph));
-                    nq.push_str(&format!("{} <https://lex.repolex.ai/ontology/git/path> \"{}\" {} .\n", fu, nq_escape(path), graph));
-                    nq.push_str(&format!("{} <https://lex.repolex.ai/ontology/git/blobHash> \"{}\" {} .\n", fu, blob_hash, graph));
-                    nq.push_str(&format!("{} <https://lex.repolex.ai/ontology/git/size> \"{}\"^^<http://www.w3.org/2001/XMLSchema#integer> {} .\n", fu, size, graph));
-                    nq.push_str(&format!("{} <https://lex.repolex.ai/ontology/git/objectType> \"{}\" {} .\n", fu, obj_type, graph));
+                    nq.push_str(&format!("{} <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://repolex.ai/ontology/git-lex/Blob> {} .\n", fu, graph));
+                    nq.push_str(&format!("{} <https://repolex.ai/ontology/git-lex/path> \"{}\" {} .\n", fu, nq_escape(path), graph));
+                    nq.push_str(&format!("{} <https://repolex.ai/ontology/git-lex/blobHash> \"{}\" {} .\n", fu, blob_hash, graph));
+                    nq.push_str(&format!("{} <https://repolex.ai/ontology/git-lex/size> \"{}\"^^<http://www.w3.org/2001/XMLSchema#integer> {} .\n", fu, size, graph));
+                    nq.push_str(&format!("{} <https://repolex.ai/ontology/git-lex/type> \"{}\" {} .\n", fu, obj_type, graph));
                 }
             }
         }
@@ -597,9 +597,9 @@ fn generate_git_nquads() -> String {
                 if parts.len() < 2 { continue; }
                 let (name, sha) = (parts[0], parts[1]);
                 let ru = format!("<{}/branch/{}>", base, nq_escape(name));
-                nq.push_str(&format!("{} <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://lex.repolex.ai/ontology/git/Branch> {} .\n", ru, graph));
-                nq.push_str(&format!("{} <https://lex.repolex.ai/ontology/git/name> \"{}\" {} .\n", ru, nq_escape(name), graph));
-                nq.push_str(&format!("{} <https://lex.repolex.ai/ontology/git/points> <{}/commit/{}> {} .\n", ru, base, sha, graph));
+                nq.push_str(&format!("{} <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://repolex.ai/ontology/git-lex/Branch> {} .\n", ru, graph));
+                nq.push_str(&format!("{} <https://repolex.ai/ontology/git-lex/shortName> \"{}\" {} .\n", ru, nq_escape(name), graph));
+                nq.push_str(&format!("{} <https://repolex.ai/ontology/git-lex/commit> <{}/commit/{}> {} .\n", ru, base, sha, graph));
             }
         }
     }
@@ -618,9 +618,9 @@ fn generate_git_nquads() -> String {
                 if parts.len() < 2 { continue; }
                 let (name, sha) = (parts[0], parts[1]);
                 let ru = format!("<{}/tag/{}>", base, nq_escape(name));
-                nq.push_str(&format!("{} <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://lex.repolex.ai/ontology/git/Tag> {} .\n", ru, graph));
-                nq.push_str(&format!("{} <https://lex.repolex.ai/ontology/git/name> \"{}\" {} .\n", ru, nq_escape(name), graph));
-                nq.push_str(&format!("{} <https://lex.repolex.ai/ontology/git/points> <{}/commit/{}> {} .\n", ru, base, sha, graph));
+                nq.push_str(&format!("{} <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://repolex.ai/ontology/git-lex/Tag> {} .\n", ru, graph));
+                nq.push_str(&format!("{} <https://repolex.ai/ontology/git-lex/shortName> \"{}\" {} .\n", ru, nq_escape(name), graph));
+                nq.push_str(&format!("{} <https://repolex.ai/ontology/git-lex/commit> <{}/commit/{}> {} .\n", ru, base, sha, graph));
             }
         }
     }
@@ -654,10 +654,10 @@ fn generate_git_nquads() -> String {
 
                 // Link commit to changeset (in commits graph so joins work)
                 let commits_graph = format!("<{}/commits>", base);
-                nq.push_str(&format!("{} <https://lex.repolex.ai/ontology/git/changed> {} {} .\n", commit_uri, change_uri, commits_graph));
+                nq.push_str(&format!("{} <https://repolex.ai/ontology/git-lex/changed> {} {} .\n", commit_uri, change_uri, commits_graph));
 
                 // Change details
-                nq.push_str(&format!("{} <https://lex.repolex.ai/ontology/git/path> \"{}\" {} .\n", change_uri, nq_escape(path), graph));
+                nq.push_str(&format!("{} <https://repolex.ai/ontology/git-lex/path> \"{}\" {} .\n", change_uri, nq_escape(path), graph));
 
                 let status_label = match status.chars().next() {
                     Some('A') => "added",
@@ -666,11 +666,11 @@ fn generate_git_nquads() -> String {
                     Some('R') => "renamed",
                     _ => "unknown",
                 };
-                nq.push_str(&format!("{} <https://lex.repolex.ai/ontology/git/changeType> \"{}\" {} .\n", change_uri, status_label, graph));
+                nq.push_str(&format!("{} <https://repolex.ai/ontology/git-lex/changeType> \"{}\" {} .\n", change_uri, status_label, graph));
 
                 // For renames, capture the new path
                 if status.starts_with('R') && parts.len() >= 3 {
-                    nq.push_str(&format!("{} <https://lex.repolex.ai/ontology/git/renamedTo> \"{}\" {} .\n", change_uri, nq_escape(parts[2]), graph));
+                    nq.push_str(&format!("{} <https://repolex.ai/ontology/git-lex/renamedTo> \"{}\" {} .\n", change_uri, nq_escape(parts[2]), graph));
                 }
             }
         }
@@ -730,7 +730,7 @@ fn generate_git_nquads() -> String {
                                 let key = format!("{}:{}", author, path);
                                 if authors_seen.insert(key) {
                                     nq.push_str(&format!(
-                                        "{} <https://lex.repolex.ai/ontology/git/blamedAuthor> \"{}\" {} .\n",
+                                        "{} <https://repolex.ai/ontology/git-lex/blamedAuthor> \"{}\" {} .\n",
                                         file_uri, nq_escape(author), graph
                                     ));
                                 }
@@ -739,7 +739,7 @@ fn generate_git_nquads() -> String {
                                 let key = format!("{}:{}", email, path);
                                 if authors_seen.insert(key) {
                                     nq.push_str(&format!(
-                                        "{} <https://lex.repolex.ai/ontology/git/blamedEmail> \"{}\" {} .\n",
+                                        "{} <https://repolex.ai/ontology/git-lex/blamedEmail> \"{}\" {} .\n",
                                         file_uri, nq_escape(email), graph
                                     ));
                                 }
@@ -798,7 +798,7 @@ fn generate_git_nquads() -> String {
                     if let Some(lang) = lang {
                         let fu = format!("<{}/tree/{}/{}>", base, head_sha, nq_escape(path));
                         nq.push_str(&format!(
-                            "{} <https://lex.repolex.ai/ontology/git/language> \"{}\" {} .\n",
+                            "{} <https://repolex.ai/ontology/git-lex/language> \"{}\" {} .\n",
                             fu, lang, graph
                         ));
                     }
@@ -876,14 +876,14 @@ fn cmd_sync() {
     // Clear and reload — simple for now, incremental later
     store.clear().expect("failed to clear store");
 
-    // Load git virtual triples
+    // Git virtual triples
     let git_nq = generate_git_nquads();
     let git_count = git_nq.lines().count();
     store
         .load_from_reader(RdfFormat::NQuads, Cursor::new(git_nq.as_bytes()))
         .expect("failed to load git triples");
 
-    // Load .lex/*.nq files
+    // .lex/*.nq files
     let lex_nq = load_lex_nquads();
     let lex_count = lex_nq.lines().filter(|l| !l.is_empty()).count();
     if !lex_nq.is_empty() {
@@ -905,20 +905,33 @@ fn cmd_sync() {
     println!("Store: {}", store_path().unwrap().display());
 }
 
-/// Add default prefixes to a query if none present.
+/// Add default prefixes to a query. Injects any standard prefixes not already declared.
 fn add_prefixes(query: &str) -> String {
-    if query.to_uppercase().contains("PREFIX") {
-        query.to_string()
-    } else {
-        format!(
-            "PREFIX git: <https://lex.repolex.ai/ontology/git/>\n\
-             PREFIX lex: <https://lex.repolex.ai/ontology/lex/>\n\
-             PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>\n\
-             PREFIX xsd: <http://www.w3.org/2001/XMLSchema#>\n\
-             {}",
-            query
-        )
+    let defaults = [
+        ("git:", "PREFIX git: <https://repolex.ai/ontology/git-lex/>"),
+        ("lex:", "PREFIX lex: <https://repolex.ai/ontology/git-lex/>"),
+        ("rdf:", "PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>"),
+        ("rdfs:", "PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>"),
+        ("owl:", "PREFIX owl: <http://www.w3.org/2002/07/owl#>"),
+        ("xsd:", "PREFIX xsd: <http://www.w3.org/2001/XMLSchema#>"),
+    ];
+    let upper = query.to_uppercase();
+    let mut prefix_block = String::new();
+    for (short, full) in &defaults {
+        // Add if the prefix is used in the query but not declared
+        if query.contains(short) && !upper.contains(&format!("PREFIX {}", short.to_uppercase())) {
+            prefix_block.push_str(full);
+            prefix_block.push('\n');
+        }
     }
+    // If no user prefixes at all, add everything
+    if !upper.contains("PREFIX") {
+        for (_, full) in &defaults {
+            prefix_block.push_str(full);
+            prefix_block.push('\n');
+        }
+    }
+    format!("{}{}", prefix_block, query)
 }
 
 /// Execute a SPARQL query on a store and print results.
