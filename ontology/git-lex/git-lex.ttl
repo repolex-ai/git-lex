@@ -177,6 +177,11 @@ lex:blobHash a owl:DatatypeProperty ;
     rdfs:label "blobHash" ;
     rdfs:comment "Content-addressed SHA hash of the file content." .
 
+lex:blob a owl:ObjectProperty ;
+    rdfs:domain lex:Blob ;
+    rdfs:label "blob" ;
+    rdfs:comment "Links a filetree entry to its content-addressed blob URI. Use for joins with lex-o:mentionedInBlob." .
+
 lex:size a owl:DatatypeProperty ;
     rdfs:domain lex:Blob ;
     rdfs:range xsd:integer ;

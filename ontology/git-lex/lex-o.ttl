@@ -176,13 +176,19 @@ lex-o:narrower a owl:ObjectProperty ;
 # references so knowledge survives document deletion.
 # =============================================================================
 
-lex-o:mentionedIn a owl:ObjectProperty ;
-    rdfs:label "mentioned in" ;
-    rdfs:comment "Entity is mentioned in this document. Points to the commit-specific file URI so grounding survives deletion. Multiple mentions across documents are expected." .
+lex-o:mentionedInPath a owl:DatatypeProperty ;
+    rdfs:label "mentioned in path" ;
+    rdfs:range xsd:string ;
+    rdfs:comment "File path where this entity is mentioned. Joins with lex:path in the filetree graph. Multiple values expected." .
 
-lex-o:sourceDocument a owl:ObjectProperty ;
+lex-o:mentionedInBlob a owl:ObjectProperty ;
+    rdfs:label "mentioned in blob" ;
+    rdfs:comment "Content-addressed blob URI where this entity was extracted from. Joins with lex:blob in the filetree graph. Used for stale detection — if the blob changes, the extraction needs refreshing." .
+
+lex-o:sourceDocument a owl:DatatypeProperty ;
     rdfs:label "source document" ;
-    rdfs:comment "The primary document this entity was extracted from. Unlike mentionedIn (which can be many), sourceDocument identifies the canonical origin." .
+    rdfs:range xsd:string ;
+    rdfs:comment "The primary file path this entity was extracted from. Unlike mentionedInPath (which can be many), sourceDocument identifies the canonical origin." .
 
 
 # =============================================================================

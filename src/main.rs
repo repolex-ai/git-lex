@@ -257,6 +257,10 @@ fn cmd_tree(git_ref: String, format: String) {
                 file_uri, blob_hash, graph
             );
             println!(
+                "{} <https://repolex.ai/ontology/git-lex/blob> <{}/blob/{}> {} .",
+                file_uri, base_uri(), blob_hash, graph
+            );
+            println!(
                 "{} <https://repolex.ai/ontology/git-lex/size> \"{}\"^^<http://www.w3.org/2001/XMLSchema#integer> {} .",
                 file_uri, size, graph
             );
@@ -511,34 +515,47 @@ fn cmd_status() {
     }
 
     // Document lexification status
+    // Get file list with blob hashes
     let output = Command::new("git")
-        .args(["ls-tree", "-r", "--name-only", "HEAD"])
+        .args(["ls-tree", "-r", "--format=%(objectname)\t%(path)", "HEAD"])
         .output();
     if let Ok(o) = output {
         if o.status.success() {
             let stdout = String::from_utf8_lossy(&o.stdout);
-            let docs: Vec<&str> = stdout
+            let docs: Vec<(&str, &str)> = stdout
                 .lines()
-                .filter(|f| {
-                    let f = f.to_lowercase();
-                    (f.ends_with(".md") || f.ends_with(".txt"))
-                        && !f.starts_with(".lex/")
-                        && !f.starts_with(".git")
+                .filter_map(|line| {
+                    let parts: Vec<&str> = line.splitn(2, '\t').collect();
+                    if parts.len() < 2 { return None; }
+                    let (hash, path) = (parts[0], parts[1]);
+                    let pl = path.to_lowercase();
+                    if (pl.ends_with(".md") || pl.ends_with(".txt"))
+                        && !pl.starts_with(".lex/")
+                        && !pl.starts_with(".git") {
+                        Some((hash, path))
+                    } else {
+                        None
+                    }
                 })
                 .collect();
 
             if !docs.is_empty() {
-                // Load all .nq content to check for mentions
                 let lex_nq = load_lex_nquads();
 
                 let mut lexified = Vec::new();
+                let mut stale = Vec::new();
                 let mut unlexified = Vec::new();
 
-                for doc in &docs {
-                    if lex_nq.contains(doc) {
-                        lexified.push(*doc);
+                for (hash, path) in &docs {
+                    let path_mentioned = lex_nq.contains(path);
+                    let blob_mentioned = lex_nq.contains(hash);
+
+                    if path_mentioned && blob_mentioned {
+                        lexified.push(*path);
+                    } else if path_mentioned && !blob_mentioned {
+                        stale.push(*path);
                     } else {
-                        unlexified.push(*doc);
+                        unlexified.push(*path);
                     }
                 }
 
@@ -547,11 +564,15 @@ fn cmd_status() {
                 for doc in &lexified {
                     println!("    {}  — lexified", doc);
                 }
+                for doc in &stale {
+                    println!("    {}  — stale (content changed since lexification)", doc);
+                }
                 for doc in &unlexified {
                     println!("    {}  — unlexified", doc);
                 }
                 println!();
-                println!("  {}/{} lexified", lexified.len(), lexified.len() + unlexified.len());
+                let total = lexified.len() + stale.len() + unlexified.len();
+                println!("  {}/{} lexified, {} stale", lexified.len(), total, stale.len());
             }
         }
     }
@@ -622,6 +643,7 @@ fn generate_git_nquads() -> String {
                     nq.push_str(&format!("{} <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://repolex.ai/ontology/git-lex/Blob> {} .\n", fu, graph));
                     nq.push_str(&format!("{} <https://repolex.ai/ontology/git-lex/path> \"{}\" {} .\n", fu, nq_escape(path), graph));
                     nq.push_str(&format!("{} <https://repolex.ai/ontology/git-lex/blobHash> \"{}\" {} .\n", fu, blob_hash, graph));
+                    nq.push_str(&format!("{} <https://repolex.ai/ontology/git-lex/blob> <{}/blob/{}> {} .\n", fu, base, blob_hash, graph));
                     nq.push_str(&format!("{} <https://repolex.ai/ontology/git-lex/size> \"{}\"^^<http://www.w3.org/2001/XMLSchema#integer> {} .\n", fu, size, graph));
                     nq.push_str(&format!("{} <https://repolex.ai/ontology/git-lex/type> \"{}\" {} .\n", fu, obj_type, graph));
                 }
