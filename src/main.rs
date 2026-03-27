@@ -52,6 +52,8 @@ enum Commands {
         #[arg(long, default_value = "pretty")]
         format: String,
     },
+    /// Dump all generated N-Quads to stdout (debug)
+    Dump,
     /// Sync git data + .lex/*.nq into the persistent store
     Sync,
     /// Semantic diff of knowledge between refs
@@ -1125,6 +1127,11 @@ fn main() {
         Commands::Tree { r#ref, format } => cmd_tree(r#ref, format),
         Commands::Refs { format } => cmd_refs(format),
         Commands::Query { query } => cmd_query(query),
+        Commands::Dump => {
+            let git_nq = generate_git_nquads();
+            let lex_nq = load_lex_nquads();
+            print!("{}{}", git_nq, lex_nq);
+        }
         Commands::Sync => cmd_sync(),
         Commands::Diff { since } => {
             println!(
