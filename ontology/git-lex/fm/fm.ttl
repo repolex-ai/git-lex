@@ -1,0 +1,68 @@
+@prefix owl: <http://www.w3.org/2002/07/owl#> .
+@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+@prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
+@prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+@prefix fm: <https://repolex.ai/ontology/git-lex/fm/> .
+@prefix lex-o: <https://repolex.ai/ontology/lex-upper/> .
+
+# =============================================================================
+# GIT-LEX FRONTMATTER ONTOLOGY
+# =============================================================================
+# Defines classes and properties for YAML frontmatter extracted from markdown
+# files. Auto-extracted during git lex sync — no external deps needed.
+#
+# Namespace: fm: = https://repolex.ai/ontology/git-lex/fm/
+#
+# Frontmatter keys are dynamically mapped to predicates under fm:.
+# For example, a YAML key "tags" becomes fm:tags, "status" becomes fm:status.
+# This ontology defines the common ones; unknown keys still work as predicates.
+# =============================================================================
+
+<https://repolex.ai/ontology/git-lex/fm/> a owl:Ontology ;
+    rdfs:label "git-lex Frontmatter Ontology" ;
+    rdfs:comment "Ontology for YAML frontmatter extracted from markdown files." ;
+    owl:versionInfo "0.0.1" .
+
+# =============================================================================
+# Properties — common frontmatter keys
+# =============================================================================
+
+fm:path a owl:DatatypeProperty ;
+    rdfs:range xsd:string ;
+    rdfs:label "path" ;
+    rdfs:comment "File path relative to repo root." .
+
+fm:title a owl:DatatypeProperty ;
+    rdfs:range xsd:string ;
+    rdfs:label "title" ;
+    rdfs:comment "Document title from frontmatter." .
+
+fm:tags a owl:DatatypeProperty ;
+    rdfs:range xsd:string ;
+    rdfs:label "tags" ;
+    rdfs:comment "Tag values. A document can have multiple tags." .
+
+fm:status a owl:DatatypeProperty ;
+    rdfs:range xsd:string ;
+    rdfs:label "status" ;
+    rdfs:comment "Document status (e.g., draft, active, complete, archived)." .
+
+fm:author a owl:DatatypeProperty ;
+    rdfs:range xsd:string ;
+    rdfs:label "author" ;
+    rdfs:comment "Author of the document." .
+
+fm:date a owl:DatatypeProperty ;
+    rdfs:range xsd:string ;
+    rdfs:label "date" ;
+    rdfs:comment "Date associated with the document." .
+
+fm:project a owl:DatatypeProperty ;
+    rdfs:range xsd:string ;
+    rdfs:label "project" ;
+    rdfs:comment "Project this document belongs to." .
+
+fm:technologies a owl:DatatypeProperty ;
+    rdfs:range xsd:string ;
+    rdfs:label "technologies" ;
+    rdfs:comment "Technologies mentioned or used. Can have multiple values." .

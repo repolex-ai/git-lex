@@ -2,15 +2,15 @@
 @prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
 @prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
 @prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
-@prefix lex: <https://repolex.ai/ontology/git-lex/> .
+@prefix git: <https://repolex.ai/ontology/git-lex/git/> .
 
 # =============================================================================
-# GIT-LEX ONTOLOGY
+# GIT-LEX GIT ONTOLOGY
 # =============================================================================
 # Defines RDF classes and properties for git objects as surfaced by git commands.
 # This is the immutable base ontology for the git-lex virtual graph layer.
 #
-# Namespace: lex: = https://repolex.ai/ontology/git-lex/
+# Namespace: git: = https://repolex.ai/ontology/git-lex/
 # =============================================================================
 
 <https://repolex.ai/ontology/git-lex/> a owl:Ontology ;
@@ -22,126 +22,130 @@
 # Classes
 # =============================================================================
 
-lex:Commit a owl:Class ;
+git:Commit a owl:Class ;
     rdfs:label "Commit" ;
     rdfs:comment "A git commit object." .
 
-lex:Actor a owl:Class ;
+git:Actor a owl:Class ;
     rdfs:label "Actor" ;
     rdfs:comment "A person (author or committer) identified by name and email." .
 
-lex:Blob a owl:Class ;
+git:Blob a owl:Class ;
     rdfs:label "Blob" ;
     rdfs:comment "A file entry in the git tree." .
 
-lex:Reference a owl:Class ;
+git:Reference a owl:Class ;
     rdfs:label "Reference" ;
     rdfs:comment "A named pointer to a commit (branch or tag)." .
 
-lex:Branch a owl:Class ;
-    rdfs:subClassOf lex:Reference ;
+git:Branch a owl:Class ;
+    rdfs:subClassOf git:Reference ;
     rdfs:label "Branch" ;
     rdfs:comment "A git branch reference." .
 
-lex:Tag a owl:Class ;
-    rdfs:subClassOf lex:Reference ;
+git:Tag a owl:Class ;
+    rdfs:subClassOf git:Reference ;
     rdfs:label "Tag" ;
     rdfs:comment "A git tag reference." .
 
-lex:Changeset a owl:Class ;
+git:Changeset a owl:Class ;
     rdfs:label "Changeset" ;
     rdfs:comment "A file change within a commit (added, modified, deleted, renamed)." .
+
+git:File a owl:Class ;
+    rdfs:label "File" ;
+    rdfs:comment "A file in the repository, identified by its content (blob hash) and location (path). The same blob at different paths is different files. The same path with different content is different versions of the same file." .
 
 # =============================================================================
 # Commit Properties
 # =============================================================================
 
-lex:hexsha a owl:DatatypeProperty ;
-    rdfs:domain lex:Commit ;
+git:hexsha a owl:DatatypeProperty ;
+    rdfs:domain git:Commit ;
     rdfs:range xsd:string ;
     rdfs:label "hexsha" ;
     rdfs:comment "Full 40-character hex SHA of the commit." .
 
-lex:message a owl:DatatypeProperty ;
-    rdfs:domain lex:Commit ;
+git:message a owl:DatatypeProperty ;
+    rdfs:domain git:Commit ;
     rdfs:range xsd:string ;
     rdfs:label "message" ;
     rdfs:comment "Commit message (subject line)." .
 
-lex:author a owl:ObjectProperty ;
-    rdfs:domain lex:Commit ;
-    rdfs:range lex:Actor ;
+git:author a owl:ObjectProperty ;
+    rdfs:domain git:Commit ;
+    rdfs:range git:Actor ;
     rdfs:label "author" ;
     rdfs:comment "The person who wrote the change." .
 
-lex:committer a owl:ObjectProperty ;
-    rdfs:domain lex:Commit ;
-    rdfs:range lex:Actor ;
+git:committer a owl:ObjectProperty ;
+    rdfs:domain git:Commit ;
+    rdfs:range git:Actor ;
     rdfs:label "committer" ;
     rdfs:comment "The person who applied the change to the repository." .
 
-lex:authoredDate a owl:DatatypeProperty ;
-    rdfs:domain lex:Commit ;
+git:authoredDate a owl:DatatypeProperty ;
+    rdfs:domain git:Commit ;
     rdfs:range xsd:dateTime ;
     rdfs:label "authoredDate" ;
     rdfs:comment "Timestamp when the change was authored." .
 
-lex:committedDate a owl:DatatypeProperty ;
-    rdfs:domain lex:Commit ;
+git:committedDate a owl:DatatypeProperty ;
+    rdfs:domain git:Commit ;
     rdfs:range xsd:dateTime ;
     rdfs:label "committedDate" ;
     rdfs:comment "Timestamp when the change was committed." .
 
-lex:parent a owl:ObjectProperty ;
-    rdfs:domain lex:Commit ;
-    rdfs:range lex:Commit ;
+git:parent a owl:ObjectProperty ;
+    rdfs:domain git:Commit ;
+    rdfs:range git:Commit ;
     rdfs:label "parent" ;
     rdfs:comment "Parent commit(s). Merge commits have multiple parents." .
 
-lex:changed a owl:ObjectProperty ;
-    rdfs:domain lex:Commit ;
-    rdfs:range lex:Changeset ;
+git:changed a owl:ObjectProperty ;
+    rdfs:domain git:Commit ;
+    rdfs:range git:Changeset ;
     rdfs:label "changed" ;
     rdfs:comment "Links a commit to the files it changed." .
 
 # Inline author/committer properties (temporary, will migrate to Actor nodes)
 
-lex:authorName a owl:DatatypeProperty ;
-    rdfs:domain lex:Commit ;
+git:authorName a owl:DatatypeProperty ;
+    rdfs:domain git:Commit ;
     rdfs:range xsd:string ;
     rdfs:label "authorName" ;
-    rdfs:comment "Author display name (temporary, will migrate to lex:Actor)." .
+    rdfs:comment "Author display name (temporary, will migrate to git:Actor)." .
 
-lex:authorEmail a owl:DatatypeProperty ;
-    rdfs:domain lex:Commit ;
+git:authorEmail a owl:DatatypeProperty ;
+    rdfs:domain git:Commit ;
     rdfs:range xsd:string ;
     rdfs:label "authorEmail" ;
-    rdfs:comment "Author email (temporary, will migrate to lex:Actor)." .
+    rdfs:comment "Author email (temporary, will migrate to git:Actor)." .
 
-lex:committerName a owl:DatatypeProperty ;
-    rdfs:domain lex:Commit ;
+git:committerName a owl:DatatypeProperty ;
+    rdfs:domain git:Commit ;
     rdfs:range xsd:string ;
     rdfs:label "committerName" ;
-    rdfs:comment "Committer display name (temporary, will migrate to lex:Actor)." .
+    rdfs:comment "Committer display name (temporary, will migrate to git:Actor)." .
 
-lex:committerEmail a owl:DatatypeProperty ;
-    rdfs:domain lex:Commit ;
+git:committerEmail a owl:DatatypeProperty ;
+    rdfs:domain git:Commit ;
     rdfs:range xsd:string ;
     rdfs:label "committerEmail" ;
-    rdfs:comment "Committer email (temporary, will migrate to lex:Actor)." .
+    rdfs:comment "Committer email (temporary, will migrate to git:Actor)." .
 
 # =============================================================================
 # Actor Properties
 # =============================================================================
 
-lex:actorName a owl:DatatypeProperty ;
-    rdfs:domain lex:Actor ;
+git:actorName a owl:DatatypeProperty ;
+    rdfs:domain git:Actor ;
     rdfs:range xsd:string ;
     rdfs:label "actorName" ;
     rdfs:comment "Display name of the actor." .
 
-lex:email a owl:DatatypeProperty ;
-    rdfs:domain lex:Actor ;
+git:email a owl:DatatypeProperty ;
+    rdfs:domain git:Actor ;
     rdfs:range xsd:string ;
     rdfs:label "email" ;
     rdfs:comment "Email address of the actor." .
@@ -150,14 +154,14 @@ lex:email a owl:DatatypeProperty ;
 # Changeset Properties
 # =============================================================================
 
-lex:changeType a owl:DatatypeProperty ;
-    rdfs:domain lex:Changeset ;
+git:changeType a owl:DatatypeProperty ;
+    rdfs:domain git:Changeset ;
     rdfs:range xsd:string ;
     rdfs:label "changeType" ;
     rdfs:comment "Type of change: added, modified, deleted, or renamed." .
 
-lex:renamedTo a owl:DatatypeProperty ;
-    rdfs:domain lex:Changeset ;
+git:renamedTo a owl:DatatypeProperty ;
+    rdfs:domain git:Changeset ;
     rdfs:range xsd:string ;
     rdfs:label "renamedTo" ;
     rdfs:comment "New file path after a rename operation." .
@@ -166,36 +170,35 @@ lex:renamedTo a owl:DatatypeProperty ;
 # Blob / File Properties
 # =============================================================================
 
-lex:path a owl:DatatypeProperty ;
+git:path a owl:DatatypeProperty ;
     rdfs:range xsd:string ;
     rdfs:label "path" ;
-    rdfs:comment "File path relative to repo root. Used on Blob and Changeset." .
+    rdfs:comment "File path relative to repo root. Used on File, Blob, and Changeset." .
 
-lex:blobHash a owl:DatatypeProperty ;
-    rdfs:domain lex:Blob ;
+git:blobHash a owl:DatatypeProperty ;
     rdfs:range xsd:string ;
     rdfs:label "blobHash" ;
-    rdfs:comment "Content-addressed SHA hash of the file content." .
+    rdfs:comment "Content-addressed SHA hash of the file content. Used on File and Blob." .
 
-lex:blob a owl:ObjectProperty ;
-    rdfs:domain lex:Blob ;
+git:blob a owl:ObjectProperty ;
+    rdfs:domain git:Blob ;
     rdfs:label "blob" ;
     rdfs:comment "Links a filetree entry to its content-addressed blob URI. Use for joins with lex-o:mentionedInBlob." .
 
-lex:size a owl:DatatypeProperty ;
-    rdfs:domain lex:Blob ;
+git:size a owl:DatatypeProperty ;
+    rdfs:domain git:Blob ;
     rdfs:range xsd:integer ;
     rdfs:label "size" ;
     rdfs:comment "File size in bytes." .
 
-lex:type a owl:DatatypeProperty ;
-    rdfs:domain lex:Blob ;
+git:type a owl:DatatypeProperty ;
+    rdfs:domain git:Blob ;
     rdfs:range xsd:string ;
     rdfs:label "type" ;
     rdfs:comment "Git object type (blob, tree, etc.)." .
 
-lex:language a owl:DatatypeProperty ;
-    rdfs:domain lex:Blob ;
+git:language a owl:DatatypeProperty ;
+    rdfs:domain git:Blob ;
     rdfs:range xsd:string ;
     rdfs:label "language" ;
     rdfs:comment "Detected programming/markup language based on file extension." .
@@ -204,15 +207,15 @@ lex:language a owl:DatatypeProperty ;
 # Reference Properties
 # =============================================================================
 
-lex:shortName a owl:DatatypeProperty ;
-    rdfs:domain lex:Reference ;
+git:shortName a owl:DatatypeProperty ;
+    rdfs:domain git:Reference ;
     rdfs:range xsd:string ;
     rdfs:label "shortName" ;
     rdfs:comment "Short name of the branch or tag." .
 
-lex:commit a owl:ObjectProperty ;
-    rdfs:domain lex:Reference ;
-    rdfs:range lex:Commit ;
+git:commit a owl:ObjectProperty ;
+    rdfs:domain git:Reference ;
+    rdfs:range git:Commit ;
     rdfs:label "commit" ;
     rdfs:comment "The commit this reference currently points to." .
 
@@ -220,14 +223,14 @@ lex:commit a owl:ObjectProperty ;
 # Blame Properties
 # =============================================================================
 
-lex:blamedAuthor a owl:DatatypeProperty ;
-    rdfs:domain lex:Blob ;
+git:blamedAuthor a owl:DatatypeProperty ;
+    rdfs:domain git:Blob ;
     rdfs:range xsd:string ;
     rdfs:label "blamedAuthor" ;
     rdfs:comment "Author name from git blame (who has lines in this file)." .
 
-lex:blamedEmail a owl:DatatypeProperty ;
-    rdfs:domain lex:Blob ;
+git:blamedEmail a owl:DatatypeProperty ;
+    rdfs:domain git:Blob ;
     rdfs:range xsd:string ;
     rdfs:label "blamedEmail" ;
     rdfs:comment "Author email from git blame." .

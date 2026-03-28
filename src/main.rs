@@ -18,6 +18,22 @@ struct Cli {
 }
 
 #[derive(Subcommand)]
+enum LlmCommands {
+    /// List files needing LLM extraction (new, changed, fresh)
+    List,
+    /// Extract entities and relationships from a file (two-step)
+    Extract {
+        /// File path to extract
+        file: String,
+    },
+    /// Re-check extraction after file changed (uses old extraction + diff)
+    Recheck {
+        /// File path to recheck
+        file: String,
+    },
+}
+
+#[derive(Subcommand)]
 enum Commands {
     /// Initialize .lex/ in the current repo and install global drivers
     Init,
@@ -53,6 +69,8 @@ enum Commands {
         #[arg(long, default_value = "pretty")]
         format: String,
     },
+    /// Extract frontmatter from .md files → write .spo sidecars + compile log
+    Extract,
     /// Dump all generated N-Quads to stdout (debug)
     Dump,
     /// Sync git data + .lex/*.nq into the persistent store
@@ -62,6 +80,11 @@ enum Commands {
         /// Show changes since this date or ref
         #[arg(long)]
         since: Option<String>,
+    },
+    /// LLM agent tools
+    Llm {
+        #[command(subcommand)]
+        command: LlmCommands,
     },
     /// Show status of .lex/ in the current repo
     Status,
@@ -181,38 +204,38 @@ fn cmd_log(author: Option<String>, n: usize, format: String) {
 
         if format == "nq" {
             println!(
-                "{} <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://repolex.ai/ontology/git-lex/Commit> {} .",
+                "{} <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://repolex.ai/ontology/git-lex/git/Commit> {} .",
                 commit_uri, graph
             );
             println!(
-                "{} <https://repolex.ai/ontology/git-lex/hexsha> \"{}\" {} .",
+                "{} <https://repolex.ai/ontology/git-lex/git/hexsha> \"{}\" {} .",
                 commit_uri, sha, graph
             );
             println!(
-                "{} <https://repolex.ai/ontology/git-lex/authorEmail> \"{}\" {} .",
+                "{} <https://repolex.ai/ontology/git-lex/git/authorEmail> \"{}\" {} .",
                 commit_uri,
                 nq_escape(email),
                 graph
             );
             println!(
-                "{} <https://repolex.ai/ontology/git-lex/authorName> \"{}\" {} .",
+                "{} <https://repolex.ai/ontology/git-lex/git/authorName> \"{}\" {} .",
                 commit_uri,
                 nq_escape(name),
                 graph
             );
             println!(
-                "{} <https://repolex.ai/ontology/git-lex/date> \"{}\"^^<http://www.w3.org/2001/XMLSchema#dateTime> {} .",
+                "{} <https://repolex.ai/ontology/git-lex/git/date> \"{}\"^^<http://www.w3.org/2001/XMLSchema#dateTime> {} .",
                 commit_uri, date, graph
             );
             println!(
-                "{} <https://repolex.ai/ontology/git-lex/message> \"{}\" {} .",
+                "{} <https://repolex.ai/ontology/git-lex/git/message> \"{}\" {} .",
                 commit_uri,
                 nq_escape(subject),
                 graph
             );
             for parent in parents.split_whitespace() {
                 println!(
-                    "{} <https://repolex.ai/ontology/git-lex/parent> <{}/commit/{}> {} .",
+                    "{} <https://repolex.ai/ontology/git-lex/git/parent> <{}/commit/{}> {} .",
                     commit_uri, base, parent, graph
                 );
             }
@@ -266,29 +289,29 @@ fn cmd_tree(git_ref: String, format: String) {
 
         if format == "nq" {
             println!(
-                "{} <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://repolex.ai/ontology/git-lex/Blob> {} .",
+                "{} <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://repolex.ai/ontology/git-lex/git/Blob> {} .",
                 file_uri, graph
             );
             println!(
-                "{} <https://repolex.ai/ontology/git-lex/path> \"{}\" {} .",
+                "{} <https://repolex.ai/ontology/git-lex/git/path> \"{}\" {} .",
                 file_uri,
                 nq_escape(path),
                 graph
             );
             println!(
-                "{} <https://repolex.ai/ontology/git-lex/blobHash> \"{}\" {} .",
+                "{} <https://repolex.ai/ontology/git-lex/git/blobHash> \"{}\" {} .",
                 file_uri, blob_hash, graph
             );
             println!(
-                "{} <https://repolex.ai/ontology/git-lex/blob> <{}/blob/{}> {} .",
+                "{} <https://repolex.ai/ontology/git-lex/git/blob> <{}/blob/{}> {} .",
                 file_uri, base_uri(), blob_hash, graph
             );
             println!(
-                "{} <https://repolex.ai/ontology/git-lex/size> \"{}\"^^<http://www.w3.org/2001/XMLSchema#integer> {} .",
+                "{} <https://repolex.ai/ontology/git-lex/git/size> \"{}\"^^<http://www.w3.org/2001/XMLSchema#integer> {} .",
                 file_uri, size, graph
             );
             println!(
-                "{} <https://repolex.ai/ontology/git-lex/type> \"{}\" {} .",
+                "{} <https://repolex.ai/ontology/git-lex/git/type> \"{}\" {} .",
                 file_uri, obj_type, graph
             );
         } else {
@@ -320,17 +343,17 @@ fn cmd_refs(format: String) {
 
                 if format == "nq" {
                     println!(
-                        "{} <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://repolex.ai/ontology/git-lex/Branch> {} .",
+                        "{} <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://repolex.ai/ontology/git-lex/git/Branch> {} .",
                         ref_uri, graph
                     );
                     println!(
-                        "{} <https://repolex.ai/ontology/git-lex/shortName> \"{}\" {} .",
+                        "{} <https://repolex.ai/ontology/git-lex/git/shortName> \"{}\" {} .",
                         ref_uri,
                         nq_escape(name),
                         graph
                     );
                     println!(
-                        "{} <https://repolex.ai/ontology/git-lex/commit> <{}/commit/{}> {} .",
+                        "{} <https://repolex.ai/ontology/git-lex/git/commit> <{}/commit/{}> {} .",
                         ref_uri, base, sha, graph
                     );
                 } else {
@@ -357,17 +380,17 @@ fn cmd_refs(format: String) {
 
                 if format == "nq" {
                     println!(
-                        "{} <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://repolex.ai/ontology/git-lex/Tag> {} .",
+                        "{} <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://repolex.ai/ontology/git-lex/git/Tag> {} .",
                         ref_uri, graph
                     );
                     println!(
-                        "{} <https://repolex.ai/ontology/git-lex/shortName> \"{}\" {} .",
+                        "{} <https://repolex.ai/ontology/git-lex/git/shortName> \"{}\" {} .",
                         ref_uri,
                         nq_escape(name),
                         graph
                     );
                     println!(
-                        "{} <https://repolex.ai/ontology/git-lex/commit> <{}/commit/{}> {} .",
+                        "{} <https://repolex.ai/ontology/git-lex/git/commit> <{}/commit/{}> {} .",
                         ref_uri, base, sha, graph
                     );
                 } else {
@@ -460,6 +483,12 @@ fn cmd_init() {
         .expect("failed to create .lex/README.md");
     }
 
+    // Create empty extraction log if it doesn't exist
+    let extraction_log = lex_dir.join("extraction.log.spo");
+    if !extraction_log.exists() {
+        fs::write(&extraction_log, "").expect("failed to create extraction.log.spo");
+    }
+
     if lex_exists {
         println!("Reinitialized .lex/ in {}", root.display());
     } else {
@@ -468,32 +497,54 @@ fn cmd_init() {
     println!();
     println!("  .lex/graph/    — knowledge graph triples");
     println!("  .lex/ontology/ — ontology definitions");
+    println!("  .lex/extraction.log.spo — assertion log");
     println!("  .gitattributes — semantic diff/merge drivers");
     println!();
     install_global_drivers();
 
-    // Install post-commit hook for auto-sync
+    // Install hooks: pre-commit for extraction, post-commit for oxigraph sync
     let hooks_dir = root.join(".git").join("hooks");
-    let hook_path = hooks_dir.join("post-commit");
-    let hook_content = "#!/bin/sh\ngit-lex sync\n";
-    if hook_path.exists() {
-        let existing = fs::read_to_string(&hook_path).unwrap_or_default();
-        if !existing.contains("git-lex sync") {
-            fs::write(&hook_path, format!("{}\n{}", existing.trim_end(), hook_content))
-                .expect("failed to update post-commit hook");
-            println!("Updated post-commit hook with git-lex sync");
+    fs::create_dir_all(&hooks_dir).ok();
+
+    // Pre-commit: extract frontmatter → write sidecars → compile log → stage
+    let pre_commit_path = hooks_dir.join("pre-commit");
+    let pre_commit_content = "#!/bin/sh\ngit-lex extract\ngit add .lex/extract/ .lex/extraction.log.spo 2>/dev/null\n";
+    if pre_commit_path.exists() {
+        let existing = fs::read_to_string(&pre_commit_path).unwrap_or_default();
+        if !existing.contains("git-lex extract") {
+            fs::write(&pre_commit_path, format!("{}\n{}", existing.trim_end(), pre_commit_content))
+                .expect("failed to update pre-commit hook");
         }
     } else {
-        fs::create_dir_all(&hooks_dir).ok();
-        fs::write(&hook_path, hook_content).expect("failed to create post-commit hook");
+        fs::write(&pre_commit_path, pre_commit_content).expect("failed to create pre-commit hook");
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            fs::set_permissions(&hook_path, fs::Permissions::from_mode(0o755))
+            fs::set_permissions(&pre_commit_path, fs::Permissions::from_mode(0o755))
                 .expect("failed to set hook permissions");
         }
-        println!("Installed post-commit hook (auto-sync)");
     }
+
+    // Post-commit: sync to oxigraph
+    let post_commit_path = hooks_dir.join("post-commit");
+    let post_commit_content = "#!/bin/sh\ngit-lex sync\n";
+    if post_commit_path.exists() {
+        let existing = fs::read_to_string(&post_commit_path).unwrap_or_default();
+        if !existing.contains("git-lex sync") {
+            fs::write(&post_commit_path, format!("{}\n{}", existing.trim_end(), post_commit_content))
+                .expect("failed to update post-commit hook");
+        }
+    } else {
+        fs::write(&post_commit_path, post_commit_content).expect("failed to create post-commit hook");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&post_commit_path, fs::Permissions::from_mode(0o755))
+                .expect("failed to set hook permissions");
+        }
+    }
+
+    println!("Installed hooks (pre-commit: extract, post-commit: sync)");
 
     // Check if repo has any commits
     let has_commits = Command::new("git")
@@ -715,17 +766,17 @@ fn generate_git_nquads() -> String {
                 let (sha, email, name, date, subject, parents) = (f[0], f[1], f[2], f[3], f[4], f[5]);
                 let (committer_email, committer_name, committer_date) = (f[6], f[7], f[8]);
                 let cu = format!("<{}/commit/{}>", base, sha);
-                nq.push_str(&format!("{} <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://repolex.ai/ontology/git-lex/Commit> {} .\n", cu, graph));
-                nq.push_str(&format!("{} <https://repolex.ai/ontology/git-lex/hexsha> \"{}\" {} .\n", cu, sha, graph));
-                nq.push_str(&format!("{} <https://repolex.ai/ontology/git-lex/authorEmail> \"{}\" {} .\n", cu, nq_escape(email), graph));
-                nq.push_str(&format!("{} <https://repolex.ai/ontology/git-lex/authorName> \"{}\" {} .\n", cu, nq_escape(name), graph));
-                nq.push_str(&format!("{} <https://repolex.ai/ontology/git-lex/authoredDate> \"{}\"^^<http://www.w3.org/2001/XMLSchema#dateTime> {} .\n", cu, date, graph));
-                nq.push_str(&format!("{} <https://repolex.ai/ontology/git-lex/committerEmail> \"{}\" {} .\n", cu, nq_escape(committer_email), graph));
-                nq.push_str(&format!("{} <https://repolex.ai/ontology/git-lex/committerName> \"{}\" {} .\n", cu, nq_escape(committer_name), graph));
-                nq.push_str(&format!("{} <https://repolex.ai/ontology/git-lex/committedDate> \"{}\"^^<http://www.w3.org/2001/XMLSchema#dateTime> {} .\n", cu, committer_date, graph));
-                nq.push_str(&format!("{} <https://repolex.ai/ontology/git-lex/message> \"{}\" {} .\n", cu, nq_escape(subject), graph));
+                nq.push_str(&format!("{} <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://repolex.ai/ontology/git-lex/git/Commit> {} .\n", cu, graph));
+                nq.push_str(&format!("{} <https://repolex.ai/ontology/git-lex/git/hexsha> \"{}\" {} .\n", cu, sha, graph));
+                nq.push_str(&format!("{} <https://repolex.ai/ontology/git-lex/git/authorEmail> \"{}\" {} .\n", cu, nq_escape(email), graph));
+                nq.push_str(&format!("{} <https://repolex.ai/ontology/git-lex/git/authorName> \"{}\" {} .\n", cu, nq_escape(name), graph));
+                nq.push_str(&format!("{} <https://repolex.ai/ontology/git-lex/git/authoredDate> \"{}\"^^<http://www.w3.org/2001/XMLSchema#dateTime> {} .\n", cu, date, graph));
+                nq.push_str(&format!("{} <https://repolex.ai/ontology/git-lex/git/committerEmail> \"{}\" {} .\n", cu, nq_escape(committer_email), graph));
+                nq.push_str(&format!("{} <https://repolex.ai/ontology/git-lex/git/committerName> \"{}\" {} .\n", cu, nq_escape(committer_name), graph));
+                nq.push_str(&format!("{} <https://repolex.ai/ontology/git-lex/git/committedDate> \"{}\"^^<http://www.w3.org/2001/XMLSchema#dateTime> {} .\n", cu, committer_date, graph));
+                nq.push_str(&format!("{} <https://repolex.ai/ontology/git-lex/git/message> \"{}\" {} .\n", cu, nq_escape(subject), graph));
                 for parent in parents.split_whitespace() {
-                    nq.push_str(&format!("{} <https://repolex.ai/ontology/git-lex/parent> <{}/commit/{}> {} .\n", cu, base, parent, graph));
+                    nq.push_str(&format!("{} <https://repolex.ai/ontology/git-lex/git/parent> <{}/commit/{}> {} .\n", cu, base, parent, graph));
                 }
             }
         }
@@ -756,12 +807,12 @@ fn generate_git_nquads() -> String {
                     if meta.len() < 4 { continue; }
                     let (obj_type, blob_hash, size) = (meta[1], meta[2], meta[3]);
                     let fu = format!("<{}/tree/{}/{}>", base, ref_sha, uri_encode_path(path));
-                    nq.push_str(&format!("{} <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://repolex.ai/ontology/git-lex/Blob> {} .\n", fu, graph));
-                    nq.push_str(&format!("{} <https://repolex.ai/ontology/git-lex/path> \"{}\" {} .\n", fu, nq_escape(path), graph));
-                    nq.push_str(&format!("{} <https://repolex.ai/ontology/git-lex/blobHash> \"{}\" {} .\n", fu, blob_hash, graph));
-                    nq.push_str(&format!("{} <https://repolex.ai/ontology/git-lex/blob> <{}/blob/{}> {} .\n", fu, base, blob_hash, graph));
-                    nq.push_str(&format!("{} <https://repolex.ai/ontology/git-lex/size> \"{}\"^^<http://www.w3.org/2001/XMLSchema#integer> {} .\n", fu, size, graph));
-                    nq.push_str(&format!("{} <https://repolex.ai/ontology/git-lex/type> \"{}\" {} .\n", fu, obj_type, graph));
+                    nq.push_str(&format!("{} <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://repolex.ai/ontology/git-lex/git/Blob> {} .\n", fu, graph));
+                    nq.push_str(&format!("{} <https://repolex.ai/ontology/git-lex/git/path> \"{}\" {} .\n", fu, nq_escape(path), graph));
+                    nq.push_str(&format!("{} <https://repolex.ai/ontology/git-lex/git/blobHash> \"{}\" {} .\n", fu, blob_hash, graph));
+                    nq.push_str(&format!("{} <https://repolex.ai/ontology/git-lex/git/blob> <{}/blob/{}> {} .\n", fu, base, blob_hash, graph));
+                    nq.push_str(&format!("{} <https://repolex.ai/ontology/git-lex/git/size> \"{}\"^^<http://www.w3.org/2001/XMLSchema#integer> {} .\n", fu, size, graph));
+                    nq.push_str(&format!("{} <https://repolex.ai/ontology/git-lex/git/type> \"{}\" {} .\n", fu, obj_type, graph));
                 }
             }
         }
@@ -781,9 +832,9 @@ fn generate_git_nquads() -> String {
                 if parts.len() < 2 { continue; }
                 let (name, sha) = (parts[0], parts[1]);
                 let ru = format!("<{}/branch/{}>", base, nq_escape(name));
-                nq.push_str(&format!("{} <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://repolex.ai/ontology/git-lex/Branch> {} .\n", ru, graph));
-                nq.push_str(&format!("{} <https://repolex.ai/ontology/git-lex/shortName> \"{}\" {} .\n", ru, nq_escape(name), graph));
-                nq.push_str(&format!("{} <https://repolex.ai/ontology/git-lex/commit> <{}/commit/{}> {} .\n", ru, base, sha, graph));
+                nq.push_str(&format!("{} <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://repolex.ai/ontology/git-lex/git/Branch> {} .\n", ru, graph));
+                nq.push_str(&format!("{} <https://repolex.ai/ontology/git-lex/git/shortName> \"{}\" {} .\n", ru, nq_escape(name), graph));
+                nq.push_str(&format!("{} <https://repolex.ai/ontology/git-lex/git/commit> <{}/commit/{}> {} .\n", ru, base, sha, graph));
             }
         }
     }
@@ -802,9 +853,9 @@ fn generate_git_nquads() -> String {
                 if parts.len() < 2 { continue; }
                 let (name, sha) = (parts[0], parts[1]);
                 let ru = format!("<{}/tag/{}>", base, nq_escape(name));
-                nq.push_str(&format!("{} <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://repolex.ai/ontology/git-lex/Tag> {} .\n", ru, graph));
-                nq.push_str(&format!("{} <https://repolex.ai/ontology/git-lex/shortName> \"{}\" {} .\n", ru, nq_escape(name), graph));
-                nq.push_str(&format!("{} <https://repolex.ai/ontology/git-lex/commit> <{}/commit/{}> {} .\n", ru, base, sha, graph));
+                nq.push_str(&format!("{} <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://repolex.ai/ontology/git-lex/git/Tag> {} .\n", ru, graph));
+                nq.push_str(&format!("{} <https://repolex.ai/ontology/git-lex/git/shortName> \"{}\" {} .\n", ru, nq_escape(name), graph));
+                nq.push_str(&format!("{} <https://repolex.ai/ontology/git-lex/git/commit> <{}/commit/{}> {} .\n", ru, base, sha, graph));
             }
         }
     }
@@ -838,10 +889,10 @@ fn generate_git_nquads() -> String {
 
                 // Link commit to changeset (in commits graph so joins work)
                 let commits_graph = format!("<{}/commits>", base);
-                nq.push_str(&format!("{} <https://repolex.ai/ontology/git-lex/changed> {} {} .\n", commit_uri, change_uri, commits_graph));
+                nq.push_str(&format!("{} <https://repolex.ai/ontology/git-lex/git/changed> {} {} .\n", commit_uri, change_uri, commits_graph));
 
                 // Change details
-                nq.push_str(&format!("{} <https://repolex.ai/ontology/git-lex/path> \"{}\" {} .\n", change_uri, nq_escape(path), graph));
+                nq.push_str(&format!("{} <https://repolex.ai/ontology/git-lex/git/path> \"{}\" {} .\n", change_uri, nq_escape(path), graph));
 
                 let status_label = match status.chars().next() {
                     Some('A') => "added",
@@ -850,11 +901,11 @@ fn generate_git_nquads() -> String {
                     Some('R') => "renamed",
                     _ => "unknown",
                 };
-                nq.push_str(&format!("{} <https://repolex.ai/ontology/git-lex/changeType> \"{}\" {} .\n", change_uri, status_label, graph));
+                nq.push_str(&format!("{} <https://repolex.ai/ontology/git-lex/git/changeType> \"{}\" {} .\n", change_uri, status_label, graph));
 
                 // For renames, capture the new path
                 if status.starts_with('R') && parts.len() >= 3 {
-                    nq.push_str(&format!("{} <https://repolex.ai/ontology/git-lex/renamedTo> \"{}\" {} .\n", change_uri, nq_escape(parts[2]), graph));
+                    nq.push_str(&format!("{} <https://repolex.ai/ontology/git-lex/git/renamedTo> \"{}\" {} .\n", change_uri, nq_escape(parts[2]), graph));
                 }
             }
         }
@@ -900,7 +951,7 @@ fn generate_git_nquads() -> String {
                                             let key = format!("name:{}:{}", sig, path);
                                             if authors_seen.insert(key) {
                                                 nq.push_str(&format!(
-                                                    "{} <https://repolex.ai/ontology/git-lex/blamedAuthor> \"{}\" {} .\n",
+                                                    "{} <https://repolex.ai/ontology/git-lex/git/blamedAuthor> \"{}\" {} .\n",
                                                     file_uri, nq_escape(sig), graph
                                                 ));
                                             }
@@ -909,7 +960,7 @@ fn generate_git_nquads() -> String {
                                             let key = format!("email:{}:{}", email, path);
                                             if authors_seen.insert(key) {
                                                 nq.push_str(&format!(
-                                                    "{} <https://repolex.ai/ontology/git-lex/blamedEmail> \"{}\" {} .\n",
+                                                    "{} <https://repolex.ai/ontology/git-lex/git/blamedEmail> \"{}\" {} .\n",
                                                     file_uri, nq_escape(email), graph
                                                 ));
                                             }
@@ -971,7 +1022,7 @@ fn generate_git_nquads() -> String {
                     if let Some(lang) = lang {
                         let fu = format!("<{}/tree/{}/{}>", base, head_sha, uri_encode_path(path));
                         nq.push_str(&format!(
-                            "{} <https://repolex.ai/ontology/git-lex/language> \"{}\" {} .\n",
+                            "{} <https://repolex.ai/ontology/git-lex/git/language> \"{}\" {} .\n",
                             fu, lang, graph
                         ));
                     }
@@ -1041,7 +1092,43 @@ fn open_or_create_store() -> Store {
     Store::open(&path).expect("failed to open store")
 }
 
-/// Extract frontmatter from all .md files and generate N-Quads.
+/// Flatten a YAML value into .spo lines with dot-notation for nested keys.
+fn flatten_yaml(prefix: &str, value: &serde_yaml::Value, file_id: &str, lines: &mut Vec<String>) {
+    match value {
+        serde_yaml::Value::String(s) => {
+            lines.push(format!("{} | {} | hasValue | {}", file_id, prefix, s));
+        }
+        serde_yaml::Value::Sequence(seq) => {
+            for item in seq {
+                if let Some(s) = item.as_str() {
+                    lines.push(format!("{} | {} | hasValue | {}", file_id, prefix, s));
+                } else if let Some(n) = item.as_f64() {
+                    lines.push(format!("{} | {} | hasValue | {}", file_id, prefix, n));
+                } else if let Some(b) = item.as_bool() {
+                    lines.push(format!("{} | {} | hasValue | {}", file_id, prefix, b));
+                }
+            }
+        }
+        serde_yaml::Value::Bool(b) => {
+            lines.push(format!("{} | {} | hasValue | {}", file_id, prefix, b));
+        }
+        serde_yaml::Value::Number(n) => {
+            lines.push(format!("{} | {} | hasValue | {}", file_id, prefix, n));
+        }
+        serde_yaml::Value::Mapping(map) => {
+            for (k, v) in map {
+                if let Some(key_str) = k.as_str() {
+                    let nested_prefix = format!("{}.{}", prefix, key_str);
+                    flatten_yaml(&nested_prefix, v, file_id, lines);
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Extract frontmatter from all .md files.
+/// Returns N-Quads for oxigraph AND writes .spo sidecar files.
 fn generate_frontmatter_nquads() -> String {
     let root = match find_git_root() {
         Some(r) => r,
@@ -1051,6 +1138,9 @@ fn generate_frontmatter_nquads() -> String {
     let base = base_uri();
     let graph = format!("<{}/frontmatter>", base);
     let mut nq = String::new();
+
+    // Open git repo for blob hash lookups
+    let repo = git2::Repository::discover(".").ok();
 
     // Walk all .md files in the repo (skip .lex/ and .git/)
     fn walk_md(dir: &std::path::Path, files: &mut Vec<PathBuf>) {
@@ -1072,6 +1162,10 @@ fn generate_frontmatter_nquads() -> String {
 
     let mut files = Vec::new();
     walk_md(&root, &mut files);
+
+    // Ensure extract dir exists
+    let extract_dir = root.join(".lex").join("extract");
+    fs::create_dir_all(&extract_dir).ok();
 
     for filepath in &files {
         let content = match fs::read_to_string(filepath) {
@@ -1100,57 +1194,357 @@ fn generate_frontmatter_nquads() -> String {
         };
 
         let relpath = filepath.strip_prefix(&root).unwrap_or(filepath);
-        let relpath_str = relpath.to_string_lossy();
-        let doc_uri = format!("<{}/doc/{}>", base, uri_encode_path(&relpath_str));
+        let relpath_str = relpath.to_string_lossy().to_string();
 
-        // Type the document
+        // Get blob hash from git index (staging area) — correct during pre-commit
+        // Falls back to HEAD tree if index lookup fails
+        let blob_hash = repo.as_ref().and_then(|r| {
+            // Try index first (staged version)
+            if let Ok(index) = r.index() {
+                if let Some(entry) = index.get_path(std::path::Path::new(&relpath_str), 0) {
+                    return Some(entry.id.to_string());
+                }
+            }
+            // Fall back to HEAD tree
+            let head = r.head().ok()?;
+            let tree = head.peel_to_tree().ok()?;
+            let entry = tree.get_path(std::path::Path::new(&relpath_str)).ok()?;
+            Some(entry.id().to_string())
+        }).unwrap_or_default();
+
+        let short_hash = if blob_hash.len() >= 8 { &blob_hash[..8] } else { &blob_hash };
+        let file_id = format!("{}/{}", short_hash, relpath_str);
+
+        // Generate .spo lines
+        let mut spo_lines = Vec::new();
+        for (key, value) in &yaml {
+            flatten_yaml(key, value, &file_id, &mut spo_lines);
+        }
+
+        // Write .spo sidecar
+        if !spo_lines.is_empty() {
+            let spo_path = extract_dir.join(format!("{}.fm.spo", relpath_str));
+            fs::create_dir_all(spo_path.parent().unwrap()).ok();
+            let spo_content = spo_lines.join("\n") + "\n";
+            fs::write(&spo_path, &spo_content).ok();
+        }
+
+        // Generate N-Quads for oxigraph (fast path)
+        let doc_uri = format!("<{}/file/{}/{}>", base, short_hash, uri_encode_path(&relpath_str));
+
         nq.push_str(&format!(
             "{} <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://repolex.ai/ontology/lex-upper/Document> {} .\n",
             doc_uri, graph
         ));
         nq.push_str(&format!(
-            "{} <https://repolex.ai/ontology/git-lex/path> \"{}\" {} .\n",
+            "{} <https://repolex.ai/ontology/git-lex/fm/path> \"{}\" {} .\n",
             doc_uri, nq_escape(&relpath_str), graph
         ));
+        nq.push_str(&format!(
+            "{} <https://repolex.ai/ontology/git-lex/git/blobHash> \"{}\" {} .\n",
+            doc_uri, blob_hash, graph
+        ));
 
-        for (key, value) in &yaml {
-            let predicate = format!("<https://repolex.ai/ontology/git-lex/fm/{}>", uri_encode_path(key));
-
-            match value {
-                serde_yaml::Value::String(s) => {
-                    nq.push_str(&format!(
-                        "{} {} \"{}\" {} .\n",
-                        doc_uri, predicate, nq_escape(s), graph
-                    ));
-                }
-                serde_yaml::Value::Sequence(seq) => {
-                    for item in seq {
-                        if let Some(s) = item.as_str() {
-                            nq.push_str(&format!(
-                                "{} {} \"{}\" {} .\n",
-                                doc_uri, predicate, nq_escape(s), graph
-                            ));
-                        }
-                    }
-                }
-                serde_yaml::Value::Bool(b) => {
-                    nq.push_str(&format!(
-                        "{} {} \"{}\"^^<http://www.w3.org/2001/XMLSchema#boolean> {} .\n",
-                        doc_uri, predicate, b, graph
-                    ));
-                }
-                serde_yaml::Value::Number(n) => {
-                    nq.push_str(&format!(
-                        "{} {} \"{}\" {} .\n",
-                        doc_uri, predicate, n, graph
-                    ));
-                }
-                _ => {}
+        // Reuse the .spo lines to generate NQ (avoids duplicate YAML traversal)
+        for line in &spo_lines {
+            // Parse: file_id | key | hasValue | value
+            let parts: Vec<&str> = line.splitn(4, " | ").collect();
+            if parts.len() == 4 {
+                let key = parts[1];
+                let value = parts[3];
+                let predicate = format!("<https://repolex.ai/ontology/git-lex/fm/{}>", uri_encode_path(key));
+                nq.push_str(&format!(
+                    "{} {} \"{}\" {} .\n",
+                    doc_uri, predicate, nq_escape(value), graph
+                ));
             }
         }
     }
 
     nq
+}
+
+/// Compile extraction log from all .spo sidecar files.
+fn compile_extraction_log() {
+    let root = find_git_root().unwrap();
+    let extract_dir = root.join(".lex").join("extract");
+    let log_path = root.join(".lex").join("extraction.log.spo");
+
+    let mut all_spo_lines: Vec<String> = Vec::new();
+    fn walk_spo(dir: &std::path::Path, lines: &mut Vec<String>) {
+        if let Ok(entries) = fs::read_dir(dir) {
+            for entry in entries.filter_map(|e| e.ok()) {
+                let path = entry.path();
+                if path.is_dir() {
+                    walk_spo(&path, lines);
+                } else if path.extension().is_some_and(|e| e == "spo") {
+                    if let Ok(content) = fs::read_to_string(&path) {
+                        for line in content.lines() {
+                            if !line.is_empty() {
+                                lines.push(line.to_string());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    if extract_dir.exists() {
+        walk_spo(&extract_dir, &mut all_spo_lines);
+    }
+
+    // Sort for deterministic output (canonical ordering)
+    all_spo_lines.sort();
+    all_spo_lines.dedup();
+
+    let new_log = if all_spo_lines.is_empty() {
+        String::new()
+    } else {
+        all_spo_lines.join("\n") + "\n"
+    };
+    let old_log = fs::read_to_string(&log_path).unwrap_or_default();
+
+    if new_log != old_log {
+        fs::write(&log_path, &new_log).expect("failed to write extraction.log.spo");
+        let new_count = all_spo_lines.len();
+        let old_count = old_log.lines().filter(|l| !l.is_empty()).count();
+        let added = new_count as i64 - old_count as i64;
+        if added > 0 {
+            eprintln!("Extraction log: {} assertions (+{})", new_count, added);
+        } else if added < 0 {
+            eprintln!("Extraction log: {} assertions ({})", new_count, added);
+        } else {
+            eprintln!("Extraction log: {} assertions (content changed)", new_count);
+        }
+    } else {
+        eprintln!("Extraction log: {} assertions (unchanged)", all_spo_lines.len());
+    }
+}
+
+// ─── git lex llm ───────────────────────────────────────────────
+
+fn cmd_llm_list() {
+    let root = match find_git_root() {
+        Some(r) => r,
+        None => {
+            eprintln!("fatal: not a git repository");
+            exit(1);
+        }
+    };
+
+    let repo = match git2::Repository::discover(".") {
+        Ok(r) => r,
+        Err(_) => {
+            eprintln!("fatal: cannot open git repository");
+            exit(1);
+        }
+    };
+
+    // Get current file list with blob hashes from index
+    let index = repo.index().expect("failed to read index");
+    let mut current_files: HashMap<String, String> = HashMap::new();
+    for entry in index.iter() {
+        let path = String::from_utf8_lossy(&entry.path).to_string();
+        let pl = path.to_lowercase();
+        if (pl.ends_with(".md") || pl.ends_with(".txt"))
+            && !pl.starts_with(".lex/")
+            && !pl.starts_with(".git")
+        {
+            let hash = entry.id.to_string();
+            let short_hash = hash[..8.min(hash.len())].to_string();
+            current_files.insert(path, short_hash);
+        }
+    }
+
+    // Check which files have .llm.spo sidecars and what blob hash they contain
+    let extract_dir = root.join(".lex").join("extract");
+    let mut new_files = Vec::new();
+    let mut changed_files = Vec::new();
+    let mut fresh_files = Vec::new();
+
+    for (path, current_hash) in &current_files {
+        let spo_path = extract_dir.join(format!("{}.llm.spo", path));
+        if !spo_path.exists() {
+            new_files.push(path.as_str());
+        } else {
+            // Check if the blob hash in the spo file matches current
+            let content = fs::read_to_string(&spo_path).unwrap_or_default();
+            if let Some(first_line) = content.lines().next() {
+                if first_line.starts_with(current_hash) {
+                    fresh_files.push(path.as_str());
+                } else {
+                    changed_files.push(path.as_str());
+                }
+            } else {
+                new_files.push(path.as_str());
+            }
+        }
+    }
+
+    new_files.sort();
+    changed_files.sort();
+    fresh_files.sort();
+
+    if !new_files.is_empty() {
+        println!("New ({} files — never extracted):", new_files.len());
+        for f in &new_files {
+            println!("  {}", f);
+        }
+        println!();
+    }
+
+    if !changed_files.is_empty() {
+        println!("Changed ({} files — blob hash differs, needs re-extraction):", changed_files.len());
+        for f in &changed_files {
+            println!("  {}", f);
+        }
+        println!();
+    }
+
+    if !fresh_files.is_empty() {
+        println!("Fresh ({} files — up to date):", fresh_files.len());
+        for f in &fresh_files {
+            println!("  {}", f);
+        }
+        println!();
+    }
+
+    println!("Summary: {} new, {} changed, {} fresh", new_files.len(), changed_files.len(), fresh_files.len());
+}
+
+fn cmd_llm_extract(file: &str) {
+    let root = match find_git_root() {
+        Some(r) => r,
+        None => {
+            eprintln!("fatal: not a git repository");
+            exit(1);
+        }
+    };
+
+    // Get blob hash
+    let repo = git2::Repository::discover(".").expect("failed to open repo");
+    let index = repo.index().expect("failed to read index");
+    let entry = index.get_path(std::path::Path::new(file), 0);
+    let blob_hash = match entry {
+        Some(e) => {
+            let hash = e.id.to_string();
+            hash[..8.min(hash.len())].to_string()
+        }
+        None => {
+            eprintln!("File not found in git index: {}", file);
+            exit(1);
+        }
+    };
+
+    let file_id = format!("{}/{}", blob_hash, file);
+
+    // Read the file content
+    let filepath = root.join(file);
+    let content = match fs::read_to_string(&filepath) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("Cannot read {}: {}", file, e);
+            exit(1);
+        }
+    };
+
+    // Output instructions for the LLM (the agent calling this will use these)
+    println!("=== LLM EXTRACTION REQUEST ===");
+    println!("File: {}", file);
+    println!("File ID: {}", file_id);
+    println!("Content length: {} bytes", content.len());
+    println!();
+    println!("Step 1: Identify all entities (things, concepts, technologies, people, systems, components) in this document.");
+    println!();
+    println!("Step 2: For those entities, output .spo triples:");
+    println!("  {} | subject | predicate | object", file_id);
+    println!();
+    println!("Include: isA (type), properties, relationships between entities.");
+    println!("Stay grounded to the actual text.");
+    println!();
+    println!("Output file: .lex/extract/{}.llm.spo", file);
+    println!("=== END REQUEST ===");
+}
+
+fn cmd_llm_recheck(file: &str) {
+    let root = match find_git_root() {
+        Some(r) => r,
+        None => {
+            eprintln!("fatal: not a git repository");
+            exit(1);
+        }
+    };
+
+    // Get current blob hash
+    let repo = git2::Repository::discover(".").expect("failed to open repo");
+    let index = repo.index().expect("failed to read index");
+    let entry = index.get_path(std::path::Path::new(file), 0);
+    let blob_hash = match entry {
+        Some(e) => {
+            let hash = e.id.to_string();
+            hash[..8.min(hash.len())].to_string()
+        }
+        None => {
+            eprintln!("File not found in git index: {}", file);
+            exit(1);
+        }
+    };
+
+    let file_id = format!("{}/{}", blob_hash, file);
+
+    // Read old extraction
+    let spo_path = root.join(".lex").join("extract").join(format!("{}.llm.spo", file));
+    let old_extraction = fs::read_to_string(&spo_path).unwrap_or_default();
+
+    if old_extraction.is_empty() {
+        eprintln!("No existing extraction for {}. Use 'git lex llm extract' instead.", file);
+        exit(1);
+    }
+
+    // Get the diff since last extraction
+    let old_hash = old_extraction.lines().next()
+        .and_then(|l| l.split('/').next())
+        .unwrap_or("");
+
+    let diff_output = Command::new("git")
+        .args(["diff", &format!("{}..HEAD", old_hash), "--", file])
+        .output();
+
+    let diff = diff_output
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
+        .unwrap_or_else(|| "(diff not available)".to_string());
+
+    println!("=== LLM RECHECK REQUEST ===");
+    println!("File: {}", file);
+    println!("New File ID: {}", file_id);
+    println!("Old blob: {}", old_hash);
+    println!();
+    println!("Previous extraction:");
+    println!("{}", old_extraction);
+    println!();
+    println!("Changes since last extraction:");
+    println!("{}", diff);
+    println!();
+    println!("Update the extraction. Keep unchanged triples, update the file_id prefix to {}.", file_id);
+    println!("Add/remove/modify triples based on the diff. Output full updated .spo file.");
+    println!();
+    println!("Output file: .lex/extract/{}.llm.spo", file);
+    println!("=== END REQUEST ===");
+}
+
+fn cmd_extract() {
+    let start = Instant::now();
+
+    // Run frontmatter extraction (writes .spo sidecars as a side effect)
+    generate_frontmatter_nquads();
+
+    // Compile the extraction log
+    compile_extraction_log();
+
+    let elapsed = start.elapsed();
+    eprintln!("Extracted in {:.1}ms", elapsed.as_secs_f64() * 1000.0);
 }
 
 fn cmd_sync() {
@@ -1176,6 +1570,9 @@ fn cmd_sync() {
             .load_from_reader(RdfFormat::NQuads, Cursor::new(fm_nq.as_bytes()))
             .expect("failed to load frontmatter triples");
     }
+
+    // Compile extraction log
+    compile_extraction_log();
 
     // .lex/*.nq files
     let lex_nq = load_lex_nquads();
@@ -1213,7 +1610,8 @@ fn add_prefixes(query: &str) -> String {
     let o_prefix = format!("PREFIX o: <https://repolex.ai/ont/{}/>", first_commit);
 
     let defaults = [
-        ("lex:", "PREFIX lex: <https://repolex.ai/ontology/git-lex/>".to_string()),
+        ("git:", "PREFIX git: <https://repolex.ai/ontology/git-lex/git/>".to_string()),
+        ("fm:", "PREFIX fm: <https://repolex.ai/ontology/git-lex/fm/>".to_string()),
         ("lex-o:", "PREFIX lex-o: <https://repolex.ai/ontology/lex-upper/>".to_string()),
         ("o:", o_prefix),
         ("rdf:", "PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>".to_string()),
@@ -1358,6 +1756,12 @@ fn main() {
             let lex_nq = load_lex_nquads();
             print!("{}{}{}", git_nq, fm_nq, lex_nq);
         }
+        Commands::Extract => cmd_extract(),
+        Commands::Llm { command } => match command {
+            LlmCommands::List => cmd_llm_list(),
+            LlmCommands::Extract { file } => cmd_llm_extract(&file),
+            LlmCommands::Recheck { file } => cmd_llm_recheck(&file),
+        },
         Commands::Sync => cmd_sync(),
         Commands::Diff { since } => {
             println!(
