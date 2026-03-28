@@ -8,6 +8,7 @@ use std::path::PathBuf;
 use std::process::{Command, exit};
 use std::time::Instant;
 use std::fs;
+use std::collections::HashMap;
 
 #[derive(Parser)]
 #[command(name = "git-lex", about = "Git extensions for knowledge graphs")]
@@ -116,11 +117,31 @@ fn base_uri() -> String {
 }
 
 /// Escape a string for use in N-Quads literals.
+/// Escape a string for use in N-Quads literals.
 fn nq_escape(s: &str) -> String {
     s.replace('\\', "\\\\")
         .replace('"', "\\\"")
         .replace('\n', "\\n")
         .replace('\r', "\\r")
+}
+
+/// Percent-encode a path for use in URIs (spaces, special chars).
+fn uri_encode_path(s: &str) -> String {
+    s.chars()
+        .map(|c| match c {
+            ' ' => "%20".to_string(),
+            '<' => "%3C".to_string(),
+            '>' => "%3E".to_string(),
+            '{' => "%7B".to_string(),
+            '}' => "%7D".to_string(),
+            '|' => "%7C".to_string(),
+            '^' => "%5E".to_string(),
+            '`' => "%60".to_string(),
+            '[' => "%5B".to_string(),
+            ']' => "%5D".to_string(),
+            _ => c.to_string(),
+        })
+        .collect()
 }
 
 // ─── git lex log ───────────────────────────────────────────────
@@ -241,7 +262,7 @@ fn cmd_tree(git_ref: String, format: String) {
         }
         let (_mode, obj_type, blob_hash, size) = (meta[0], meta[1], meta[2], meta[3]);
 
-        let file_uri = format!("<{}/tree/{}/{}>", base, ref_sha, nq_escape(path));
+        let file_uri = format!("<{}/tree/{}/{}>", base, ref_sha, uri_encode_path(path));
 
         if format == "nq" {
             println!(
@@ -363,8 +384,30 @@ fn cmd_init() {
     let root = match find_git_root() {
         Some(r) => r,
         None => {
-            eprintln!("fatal: not a git repository (or any parent up to mount point /)");
-            exit(1);
+            // Not a git repo — offer to create one
+            let cwd = std::env::current_dir().expect("failed to get current directory");
+            eprint!("Not a git repository. Initialize one in {}? [Y/n] ", cwd.display());
+            let mut input = String::new();
+            std::io::stdin().read_line(&mut input).unwrap_or_default();
+            let input = input.trim().to_lowercase();
+            if input.is_empty() || input == "y" || input == "yes" {
+                let status = Command::new("git")
+                    .args(["init"])
+                    .status();
+                match status {
+                    Ok(s) if s.success() => {
+                        println!();
+                    }
+                    _ => {
+                        eprintln!("fatal: failed to initialize git repository");
+                        exit(1);
+                    }
+                }
+                cwd
+            } else {
+                eprintln!("Aborted.");
+                exit(1);
+            }
         }
     };
 
@@ -372,7 +415,7 @@ fn cmd_init() {
     let lex_exists = lex_dir.exists();
 
     fs::create_dir_all(lex_dir.join("graph")).expect("failed to create .lex/graph/");
-    fs::create_dir_all(lex_dir.join("schema")).expect("failed to create .lex/schema/");
+    fs::create_dir_all(lex_dir.join("ontology")).expect("failed to create .lex/ontology/");
 
     let gitattributes = root.join(".gitattributes");
     let attr_content = "# git-lex: semantic diff/merge for knowledge graph files\n\
@@ -411,7 +454,7 @@ fn cmd_init() {
             "# .lex/\n\n\
              Knowledge graph index managed by git-lex.\n\n\
              - `graph/` — derived triples and relationships\n\
-             - `schema/` — ontology and controlled vocabulary\n\n\
+             - `ontology/` — ontology definitions and controlled vocabulary\n\n\
              Content lives in the repo root. This directory is the index layer.\n",
         )
         .expect("failed to create .lex/README.md");
@@ -424,10 +467,81 @@ fn cmd_init() {
     }
     println!();
     println!("  .lex/graph/    — knowledge graph triples");
-    println!("  .lex/schema/   — ontology definitions");
+    println!("  .lex/ontology/ — ontology definitions");
     println!("  .gitattributes — semantic diff/merge drivers");
     println!();
     install_global_drivers();
+
+    // Install post-commit hook for auto-sync
+    let hooks_dir = root.join(".git").join("hooks");
+    let hook_path = hooks_dir.join("post-commit");
+    let hook_content = "#!/bin/sh\ngit-lex sync\n";
+    if hook_path.exists() {
+        let existing = fs::read_to_string(&hook_path).unwrap_or_default();
+        if !existing.contains("git-lex sync") {
+            fs::write(&hook_path, format!("{}\n{}", existing.trim_end(), hook_content))
+                .expect("failed to update post-commit hook");
+            println!("Updated post-commit hook with git-lex sync");
+        }
+    } else {
+        fs::create_dir_all(&hooks_dir).ok();
+        fs::write(&hook_path, hook_content).expect("failed to create post-commit hook");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&hook_path, fs::Permissions::from_mode(0o755))
+                .expect("failed to set hook permissions");
+        }
+        println!("Installed post-commit hook (auto-sync)");
+    }
+
+    // Check if repo has any commits
+    let has_commits = Command::new("git")
+        .args(["rev-parse", "HEAD"])
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+
+    // Commit 1: lex setup files
+    let lex_files = [".lex/", ".gitattributes", ".gitignore"];
+    for f in &lex_files {
+        let _ = Command::new("git").args(["add", f]).status();
+    }
+    let status = Command::new("git")
+        .args(["commit", "-m", "git lex init"])
+        .output();
+    match status {
+        Ok(o) if o.status.success() => {
+            println!("\nCommitted git-lex setup files.");
+        }
+        _ => {
+            // May fail if nothing to commit (reinit case)
+        }
+    }
+
+    // Commit 2: if this is a fresh repo with uncommitted content, commit it all
+    if !has_commits || !lex_exists {
+        let untracked = Command::new("git")
+            .args(["status", "--porcelain"])
+            .output()
+            .ok()
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+            .unwrap_or_default();
+
+        if !untracked.is_empty() {
+            eprint!("Commit existing files to the repository? [Y/n] ");
+            let mut input = String::new();
+            std::io::stdin().read_line(&mut input).unwrap_or_default();
+            let input = input.trim().to_lowercase();
+            if input.is_empty() || input == "y" || input == "yes" {
+                let _ = Command::new("git").args(["add", "."]).status();
+                let _ = Command::new("git")
+                    .args(["commit", "-m", "Initial content"])
+                    .status();
+                println!("Committed existing content.");
+            }
+        }
+    }
 }
 
 fn install_global_drivers() {
@@ -480,7 +594,7 @@ fn cmd_status() {
     println!("git-lex status for {}", root.display());
     println!();
 
-    for subdir in &["graph", "schema"] {
+    for subdir in &["graph", "ontology"] {
         let dir = lex_dir.join(subdir);
         if dir.exists() {
             let count = fs::read_dir(&dir)
@@ -641,7 +755,7 @@ fn generate_git_nquads() -> String {
                     let meta: Vec<&str> = parts[0].split_whitespace().collect();
                     if meta.len() < 4 { continue; }
                     let (obj_type, blob_hash, size) = (meta[1], meta[2], meta[3]);
-                    let fu = format!("<{}/tree/{}/{}>", base, ref_sha, nq_escape(path));
+                    let fu = format!("<{}/tree/{}/{}>", base, ref_sha, uri_encode_path(path));
                     nq.push_str(&format!("{} <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://repolex.ai/ontology/git-lex/Blob> {} .\n", fu, graph));
                     nq.push_str(&format!("{} <https://repolex.ai/ontology/git-lex/path> \"{}\" {} .\n", fu, nq_escape(path), graph));
                     nq.push_str(&format!("{} <https://repolex.ai/ontology/git-lex/blobHash> \"{}\" {} .\n", fu, blob_hash, graph));
@@ -719,7 +833,7 @@ fn generate_git_nquads() -> String {
                 let status = parts[0];
                 let path = parts[1];
                 let graph = format!("<{}/changeset/{}>", base, current_sha);
-                let change_uri = format!("<{}/changeset/{}/{}>", base, current_sha, nq_escape(path));
+                let change_uri = format!("<{}/changeset/{}/{}>", base, current_sha, uri_encode_path(path));
                 let commit_uri = format!("<{}/commit/{}>", base, current_sha);
 
                 // Link commit to changeset (in commits graph so joins work)
@@ -746,72 +860,61 @@ fn generate_git_nquads() -> String {
         }
     }
 
-    // Blame: per-line authorship for all tracked files at HEAD
-    // Only run for files under a reasonable count to avoid huge repos
-    let output = Command::new("git")
-        .args(["ls-tree", "-r", "--name-only", "HEAD"])
-        .output();
-    if let Ok(o) = output {
-        if o.status.success() {
-            let stdout = String::from_utf8_lossy(&o.stdout);
-            let files: Vec<&str> = stdout.lines().collect();
-            let base = base_uri();
+    // Blame: per-file authorship using git2 (handles unicode/emoji safely)
+    if let Ok(repo) = git2::Repository::discover(".") {
+        if let Ok(head) = repo.head() {
+            if let Some(head_oid) = head.target() {
+                let head_sha = head_oid.to_string();
+                let base = base_uri();
+                let graph = format!("<{}/blame/{}>", base, head_sha);
 
-            // Get HEAD sha for graph URI
-            let head_sha = Command::new("git")
-                .args(["rev-parse", "HEAD"])
-                .output()
-                .ok()
-                .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-                .unwrap_or_default();
-
-            let graph = format!("<{}/blame/{}>", base, head_sha);
-
-            // Skip blame for repos with too many files (can add --limit flag later)
-            let max_files = 100;
-            let blame_files: Vec<&str> = files.iter()
-                .filter(|f| !f.starts_with(".lex/"))
-                .copied()
-                .take(max_files)
-                .collect();
-
-            for path in &blame_files {
-                let blame_output = Command::new("git")
-                    .args(["blame", "--porcelain", path])
-                    .output();
-                if let Ok(bo) = blame_output {
-                    if bo.status.success() {
-                        let blame_str = String::from_utf8_lossy(&bo.stdout);
-                        let file_uri = format!("<{}/tree/{}/{}>", base, head_sha, nq_escape(path));
-                        let mut current_blame_sha = String::new();
-                        let mut current_line: u64 = 0;
-                        let mut authors_seen = std::collections::HashSet::new();
-
-                        for bline in blame_str.lines() {
-                            // Lines starting with a SHA (40 hex) are blame headers
-                            if bline.len() >= 40 && bline[..40].chars().all(|c| c.is_ascii_hexdigit()) {
-                                let parts: Vec<&str> = bline.split_whitespace().collect();
-                                current_blame_sha = parts[0].to_string();
-                                if parts.len() >= 3 {
-                                    current_line = parts[2].parse().unwrap_or(0);
+                // Get file list from HEAD tree
+                if let Ok(commit) = repo.find_commit(head_oid) {
+                    if let Ok(tree) = commit.tree() {
+                        let mut paths = Vec::new();
+                        tree.walk(git2::TreeWalkMode::PreOrder, |dir, entry| {
+                            if entry.kind() == Some(git2::ObjectType::Blob) {
+                                let path = if dir.is_empty() {
+                                    entry.name().unwrap_or("").to_string()
+                                } else {
+                                    format!("{}{}", dir, entry.name().unwrap_or(""))
+                                };
+                                if !path.starts_with(".lex/") {
+                                    paths.push(path);
                                 }
-                            } else if let Some(author) = bline.strip_prefix("author ") {
-                                // Emit one blame triple per unique author-file pair
-                                let key = format!("{}:{}", author, path);
-                                if authors_seen.insert(key) {
-                                    nq.push_str(&format!(
-                                        "{} <https://repolex.ai/ontology/git-lex/blamedAuthor> \"{}\" {} .\n",
-                                        file_uri, nq_escape(author), graph
-                                    ));
-                                }
-                            } else if let Some(email) = bline.strip_prefix("author-mail <") {
-                                let email = email.trim_end_matches('>');
-                                let key = format!("{}:{}", email, path);
-                                if authors_seen.insert(key) {
-                                    nq.push_str(&format!(
-                                        "{} <https://repolex.ai/ontology/git-lex/blamedEmail> \"{}\" {} .\n",
-                                        file_uri, nq_escape(email), graph
-                                    ));
+                            }
+                            git2::TreeWalkResult::Ok
+                        }).ok();
+
+                        // Limit blame to reasonable number of files
+                        let max_files = 500;
+                        for path in paths.iter().take(max_files) {
+                            let blame = repo.blame_file(std::path::Path::new(path), None);
+                            if let Ok(blame) = blame {
+                                let file_uri = format!("<{}/tree/{}/{}>", base, head_sha, uri_encode_path(path));
+                                let mut authors_seen = std::collections::HashSet::new();
+
+                                for i in 0..blame.len() {
+                                    if let Some(hunk) = blame.get_index(i) {
+                                        if let Some(sig) = hunk.final_signature().name() {
+                                            let key = format!("name:{}:{}", sig, path);
+                                            if authors_seen.insert(key) {
+                                                nq.push_str(&format!(
+                                                    "{} <https://repolex.ai/ontology/git-lex/blamedAuthor> \"{}\" {} .\n",
+                                                    file_uri, nq_escape(sig), graph
+                                                ));
+                                            }
+                                        }
+                                        if let Some(email) = hunk.final_signature().email() {
+                                            let key = format!("email:{}:{}", email, path);
+                                            if authors_seen.insert(key) {
+                                                nq.push_str(&format!(
+                                                    "{} <https://repolex.ai/ontology/git-lex/blamedEmail> \"{}\" {} .\n",
+                                                    file_uri, nq_escape(email), graph
+                                                ));
+                                            }
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -866,7 +969,7 @@ fn generate_git_nquads() -> String {
                         _ => None,
                     };
                     if let Some(lang) = lang {
-                        let fu = format!("<{}/tree/{}/{}>", base, head_sha, nq_escape(path));
+                        let fu = format!("<{}/tree/{}/{}>", base, head_sha, uri_encode_path(path));
                         nq.push_str(&format!(
                             "{} <https://repolex.ai/ontology/git-lex/language> \"{}\" {} .\n",
                             fu, lang, graph
@@ -938,6 +1041,118 @@ fn open_or_create_store() -> Store {
     Store::open(&path).expect("failed to open store")
 }
 
+/// Extract frontmatter from all .md files and generate N-Quads.
+fn generate_frontmatter_nquads() -> String {
+    let root = match find_git_root() {
+        Some(r) => r,
+        None => return String::new(),
+    };
+
+    let base = base_uri();
+    let graph = format!("<{}/frontmatter>", base);
+    let mut nq = String::new();
+
+    // Walk all .md files in the repo (skip .lex/ and .git/)
+    fn walk_md(dir: &std::path::Path, files: &mut Vec<PathBuf>) {
+        if let Ok(entries) = fs::read_dir(dir) {
+            for entry in entries.filter_map(|e| e.ok()) {
+                let path = entry.path();
+                let name = entry.file_name().to_string_lossy().to_string();
+                if name.starts_with('.') {
+                    continue;
+                }
+                if path.is_dir() {
+                    walk_md(&path, files);
+                } else if name.ends_with(".md") || name.ends_with(".txt") {
+                    files.push(path);
+                }
+            }
+        }
+    }
+
+    let mut files = Vec::new();
+    walk_md(&root, &mut files);
+
+    for filepath in &files {
+        let content = match fs::read_to_string(filepath) {
+            Ok(c) => c,
+            Err(_) => continue,
+        };
+
+        // Check for frontmatter (starts with ---)
+        if !content.starts_with("---\n") && !content.starts_with("---\r\n") {
+            continue;
+        }
+
+        // Find the closing ---
+        let rest = &content[4..]; // skip first "---\n"
+        let end = match rest.find("\n---") {
+            Some(pos) => pos,
+            None => continue,
+        };
+
+        let yaml_str = &rest[..end];
+
+        // Parse YAML
+        let yaml: HashMap<String, serde_yaml::Value> = match serde_yaml::from_str(yaml_str) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+
+        let relpath = filepath.strip_prefix(&root).unwrap_or(filepath);
+        let relpath_str = relpath.to_string_lossy();
+        let doc_uri = format!("<{}/doc/{}>", base, uri_encode_path(&relpath_str));
+
+        // Type the document
+        nq.push_str(&format!(
+            "{} <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://repolex.ai/ontology/lex-upper/Document> {} .\n",
+            doc_uri, graph
+        ));
+        nq.push_str(&format!(
+            "{} <https://repolex.ai/ontology/git-lex/path> \"{}\" {} .\n",
+            doc_uri, nq_escape(&relpath_str), graph
+        ));
+
+        for (key, value) in &yaml {
+            let predicate = format!("<https://repolex.ai/ontology/git-lex/fm/{}>", uri_encode_path(key));
+
+            match value {
+                serde_yaml::Value::String(s) => {
+                    nq.push_str(&format!(
+                        "{} {} \"{}\" {} .\n",
+                        doc_uri, predicate, nq_escape(s), graph
+                    ));
+                }
+                serde_yaml::Value::Sequence(seq) => {
+                    for item in seq {
+                        if let Some(s) = item.as_str() {
+                            nq.push_str(&format!(
+                                "{} {} \"{}\" {} .\n",
+                                doc_uri, predicate, nq_escape(s), graph
+                            ));
+                        }
+                    }
+                }
+                serde_yaml::Value::Bool(b) => {
+                    nq.push_str(&format!(
+                        "{} {} \"{}\"^^<http://www.w3.org/2001/XMLSchema#boolean> {} .\n",
+                        doc_uri, predicate, b, graph
+                    ));
+                }
+                serde_yaml::Value::Number(n) => {
+                    nq.push_str(&format!(
+                        "{} {} \"{}\" {} .\n",
+                        doc_uri, predicate, n, graph
+                    ));
+                }
+                _ => {}
+            }
+        }
+    }
+
+    nq
+}
+
 fn cmd_sync() {
     let start = Instant::now();
 
@@ -953,6 +1168,15 @@ fn cmd_sync() {
         .load_from_reader(RdfFormat::NQuads, Cursor::new(git_nq.as_bytes()))
         .expect("failed to load git triples");
 
+    // Frontmatter triples
+    let fm_nq = generate_frontmatter_nquads();
+    let fm_count = fm_nq.lines().filter(|l| !l.is_empty()).count();
+    if !fm_nq.is_empty() {
+        store
+            .load_from_reader(RdfFormat::NQuads, Cursor::new(fm_nq.as_bytes()))
+            .expect("failed to load frontmatter triples");
+    }
+
     // .lex/*.nq files
     let lex_nq = load_lex_nquads();
     let lex_count = lex_nq.lines().filter(|l| !l.is_empty()).count();
@@ -966,10 +1190,11 @@ fn cmd_sync() {
 
     let elapsed = start.elapsed();
     println!(
-        "Synced {} git + {} lex = {} total triples in {:.1}ms",
+        "Synced {} git + {} frontmatter + {} lex = {} total triples in {:.1}ms",
         git_count,
+        fm_count,
         lex_count,
-        git_count + lex_count,
+        git_count + fm_count + lex_count,
         elapsed.as_secs_f64() * 1000.0
     );
     println!("Store: {}", store_path().unwrap().display());
@@ -1129,8 +1354,9 @@ fn main() {
         Commands::Query { query } => cmd_query(query),
         Commands::Dump => {
             let git_nq = generate_git_nquads();
+            let fm_nq = generate_frontmatter_nquads();
             let lex_nq = load_lex_nquads();
-            print!("{}{}", git_nq, lex_nq);
+            print!("{}{}{}", git_nq, fm_nq, lex_nq);
         }
         Commands::Sync => cmd_sync(),
         Commands::Diff { since } => {

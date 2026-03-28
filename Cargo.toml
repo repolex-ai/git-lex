@@ -13,3 +13,5 @@ path = "src/main.rs"
 [dependencies]
 clap = { version = "4", features = ["derive"] }
 oxigraph = { version = "0.5.6", features = ["rdf-12"] }
+git2 = { version = "0.20", default-features = false, features = ["vendored-openssl"] }
+serde_yaml = "0.9"
