@@ -25,11 +25,17 @@ enum LlmCommands {
     Extract {
         /// File path to extract
         file: String,
+        /// Model identifier for the .spo filename (e.g., claude-haiku-4-5-20251001)
+        #[arg(long)]
+        model: String,
     },
     /// Re-check extraction after file changed (uses old extraction + diff)
     Recheck {
         /// File path to recheck
         file: String,
+        /// Model identifier for the .spo filename
+        #[arg(long)]
+        model: String,
     },
 }
 
@@ -1093,33 +1099,34 @@ fn open_or_create_store() -> Store {
 }
 
 /// Flatten a YAML value into .spo lines with dot-notation for nested keys.
-fn flatten_yaml(prefix: &str, value: &serde_yaml::Value, file_id: &str, lines: &mut Vec<String>) {
+/// Individual .spo files use simple format: subject | predicate | object
+fn flatten_yaml(prefix: &str, value: &serde_yaml::Value, lines: &mut Vec<String>) {
     match value {
         serde_yaml::Value::String(s) => {
-            lines.push(format!("{} | {} | hasValue | {}", file_id, prefix, s));
+            lines.push(format!("{} | hasValue | {}", prefix, s));
         }
         serde_yaml::Value::Sequence(seq) => {
             for item in seq {
                 if let Some(s) = item.as_str() {
-                    lines.push(format!("{} | {} | hasValue | {}", file_id, prefix, s));
+                    lines.push(format!("{} | hasValue | {}", prefix, s));
                 } else if let Some(n) = item.as_f64() {
-                    lines.push(format!("{} | {} | hasValue | {}", file_id, prefix, n));
+                    lines.push(format!("{} | hasValue | {}", prefix, n));
                 } else if let Some(b) = item.as_bool() {
-                    lines.push(format!("{} | {} | hasValue | {}", file_id, prefix, b));
+                    lines.push(format!("{} | hasValue | {}", prefix, b));
                 }
             }
         }
         serde_yaml::Value::Bool(b) => {
-            lines.push(format!("{} | {} | hasValue | {}", file_id, prefix, b));
+            lines.push(format!("{} | hasValue | {}", prefix, b));
         }
         serde_yaml::Value::Number(n) => {
-            lines.push(format!("{} | {} | hasValue | {}", file_id, prefix, n));
+            lines.push(format!("{} | hasValue | {}", prefix, n));
         }
         serde_yaml::Value::Mapping(map) => {
             for (k, v) in map {
                 if let Some(key_str) = k.as_str() {
                     let nested_prefix = format!("{}.{}", prefix, key_str);
-                    flatten_yaml(&nested_prefix, v, file_id, lines);
+                    flatten_yaml(&nested_prefix, v, lines);
                 }
             }
         }
@@ -1215,11 +1222,15 @@ fn generate_frontmatter_nquads() -> String {
         let short_hash = if blob_hash.len() >= 8 { &blob_hash[..8] } else { &blob_hash };
         let file_id = format!("{}/{}", short_hash, relpath_str);
 
-        // Generate .spo lines
+        // Generate .spo lines (simple s | p | o — no file_id in individual files)
         let mut spo_lines = Vec::new();
         for (key, value) in &yaml {
-            flatten_yaml(key, value, &file_id, &mut spo_lines);
+            flatten_yaml(key, value, &mut spo_lines);
         }
+
+        // Sort for deterministic output
+        spo_lines.sort();
+        spo_lines.dedup();
 
         // Write .spo sidecar
         if !spo_lines.is_empty() {
@@ -1247,11 +1258,11 @@ fn generate_frontmatter_nquads() -> String {
 
         // Reuse the .spo lines to generate NQ (avoids duplicate YAML traversal)
         for line in &spo_lines {
-            // Parse: file_id | key | hasValue | value
-            let parts: Vec<&str> = line.splitn(4, " | ").collect();
-            if parts.len() == 4 {
-                let key = parts[1];
-                let value = parts[3];
+            // Parse: subject | predicate | object
+            let parts: Vec<&str> = line.splitn(3, " | ").collect();
+            if parts.len() == 3 {
+                let key = parts[0];
+                let value = parts[2];
                 let predicate = format!("<https://repolex.ai/ontology/git-lex/fm/{}>", uri_encode_path(key));
                 nq.push_str(&format!(
                     "{} {} \"{}\" {} .\n",
@@ -1265,23 +1276,70 @@ fn generate_frontmatter_nquads() -> String {
 }
 
 /// Compile extraction log from all .spo sidecar files.
+/// Prepends blobhash/filepath to each line for grounding.
 fn compile_extraction_log() {
     let root = find_git_root().unwrap();
     let extract_dir = root.join(".lex").join("extract");
     let log_path = root.join(".lex").join("extraction.log.spo");
 
+    // Build blob hash lookup from git index
+    let repo = git2::Repository::discover(".").ok();
+    let blob_map: HashMap<String, String> = repo.as_ref().map(|r| {
+        let mut map = HashMap::new();
+        if let Ok(index) = r.index() {
+            for entry in index.iter() {
+                let path = String::from_utf8_lossy(&entry.path).to_string();
+                let hash = entry.id.to_string();
+                let short = hash[..8.min(hash.len())].to_string();
+                map.insert(path, short);
+            }
+        }
+        map
+    }).unwrap_or_default();
+
     let mut all_spo_lines: Vec<String> = Vec::new();
-    fn walk_spo(dir: &std::path::Path, lines: &mut Vec<String>) {
+
+    // Walk .spo files, derive source file path from sidecar path
+    fn walk_spo(dir: &std::path::Path, extract_dir: &std::path::Path, blob_map: &HashMap<String, String>, lines: &mut Vec<String>) {
         if let Ok(entries) = fs::read_dir(dir) {
             for entry in entries.filter_map(|e| e.ok()) {
                 let path = entry.path();
                 if path.is_dir() {
-                    walk_spo(&path, lines);
+                    walk_spo(&path, extract_dir, blob_map, lines);
                 } else if path.extension().is_some_and(|e| e == "spo") {
+                    // Derive source file path: strip extract_dir prefix and .fm.spo/.llm.spo suffix
+                    let rel = path.strip_prefix(extract_dir).unwrap_or(&path);
+                    let rel_str = rel.to_string_lossy().to_string();
+                    // Strip extractor suffix: filename.ext.{extractor}.spo → filename.ext
+                    let source_path = if let Some(pos) = rel_str.rfind(".spo") {
+                        let without_spo = &rel_str[..pos];
+                        // Find the second-to-last dot (the extractor separator)
+                        if let Some(ext_pos) = without_spo.rfind('.') {
+                            // Check if what's between the dots looks like an extractor name
+                            // (not a file extension like .md)
+                            let maybe_ext = &without_spo[ext_pos + 1..];
+                            if maybe_ext == "fm" || maybe_ext.contains('-') || maybe_ext.len() > 5 {
+                                without_spo[..ext_pos].to_string()
+                            } else {
+                                without_spo.to_string()
+                            }
+                        } else {
+                            without_spo.to_string()
+                        }
+                    } else {
+                        rel_str.clone()
+                    };
+
+                    let blob_hash = blob_map.get(&source_path)
+                        .cloned()
+                        .unwrap_or_else(|| "00000000".to_string());
+
+                    let file_id = format!("{}/{}", blob_hash, source_path);
+
                     if let Ok(content) = fs::read_to_string(&path) {
                         for line in content.lines() {
-                            if !line.is_empty() {
-                                lines.push(line.to_string());
+                            if !line.is_empty() && !line.starts_with('#') {
+                                lines.push(format!("{} | {}", file_id, line));
                             }
                         }
                     }
@@ -1290,7 +1348,7 @@ fn compile_extraction_log() {
         }
     }
     if extract_dir.exists() {
-        walk_spo(&extract_dir, &mut all_spo_lines);
+        walk_spo(&extract_dir, &extract_dir, &blob_map, &mut all_spo_lines);
     }
 
     // Sort for deterministic output (canonical ordering)
@@ -1363,20 +1421,41 @@ fn cmd_llm_list() {
     let mut fresh_files = Vec::new();
 
     for (path, current_hash) in &current_files {
-        let spo_path = extract_dir.join(format!("{}.llm.spo", path));
-        if !spo_path.exists() {
+        // Check for any non-fm .spo sidecar for this file
+        let spo_dir = extract_dir.join(std::path::Path::new(path).parent().unwrap_or(std::path::Path::new("")));
+        let fname = std::path::Path::new(path).file_name().unwrap_or_default().to_string_lossy();
+        let has_llm_spo = spo_dir.exists() && fs::read_dir(&spo_dir)
+            .map(|entries| entries.filter_map(|e| e.ok()).any(|e| {
+                let n = e.file_name().to_string_lossy().to_string();
+                n.starts_with(&format!("{}.", fname)) && n.ends_with(".spo") && !n.ends_with(".fm.spo")
+            }))
+            .unwrap_or(false);
+        let spo_path = if has_llm_spo {
+            // Find the actual spo file to check blob hash
+            fs::read_dir(&spo_dir)
+                .ok()
+                .and_then(|entries| entries.filter_map(|e| e.ok()).find(|e| {
+                    let n = e.file_name().to_string_lossy().to_string();
+                    n.starts_with(&format!("{}.", fname)) && n.ends_with(".spo") && !n.ends_with(".fm.spo")
+                }))
+                .map(|e| e.path())
+                .unwrap_or_else(|| extract_dir.join("nonexistent"))
+        } else {
+            extract_dir.join("nonexistent")
+        };
+        if !has_llm_spo {
             new_files.push(path.as_str());
         } else {
-            // Check if the blob hash in the spo file matches current
-            let content = fs::read_to_string(&spo_path).unwrap_or_default();
-            if let Some(first_line) = content.lines().next() {
-                if first_line.starts_with(current_hash) {
-                    fresh_files.push(path.as_str());
-                } else {
-                    changed_files.push(path.as_str());
-                }
+            // Check extraction log for this file's current blob hash
+            let log_content = fs::read_to_string(&root.join(".lex").join("extraction.log.spo")).unwrap_or_default();
+            let file_id_prefix = format!("{}/{}", current_hash, path);
+            // If the current hash appears in the log, extraction is fresh
+            // If a different hash appears for this path, it's changed
+            let has_current = log_content.lines().any(|l| l.starts_with(&file_id_prefix));
+            if has_current {
+                fresh_files.push(path.as_str());
             } else {
-                new_files.push(path.as_str());
+                changed_files.push(path.as_str());
             }
         }
     }
@@ -1412,7 +1491,7 @@ fn cmd_llm_list() {
     println!("Summary: {} new, {} changed, {} fresh", new_files.len(), changed_files.len(), fresh_files.len());
 }
 
-fn cmd_llm_extract(file: &str) {
+fn cmd_llm_extract(file: &str, model: &str) {
     let root = match find_git_root() {
         Some(r) => r,
         None => {
@@ -1420,23 +1499,6 @@ fn cmd_llm_extract(file: &str) {
             exit(1);
         }
     };
-
-    // Get blob hash
-    let repo = git2::Repository::discover(".").expect("failed to open repo");
-    let index = repo.index().expect("failed to read index");
-    let entry = index.get_path(std::path::Path::new(file), 0);
-    let blob_hash = match entry {
-        Some(e) => {
-            let hash = e.id.to_string();
-            hash[..8.min(hash.len())].to_string()
-        }
-        None => {
-            eprintln!("File not found in git index: {}", file);
-            exit(1);
-        }
-    };
-
-    let file_id = format!("{}/{}", blob_hash, file);
 
     // Read the file content
     let filepath = root.join(file);
@@ -1448,25 +1510,26 @@ fn cmd_llm_extract(file: &str) {
         }
     };
 
-    // Output instructions for the LLM (the agent calling this will use these)
-    println!("=== LLM EXTRACTION REQUEST ===");
-    println!("File: {}", file);
-    println!("File ID: {}", file_id);
-    println!("Content length: {} bytes", content.len());
+    let spo_path = format!(".lex/extract/{}.{}.spo", file, model);
+
+    println!("Extract entities and relationships from this document.");
     println!();
-    println!("Step 1: Identify all entities (things, concepts, technologies, people, systems, components) in this document.");
+    println!("Step 1: Identify all entities (things, concepts, technologies, people, systems, components).");
+    println!("Step 2: For those entities, output triples in this format, one per line:");
+    println!("  subject | predicate | object");
     println!();
-    println!("Step 2: For those entities, output .spo triples:");
-    println!("  {} | subject | predicate | object", file_id);
+    println!("Include: isA (type), properties (attributes), relationships between entities.");
+    println!("Use lowercase-with-dashes for names. Stay grounded to the actual text.");
+    println!("Sort output alphabetically by subject, then predicate, then object.");
     println!();
-    println!("Include: isA (type), properties, relationships between entities.");
-    println!("Stay grounded to the actual text.");
+    println!("--- FILE: {} ---", file);
+    println!("{}", content);
+    println!("--- END FILE ---");
     println!();
-    println!("Output file: .lex/extract/{}.llm.spo", file);
-    println!("=== END REQUEST ===");
+    println!("Write the output to: {}", spo_path);
 }
 
-fn cmd_llm_recheck(file: &str) {
+fn cmd_llm_recheck(file: &str, model: &str) {
     let root = match find_git_root() {
         Some(r) => r,
         None => {
@@ -1493,45 +1556,47 @@ fn cmd_llm_recheck(file: &str) {
     let file_id = format!("{}/{}", blob_hash, file);
 
     // Read old extraction
-    let spo_path = root.join(".lex").join("extract").join(format!("{}.llm.spo", file));
+    let spo_path = root.join(".lex").join("extract").join(format!("{}.{}.spo", file, model));
     let old_extraction = fs::read_to_string(&spo_path).unwrap_or_default();
 
     if old_extraction.is_empty() {
-        eprintln!("No existing extraction for {}. Use 'git lex llm extract' instead.", file);
+        eprintln!("No existing extraction for {} by {}. Use 'git lex llm extract' instead.", file, model);
         exit(1);
     }
 
-    // Get the diff since last extraction
-    let old_hash = old_extraction.lines().next()
-        .and_then(|l| l.split('/').next())
-        .unwrap_or("");
+    // Read the current file content
+    let filepath = root.join(file);
+    let content = fs::read_to_string(&filepath).unwrap_or_default();
 
+    // Get the diff
     let diff_output = Command::new("git")
-        .args(["diff", &format!("{}..HEAD", old_hash), "--", file])
+        .args(["diff", "HEAD", "--", file])
         .output();
 
     let diff = diff_output
         .ok()
         .filter(|o| o.status.success())
         .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
-        .unwrap_or_else(|| "(diff not available)".to_string());
+        .unwrap_or_default();
 
-    println!("=== LLM RECHECK REQUEST ===");
-    println!("File: {}", file);
-    println!("New File ID: {}", file_id);
-    println!("Old blob: {}", old_hash);
+    println!("Re-check extraction after file change.");
     println!();
     println!("Previous extraction:");
     println!("{}", old_extraction);
     println!();
-    println!("Changes since last extraction:");
-    println!("{}", diff);
+    if !diff.is_empty() {
+        println!("Changes since last extraction:");
+        println!("{}", diff);
+    } else {
+        println!("--- FILE: {} ---", file);
+        println!("{}", content);
+        println!("--- END FILE ---");
+    }
     println!();
-    println!("Update the extraction. Keep unchanged triples, update the file_id prefix to {}.", file_id);
-    println!("Add/remove/modify triples based on the diff. Output full updated .spo file.");
+    println!("Update the triples. Keep unchanged ones, add/remove/modify based on changes.");
+    println!("Sort output alphabetically by subject, then predicate, then object.");
     println!();
-    println!("Output file: .lex/extract/{}.llm.spo", file);
-    println!("=== END REQUEST ===");
+    println!("Write the output to: .lex/extract/{}.{}.spo", file, model);
 }
 
 fn cmd_extract() {
@@ -1759,8 +1824,8 @@ fn main() {
         Commands::Extract => cmd_extract(),
         Commands::Llm { command } => match command {
             LlmCommands::List => cmd_llm_list(),
-            LlmCommands::Extract { file } => cmd_llm_extract(&file),
-            LlmCommands::Recheck { file } => cmd_llm_recheck(&file),
+            LlmCommands::Extract { file, model } => cmd_llm_extract(&file, &model),
+            LlmCommands::Recheck { file, model } => cmd_llm_recheck(&file, &model),
         },
         Commands::Sync => cmd_sync(),
         Commands::Diff { since } => {
