@@ -1672,7 +1672,7 @@ fn cmd_resolve(full: bool) {
         String::new() // Full rebuild — treat everything as new
     } else {
         Command::new("git")
-            .args(["show", "HEAD:.lex/extraction.log.spo"])
+            .args(["show", "HEAD~1:.lex/extraction.log.spo"])
             .output()
             .ok()
             .filter(|o| o.status.success())
