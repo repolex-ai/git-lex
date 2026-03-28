@@ -540,7 +540,7 @@ fn cmd_init() {
 
     // Post-commit: sync to oxigraph
     let post_commit_path = hooks_dir.join("post-commit");
-    let post_commit_content = "#!/bin/sh\ngit-lex sync\n";
+    let post_commit_content = "#!/bin/sh\ngit-lex resolve\ngit-lex sync\n";
     if post_commit_path.exists() {
         let existing = fs::read_to_string(&post_commit_path).unwrap_or_default();
         if !existing.contains("git-lex sync") {
