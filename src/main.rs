@@ -3,12 +3,13 @@ use oxigraph::io::RdfFormat;
 use oxigraph::model::*;
 use oxigraph::sparql::SparqlEvaluator;
 use oxigraph::store::Store;
+use sha2::{Sha256, Digest};
 use std::io::Cursor;
 use std::path::PathBuf;
 use std::process::{Command, exit};
 use std::time::Instant;
 use std::fs;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 #[derive(Parser)]
 #[command(name = "git-lex", about = "Git extensions for knowledge graphs")]
@@ -79,6 +80,12 @@ enum Commands {
     Extract,
     /// Dump all generated N-Quads to stdout (debug)
     Dump,
+    /// Resolve extraction log into RDF N-Quads (mechanical transformation)
+    Resolve {
+        /// Rebuild from scratch instead of diffing
+        #[arg(long)]
+        full: bool,
+    },
     /// Sync git data + .lex/*.nq into the persistent store
     Sync,
     /// Semantic diff of knowledge between refs
@@ -1599,6 +1606,215 @@ fn cmd_llm_recheck(file: &str, model: &str) {
     println!("Write the output to: .lex/extract/{}.{}.spo", file, model);
 }
 
+// ─── git lex resolve ────────────────────────────────────────────
+
+/// Validate an IRI string. Returns true if valid.
+fn is_valid_iri(iri: &str) -> bool {
+    oxiri::Iri::parse(iri).is_ok()
+}
+
+/// Sanitize a string for use in a URI path segment.
+/// Removes/replaces characters that would make an invalid IRI.
+fn sanitize_uri_segment(s: &str) -> String {
+    s.chars()
+        .map(|c| match c {
+            'a'..='z' | 'A'..='Z' | '0'..='9' | '-' | '_' | '.' => c,
+            ' ' | ':' | '/' | '\\' | '<' | '>' | '{' | '}' | '|' | '^' | '`' | '[' | ']' | '#' | '?' | '@' => '-',
+            _ if c.is_alphanumeric() => c,
+            _ => '-',
+        })
+        .collect::<String>()
+        .replace("--", "-")
+        .trim_matches('-')
+        .to_string()
+}
+
+/// Generate a short deterministic hash from a string.
+fn short_hash(input: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(input.as_bytes());
+    let result = hasher.finalize();
+    hex::encode(&result[..8]) // 16 hex chars
+}
+
+fn cmd_resolve(full: bool) {
+    let start = Instant::now();
+
+    let root = match find_git_root() {
+        Some(r) => r,
+        None => {
+            eprintln!("fatal: not a git repository");
+            exit(1);
+        }
+    };
+
+    let base = base_uri();
+    let log_path = root.join(".lex").join("extraction.log.spo");
+    let knowledge_path = root.join(".lex").join("graph").join("knowledge.nq");
+
+    // Get current commit hash for named graph
+    let commit_hash = Command::new("git")
+        .args(["rev-parse", "HEAD"])
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .unwrap_or_else(|| "unknown".to_string());
+
+    let graph = format!("<{}/commit/{}>", base, commit_hash);
+
+    // Read current extraction log
+    let current_log = fs::read_to_string(&log_path).unwrap_or_default();
+    let current_lines: HashSet<&str> = current_log.lines().filter(|l| !l.is_empty()).collect();
+
+    // Read previous version (from last commit) for diff
+    let previous_log = if full {
+        String::new() // Full rebuild — treat everything as new
+    } else {
+        Command::new("git")
+            .args(["show", "HEAD:.lex/extraction.log.spo"])
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+            .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
+            .unwrap_or_default()
+    };
+    let previous_lines: HashSet<&str> = previous_log.lines().filter(|l| !l.is_empty()).collect();
+
+    // Compute diff
+    let new_lines: Vec<&str> = current_lines.difference(&previous_lines).copied().collect();
+    let removed_lines: Vec<&str> = previous_lines.difference(&current_lines).copied().collect();
+
+    if new_lines.is_empty() && removed_lines.is_empty() {
+        println!("Nothing to resolve (no changes in extraction log).");
+        return;
+    }
+
+    let mut nq = String::new();
+
+    // Process new assertions
+    for line in &new_lines {
+        // Parse: blobhash/filepath | subject | predicate | object
+        let parts: Vec<&str> = line.splitn(2, " | ").collect();
+        if parts.len() < 2 {
+            continue;
+        }
+        let file_id = parts[0]; // blobhash/filepath
+        let spo_part = parts[1]; // subject | predicate | object
+
+        let spo_fields: Vec<&str> = spo_part.splitn(3, " | ").collect();
+        if spo_fields.len() < 3 {
+            continue;
+        }
+        let (subject, predicate, object) = (spo_fields[0], spo_fields[1], spo_fields[2]);
+
+        // Extract blob hash and filepath from file_id
+        let (blob_hash, filepath) = if let Some(pos) = file_id.find('/') {
+            (&file_id[..pos], &file_id[pos + 1..])
+        } else {
+            (file_id, "")
+        };
+
+        // Build entity URIs (sanitized for valid IRI)
+        let subject_uri = format!("<{}/entity/{}~{}>", base, sanitize_uri_segment(subject), blob_hash);
+
+        // Handle predicate: isA → rdf:type, hasValue → fm:key, others → unresolved URI
+        let predicate_nq = if predicate == "isA" {
+            "<http://www.w3.org/1999/02/22-rdf-syntax-ns#type>".to_string()
+        } else if predicate == "hasValue" {
+            // For frontmatter, the subject IS the key name — use fm: namespace
+            format!("<https://repolex.ai/ontology/git-lex/fm/{}>", uri_encode_path(subject))
+        } else {
+            // Unresolved predicate — wrap in a namespace so it's a valid IRI
+            format!("<https://repolex.ai/r/{}/predicate/{}>", get_repo_id(), sanitize_uri_segment(predicate))
+        };
+
+        // Handle object: if predicate is isA or hasValue, object is a literal
+        // Otherwise, object is another entity from the same file
+        let object_nq = if predicate == "isA" || predicate == "hasValue" {
+            format!("\"{}\"", nq_escape(object))
+        } else {
+            format!("<{}/entity/{}~{}>", base, sanitize_uri_segment(object), blob_hash)
+        };
+
+        // Write the assertion triple
+        nq.push_str(&format!("{} {} {} {} .\n", subject_uri, predicate_nq, object_nq, graph));
+
+        // Write name triple for subject (if we haven't seen it yet)
+        nq.push_str(&format!(
+            "{} <https://repolex.ai/ontology/lex-upper/name> \"{}\" {} .\n",
+            subject_uri, nq_escape(subject), graph
+        ));
+
+        // Generate annotation with triple term
+        let spo_key = format!("{}|{}|{}|{}", file_id, subject, predicate, object);
+        let ann_hash = short_hash(&spo_key);
+        let ann_uri = format!("<{}/ann/{}>", base, ann_hash);
+
+        // Triple term annotation
+        nq.push_str(&format!(
+            "{} <http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies> <<( {} {} {} )>> {} .\n",
+            ann_uri, subject_uri, predicate_nq, object_nq, graph
+        ));
+        nq.push_str(&format!(
+            "{} <https://repolex.ai/ontology/git-lex/git/filePath> \"{}\" {} .\n",
+            ann_uri, nq_escape(filepath), graph
+        ));
+        nq.push_str(&format!(
+            "{} <https://repolex.ai/ontology/git-lex/git/blobHash> \"{}\" {} .\n",
+            ann_uri, nq_escape(blob_hash), graph
+        ));
+    }
+
+    // Process retractions
+    for line in &removed_lines {
+        let parts: Vec<&str> = line.splitn(2, " | ").collect();
+        if parts.len() < 2 {
+            continue;
+        }
+        let file_id = parts[0];
+        let spo_part = parts[1];
+
+        let spo_fields: Vec<&str> = spo_part.splitn(3, " | ").collect();
+        if spo_fields.len() < 3 {
+            continue;
+        }
+        let (subject, predicate, object) = (spo_fields[0], spo_fields[1], spo_fields[2]);
+
+        let spo_key = format!("{}|{}|{}|{}", file_id, subject, predicate, object);
+        let ann_hash = short_hash(&spo_key);
+        let ann_uri = format!("<{}/ann/{}>", base, ann_hash);
+
+        // Retraction annotation
+        nq.push_str(&format!(
+            "{} <https://repolex.ai/ontology/git-lex/git/retracted> \"true\"^^<http://www.w3.org/2001/XMLSchema#boolean> {} .\n",
+            ann_uri, graph
+        ));
+    }
+
+    // Write knowledge graph
+    fs::create_dir_all(root.join(".lex").join("graph")).ok();
+    if full {
+        fs::write(&knowledge_path, &nq).expect("failed to write knowledge.nq");
+    } else {
+        // Append to existing
+        let mut existing = fs::read_to_string(&knowledge_path).unwrap_or_default();
+        existing.push_str(&nq);
+        fs::write(&knowledge_path, &existing).expect("failed to write knowledge.nq");
+    }
+
+    let elapsed = start.elapsed();
+    let triple_count = nq.lines().filter(|l| !l.is_empty()).count();
+    println!(
+        "Resolved {} new + {} retracted → {} quads in {:.1}ms",
+        new_lines.len(),
+        removed_lines.len(),
+        triple_count,
+        elapsed.as_secs_f64() * 1000.0
+    );
+    println!("Written to: {}", knowledge_path.display());
+}
+
 fn cmd_extract() {
     let start = Instant::now();
 
@@ -1827,6 +2043,7 @@ fn main() {
             LlmCommands::Extract { file, model } => cmd_llm_extract(&file, &model),
             LlmCommands::Recheck { file, model } => cmd_llm_recheck(&file, &model),
         },
+        Commands::Resolve { full } => cmd_resolve(full),
         Commands::Sync => cmd_sync(),
         Commands::Diff { since } => {
             println!(
