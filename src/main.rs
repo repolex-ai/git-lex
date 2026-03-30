@@ -567,6 +567,24 @@ fn cmd_init(kit: Option<String>) {
         )).ok();
     }
 
+    // Create type folders from kit ontology
+    if kit.is_some() {
+        let kit_types = get_kit_types(kit_name);
+        for (type_name, _) in &kit_types {
+            let type_dir = root.join(type_name.to_lowercase());
+            fs::create_dir_all(&type_dir).ok();
+            // Add a .gitkeep so empty dirs are tracked
+            let gitkeep = type_dir.join(".gitkeep");
+            if !gitkeep.exists() {
+                fs::write(&gitkeep, "").ok();
+            }
+        }
+        if !kit_types.is_empty() {
+            let type_names: Vec<String> = kit_types.iter().map(|(n, _)| n.to_lowercase()).collect();
+            println!("Created type folders: {}", type_names.join(", "));
+        }
+    }
+
     // Print summary
     if lex_exists {
         println!("Reinitialized .lex/ in {}", root.display());
@@ -2156,19 +2174,69 @@ fn cmd_extract() {
 fn cmd_sync() {
     let start = Instant::now();
 
+    let root = find_git_root().expect("not a git repo");
+    let base = base_uri();
     let store = open_or_create_store();
 
-    // Clear and reload — simple for now, incremental later
-    store.clear().expect("failed to clear store");
+    // Get current HEAD commit
+    let head_sha = Command::new("git")
+        .args(["rev-parse", "HEAD"])
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .unwrap_or_default();
 
-    // Git virtual triples
+    if head_sha.is_empty() {
+        println!("No commits yet. Nothing to sync.");
+        return;
+    }
+
+    // ─── Phase 1: Clear and regenerate virtual graphs ───
+    // Virtual graphs are ephemeral — rebuilt from git every sync.
+    // We clear ALL graphs that aren't /sync/ graphs, then reload.
+    // Sync graphs are persistent — never touched.
+
+    // Find all existing graph names
+    let existing_graphs: Vec<String> = {
+        let query = "SELECT DISTINCT ?g WHERE { GRAPH ?g { ?s ?p ?o } }";
+        let results = oxigraph::sparql::SparqlEvaluator::new()
+            .parse_query(query)
+            .ok()
+            .and_then(|q| q.on_store(&store).execute().ok());
+        match results {
+            Some(oxigraph::sparql::QueryResults::Solutions(solutions)) => {
+                solutions.filter_map(|s| {
+                    s.ok().and_then(|s| {
+                        s.get("g").map(|t| match t {
+                            Term::NamedNode(n) => n.as_str().to_string(),
+                            _ => String::new(),
+                        })
+                    })
+                }).collect()
+            }
+            _ => Vec::new(),
+            None => Vec::new(),
+        }
+    };
+
+    // Clear non-sync graphs (virtual graphs get regenerated)
+    for graph_uri in &existing_graphs {
+        if !graph_uri.contains("/sync/") {
+            if let Ok(graph) = oxigraph::model::NamedNode::new(graph_uri) {
+                store.clear_graph(&oxigraph::model::GraphName::from(graph)).ok();
+            }
+        }
+    }
+
+    // Regenerate git virtual triples
     let git_nq = generate_git_nquads();
     let git_count = git_nq.lines().count();
     store
         .load_from_reader(RdfFormat::NQuads, Cursor::new(git_nq.as_bytes()))
         .expect("failed to load git triples");
 
-    // Frontmatter triples
+    // Regenerate frontmatter + mention + wikilink triples
     let fm_nq = generate_frontmatter_nquads();
     let fm_count = fm_nq.lines().filter(|l| !l.is_empty()).count();
     if !fm_nq.is_empty() {
@@ -2177,29 +2245,269 @@ fn cmd_sync() {
             .expect("failed to load frontmatter triples");
     }
 
-    // Compile extraction log
-    compile_extraction_log();
+    // ─── Phase 2: Sync graph — diff sidecars since last sync ───
 
-    // .lex/*.nq files
-    let lex_nq = load_lex_nquads();
-    let lex_count = lex_nq.lines().filter(|l| !l.is_empty()).count();
-    if !lex_nq.is_empty() {
+    // Find last sync commit (latest /sync/ graph in store)
+    let last_sync_commit: Option<String> = {
+        let query = format!(
+            "SELECT ?g WHERE {{ GRAPH ?g {{ ?s ?p ?o }} FILTER(CONTAINS(STR(?g), '/sync/')) }} ORDER BY DESC(STR(?g)) LIMIT 1"
+        );
+        let results = oxigraph::sparql::SparqlEvaluator::new()
+            .parse_query(&query)
+            .ok()
+            .and_then(|q| q.on_store(&store).execute().ok());
+        match results {
+            Some(oxigraph::sparql::QueryResults::Solutions(solutions)) => {
+                solutions.filter_map(|s| {
+                    s.ok().and_then(|s| {
+                        s.get("g").and_then(|t| match t {
+                            Term::NamedNode(n) => {
+                                // Extract commit SHA from /sync/{sha}/
+                                let uri = n.as_str();
+                                uri.rfind("/sync/").map(|pos| {
+                                    uri[pos + 6..].trim_end_matches('/').to_string()
+                                })
+                            }
+                            _ => None,
+                        })
+                    })
+                }).next()
+            }
+            _ => None,
+        }
+    };
+
+    // Get all current .spo sidecars
+    let extract_dir = root.join(".lex").join("extract");
+    let mut current_spo: HashMap<String, String> = HashMap::new(); // filepath → content
+
+    fn collect_spo(dir: &std::path::Path, base_dir: &std::path::Path, map: &mut HashMap<String, String>) {
+        if let Ok(entries) = fs::read_dir(dir) {
+            for entry in entries.filter_map(|e| e.ok()) {
+                let path = entry.path();
+                if path.is_dir() {
+                    collect_spo(&path, base_dir, map);
+                } else if path.extension().is_some_and(|e| e == "spo") {
+                    if let Ok(content) = fs::read_to_string(&path) {
+                        let rel = path.strip_prefix(base_dir).unwrap_or(&path);
+                        map.insert(rel.to_string_lossy().to_string(), content);
+                    }
+                }
+            }
+        }
+    }
+    if extract_dir.exists() {
+        collect_spo(&extract_dir, &extract_dir, &mut current_spo);
+    }
+
+    // Get sidecars at last sync point (from git history)
+    let previous_spo: HashMap<String, String> = if let Some(ref last_sha) = last_sync_commit {
+        // List .spo files at that commit
+        let output = Command::new("git")
+            .args(["ls-tree", "-r", "--name-only", last_sha, ".lex/extract/"])
+            .output();
+        let mut prev = HashMap::new();
+        if let Ok(o) = output {
+            if o.status.success() {
+                let stdout = String::from_utf8_lossy(&o.stdout);
+                for file_path in stdout.lines() {
+                    if file_path.ends_with(".spo") {
+                        let content = Command::new("git")
+                            .args(["show", &format!("{}:{}", last_sha, file_path)])
+                            .output();
+                        if let Ok(c) = content {
+                            if c.status.success() {
+                                let rel = file_path.strip_prefix(".lex/extract/").unwrap_or(file_path);
+                                prev.insert(rel.to_string(), String::from_utf8_lossy(&c.stdout).to_string());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        prev
+    } else {
+        HashMap::new() // First sync — everything is new
+    };
+
+    // Compute delta
+    let sync_graph = format!("<{}/sync/{}>", base, head_sha);
+    let mut sync_nq = String::new();
+    let mut new_assertions = 0;
+    let mut retracted = 0;
+
+    // New/changed assertions
+    for (spo_file, content) in &current_spo {
+        let prev_content = previous_spo.get(spo_file).map(|s| s.as_str()).unwrap_or("");
+        let current_lines: HashSet<&str> = content.lines().filter(|l| !l.is_empty() && !l.starts_with('#')).collect();
+        let prev_lines: HashSet<&str> = prev_content.lines().filter(|l| !l.is_empty() && !l.starts_with('#')).collect();
+
+        // Derive source file from spo path
+        let source_file = spo_file
+            .strip_suffix(".fm.spo")
+            .or_else(|| {
+                // For model-named files: strip .{model}.spo
+                if let Some(pos) = spo_file.rfind(".spo") {
+                    let without_spo = &spo_file[..pos];
+                    if let Some(ext_pos) = without_spo.rfind('.') {
+                        let maybe_ext = &without_spo[ext_pos + 1..];
+                        if maybe_ext.len() > 3 || maybe_ext == "fm" {
+                            return Some(&without_spo[..ext_pos]);
+                        }
+                    }
+                }
+                None
+            })
+            .unwrap_or(spo_file);
+
+        // Get blob hash for this source file
+        let blob_hash = Command::new("git")
+            .args(["rev-parse", &format!("HEAD:{}", source_file)])
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+            .map(|o| {
+                let h = String::from_utf8_lossy(&o.stdout).trim().to_string();
+                h[..8.min(h.len())].to_string()
+            })
+            .unwrap_or_default();
+
+        // New lines = new assertions
+        for line in current_lines.difference(&prev_lines) {
+            let parts: Vec<&str> = line.splitn(3, " | ").collect();
+            if parts.len() < 3 { continue; }
+            let (subject, predicate, object) = (parts[0], parts[1], parts[2]);
+
+            // Build entity URIs
+            let subject_uri = format!("<{}/entity/{}~{}>", base, sanitize_uri_segment(subject), blob_hash);
+            let predicate_uri = if predicate == "isA" {
+                "<http://www.w3.org/1999/02/22-rdf-syntax-ns#type>".to_string()
+            } else if predicate == "hasValue" {
+                format!("<https://repolex.ai/ontology/git-lex/fm/{}>", uri_encode_path(subject))
+            } else if predicate == "mentions" {
+                "<https://repolex.ai/ontology/git-lex/lex/mentions>".to_string()
+            } else if predicate == "linksTo" {
+                "<https://repolex.ai/ontology/git-lex/lex/linksTo>".to_string()
+            } else {
+                format!("<{}/predicate/{}>", base, sanitize_uri_segment(predicate))
+            };
+            let object_nq = if predicate == "isA" || predicate == "hasValue" || predicate == "mentions" || predicate == "linksTo" {
+                format!("\"{}\"", nq_escape(object))
+            } else {
+                format!("<{}/entity/{}~{}>", base, sanitize_uri_segment(object), blob_hash)
+            };
+
+            // The assertion
+            sync_nq.push_str(&format!("{} {} {} {} .\n", subject_uri, predicate_uri, object_nq, sync_graph));
+
+            // Name triple
+            sync_nq.push_str(&format!(
+                "{} <https://repolex.ai/ontology/git-lex/lex/name> \"{}\" {} .\n",
+                subject_uri, nq_escape(subject), sync_graph
+            ));
+
+            // Triple term annotation
+            let spo_key = format!("{}|{}|{}|{}", source_file, subject, predicate, object);
+            let ann_hash = short_hash(&spo_key);
+            let ann_uri = format!("<{}/ann/{}>", base, ann_hash);
+
+            sync_nq.push_str(&format!(
+                "{} <http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies> <<( {} {} {} )>> {} .\n",
+                ann_uri, subject_uri, predicate_uri, object_nq, sync_graph
+            ));
+            sync_nq.push_str(&format!(
+                "{} <https://repolex.ai/ontology/git-lex/lex/filePath> \"{}\" {} .\n",
+                ann_uri, nq_escape(source_file), sync_graph
+            ));
+            sync_nq.push_str(&format!(
+                "{} <https://repolex.ai/ontology/git-lex/lex/blobHash> \"{}\" {} .\n",
+                ann_uri, nq_escape(&blob_hash), sync_graph
+            ));
+            sync_nq.push_str(&format!(
+                "{} <https://repolex.ai/ontology/git-lex/git/commitId> \"{}\" {} .\n",
+                ann_uri, nq_escape(&head_sha), sync_graph
+            ));
+
+            new_assertions += 1;
+        }
+
+        // Removed lines = retractions
+        for line in prev_lines.difference(&current_lines) {
+            let parts: Vec<&str> = line.splitn(3, " | ").collect();
+            if parts.len() < 3 { continue; }
+            let (subject, predicate, object) = (parts[0], parts[1], parts[2]);
+
+            let spo_key = format!("{}|{}|{}|{}", source_file, subject, predicate, object);
+            let ann_hash = short_hash(&spo_key);
+            let ann_uri = format!("<{}/ann/{}>", base, ann_hash);
+
+            sync_nq.push_str(&format!(
+                "{} <https://repolex.ai/ontology/git-lex/lex/retracted> \"true\"^^<http://www.w3.org/2001/XMLSchema#boolean> {} .\n",
+                ann_uri, sync_graph
+            ));
+            retracted += 1;
+        }
+    }
+
+    // Handle deleted files (in previous but not in current)
+    for (spo_file, content) in &previous_spo {
+        if !current_spo.contains_key(spo_file) {
+            // Entire file deleted — retract all its assertions
+            let source_file = spo_file
+                .strip_suffix(".fm.spo")
+                .unwrap_or(spo_file);
+
+            for line in content.lines().filter(|l| !l.is_empty() && !l.starts_with('#')) {
+                let parts: Vec<&str> = line.splitn(3, " | ").collect();
+                if parts.len() < 3 { continue; }
+                let (subject, predicate, object) = (parts[0], parts[1], parts[2]);
+
+                let spo_key = format!("{}|{}|{}|{}", source_file, subject, predicate, object);
+                let ann_hash = short_hash(&spo_key);
+                let ann_uri = format!("<{}/ann/{}>", base, ann_hash);
+
+                sync_nq.push_str(&format!(
+                    "{} <https://repolex.ai/ontology/git-lex/lex/retracted> \"true\"^^<http://www.w3.org/2001/XMLSchema#boolean> {} .\n",
+                    ann_uri, sync_graph
+                ));
+                retracted += 1;
+            }
+        }
+    }
+
+    // Load sync graph into oxigraph
+    let sync_count = sync_nq.lines().filter(|l| !l.is_empty()).count();
+    if !sync_nq.is_empty() {
         store
-            .load_from_reader(RdfFormat::NQuads, Cursor::new(lex_nq.as_bytes()))
-            .expect("failed to load .lex/ triples");
+            .load_from_reader(RdfFormat::NQuads, Cursor::new(sync_nq.as_bytes()))
+            .expect("failed to load sync graph");
     }
 
     store.flush().expect("failed to flush store");
 
     let elapsed = start.elapsed();
+
+    // Count total sync graph triples
+    let total_sync: usize = existing_graphs.iter()
+        .filter(|g| g.contains("/sync/"))
+        .count();
+
     println!(
-        "Synced {} git + {} frontmatter + {} lex = {} total triples in {:.1}ms",
-        git_count,
-        fm_count,
-        lex_count,
-        git_count + fm_count + lex_count,
+        "Synced in {:.1}ms:",
         elapsed.as_secs_f64() * 1000.0
     );
+    println!("  Virtual: {} git + {} frontmatter", git_count, fm_count);
+    if new_assertions > 0 || retracted > 0 {
+        println!(
+            "  Sync /sync/{}/: +{} assertions, -{} retracted ({} quads)",
+            &head_sha[..8.min(head_sha.len())], new_assertions, retracted, sync_count
+        );
+    } else if last_sync_commit.is_some() {
+        println!("  No new assertions since last sync");
+    } else {
+        println!("  First sync — no previous state");
+    }
+    println!("  Total sync graphs: {}", total_sync + if sync_count > 0 { 1 } else { 0 });
     println!("Store: {}", store_path().unwrap().display());
 }
 

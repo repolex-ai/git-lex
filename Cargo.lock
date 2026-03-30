@@ -298,6 +298,7 @@ dependencies = [
  "hex",
  "oxigraph",
  "oxiri",
+ "regex",
  "serde_yaml",
  "sha2",
 ]
