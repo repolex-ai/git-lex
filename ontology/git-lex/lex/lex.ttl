@@ -1,0 +1,83 @@
+@prefix lex: <https://repolex.ai/ontology/git-lex/lex/> .
+@prefix owl: <http://www.w3.org/2002/07/owl#> .
+@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+@prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
+
+# =============================================================================
+# GIT-LEX TOOL ONTOLOGY
+# =============================================================================
+# Properties and classes that git-lex adds on top of git.
+# These are tool-level features — extraction, linking, provenance.
+#
+# Namespace: lex: = https://repolex.ai/ontology/git-lex/lex/
+#
+# Extractors that populate these properties:
+#   - wikilink extractor: [[reference]] → lex:linksTo
+#   - @mention extractor: @agent → lex:mentions
+#   - markdown link extractor: [text](url) → lex:linksTo / lex:externalLink
+#
+# These extractors run on all text surfaces:
+#   - document bodies (.md)
+#   - commit messages
+#   - git notes (if used)
+# =============================================================================
+
+<https://repolex.ai/ontology/git-lex/lex> a owl:Ontology ;
+    rdfs:label "git-lex Tool Ontology" ;
+    rdfs:comment "Properties and classes added by git-lex — extraction features, linking, provenance. The tool layer between git: (raw git data) and kit ontologies (use-case specific)." ;
+    owl:versionInfo "0.1" .
+
+
+# =============================================================================
+# EXTRACTION PROPERTIES
+# =============================================================================
+# Populated by built-in Tier 1 extractors. Pattern-matching, no LLM.
+
+lex:mentions a owl:ObjectProperty ;
+    rdfs:label "mentions" ;
+    rdfs:comment "An @mention of an agent. Extracted from @agentname patterns in document bodies, commit messages, and git notes." .
+
+lex:linksTo a owl:ObjectProperty ;
+    rdfs:label "links to" ;
+    rdfs:comment "An internal reference via [[wikilink]] or [text](path.md). Links to another document or entity within the repo." .
+
+lex:externalLink a owl:DatatypeProperty ;
+    rdfs:label "external link" ;
+    rdfs:comment "A reference to an external URL via [text](https://...). Stored as the URL string." ;
+    rdfs:range xsd:anyURI .
+
+
+# =============================================================================
+# PROVENANCE (for RDF 1.2 triple term annotations)
+# =============================================================================
+# Applied to quoted triples to track who extracted what, from where.
+
+lex:extractor a owl:DatatypeProperty ;
+    rdfs:label "extractor" ;
+    rdfs:comment "Which extractor produced this triple: 'fm', 'wikilink', 'mention', 'llm', 'manual'." ;
+    rdfs:range xsd:string .
+
+lex:filePath a owl:DatatypeProperty ;
+    rdfs:label "file path" ;
+    rdfs:comment "Source file path this triple was extracted from." ;
+    rdfs:range xsd:string .
+
+lex:blobHash a owl:DatatypeProperty ;
+    rdfs:label "blob hash" ;
+    rdfs:comment "Git blob hash of the source file content when this triple was extracted." ;
+    rdfs:range xsd:string .
+
+lex:retracted a owl:DatatypeProperty ;
+    rdfs:label "retracted" ;
+    rdfs:comment "Whether this triple has been retracted (source file deleted). Applied to triple term annotations." ;
+    rdfs:range xsd:boolean .
+
+
+# =============================================================================
+# ENTITY IDENTITY
+# =============================================================================
+
+lex:name a owl:DatatypeProperty ;
+    rdfs:label "name" ;
+    rdfs:comment "Human-readable name for an entity. Used across all kits." ;
+    rdfs:range xsd:string .

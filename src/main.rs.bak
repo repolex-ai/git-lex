@@ -43,22 +43,10 @@ enum LlmCommands {
 #[derive(Subcommand)]
 enum Commands {
     /// Initialize .lex/ in the current repo and install global drivers
-    Init {
-        /// Use case kit (e.g., squad). Defines valid document types and ontology.
-        #[arg(long)]
-        kit: Option<String>,
-    },
-    /// Query the knowledge graph.
-    ///
-    /// By default, queries act on the union of all named graphs, meaning
-    /// `SELECT * WHERE { ?s ?p ?o }` will find everything across commits, files,
-    /// and extracted metrics automatically.
-    ///
-    /// Examples:
-    ///   git lex query "SELECT * WHERE { ?s ?p ?o } LIMIT 10"
-    ///   git lex query "SELECT ?file WHERE { ?file git:language 'markdown' }"
+    Init,
+    /// Query the knowledge graph
     Query {
-        /// The SPARQL query string
+        /// The query string
         query: String,
     },
     /// Emit commit history as N-Quads
@@ -110,20 +98,6 @@ enum Commands {
     Llm {
         #[command(subcommand)]
         command: LlmCommands,
-    },
-    /// Create a new document from the kit ontology
-    Create {
-        /// Document type (e.g., decision, agent, task)
-        doctype: String,
-        /// Title for the document
-        #[arg(long)]
-        title: Option<String>,
-    },
-    /// Save changes (add + commit + sync in one command)
-    Save {
-        /// Commit message
-        #[arg(default_value = "git lex save")]
-        message: String,
     },
     /// Show status of .lex/ in the current repo
     Status,
@@ -442,27 +416,28 @@ fn cmd_refs(format: String) {
 
 // ─── git lex init ──────────────────────────────────────────────
 
-// Embedded ontologies
-const ONT_GIT: &str = include_str!("../ontology/git-lex/git/git.ttl");
-const ONT_FM: &str = include_str!("../ontology/git-lex/fm/fm.ttl");
-const ONT_LEX: &str = include_str!("../ontology/git-lex/lex/lex.ttl");
-const ONT_LEX_O: &str = include_str!("../ontology/git-lex/lex-o/lex-o.ttl");
-const ONT_KIT_SQUAD: &str = include_str!("../ontology/git-lex/kit/squad/squad.ttl");
-
-fn cmd_init(kit: Option<String>) {
+fn cmd_init() {
     let root = match find_git_root() {
         Some(r) => r,
         None => {
+            // Not a git repo — offer to create one
             let cwd = std::env::current_dir().expect("failed to get current directory");
             eprint!("Not a git repository. Initialize one in {}? [Y/n] ", cwd.display());
             let mut input = String::new();
             std::io::stdin().read_line(&mut input).unwrap_or_default();
             let input = input.trim().to_lowercase();
             if input.is_empty() || input == "y" || input == "yes" {
-                let status = Command::new("git").args(["init"]).status();
+                let status = Command::new("git")
+                    .args(["init"])
+                    .status();
                 match status {
-                    Ok(s) if s.success() => { println!(); }
-                    _ => { eprintln!("fatal: failed to initialize git repository"); exit(1); }
+                    Ok(s) if s.success() => {
+                        println!();
+                    }
+                    _ => {
+                        eprintln!("fatal: failed to initialize git repository");
+                        exit(1);
+                    }
                 }
                 cwd
             } else {
@@ -472,149 +447,151 @@ fn cmd_init(kit: Option<String>) {
         }
     };
 
-    // Validate kit
-    let kit_name = kit.as_deref().unwrap_or("none");
-    if let Some(ref k) = kit {
-        if k != "squad" {
-            eprintln!("Unknown kit: {}. Available kits: squad", k);
-            exit(1);
-        }
-    }
-
     let lex_dir = root.join(".lex");
     let lex_exists = lex_dir.exists();
 
-    // Create .lex/ structure
-    fs::create_dir_all(lex_dir.join("extract")).ok();
+    fs::create_dir_all(lex_dir.join("graph")).expect("failed to create .lex/graph/");
+    fs::create_dir_all(lex_dir.join("ontology")).expect("failed to create .lex/ontology/");
 
-    // Install ontologies (full directory structure)
-    let ont_dir = lex_dir.join("ontology");
-    let ontologies: Vec<(&str, &str)> = vec![
-        ("git/git.ttl", ONT_GIT),
-        ("fm/fm.ttl", ONT_FM),
-        ("lex/lex.ttl", ONT_LEX),
-        ("lex-o/lex-o.ttl", ONT_LEX_O),
-    ];
-    for (path, content) in &ontologies {
-        let full_path = ont_dir.join(path);
-        fs::create_dir_all(full_path.parent().unwrap()).ok();
-        if !full_path.exists() {
-            fs::write(&full_path, content).expect(&format!("failed to write {}", path));
-        }
-    }
-
-    // Install kit ontology if specified
-    if let Some(ref k) = kit {
-        let kit_content = match k.as_str() {
-            "squad" => ONT_KIT_SQUAD,
-            _ => unreachable!(),
-        };
-        let kit_path = ont_dir.join(format!("kit/{}/{}.ttl", k, k));
-        fs::create_dir_all(kit_path.parent().unwrap()).ok();
-        if !kit_path.exists() {
-            fs::write(&kit_path, kit_content).expect("failed to write kit ontology");
-        }
-    }
-
-    // .gitattributes
     let gitattributes = root.join(".gitattributes");
-    let attr_content = "# git-lex: semantic diff/merge for knowledge graph files\n.lex/**/*.nq diff=lex merge=lex\n";
+    let attr_content = "# git-lex: semantic diff/merge for knowledge graph files\n\
+                        .lex/**/*.nq diff=lex merge=lex\n";
+
     if gitattributes.exists() {
         let existing = fs::read_to_string(&gitattributes).unwrap_or_default();
         if !existing.contains("diff=lex") {
-            fs::write(&gitattributes, format!("{}\n{}", existing.trim_end(), attr_content)).ok();
+            fs::write(&gitattributes, format!("{}\n{}", existing.trim_end(), attr_content))
+                .expect("failed to update .gitattributes");
+            println!("Updated .gitattributes with lex diff/merge drivers");
         }
     } else {
-        fs::write(&gitattributes, attr_content).ok();
+        fs::write(&gitattributes, attr_content).expect("failed to create .gitattributes");
+        println!("Created .gitattributes");
     }
 
-    // .gitignore
+    // Ensure .store/ is in .gitignore (it's a local cache, not committed)
     let gitignore = root.join(".gitignore");
-    let ignore_entries = ".lex/oxigraph/\n.lex/raw/\n";
+    let ignore_entry = ".lex/oxigraph/";
     if gitignore.exists() {
         let existing = fs::read_to_string(&gitignore).unwrap_or_default();
-        if !existing.contains(".lex/oxigraph/") {
-            fs::write(&gitignore, format!("{}\n{}", existing.trim_end(), ignore_entries)).ok();
+        if !existing.contains(ignore_entry) {
+            fs::write(&gitignore, format!("{}\n{}\n", existing.trim_end(), ignore_entry))
+                .expect("failed to update .gitignore");
         }
     } else {
-        fs::write(&gitignore, ignore_entries).ok();
+        fs::write(&gitignore, format!("{}\n", ignore_entry))
+            .expect("failed to create .gitignore");
     }
 
-    // repo.yml
-    let repo_yml_path = lex_dir.join("repo.yml");
-    if !repo_yml_path.exists() {
-        let repo_name = root.file_name()
-            .map(|n| n.to_string_lossy().to_string())
-            .unwrap_or_else(|| "unknown".to_string());
-        let today = Command::new("date").args(["+%Y-%m-%d"]).output().ok()
-            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-            .unwrap_or_else(|| "unknown".to_string());
-        fs::write(&repo_yml_path, format!(
-            "name: {}\nkit: {}\ncreated: {}\nversion: \"1.0\"\n",
-            repo_name, kit_name, today
-        )).ok();
-    }
-
-    // README
     let readme_path = lex_dir.join("README.md");
     if !readme_path.exists() {
-        fs::write(&readme_path, format!(
-            "# .lex/\n\nKnowledge graph managed by git-lex.\nKit: {}\n\n\
-             - `extract/` — extraction sidecars (.spo)\n\
-             - `ontology/` — ontology definitions\n\
-             - `oxigraph/` — local SPARQL store (gitignored)\n",
-            kit_name
-        )).ok();
+        fs::write(
+            &readme_path,
+            "# .lex/\n\n\
+             Knowledge graph index managed by git-lex.\n\n\
+             - `graph/` — derived triples and relationships\n\
+             - `ontology/` — ontology definitions and controlled vocabulary\n\n\
+             Content lives in the repo root. This directory is the index layer.\n",
+        )
+        .expect("failed to create .lex/README.md");
     }
 
-    // Print summary
+    // Create empty extraction log if it doesn't exist
+    let extraction_log = lex_dir.join("extraction.log.spo");
+    if !extraction_log.exists() {
+        fs::write(&extraction_log, "").expect("failed to create extraction.log.spo");
+    }
+
     if lex_exists {
         println!("Reinitialized .lex/ in {}", root.display());
     } else {
         println!("Initialized .lex/ in {}", root.display());
     }
     println!();
-    println!("  .lex/repo.yml     — repo config (kit: {})", kit_name);
-    println!("  .lex/extract/     — extraction sidecars");
-    println!("  .lex/ontology/    — ontology definitions");
-    println!("  .gitattributes    — semantic diff/merge drivers");
+    println!("  .lex/graph/    — knowledge graph triples");
+    println!("  .lex/ontology/ — ontology definitions");
+    println!("  .lex/extraction.log.spo — assertion log");
+    println!("  .gitattributes — semantic diff/merge drivers");
     println!();
-
-    // Install global drivers
     install_global_drivers();
 
-    // Pre-commit hook: extract changed files → write sidecars → stage
+    // Install hooks: pre-commit for extraction, post-commit for oxigraph sync
     let hooks_dir = root.join(".git").join("hooks");
     fs::create_dir_all(&hooks_dir).ok();
 
+    // Pre-commit: extract frontmatter → write sidecars → compile log → stage
     let pre_commit_path = hooks_dir.join("pre-commit");
-    let pre_commit_content = "#!/bin/sh\ngit-lex extract\ngit add .lex/extract/ 2>/dev/null\n";
-    if !pre_commit_path.exists() || !fs::read_to_string(&pre_commit_path).unwrap_or_default().contains("git-lex extract") {
-        fs::write(&pre_commit_path, pre_commit_content).ok();
+    let pre_commit_content = "#!/bin/sh\ngit-lex extract\ngit add .lex/extract/ .lex/extraction.log.spo 2>/dev/null\n";
+    if pre_commit_path.exists() {
+        let existing = fs::read_to_string(&pre_commit_path).unwrap_or_default();
+        if !existing.contains("git-lex extract") {
+            fs::write(&pre_commit_path, format!("{}\n{}", existing.trim_end(), pre_commit_content))
+                .expect("failed to update pre-commit hook");
+        }
+    } else {
+        fs::write(&pre_commit_path, pre_commit_content).expect("failed to create pre-commit hook");
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            fs::set_permissions(&pre_commit_path, fs::Permissions::from_mode(0o755)).ok();
+            fs::set_permissions(&pre_commit_path, fs::Permissions::from_mode(0o755))
+                .expect("failed to set hook permissions");
         }
     }
-    println!("Installed pre-commit hook (extract on commit)");
 
-    // NO post-commit hook — sync is manual/background
-
-    // Commit setup files
-    let has_commits = Command::new("git").args(["rev-parse", "HEAD"]).output()
-        .map(|o| o.status.success()).unwrap_or(false);
-
-    let _ = Command::new("git").args(["add", ".lex/", ".gitattributes", ".gitignore"]).status();
-    if Command::new("git").args(["commit", "-m", "git lex init"]).output()
-        .map(|o| o.status.success()).unwrap_or(false) {
-        println!("\nCommitted git-lex setup files.");
+    // Post-commit: sync to oxigraph
+    let post_commit_path = hooks_dir.join("post-commit");
+    let post_commit_content = "#!/bin/sh\ngit-lex resolve\ngit-lex sync\n";
+    if post_commit_path.exists() {
+        let existing = fs::read_to_string(&post_commit_path).unwrap_or_default();
+        if !existing.contains("git-lex sync") {
+            fs::write(&post_commit_path, format!("{}\n{}", existing.trim_end(), post_commit_content))
+                .expect("failed to update post-commit hook");
+        }
+    } else {
+        fs::write(&post_commit_path, post_commit_content).expect("failed to create post-commit hook");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&post_commit_path, fs::Permissions::from_mode(0o755))
+                .expect("failed to set hook permissions");
+        }
     }
 
-    // Offer to commit existing content
+    println!("Installed hooks (pre-commit: extract, post-commit: sync)");
+
+    // Check if repo has any commits
+    let has_commits = Command::new("git")
+        .args(["rev-parse", "HEAD"])
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+
+    // Commit 1: lex setup files
+    let lex_files = [".lex/", ".gitattributes", ".gitignore"];
+    for f in &lex_files {
+        let _ = Command::new("git").args(["add", f]).status();
+    }
+    let status = Command::new("git")
+        .args(["commit", "-m", "git lex init"])
+        .output();
+    match status {
+        Ok(o) if o.status.success() => {
+            println!("\nCommitted git-lex setup files.");
+        }
+        _ => {
+            // May fail if nothing to commit (reinit case)
+        }
+    }
+
+    // Commit 2: if this is a fresh repo with uncommitted content, commit it all
     if !has_commits || !lex_exists {
-        let untracked = Command::new("git").args(["status", "--porcelain"]).output().ok()
-            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string()).unwrap_or_default();
+        let untracked = Command::new("git")
+            .args(["status", "--porcelain"])
+            .output()
+            .ok()
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+            .unwrap_or_default();
+
         if !untracked.is_empty() {
             eprint!("Commit existing files to the repository? [Y/n] ");
             let mut input = String::new();
@@ -622,7 +599,9 @@ fn cmd_init(kit: Option<String>) {
             let input = input.trim().to_lowercase();
             if input.is_empty() || input == "y" || input == "yes" {
                 let _ = Command::new("git").args(["add", "."]).status();
-                let _ = Command::new("git").args(["commit", "-m", "Initial content"]).status();
+                let _ = Command::new("git")
+                    .args(["commit", "-m", "Initial content"])
+                    .status();
                 println!("Committed existing content.");
             }
         }
@@ -1836,237 +1815,6 @@ fn cmd_resolve(full: bool) {
     println!("Written to: {}", knowledge_path.display());
 }
 
-// ─── git lex create ─────────────────────────────────────────────
-
-/// Read repo.yml and return the kit name.
-fn get_kit() -> Option<String> {
-    let root = find_git_root()?;
-    let repo_yml = root.join(".lex").join("repo.yml");
-    let content = fs::read_to_string(&repo_yml).ok()?;
-    for line in content.lines() {
-        if let Some(kit) = line.strip_prefix("kit: ") {
-            let kit = kit.trim();
-            if kit != "none" {
-                return Some(kit.to_string());
-            }
-        }
-    }
-    None
-}
-
-/// Parse the kit ontology to find document types and their properties.
-fn get_kit_types(kit: &str) -> Vec<(String, Vec<(String, String, bool)>)> {
-    let root = match find_git_root() {
-        Some(r) => r,
-        None => return Vec::new(),
-    };
-
-    let ontology_path = root.join(".lex").join("ontology").join("kit").join(kit).join(format!("{}.ttl", kit));
-    let content = match fs::read_to_string(&ontology_path) {
-        Ok(c) => c,
-        Err(_) => return Vec::new(),
-    };
-
-    // Extract the kit prefix namespace
-    let mut prefix = String::new();
-    for line in content.lines() {
-        if line.starts_with(&format!("@prefix {}:", kit)) {
-            if let Some(start) = line.find('<') {
-                if let Some(end) = line.find('>') {
-                    prefix = line[start + 1..end].to_string();
-                }
-            }
-        }
-    }
-
-    // Find all owl:Class declarations and their properties
-    let mut types: HashMap<String, Vec<(String, String, bool)>> = HashMap::new();
-    let mut current_class = String::new();
-
-    for line in content.lines() {
-        let trimmed = line.trim();
-
-        // Detect class: "squad:Decision a owl:Class ;"
-        if trimmed.contains("a owl:Class") {
-            if let Some(class_name) = trimmed.split_whitespace().next() {
-                let name = class_name
-                    .strip_prefix(&format!("{}:", kit))
-                    .unwrap_or(class_name)
-                    .to_string();
-                current_class = name.clone();
-                types.entry(name).or_default();
-            }
-        }
-
-        // Detect property with domain: "rdfs:domain squad:Decision ;"
-        if trimmed.contains("rdfs:domain") && trimmed.contains(&format!("{}:", kit)) {
-            // Look back to find the property name — this is tricky with TTL
-            // Instead, we'll parse properties differently
-        }
-    }
-
-    // Parse properties: track current property name and type across multi-line TTL blocks
-    let mut current_prop = String::new();
-    let mut current_prop_type = String::new();
-
-    for line in content.lines() {
-        let trimmed = line.trim();
-
-        // New property block starts with "kit:propName a owl:DatatypeProperty/ObjectProperty"
-        if trimmed.contains("a owl:DatatypeProperty") || trimmed.contains("a owl:ObjectProperty") {
-            if let Some(prop) = trimmed.split_whitespace().next() {
-                current_prop = prop
-                    .strip_prefix(&format!("{}:", kit))
-                    .unwrap_or(prop)
-                    .to_string();
-                current_prop_type = if trimmed.contains("DatatypeProperty") {
-                    "string".to_string()
-                } else {
-                    "reference".to_string()
-                };
-            }
-        }
-
-        // Domain line within a property block
-        if !current_prop.is_empty() && trimmed.starts_with("rdfs:domain") {
-            if let Some(domain) = trimmed.split_whitespace().nth(1) {
-                let class_name = domain
-                    .strip_prefix(&format!("{}:", kit))
-                    .unwrap_or(domain)
-                    .trim_end_matches(|c: char| c == ' ' || c == ';' || c == '.')
-                    .to_string();
-
-                if let Some(props) = types.get_mut(&class_name) {
-                    props.push((current_prop.clone(), current_prop_type.clone(), false));
-                }
-            }
-        }
-
-        // A blank line or a new top-level definition ends the current property block
-        if trimmed.is_empty() {
-            current_prop.clear();
-        }
-    }
-
-    types.into_iter().collect()
-}
-
-fn cmd_create(doctype: &str, title: Option<&str>) {
-    let root = match find_git_root() {
-        Some(r) => r,
-        None => {
-            eprintln!("fatal: not a git repository");
-            exit(1);
-        }
-    };
-
-    let kit = match get_kit() {
-        Some(k) => k,
-        None => {
-            eprintln!("No kit configured. Run 'git lex init --kit <name>' first.");
-            exit(1);
-        }
-    };
-
-    // Find valid types
-    let kit_types = get_kit_types(&kit);
-    let doctype_lower = doctype.to_lowercase();
-
-    let matching_type = kit_types.iter().find(|(name, _)| name.to_lowercase() == doctype_lower);
-
-    let (class_name, properties) = match matching_type {
-        Some((name, props)) => (name.clone(), props.clone()),
-        None => {
-            let valid: Vec<String> = kit_types.iter().map(|(n, _)| n.to_lowercase()).collect();
-            eprintln!(
-                "Unknown document type '{}'. Valid types for kit '{}': {}",
-                doctype, kit, valid.join(", ")
-            );
-            exit(1);
-        }
-    };
-
-    // Generate filename in type-specific folder
-    let title_str = title.unwrap_or("untitled");
-    let slug = title_str
-        .to_lowercase()
-        .replace(' ', "-")
-        .replace(|c: char| !c.is_alphanumeric() && c != '-', "");
-
-    let type_folder = class_name.to_lowercase();
-    let type_dir = root.join(&type_folder);
-    fs::create_dir_all(&type_dir).ok();
-
-    let filename = format!("{}.md", slug);
-    let filepath = type_dir.join(&filename);
-    let display_path = format!("{}/{}", type_folder, filename);
-
-    if filepath.exists() {
-        eprintln!("File already exists: {}", display_path);
-        exit(1);
-    }
-
-    // Build frontmatter
-    let mut fm = String::new();
-    fm.push_str("---\n");
-    fm.push_str(&format!("title: \"{}\"\n", title_str));
-    fm.push_str("tags: []\n");
-    fm.push_str(&format!("{}:\n", kit));
-    fm.push_str(&format!("  type: {}\n", class_name));
-
-    for (prop_name, prop_type, _required) in &properties {
-        match prop_type.as_str() {
-            "string" => fm.push_str(&format!("  {}: \"\"\n", prop_name)),
-            "reference" => fm.push_str(&format!("  {}: \n", prop_name)),
-            _ => fm.push_str(&format!("  {}: \n", prop_name)),
-        }
-    }
-
-    fm.push_str("---\n\n");
-    fm.push_str(&format!("# {}\n\n", title_str));
-    fm.push_str("<!-- Write your content here -->\n");
-
-    fs::write(&filepath, &fm).expect("failed to create document");
-    println!("Created: {}", display_path);
-    println!("Type: {}:{}", kit, class_name);
-    println!("Edit the file, then run 'git lex save' to commit.");
-}
-
-// ─── git lex save ──────────────────────────────────────────────
-
-fn cmd_save(message: &str) {
-    // Add everything, commit, let hooks handle extract + sync
-    let status = Command::new("git")
-        .args(["add", "-A"])
-        .status();
-    if !status.map(|s| s.success()).unwrap_or(false) {
-        eprintln!("fatal: git add failed");
-        exit(1);
-    }
-
-    // Check if there's anything to commit
-    let diff = Command::new("git")
-        .args(["diff", "--cached", "--quiet"])
-        .status();
-    if diff.map(|s| s.success()).unwrap_or(false) {
-        println!("Nothing to save (no changes).");
-        return;
-    }
-
-    let status = Command::new("git")
-        .args(["commit", "-m", message])
-        .status();
-    match status {
-        Ok(s) if s.success() => {
-            println!("Saved: {}", message);
-        }
-        _ => {
-            eprintln!("fatal: git commit failed");
-            exit(1);
-        }
-    }
-}
-
 fn cmd_extract() {
     let start = Instant::now();
 
@@ -2171,7 +1919,7 @@ fn add_prefixes(query: &str) -> String {
     format!("{}{}", prefix_block, query)
 }
 
-#[allow(deprecated)]
+/// Execute a SPARQL query on a store and print results.
 fn run_query(store: &Store, query: &str, store_type: &str) {
     let start = Instant::now();
     let prefixed = add_prefixes(query);
@@ -2183,9 +1931,7 @@ fn run_query(store: &Store, query: &str, store_type: &str) {
             exit(1);
         }
     };
-    parsed_query.dataset_mut().set_default_graph_as_union();
-
-    let results = match store.query(parsed_query) {
+    let results = match evaluator.on_store(store).execute() {
         Ok(r) => r,
         Err(e) => {
             eprintln!("SPARQL evaluation error: {}", e);
@@ -2202,17 +1948,10 @@ fn run_query(store: &Store, query: &str, store_type: &str) {
                 .map(|v| v.as_str().to_string())
                 .collect();
 
-            let mut all_rows = Vec::new();
             for solution in solutions {
-                let solution = match solution {
-                    Ok(s) => s,
-                    Err(e) => {
-                        eprintln!("Error reading solution: {}", e);
-                        continue;
-                    }
-                };
+                let solution = solution.expect("failed to read solution");
                 count += 1;
-                let mut row = Vec::new();
+                let mut parts = Vec::new();
                 for var in &vars {
                     let val = solution
                         .get(var.as_str())
@@ -2223,42 +1962,9 @@ fn run_query(store: &Store, query: &str, store_type: &str) {
                             Term::Triple(t) => format!("<< {} {} {} >>", t.subject, t.predicate, t.object),
                         })
                         .unwrap_or_default();
-                    row.push(val);
+                    parts.push(format!("{}={}", var, val));
                 }
-                all_rows.push(row);
-            }
-
-            if !all_rows.is_empty() {
-                // Compute column widths
-                let mut widths = vec![0; vars.len()];
-                for (i, var) in vars.iter().enumerate() {
-                    widths[i] = var.len();
-                }
-                for row in &all_rows {
-                    for (i, val) in row.iter().enumerate() {
-                        if val.len() > widths[i] {
-                            widths[i] = val.len();
-                        }
-                    }
-                }
-
-                // Print header
-                let mut header = String::new();
-                for (i, var) in vars.iter().enumerate() {
-                    header.push_str(&format!(" {:width$} |", var, width = widths[i]));
-                }
-                println!("|{} \n|{}", header, "-".repeat(header.len().saturating_sub(1)));
-
-                // Print rows
-                for row in &all_rows {
-                    let mut row_str = String::new();
-                    for (i, val) in row.iter().enumerate() {
-                        row_str.push_str(&format!(" {:width$} |", val, width = widths[i]));
-                    }
-                    println!("|{}", row_str);
-                }
-            } else {
-                println!("(No results found)");
+                println!("{}", parts.join(" | "));
             }
         }
         oxigraph::sparql::QueryResults::Boolean(b) => {
@@ -2319,10 +2025,8 @@ fn main() {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Init { kit } => cmd_init(kit),
+        Commands::Init => cmd_init(),
         Commands::Status => cmd_status(),
-        Commands::Create { doctype, title } => cmd_create(&doctype, title.as_deref()),
-        Commands::Save { message } => cmd_save(&message),
         Commands::Log { author, n, format } => cmd_log(author, n, format),
         Commands::Tree { r#ref, format } => cmd_tree(r#ref, format),
         Commands::Refs { format } => cmd_refs(format),

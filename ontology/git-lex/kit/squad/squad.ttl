@@ -1,0 +1,282 @@
+@prefix lex-o: <https://repolex.ai/ontology/lex-upper/> .
+@prefix squad: <https://repolex.ai/ontology/kit/squad/> .
+@prefix owl: <http://www.w3.org/2002/07/owl#> .
+@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+@prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
+
+# =============================================================================
+# SQUAD KIT ONTOLOGY
+# =============================================================================
+# Multi-agent squad memory. Carbon and silicon agents collaborate in a shared
+# git repo. Each document type below becomes a `git lex create` command.
+#
+# Kit: squad
+# Namespace: squad: = https://repolex.ai/ontology/kit/squad/
+# Extends: lex-o: (upper ontology)
+# Tags: Use fm:tags from frontmatter — no duplication.
+#
+# Document types (= valid `git lex create` commands):
+#   agent, message, decision, discovery, task, project, note
+# =============================================================================
+
+<https://repolex.ai/ontology/kit/team> a owl:Ontology ;
+    rdfs:label "Squad Kit Ontology" ;
+    rdfs:comment "Multi-agent squad memory. Carbon and silicon agents collaborate via structured markdown in a shared git repo." ;
+    owl:versionInfo "0.1" .
+
+
+# =============================================================================
+# DOCUMENT TYPES (each = a `git lex create` command)
+# =============================================================================
+
+# --- Agent ---
+# Who's on the squad. Carbon (humans) and silicon (AI).
+# Created once per member. Updated as roles change.
+# Git author email IS the agent identity.
+
+squad:Agent a owl:Class ;
+    rdfs:subClassOf lex-o:Physical ;
+    rdfs:label "Agent" ;
+    rdfs:comment "A squad member — carbon or silicon. Identity tied to git author email." .
+
+squad:substrate a owl:DatatypeProperty ;
+    rdfs:label "substrate" ;
+    rdfs:comment "What the agent runs on: 'carbon' (human) or 'silicon' (AI)." ;
+    rdfs:domain squad:Agent ;
+    rdfs:range xsd:string .
+
+squad:role a owl:DatatypeProperty ;
+    rdfs:label "role" ;
+    rdfs:comment "The agent's role on the squad (e.g., 'ontologist', 'coder', 'boss')." ;
+    rdfs:domain squad:Agent ;
+    rdfs:range xsd:string .
+
+squad:expertise a owl:DatatypeProperty ;
+    rdfs:label "expertise" ;
+    rdfs:comment "Areas of expertise (e.g., 'rust', 'sparql', 'vibes')." ;
+    rdfs:domain squad:Agent ;
+    rdfs:range xsd:string .
+
+squad:agentEmail a owl:DatatypeProperty ;
+    rdfs:label "agent email" ;
+    rdfs:comment "Git author email — the agent's unique identity. Matches git:authorEmail." ;
+    rdfs:domain squad:Agent ;
+    rdfs:range xsd:string .
+
+squad:worksOn a owl:ObjectProperty ;
+    rdfs:label "works on" ;
+    rdfs:comment "Projects this agent is actively working on." ;
+    rdfs:domain squad:Agent ;
+    rdfs:range squad:Project .
+
+# --- Message ---
+# Inter-agent communication. Persistent, queryable, threaded.
+# Replaces ephemeral chat. Git blame shows who wrote what.
+
+squad:Message a owl:Class ;
+    rdfs:subClassOf lex-o:Information ;
+    rdfs:label "Message" ;
+    rdfs:comment "A message from one agent to another. Persistent inter-agent communication." .
+
+squad:from a owl:ObjectProperty ;
+    rdfs:label "from" ;
+    rdfs:comment "The agent who sent this message." ;
+    rdfs:domain squad:Message ;
+    rdfs:range squad:Agent .
+
+squad:to a owl:ObjectProperty ;
+    rdfs:label "to" ;
+    rdfs:comment "The agent this message is addressed to. Can be multiple." ;
+    rdfs:domain squad:Message ;
+    rdfs:range squad:Agent .
+
+squad:messageStatus a owl:DatatypeProperty ;
+    rdfs:label "message status" ;
+    rdfs:comment "Message status: 'open', 'resolved', 'acknowledged'." ;
+    rdfs:domain squad:Message ;
+    rdfs:range xsd:string .
+
+squad:priority a owl:DatatypeProperty ;
+    rdfs:label "priority" ;
+    rdfs:comment "Message priority: 'low', 'normal', 'high', 'urgent'." ;
+    rdfs:domain squad:Message ;
+    rdfs:range xsd:string .
+
+squad:regarding a owl:ObjectProperty ;
+    rdfs:label "regarding" ;
+    rdfs:comment "The entity (decision, task, project, etc.) this message is about." ;
+    rdfs:domain squad:Message .
+
+squad:inReplyTo a owl:ObjectProperty ;
+    rdfs:label "in reply to" ;
+    rdfs:comment "The message this is a reply to. Creates conversation threads." ;
+    rdfs:domain squad:Message ;
+    rdfs:range squad:Message .
+
+# --- Decision ---
+# A choice that was made, with context and rationale.
+# The "why" behind the "what". Queryable decision history.
+
+squad:Decision a owl:Class ;
+    rdfs:subClassOf lex-o:Decision ;
+    rdfs:label "Decision" ;
+    rdfs:comment "A recorded choice with context, rationale, and outcome." .
+
+squad:decidedBy a owl:ObjectProperty ;
+    rdfs:label "decided by" ;
+    rdfs:comment "The agent(s) who made this decision." ;
+    rdfs:domain squad:Decision ;
+    rdfs:range squad:Agent .
+
+squad:alternatives a owl:DatatypeProperty ;
+    rdfs:label "alternatives" ;
+    rdfs:comment "Other options that were considered." ;
+    rdfs:domain squad:Decision ;
+    rdfs:range xsd:string .
+
+squad:rationale a owl:DatatypeProperty ;
+    rdfs:label "rationale" ;
+    rdfs:comment "Why this option was chosen over alternatives." ;
+    rdfs:domain squad:Decision ;
+    rdfs:range xsd:string .
+
+squad:outcome a owl:DatatypeProperty ;
+    rdfs:label "outcome" ;
+    rdfs:comment "What happened as a result: 'pending', 'implemented', 'reverted', 'superseded'." ;
+    rdfs:domain squad:Decision ;
+    rdfs:range xsd:string .
+
+squad:supersededBy a owl:ObjectProperty ;
+    rdfs:label "superseded by" ;
+    rdfs:comment "A later decision that replaces this one." ;
+    rdfs:domain squad:Decision ;
+    rdfs:range squad:Decision .
+
+# --- Discovery ---
+# Something learned. A finding, insight, or gotcha.
+# The squad's accumulated knowledge.
+
+squad:Discovery a owl:Class ;
+    rdfs:subClassOf lex-o:Information ;
+    rdfs:label "Discovery" ;
+    rdfs:comment "A finding, insight, or lesson learned." .
+
+squad:foundBy a owl:ObjectProperty ;
+    rdfs:label "found by" ;
+    rdfs:comment "The agent who made this discovery." ;
+    rdfs:domain squad:Discovery ;
+    rdfs:range squad:Agent .
+
+squad:implications a owl:DatatypeProperty ;
+    rdfs:label "implications" ;
+    rdfs:comment "What this discovery means for the project." ;
+    rdfs:domain squad:Discovery ;
+    rdfs:range xsd:string .
+
+squad:confidence a owl:DatatypeProperty ;
+    rdfs:label "confidence" ;
+    rdfs:comment "How confident: 'certain', 'likely', 'hypothesis', 'hunch'." ;
+    rdfs:domain squad:Discovery ;
+    rdfs:range xsd:string .
+
+# --- Task ---
+# A work item. Assigned, tracked, blocked/blocking.
+
+squad:Task a owl:Class ;
+    rdfs:subClassOf lex-o:Process ;
+    rdfs:label "Task" ;
+    rdfs:comment "A work item with assignment and status tracking." .
+
+squad:assignedTo a owl:ObjectProperty ;
+    rdfs:label "assigned to" ;
+    rdfs:comment "The agent responsible for this task." ;
+    rdfs:domain squad:Task ;
+    rdfs:range squad:Agent .
+
+squad:taskStatus a owl:DatatypeProperty ;
+    rdfs:label "task status" ;
+    rdfs:comment "Task status: 'todo', 'in-progress', 'blocked', 'done', 'cancelled'." ;
+    rdfs:domain squad:Task ;
+    rdfs:range xsd:string .
+
+squad:blocks a owl:ObjectProperty ;
+    rdfs:label "blocks" ;
+    rdfs:comment "Tasks that cannot proceed until this one is done." ;
+    rdfs:domain squad:Task ;
+    rdfs:range squad:Task .
+
+squad:blockedBy a owl:ObjectProperty ;
+    rdfs:label "blocked by" ;
+    rdfs:comment "Tasks that must complete before this one can proceed." ;
+    rdfs:domain squad:Task ;
+    rdfs:range squad:Task .
+
+squad:relatedDecision a owl:ObjectProperty ;
+    rdfs:label "related decision" ;
+    rdfs:comment "The decision that created or motivated this task." ;
+    rdfs:domain squad:Task ;
+    rdfs:range squad:Decision .
+
+# --- Project ---
+# What we're building. High-level context.
+
+squad:Project a owl:Class ;
+    rdfs:subClassOf lex-o:Concept ;
+    rdfs:label "Project" ;
+    rdfs:comment "A project the squad is working on." .
+
+squad:repo a owl:DatatypeProperty ;
+    rdfs:label "repo" ;
+    rdfs:comment "GitHub repository URL or org/repo identifier." ;
+    rdfs:domain squad:Project ;
+    rdfs:range xsd:string .
+
+squad:projectStatus a owl:DatatypeProperty ;
+    rdfs:label "project status" ;
+    rdfs:comment "Project status: 'planning', 'active', 'paused', 'shipped', 'archived'." ;
+    rdfs:domain squad:Project ;
+    rdfs:range xsd:string .
+
+squad:squadMembers a owl:ObjectProperty ;
+    rdfs:label "squad members" ;
+    rdfs:comment "Agents working on this project." ;
+    rdfs:domain squad:Project ;
+    rdfs:range squad:Agent .
+
+# --- Note ---
+# Freeform knowledge. Tagged but unstructured.
+# The catch-all for things that don't fit other types.
+
+squad:Note a owl:Class ;
+    rdfs:subClassOf lex-o:Information ;
+    rdfs:label "Note" ;
+    rdfs:comment "Freeform knowledge capture. For things that don't fit other document types." .
+
+squad:topic a owl:DatatypeProperty ;
+    rdfs:label "topic" ;
+    rdfs:comment "What this note is about." ;
+    rdfs:domain squad:Note ;
+    rdfs:range xsd:string .
+
+squad:relatedTo a owl:ObjectProperty ;
+    rdfs:label "related to" ;
+    rdfs:comment "Entities this note references." ;
+    rdfs:domain squad:Note .
+
+
+# =============================================================================
+# SHARED PROPERTIES (used across multiple document types)
+# =============================================================================
+# Tags come from fm:tags (frontmatter). No squad:tags needed.
+
+squad:project a owl:ObjectProperty ;
+    rdfs:label "project" ;
+    rdfs:comment "Which project this document relates to." ;
+    rdfs:range squad:Project .
+
+
+# =============================================================================
+# REASONING SUPPORT
+# =============================================================================
+
+squad:blockedBy owl:inverseOf squad:blocks .
