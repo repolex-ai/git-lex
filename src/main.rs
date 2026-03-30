@@ -1202,45 +1202,26 @@ fn generate_frontmatter_nquads() -> String {
     let extract_dir = root.join(".lex").join("extract");
     fs::create_dir_all(&extract_dir).ok();
 
+    // Regex patterns for @mentions and [[wikilinks]]
+    let mention_re = regex::Regex::new(r"@([a-zA-Z0-9_-]+)").unwrap();
+    let wikilink_re = regex::Regex::new(r"\[\[([^\]]+)\]\]").unwrap();
+
     for filepath in &files {
         let content = match fs::read_to_string(filepath) {
             Ok(c) => c,
             Err(_) => continue,
         };
 
-        // Check for frontmatter (starts with ---)
-        if !content.starts_with("---\n") && !content.starts_with("---\r\n") {
-            continue;
-        }
-
-        // Find the closing ---
-        let rest = &content[4..]; // skip first "---\n"
-        let end = match rest.find("\n---") {
-            Some(pos) => pos,
-            None => continue,
-        };
-
-        let yaml_str = &rest[..end];
-
-        // Parse YAML
-        let yaml: HashMap<String, serde_yaml::Value> = match serde_yaml::from_str(yaml_str) {
-            Ok(v) => v,
-            Err(_) => continue,
-        };
-
         let relpath = filepath.strip_prefix(&root).unwrap_or(filepath);
         let relpath_str = relpath.to_string_lossy().to_string();
 
-        // Get blob hash from git index (staging area) — correct during pre-commit
-        // Falls back to HEAD tree if index lookup fails
+        // Get blob hash from git index (staging area)
         let blob_hash = repo.as_ref().and_then(|r| {
-            // Try index first (staged version)
             if let Ok(index) = r.index() {
                 if let Some(entry) = index.get_path(std::path::Path::new(&relpath_str), 0) {
                     return Some(entry.id.to_string());
                 }
             }
-            // Fall back to HEAD tree
             let head = r.head().ok()?;
             let tree = head.peel_to_tree().ok()?;
             let entry = tree.get_path(std::path::Path::new(&relpath_str)).ok()?;
@@ -1248,19 +1229,53 @@ fn generate_frontmatter_nquads() -> String {
         }).unwrap_or_default();
 
         let short_hash = if blob_hash.len() >= 8 { &blob_hash[..8] } else { &blob_hash };
-        let file_id = format!("{}/{}", short_hash, relpath_str);
 
-        // Generate .spo lines (simple s | p | o — no file_id in individual files)
+        // --- Frontmatter extraction ---
         let mut spo_lines = Vec::new();
-        for (key, value) in &yaml {
-            flatten_yaml(key, value, &mut spo_lines);
+        let body_text;
+
+        if content.starts_with("---\n") || content.starts_with("---\r\n") {
+            let rest = &content[4..];
+            if let Some(end) = rest.find("\n---") {
+                let yaml_str = &rest[..end];
+                if let Ok(yaml) = serde_yaml::from_str::<HashMap<String, serde_yaml::Value>>(yaml_str) {
+                    for (key, value) in &yaml {
+                        flatten_yaml(key, value, &mut spo_lines);
+                    }
+                }
+                // Body is everything after the closing ---
+                let after_fm = &rest[end + 4..]; // skip "\n---"
+                body_text = after_fm.to_string();
+            } else {
+                body_text = content.clone();
+            }
+        } else {
+            body_text = content.clone();
         }
 
-        // Sort for deterministic output
+        // --- @mention extraction ---
+        let mut mentions_seen = HashSet::new();
+        for cap in mention_re.captures_iter(&body_text) {
+            let mention = cap[1].to_lowercase();
+            if mentions_seen.insert(mention.clone()) {
+                spo_lines.push(format!("@{} | mentions | {}", relpath_str, mention));
+            }
+        }
+
+        // --- [[wikilink]] extraction ---
+        let mut links_seen = HashSet::new();
+        for cap in wikilink_re.captures_iter(&body_text) {
+            let link = cap[1].to_string();
+            if links_seen.insert(link.clone()) {
+                spo_lines.push(format!("{} | linksTo | {}", relpath_str, link));
+            }
+        }
+
+        // Sort and dedup
         spo_lines.sort();
         spo_lines.dedup();
 
-        // Write .spo sidecar
+        // Write .spo sidecar (only if there's content)
         if !spo_lines.is_empty() {
             let spo_path = extract_dir.join(format!("{}.fm.spo", relpath_str));
             fs::create_dir_all(spo_path.parent().unwrap()).ok();
@@ -1268,7 +1283,7 @@ fn generate_frontmatter_nquads() -> String {
             fs::write(&spo_path, &spo_content).ok();
         }
 
-        // Generate N-Quads for oxigraph (fast path)
+        // --- Generate N-Quads for oxigraph (frontmatter graph) ---
         let doc_uri = format!("<{}/file/{}/{}>", base, short_hash, uri_encode_path(&relpath_str));
 
         nq.push_str(&format!(
@@ -1284,18 +1299,64 @@ fn generate_frontmatter_nquads() -> String {
             doc_uri, blob_hash, graph
         ));
 
-        // Reuse the .spo lines to generate NQ (avoids duplicate YAML traversal)
         for line in &spo_lines {
-            // Parse: subject | predicate | object
             let parts: Vec<&str> = line.splitn(3, " | ").collect();
             if parts.len() == 3 {
-                let key = parts[0];
-                let value = parts[2];
-                let predicate = format!("<https://repolex.ai/ontology/git-lex/fm/{}>", uri_encode_path(key));
-                nq.push_str(&format!(
-                    "{} {} \"{}\" {} .\n",
-                    doc_uri, predicate, nq_escape(value), graph
-                ));
+                let subject = parts[0];
+                let predicate = parts[1];
+                let object = parts[2];
+
+                if predicate == "mentions" {
+                    // @mention → lex:mentions
+                    nq.push_str(&format!(
+                        "{} <https://repolex.ai/ontology/git-lex/lex/mentions> \"{}\" {} .\n",
+                        doc_uri, nq_escape(object), graph
+                    ));
+                } else if predicate == "linksTo" {
+                    // [[wikilink]] → lex:linksTo
+                    nq.push_str(&format!(
+                        "{} <https://repolex.ai/ontology/git-lex/lex/linksTo> \"{}\" {} .\n",
+                        doc_uri, nq_escape(object), graph
+                    ));
+                } else {
+                    // Frontmatter key-value
+                    let fm_predicate = format!("<https://repolex.ai/ontology/git-lex/fm/{}>", uri_encode_path(subject));
+                    nq.push_str(&format!(
+                        "{} {} \"{}\" {} .\n",
+                        doc_uri, fm_predicate, nq_escape(object), graph
+                    ));
+                }
+            }
+        }
+    }
+
+    // --- Scan commit messages for @mentions and [[wikilinks]] ---
+    let commit_output = Command::new("git")
+        .args(["log", "--all", "--format=%H%x00%s"])
+        .output();
+    if let Ok(o) = commit_output {
+        if o.status.success() {
+            let stdout = String::from_utf8_lossy(&o.stdout);
+            for line in stdout.lines() {
+                let parts: Vec<&str> = line.splitn(2, '\x00').collect();
+                if parts.len() < 2 { continue; }
+                let (sha, message) = (parts[0], parts[1]);
+                let commit_uri = format!("<{}/commit/{}>", base, sha);
+
+                for cap in mention_re.captures_iter(message) {
+                    let mention = cap[1].to_lowercase();
+                    nq.push_str(&format!(
+                        "{} <https://repolex.ai/ontology/git-lex/lex/mentions> \"{}\" {} .\n",
+                        commit_uri, nq_escape(&mention), graph
+                    ));
+                }
+                for cap in wikilink_re.captures_iter(message) {
+                    let link = &cap[1];
+                    nq.push_str(&format!(
+                        "{} <https://repolex.ai/ontology/git-lex/lex/linksTo> \"{}\" {} .\n",
+                        commit_uri, nq_escape(link), graph
+                    ));
+                }
             }
         }
     }
@@ -2006,6 +2067,9 @@ fn cmd_create(doctype: &str, title: Option<&str>) {
         exit(1);
     }
 
+    // Auto-generate agent email for Agent type
+    let agent_email = format!("{}@lex.local", slug);
+
     // Build frontmatter
     let mut fm = String::new();
     fm.push_str("---\n");
@@ -2015,10 +2079,15 @@ fn cmd_create(doctype: &str, title: Option<&str>) {
     fm.push_str(&format!("  type: {}\n", class_name));
 
     for (prop_name, prop_type, _required) in &properties {
-        match prop_type.as_str() {
-            "string" => fm.push_str(&format!("  {}: \"\"\n", prop_name)),
-            "reference" => fm.push_str(&format!("  {}: \n", prop_name)),
-            _ => fm.push_str(&format!("  {}: \n", prop_name)),
+        // Auto-fill agentEmail for Agent type
+        if prop_name == "agentEmail" && class_name == "Agent" {
+            fm.push_str(&format!("  {}: \"{}\"\n", prop_name, agent_email));
+        } else {
+            match prop_type.as_str() {
+                "string" => fm.push_str(&format!("  {}: \"\"\n", prop_name)),
+                "reference" => fm.push_str(&format!("  {}: \n", prop_name)),
+                _ => fm.push_str(&format!("  {}: \n", prop_name)),
+            }
         }
     }
 
@@ -2029,6 +2098,10 @@ fn cmd_create(doctype: &str, title: Option<&str>) {
     fs::write(&filepath, &fm).expect("failed to create document");
     println!("Created: {}", display_path);
     println!("Type: {}:{}", kit, class_name);
+    if class_name == "Agent" {
+        println!("Agent ID: {}", agent_email);
+        println!("Use this as your git author: git -c user.email=\"{}\"", agent_email);
+    }
     println!("Edit the file, then run 'git lex save' to commit.");
 }
 
@@ -2142,16 +2215,38 @@ fn add_prefixes(query: &str) -> String {
         .unwrap_or_default();
     let o_prefix = format!("PREFIX o: <https://repolex.ai/ont/{}/>", first_commit);
 
-    let defaults = [
-        ("git:", "PREFIX git: <https://repolex.ai/ontology/git-lex/git/>".to_string()),
-        ("fm:", "PREFIX fm: <https://repolex.ai/ontology/git-lex/fm/>".to_string()),
-        ("lex-o:", "PREFIX lex-o: <https://repolex.ai/ontology/lex-upper/>".to_string()),
-        ("o:", o_prefix),
-        ("rdf:", "PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>".to_string()),
-        ("rdfs:", "PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>".to_string()),
-        ("owl:", "PREFIX owl: <http://www.w3.org/2002/07/owl#>".to_string()),
-        ("xsd:", "PREFIX xsd: <http://www.w3.org/2001/XMLSchema#>".to_string()),
+    // Also read kit from repo.yml for squad: prefix
+    let kit_prefix = find_git_root().and_then(|r| {
+        let content = fs::read_to_string(r.join(".lex").join("repo.yml")).ok()?;
+        for line in content.lines() {
+            if let Some(kit) = line.strip_prefix("kit: ") {
+                let kit = kit.trim();
+                if kit != "none" {
+                    return Some((
+                        format!("{}:", kit),
+                        format!("PREFIX {}: <https://repolex.ai/ontology/kit/{}/>", kit, kit),
+                    ));
+                }
+            }
+        }
+        None
+    });
+
+    let mut defaults = vec![
+        ("git:".to_string(), "PREFIX git: <https://repolex.ai/ontology/git-lex/git/>".to_string()),
+        ("lex:".to_string(), "PREFIX lex: <https://repolex.ai/ontology/git-lex/lex/>".to_string()),
+        ("fm:".to_string(), "PREFIX fm: <https://repolex.ai/ontology/git-lex/fm/>".to_string()),
+        ("lex-o:".to_string(), "PREFIX lex-o: <https://repolex.ai/ontology/lex-upper/>".to_string()),
+        ("o:".to_string(), o_prefix),
+        ("rdf:".to_string(), "PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>".to_string()),
+        ("rdfs:".to_string(), "PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>".to_string()),
+        ("owl:".to_string(), "PREFIX owl: <http://www.w3.org/2002/07/owl#>".to_string()),
+        ("xsd:".to_string(), "PREFIX xsd: <http://www.w3.org/2001/XMLSchema#>".to_string()),
     ];
+    if let Some((short, full)) = kit_prefix {
+        defaults.push((short, full));
+    }
+    let defaults = defaults;
     let upper = query.to_uppercase();
     let mut prefix_block = String::new();
     for (short, full) in &defaults {

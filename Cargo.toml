@@ -17,4 +17,5 @@ git2 = { version = "0.20", default-features = false, features = ["vendored-opens
 serde_yaml = "0.9"
 sha2 = "0.10"
 hex = "0.4"
+regex = "1"
 oxiri = "0.2"
