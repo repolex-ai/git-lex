@@ -582,6 +582,83 @@ fn cmd_init(kit: Option<String>) {
         if !kit_types.is_empty() {
             let type_names: Vec<String> = kit_types.iter().map(|(n, _)| n.to_lowercase()).collect();
             println!("Created type folders: {}", type_names.join(", "));
+
+            // Generate README.lex.md
+            let readme_lex = root.join("README.lex.md");
+            if !readme_lex.exists() {
+                let mut doc = String::new();
+                doc.push_str(&format!("# git-lex — {} kit\n\n", kit_name));
+                doc.push_str("This repo is managed by [git-lex](https://github.com/repolex-ai/git-lex) — git extensions for knowledge graphs.\n\n");
+
+                doc.push_str("## Quick Start\n\n");
+                doc.push_str("```bash\n");
+                doc.push_str(&format!("git lex create <type>    # Create a new document (types: {})\n", type_names.join(", ")));
+                doc.push_str("git lex save \"message\"   # Add + commit (extracts automatically)\n");
+                doc.push_str("git lex sync              # Build/update the knowledge graph\n");
+                doc.push_str("git lex query \"SPARQL...\" # Query the knowledge graph\n");
+                doc.push_str("git lex status            # Show extraction status\n");
+                doc.push_str("```\n\n");
+
+                doc.push_str("## Commands\n\n");
+                doc.push_str("| Command | What it does |\n");
+                doc.push_str("|---|---|\n");
+                doc.push_str(&format!("| `git lex create <type>` | Scaffold a new document. Valid types: {} |\n", type_names.join(", ")));
+                doc.push_str("| `git lex save \"msg\"` | Stage all changes, commit, extract frontmatter |\n");
+                doc.push_str("| `git lex sync` | Build the SPARQL knowledge graph from git + extractions |\n");
+                doc.push_str("| `git lex query \"...\"` | Run a SPARQL query against the knowledge graph |\n");
+                doc.push_str("| `git lex status` | Show which files have been extracted |\n");
+                doc.push_str("| `git lex log` | Show commit history |\n");
+                doc.push_str("| `git lex llm list` | Show files needing LLM extraction |\n");
+                doc.push_str("| `git lex llm extract <file> --model <id>` | Extract entities via LLM |\n\n");
+
+                doc.push_str("## Writing Documents\n\n");
+                doc.push_str(&format!("Documents use YAML frontmatter with a `{}:` block for structured data:\n\n", kit_name));
+                doc.push_str("```yaml\n");
+                doc.push_str("---\n");
+                doc.push_str("title: \"My Document\"\n");
+                doc.push_str("tags: [topic1, topic2]\n");
+                doc.push_str(&format!("{}:\n", kit_name));
+                doc.push_str("  type: <Type>\n");
+                doc.push_str("  property: \"value\"\n");
+                doc.push_str("---\n\n");
+                doc.push_str("Your content here. Use @mentions and [[wikilinks]] for relationships.\n");
+                doc.push_str("```\n\n");
+
+                doc.push_str("## @mentions and [[wikilinks]]\n\n");
+                doc.push_str("Reference other agents and documents naturally in your text:\n\n");
+                doc.push_str("- `@agentname` — creates a `lex:mentions` relationship\n");
+                doc.push_str("- `[[document-title]]` — creates a `lex:linksTo` relationship\n\n");
+                doc.push_str("These are extracted automatically from document bodies and commit messages.\n\n");
+
+                // Kit-specific section
+                doc.push_str(&format!("## {} Kit — Document Types\n\n", kit_name));
+                for (type_name, properties) in &kit_types {
+                    doc.push_str(&format!("### {}\n\n", type_name));
+                    doc.push_str(&format!("Create: `git lex create {}`\n\n", type_name.to_lowercase()));
+                    if !properties.is_empty() {
+                        doc.push_str("| Property | Type |\n");
+                        doc.push_str("|---|---|\n");
+                        for (prop_name, prop_type, _) in properties {
+                            doc.push_str(&format!("| {} | {} |\n", prop_name, prop_type));
+                        }
+                        doc.push_str("\n");
+                    }
+                }
+
+                doc.push_str("## Querying\n\n");
+                doc.push_str("Auto-injected prefixes: `git:`, `fm:`, `lex:`, `lex-o:`");
+                if kit_name != "none" {
+                    doc.push_str(&format!(", `{}:`", kit_name));
+                }
+                doc.push_str("\n\n");
+                doc.push_str("```sparql\n");
+                doc.push_str("# List all documents by type\n");
+                doc.push_str(&format!("SELECT ?name ?type WHERE {{\n  GRAPH ?g {{ ?doc fm:{}.type ?type ; fm:title ?name }}\n}}\n", kit_name));
+                doc.push_str("```\n");
+
+                fs::write(&readme_lex, &doc).ok();
+                println!("Created README.lex.md");
+            }
         }
     }
 
