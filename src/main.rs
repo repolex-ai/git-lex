@@ -448,6 +448,7 @@ const ONT_FM: &str = include_str!("../ontology/git-lex/fm/fm.ttl");
 const ONT_LEX: &str = include_str!("../ontology/git-lex/lex/lex.ttl");
 const ONT_LEX_O: &str = include_str!("../ontology/git-lex/lex-o/lex-o.ttl");
 const ONT_KIT_SQUAD: &str = include_str!("../ontology/git-lex/kit/squad/squad.ttl");
+const ONT_KIT_SOLO: &str = include_str!("../ontology/git-lex/kit/solo/solo.ttl");
 
 fn cmd_init(kit: Option<String>) {
     let root = match find_git_root() {
@@ -475,8 +476,8 @@ fn cmd_init(kit: Option<String>) {
     // Validate kit
     let kit_name = kit.as_deref().unwrap_or("none");
     if let Some(ref k) = kit {
-        if k != "squad" {
-            eprintln!("Unknown kit: {}. Available kits: squad", k);
+        if k != "squad" && k != "solo" {
+            eprintln!("Unknown kit: {}. Available kits: solo, squad", k);
             exit(1);
         }
     }
@@ -507,6 +508,7 @@ fn cmd_init(kit: Option<String>) {
     if let Some(ref k) = kit {
         let kit_content = match k.as_str() {
             "squad" => ONT_KIT_SQUAD,
+            "solo" => ONT_KIT_SOLO,
             _ => unreachable!(),
         };
         let kit_path = ont_dir.join(format!("kit/{}/{}.ttl", k, k));
