@@ -449,6 +449,7 @@ const ONT_LEX: &str = include_str!("../ontology/git-lex/lex/lex.ttl");
 const ONT_LEX_O: &str = include_str!("../ontology/git-lex/lex-o/lex-o.ttl");
 const ONT_KIT_SQUAD: &str = include_str!("../ontology/git-lex/kit/squad/squad.ttl");
 const ONT_KIT_SOLO: &str = include_str!("../ontology/git-lex/kit/solo/solo.ttl");
+const ONT_KIT_CLAUDE_CODE: &str = include_str!("../ontology/git-lex/kit/claude-code/claude-code.ttl");
 
 fn cmd_init(kit: Option<String>) {
     let root = match find_git_root() {
@@ -476,8 +477,8 @@ fn cmd_init(kit: Option<String>) {
     // Validate kit
     let kit_name = kit.as_deref().unwrap_or("none");
     if let Some(ref k) = kit {
-        if k != "squad" && k != "solo" {
-            eprintln!("Unknown kit: {}. Available kits: solo, squad", k);
+        if k != "squad" && k != "solo" && k != "claude-code" {
+            eprintln!("Unknown kit: {}. Available kits: solo, squad, claude-code", k);
             exit(1);
         }
     }
@@ -509,6 +510,7 @@ fn cmd_init(kit: Option<String>) {
         let kit_content = match k.as_str() {
             "squad" => ONT_KIT_SQUAD,
             "solo" => ONT_KIT_SOLO,
+            "claude-code" => ONT_KIT_CLAUDE_CODE,
             _ => unreachable!(),
         };
         let kit_path = ont_dir.join(format!("kit/{}/{}.ttl", k, k));
@@ -532,7 +534,29 @@ fn cmd_init(kit: Option<String>) {
 
     // .gitignore
     let gitignore = root.join(".gitignore");
-    let ignore_entries = ".lex/oxigraph/\n.lex/raw/\n";
+    let ignore_entries = if kit_name == "claude-code" {
+        // Claude Code kit: whitelist approach — ignore everything except what we index
+        "*\n\
+         !.gitignore\n\
+         !.gitattributes\n\
+         !.lex/\n\
+         !.lex/**\n\
+         .lex/oxigraph/\n\
+         .lex/raw/\n\
+         !README.lex.md\n\
+         !*/\n\
+         !*/*.jsonl\n\
+         !*/memory/\n\
+         !*/memory/**\n\
+         !agents/\n\
+         !agents/**\n\
+         !plans/\n\
+         !plans/**\n\
+         !CLAUDE.md\n\
+         !history.jsonl\n"
+    } else {
+        ".lex/oxigraph/\n.lex/raw/\n"
+    };
     if gitignore.exists() {
         let existing = fs::read_to_string(&gitignore).unwrap_or_default();
         if !existing.contains(".lex/oxigraph/") {

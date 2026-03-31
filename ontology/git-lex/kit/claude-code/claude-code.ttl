@@ -1,0 +1,187 @@
+@prefix lex-o: <https://repolex.ai/ontology/lex-upper/> .
+@prefix cc: <https://repolex.ai/ontology/kit/claude-code/> .
+@prefix owl: <http://www.w3.org/2002/07/owl#> .
+@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+@prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
+
+# =============================================================================
+# CLAUDE CODE KIT ONTOLOGY
+# =============================================================================
+# Structured indexing of Claude Code conversations and artifacts.
+# Designed to extract knowledge from ~/.claude/ directory.
+#
+# Kit: claude-code
+# Namespace: cc: = https://repolex.ai/ontology/kit/claude-code/
+# Extends: lex-o: (upper ontology)
+#
+# Document types (= valid `git lex create` commands):
+#   session, project, agent, plan, todo
+#
+# Extracted automatically from .jsonl files:
+#   tool usage, channel messages, file changes, timing
+# =============================================================================
+
+<https://repolex.ai/ontology/kit/claude-code> a owl:Ontology ;
+    rdfs:label "Claude Code Kit Ontology" ;
+    rdfs:comment "Structured indexing of Claude Code conversations and project artifacts. Extracts from .jsonl conversation files." ;
+    owl:versionInfo "0.1" .
+
+
+# =============================================================================
+# DOCUMENT TYPES
+# =============================================================================
+
+# --- Session ---
+# A single Claude Code conversation. Extracted from .jsonl files.
+# This is the core unit — each .jsonl file becomes a Session.
+
+cc:Session a owl:Class ;
+    rdfs:subClassOf lex-o:Event ;
+    rdfs:label "Session" ;
+    rdfs:comment "A Claude Code conversation session. One per .jsonl file." .
+
+cc:sessionId a owl:DatatypeProperty ;
+    rdfs:label "session ID" ;
+    rdfs:comment "UUID of the session." ;
+    rdfs:domain cc:Session ;
+    rdfs:range xsd:string .
+
+cc:sessionProject a owl:DatatypeProperty ;
+    rdfs:label "project" ;
+    rdfs:comment "Project directory path (encoded as dash-separated)." ;
+    rdfs:domain cc:Session ;
+    rdfs:range xsd:string .
+
+cc:startTime a owl:DatatypeProperty ;
+    rdfs:label "start time" ;
+    rdfs:comment "Timestamp of first message." ;
+    rdfs:domain cc:Session ;
+    rdfs:range xsd:dateTime .
+
+cc:endTime a owl:DatatypeProperty ;
+    rdfs:label "end time" ;
+    rdfs:comment "Timestamp of last message." ;
+    rdfs:domain cc:Session ;
+    rdfs:range xsd:dateTime .
+
+cc:messageCount a owl:DatatypeProperty ;
+    rdfs:label "message count" ;
+    rdfs:comment "Total number of messages in the session." ;
+    rdfs:domain cc:Session ;
+    rdfs:range xsd:integer .
+
+cc:userMessageCount a owl:DatatypeProperty ;
+    rdfs:label "user message count" ;
+    rdfs:comment "Number of user messages." ;
+    rdfs:domain cc:Session ;
+    rdfs:range xsd:integer .
+
+cc:assistantMessageCount a owl:DatatypeProperty ;
+    rdfs:label "assistant message count" ;
+    rdfs:comment "Number of assistant messages." ;
+    rdfs:domain cc:Session ;
+    rdfs:range xsd:integer .
+
+cc:cwd a owl:DatatypeProperty ;
+    rdfs:label "working directory" ;
+    rdfs:comment "Primary working directory for this session." ;
+    rdfs:domain cc:Session ;
+    rdfs:range xsd:string .
+
+cc:ccVersion a owl:DatatypeProperty ;
+    rdfs:label "Claude Code version" ;
+    rdfs:comment "Version of Claude Code used." ;
+    rdfs:domain cc:Session ;
+    rdfs:range xsd:string .
+
+cc:gitBranch a owl:DatatypeProperty ;
+    rdfs:label "git branch" ;
+    rdfs:comment "Git branch active during session." ;
+    rdfs:domain cc:Session ;
+    rdfs:range xsd:string .
+
+cc:toolUsage a owl:DatatypeProperty ;
+    rdfs:label "tool usage" ;
+    rdfs:comment "Tool name and count, format: 'ToolName:count'." ;
+    rdfs:domain cc:Session ;
+    rdfs:range xsd:string .
+
+cc:channelMessageCount a owl:DatatypeProperty ;
+    rdfs:label "channel message count" ;
+    rdfs:comment "Number of channel/peers messages in session." ;
+    rdfs:domain cc:Session ;
+    rdfs:range xsd:integer .
+
+cc:hasSubagent a owl:ObjectProperty ;
+    rdfs:label "has subagent" ;
+    rdfs:comment "Subagent sessions spawned from this session." ;
+    rdfs:domain cc:Session ;
+    rdfs:range cc:Session .
+
+# --- Project ---
+# A Claude Code project directory. Groups sessions.
+
+cc:Project a owl:Class ;
+    rdfs:subClassOf lex-o:Concept ;
+    rdfs:label "Project" ;
+    rdfs:comment "A Claude Code project directory. Groups sessions by working directory." .
+
+cc:projectPath a owl:DatatypeProperty ;
+    rdfs:label "project path" ;
+    rdfs:comment "The directory path this project represents." ;
+    rdfs:domain cc:Project ;
+    rdfs:range xsd:string .
+
+cc:sessionCount a owl:DatatypeProperty ;
+    rdfs:label "session count" ;
+    rdfs:comment "Number of sessions in this project." ;
+    rdfs:domain cc:Project ;
+    rdfs:range xsd:integer .
+
+# --- Agent ---
+# A Claude Code agent definition (from ~/.claude/agents/)
+
+cc:Agent a owl:Class ;
+    rdfs:subClassOf lex-o:Information ;
+    rdfs:label "Agent" ;
+    rdfs:comment "A Claude Code agent definition." .
+
+cc:agentTools a owl:DatatypeProperty ;
+    rdfs:label "tools" ;
+    rdfs:comment "Tools available to this agent." ;
+    rdfs:domain cc:Agent ;
+    rdfs:range xsd:string .
+
+# --- Plan ---
+# A saved plan from Claude Code planning mode.
+
+cc:Plan a owl:Class ;
+    rdfs:subClassOf lex-o:Information ;
+    rdfs:label "Plan" ;
+    rdfs:comment "A saved plan from Claude Code planning mode." .
+
+cc:planStatus a owl:DatatypeProperty ;
+    rdfs:label "plan status" ;
+    rdfs:comment "Status: 'active', 'completed', 'abandoned'." ;
+    rdfs:domain cc:Plan ;
+    rdfs:range xsd:string .
+
+# --- Todo ---
+# A task from Claude Code's todo system.
+
+cc:Todo a owl:Class ;
+    rdfs:subClassOf lex-o:Process ;
+    rdfs:label "Todo" ;
+    rdfs:comment "A task from Claude Code's todo tracking." .
+
+cc:todoStatus a owl:DatatypeProperty ;
+    rdfs:label "todo status" ;
+    rdfs:comment "Task status." ;
+    rdfs:domain cc:Todo ;
+    rdfs:range xsd:string .
+
+cc:todoSession a owl:ObjectProperty ;
+    rdfs:label "todo session" ;
+    rdfs:comment "Which session this todo was created in." ;
+    rdfs:domain cc:Todo ;
+    rdfs:range cc:Session .
