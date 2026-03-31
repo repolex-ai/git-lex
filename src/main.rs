@@ -2715,7 +2715,34 @@ fn cmd_sync() {
             } else {
                 format!("<{}/predicate/{}>", base, sanitize_uri_segment(predicate))
             };
-            let object_nq = if predicate == "isA" || predicate == "hasValue" || predicate == "mentions" || predicate == "linksTo" {
+            // Determine if object is a literal or entity reference
+            // Literals: isA, hasValue, mentions, linksTo, and any predicate where
+            // the object looks like a value (numbers, timestamps, paths, URLs, or
+            // contains special chars that aren't entity-name-like)
+            let is_literal = predicate == "isA"
+                || predicate == "hasValue"
+                || predicate == "mentions"
+                || predicate == "linksTo"
+                || object.contains('/')
+                || object.contains(':')
+                || object.contains(' ')
+                || object.parse::<f64>().is_ok()
+                || object.starts_with("20")  // timestamps like 2026-03-26T...
+                || predicate.ends_with("Count")
+                || predicate.ends_with("Time")
+                || predicate.ends_with("Date")
+                || predicate.ends_with("Version")
+                || predicate.ends_with("Id")
+                || predicate.ends_with("Status")
+                || predicate.ends_with("Branch")
+                || predicate == "cwd"
+                || predicate == "ccVersion"
+                || predicate == "sessionId"
+                || predicate == "toolUsage"
+                || predicate == "project"
+                || object.starts_with("-")  // dash-encoded paths like -Users-rob-repos
+                || object.starts_with("http");
+            let object_nq = if is_literal {
                 format!("\"{}\"", nq_escape(object))
             } else {
                 format!("<{}/entity/{}~{}>", base, sanitize_uri_segment(object), blob_hash)
