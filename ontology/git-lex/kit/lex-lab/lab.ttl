@@ -1,0 +1,418 @@
+@prefix lab:     <https://repolex.ai/ontology/kit/lex-lab/> .
+@prefix lex-o:   <https://repolex.ai/ontology/lex-upper/> .
+@prefix prov:    <http://www.w3.org/ns/prov#> .
+@prefix dcterms: <http://purl.org/dc/terms/> .
+@prefix cito:    <http://purl.org/spar/cito/> .
+@prefix fabio:   <http://purl.org/spar/fabio/> .
+@prefix owl:     <http://www.w3.org/2002/07/owl#> .
+@prefix rdfs:    <http://www.w3.org/2000/01/rdf-schema#> .
+@prefix xsd:     <http://www.w3.org/2001/XMLSchema#> .
+
+# =============================================================================
+# LEX-LAB KIT ONTOLOGY
+# =============================================================================
+# Collaborative research for multi-agent teams. Git-native, SPARQL-queryable,
+# FAIR-aligned. Public by default — lab graphs are designed to be federated.
+#
+# Kit: lex-lab
+# Namespace: lab: = https://repolex.ai/ontology/kit/lex-lab/
+# Extends: lex-o: (upper ontology)
+# Aligns: PROV-O, DCTERMS, CiTO, FaBiO (SPAR ontologies)
+#
+# Document types (= valid `git lex create` commands):
+#   investigation, experiment, survey, synthesis, hypothesis
+#
+# Field naming convention:
+#   plain string       — single literal value
+#   -list              — multiple literal values  (YAML list)
+#   -link              — reference to one entity  (file path or URI)
+#   -links             — references to multiple entities
+#
+# The gap this kit fills:
+#   Existing research ontologies (PROV-O, nanopub, FaBiO) cover what research IS
+#   and what it produces. None cover how computational agents collaboratively build
+#   knowledge in a git-tracked environment — branches as hypotheses, merges as
+#   synthesis, multi-agent deliberation as provenance. That's lex-lab's domain.
+# =============================================================================
+
+<https://repolex.ai/ontology/kit/lex-lab> a owl:Ontology ;
+    rdfs:label "Lex-Lab Kit Ontology" ;
+    rdfs:comment "Collaborative research for multi-agent teams. Git-native, SPARQL-queryable, FAIR-aligned. Public by default — lab graphs are designed to be federated and cited." ;
+    owl:versionInfo "0.1" ;
+    owl:imports <http://www.w3.org/ns/prov-o#> ;
+    dcterms:license <https://creativecommons.org/licenses/by/4.0/> .
+
+
+# =============================================================================
+# DOCUMENT TYPES (each = a `git lex create` command)
+# =============================================================================
+
+# --- Investigation ---
+# The top-level container for a research thread. Holds a question and tracks
+# the experiments and surveys that address it. Like a Jupyter project but
+# git-native, structured, and multi-agent.
+
+lab:Investigation a owl:Class ;
+    rdfs:subClassOf lex-o:Process ;
+    rdfs:subClassOf prov:Activity ;
+    rdfs:label "Investigation" ;
+    rdfs:comment "A named research thread: a question being investigated. Container for experiments, surveys, and the synthesis that concludes it. Aligns with OBI's 'investigation' concept." .
+
+lab:researchQuestion a owl:DatatypeProperty ;
+    rdfs:label "research question" ;
+    rdfs:comment "The question this investigation is trying to answer." ;
+    rdfs:domain lab:Investigation ;
+    rdfs:range xsd:string .
+
+lab:investigationStatus a owl:DatatypeProperty ;
+    rdfs:label "investigation status" ;
+    rdfs:comment "Status: 'open', 'active', 'paused', 'concluded', 'abandoned'." ;
+    rdfs:domain lab:Investigation ;
+    rdfs:range xsd:string .
+
+lab:lead-link a owl:ObjectProperty ;
+    rdfs:label "lead" ;
+    rdfs:comment "The agent leading this investigation." ;
+    rdfs:domain lab:Investigation ;
+    rdfs:subPropertyOf prov:wasAssociatedWith .
+
+lab:contributors-links a owl:ObjectProperty ;
+    rdfs:label "contributors" ;
+    rdfs:comment "Other agents contributing to this investigation." ;
+    rdfs:domain lab:Investigation ;
+    rdfs:subPropertyOf prov:wasAssociatedWith .
+
+lab:parentInvestigation-link a owl:ObjectProperty ;
+    rdfs:label "parent investigation" ;
+    rdfs:comment "The broader investigation this one is a sub-thread of." ;
+    rdfs:domain lab:Investigation ;
+    rdfs:range lab:Investigation .
+
+lab:concludedBy-link a owl:ObjectProperty ;
+    rdfs:label "concluded by" ;
+    rdfs:comment "The synthesis document that concludes this investigation." ;
+    rdfs:domain lab:Investigation ;
+    rdfs:range lab:Synthesis .
+
+
+# --- Hypothesis ---
+# A falsifiable claim under investigation. Not a document type on its own
+# (hypotheses live inside investigations and experiments) but a first-class
+# entity with a lifecycle. Can also be a standalone document when the
+# hypothesis itself needs detailed treatment.
+
+lab:Hypothesis a owl:Class ;
+    rdfs:subClassOf lex-o:Information ;
+    rdfs:label "Hypothesis" ;
+    rdfs:comment "A falsifiable claim being evaluated. Tracks its own lifecycle from proposal through support, refutation, or revision." .
+
+lab:claim a owl:DatatypeProperty ;
+    rdfs:label "claim" ;
+    rdfs:comment "The falsifiable statement being evaluated." ;
+    rdfs:domain lab:Hypothesis ;
+    rdfs:range xsd:string .
+
+lab:hypothesisStatus a owl:DatatypeProperty ;
+    rdfs:label "hypothesis status" ;
+    rdfs:comment "Lifecycle: 'proposed', 'active', 'supported', 'refuted', 'revised', 'abandoned'." ;
+    rdfs:domain lab:Hypothesis ;
+    rdfs:range xsd:string .
+
+lab:revisedBy-link a owl:ObjectProperty ;
+    rdfs:label "revised by" ;
+    rdfs:comment "A later hypothesis that refines or replaces this one." ;
+    rdfs:domain lab:Hypothesis ;
+    rdfs:range lab:Hypothesis ;
+    rdfs:subPropertyOf dcterms:isReplacedBy .
+
+lab:addresses-link a owl:ObjectProperty ;
+    rdfs:label "addresses" ;
+    rdfs:comment "The investigation this hypothesis is formulated to answer." ;
+    rdfs:domain lab:Hypothesis ;
+    rdfs:range lab:Investigation .
+
+lab:confidence a owl:DatatypeProperty ;
+    rdfs:label "confidence" ;
+    rdfs:comment "Current confidence level: 'speculative', 'plausible', 'likely', 'supported', 'refuted'." ;
+    rdfs:domain lab:Hypothesis ;
+    rdfs:range xsd:string .
+
+
+# --- Experiment ---
+# A specific test of a hypothesis. Protocol + result + conclusion.
+# Git-native: the repo + commit IS the reproducible artifact.
+
+lab:Experiment a owl:Class ;
+    rdfs:subClassOf lex-o:Process ;
+    rdfs:subClassOf prov:Activity ;
+    rdfs:label "Experiment" ;
+    rdfs:comment "A specific test of a hypothesis. Protocol describes what was done; result describes what was observed; conclusion interprets the result. Extends P-Plan's Plan/Step model for git-native execution." .
+
+lab:protocol a owl:DatatypeProperty ;
+    rdfs:label "protocol" ;
+    rdfs:comment "What was done — method, steps, configuration." ;
+    rdfs:domain lab:Experiment ;
+    rdfs:range xsd:string .
+
+lab:result a owl:DatatypeProperty ;
+    rdfs:label "result" ;
+    rdfs:comment "What was observed — raw output, measurements, data." ;
+    rdfs:domain lab:Experiment ;
+    rdfs:range xsd:string .
+
+lab:conclusion a owl:DatatypeProperty ;
+    rdfs:label "conclusion" ;
+    rdfs:comment "Interpretation of the result — what it means for the hypothesis." ;
+    rdfs:domain lab:Experiment ;
+    rdfs:range xsd:string .
+
+lab:experimentStatus a owl:DatatypeProperty ;
+    rdfs:label "experiment status" ;
+    rdfs:comment "Status: 'planned', 'running', 'complete', 'failed', 'abandoned'." ;
+    rdfs:domain lab:Experiment ;
+    rdfs:range xsd:string .
+
+lab:tests-link a owl:ObjectProperty ;
+    rdfs:label "tests" ;
+    rdfs:comment "The hypothesis this experiment is designed to test." ;
+    rdfs:domain lab:Experiment ;
+    rdfs:range lab:Hypothesis ;
+    rdfs:subPropertyOf cito:citesAsEvidence .
+
+lab:partOf-link a owl:ObjectProperty ;
+    rdfs:label "part of" ;
+    rdfs:comment "The investigation this experiment contributes to." ;
+    rdfs:domain lab:Experiment ;
+    rdfs:range lab:Investigation ;
+    rdfs:subPropertyOf lex-o:partOf .
+
+lab:replicates-link a owl:ObjectProperty ;
+    rdfs:label "replicates" ;
+    rdfs:comment "An earlier experiment this one attempts to reproduce." ;
+    rdfs:domain lab:Experiment ;
+    rdfs:range lab:Experiment ;
+    rdfs:subPropertyOf cito:usesMethodIn .
+
+lab:runBy-link a owl:ObjectProperty ;
+    rdfs:label "run by" ;
+    rdfs:comment "The agent who ran this experiment." ;
+    rdfs:domain lab:Experiment ;
+    rdfs:subPropertyOf prov:wasAssociatedWith .
+
+lab:commitRef a owl:DatatypeProperty ;
+    rdfs:label "commit ref" ;
+    rdfs:comment "Git commit SHA where this experiment was run. The commit IS the reproducible artifact — checkout this SHA to reproduce." ;
+    rdfs:domain lab:Experiment ;
+    rdfs:range xsd:string .
+
+lab:dataset-link a owl:ObjectProperty ;
+    rdfs:label "dataset" ;
+    rdfs:comment "Link to dataset(s) used or produced by this experiment." ;
+    rdfs:domain lab:Experiment .
+
+
+# --- Survey ---
+# Systematic review of existing work — literature, prior experiments, external
+# sources. What is already known. Grounds the investigation in prior art.
+
+lab:Survey a owl:Class ;
+    rdfs:subClassOf lex-o:Information ;
+    rdfs:subClassOf fabio:ReviewArticle ;
+    rdfs:label "Survey" ;
+    rdfs:comment "Systematic review of existing work — literature, prior experiments, standards. What is already known before the investigation starts. Aligns with FaBiO's ReviewArticle." .
+
+lab:scope a owl:DatatypeProperty ;
+    rdfs:label "scope" ;
+    rdfs:comment "What was surveyed — which sources, time range, search terms." ;
+    rdfs:domain lab:Survey ;
+    rdfs:range xsd:string .
+
+lab:findings a owl:DatatypeProperty ;
+    rdfs:label "findings" ;
+    rdfs:comment "What the survey found — key takeaways, gaps, patterns." ;
+    rdfs:domain lab:Survey ;
+    rdfs:range xsd:string .
+
+lab:sources-list a owl:DatatypeProperty ;
+    rdfs:label "sources" ;
+    rdfs:comment "List of sources surveyed: URLs, papers, ontologies, repos." ;
+    rdfs:domain lab:Survey ;
+    rdfs:range xsd:string .
+
+lab:surveyStatus a owl:DatatypeProperty ;
+    rdfs:label "survey status" ;
+    rdfs:comment "Status: 'planned', 'in-progress', 'complete'." ;
+    rdfs:domain lab:Survey ;
+    rdfs:range xsd:string .
+
+lab:informs-link a owl:ObjectProperty ;
+    rdfs:label "informs" ;
+    rdfs:comment "The investigation this survey informs." ;
+    rdfs:domain lab:Survey ;
+    rdfs:range lab:Investigation ;
+    rdfs:subPropertyOf cito:citesAsEvidence .
+
+
+# --- Synthesis ---
+# Where distributed multi-agent research converges. A synthesis integrates
+# findings from multiple experiments and surveys into a combined claim.
+# This is the conclusion of an investigation. Citable. Public.
+
+lab:Synthesis a owl:Class ;
+    rdfs:subClassOf lex-o:Information ;
+    rdfs:subClassOf prov:Entity ;
+    rdfs:label "Synthesis" ;
+    rdfs:comment "Combined insight from multiple experiments and surveys. The conclusion of an investigation — where distributed multi-agent research converges. Designed to be citable and published. Aligns with nanopublication's Assertion + Provenance + PublicationInfo structure." .
+
+lab:synthesizedClaim a owl:DatatypeProperty ;
+    rdfs:label "synthesized claim" ;
+    rdfs:comment "The central claim this synthesis makes. Should be a precise, citable statement." ;
+    rdfs:domain lab:Synthesis ;
+    rdfs:range xsd:string .
+
+lab:synthesisStatus a owl:DatatypeProperty ;
+    rdfs:label "synthesis status" ;
+    rdfs:comment "Status: 'draft', 'review', 'published', 'superseded'." ;
+    rdfs:domain lab:Synthesis ;
+    rdfs:range xsd:string .
+
+lab:evidenceStrength a owl:DatatypeProperty ;
+    rdfs:label "evidence strength" ;
+    rdfs:comment "How strong is the evidence: 'weak', 'moderate', 'strong', 'conclusive'." ;
+    rdfs:domain lab:Synthesis ;
+    rdfs:range xsd:string .
+
+lab:concludes-link a owl:ObjectProperty ;
+    rdfs:label "concludes" ;
+    rdfs:comment "The investigation this synthesis concludes." ;
+    rdfs:domain lab:Synthesis ;
+    rdfs:range lab:Investigation .
+
+lab:basedOn-links a owl:ObjectProperty ;
+    rdfs:label "based on" ;
+    rdfs:comment "Experiments and surveys this synthesis draws from." ;
+    rdfs:domain lab:Synthesis ;
+    rdfs:subPropertyOf cito:citesAsEvidence .
+
+lab:supports-link a owl:ObjectProperty ;
+    rdfs:label "supports" ;
+    rdfs:comment "A hypothesis this synthesis supports." ;
+    rdfs:domain lab:Synthesis ;
+    rdfs:range lab:Hypothesis ;
+    rdfs:subPropertyOf cito:supports .
+
+lab:refutes-link a owl:ObjectProperty ;
+    rdfs:label "refutes" ;
+    rdfs:comment "A hypothesis this synthesis refutes." ;
+    rdfs:domain lab:Synthesis ;
+    rdfs:range lab:Hypothesis ;
+    rdfs:subPropertyOf cito:disputes .
+
+lab:supersedes-link a owl:ObjectProperty ;
+    rdfs:label "supersedes" ;
+    rdfs:comment "An earlier synthesis this one replaces." ;
+    rdfs:domain lab:Synthesis ;
+    rdfs:range lab:Synthesis ;
+    rdfs:subPropertyOf dcterms:replaces .
+
+lab:authors-links a owl:ObjectProperty ;
+    rdfs:label "authors" ;
+    rdfs:comment "The agents who wrote this synthesis." ;
+    rdfs:domain lab:Synthesis ;
+    rdfs:subPropertyOf prov:wasAttributedTo .
+
+
+# =============================================================================
+# GIT-NATIVE RESEARCH PRIMITIVES
+# =============================================================================
+# These map git operations to research semantics. No other research ontology
+# covers this — it's the unique contribution of lex-lab.
+
+# --- Branch as Hypothesis Container ---
+# A named git branch IS a named hypothesis being developed.
+# Branch lifecycle = hypothesis lifecycle.
+
+lab:ResearchBranch a owl:Class ;
+    rdfs:subClassOf lex-o:Information ;
+    rdfs:label "Research Branch" ;
+    rdfs:comment "A git branch framed as a hypothesis container. The branch name is the hypothesis name. Commits on the branch are evidence accumulation. Merge = synthesis conclusion." .
+
+lab:branchName a owl:DatatypeProperty ;
+    rdfs:label "branch name" ;
+    rdfs:comment "The git branch name — also the hypothesis identifier." ;
+    rdfs:domain lab:ResearchBranch ;
+    rdfs:range xsd:string .
+
+lab:embodiesHypothesis-link a owl:ObjectProperty ;
+    rdfs:label "embodies hypothesis" ;
+    rdfs:comment "The hypothesis being developed on this branch." ;
+    rdfs:domain lab:ResearchBranch ;
+    rdfs:range lab:Hypothesis .
+
+
+# --- Deliberation ---
+# Multi-agent debate. The structured discussion that precedes a synthesis.
+# Roles: Proposer, Challenger, Defender, Synthesizer.
+# Records the reasoning process, not just the conclusion.
+
+lab:Deliberation a owl:Class ;
+    rdfs:subClassOf lex-o:Process ;
+    rdfs:subClassOf prov:Activity ;
+    rdfs:label "Deliberation" ;
+    rdfs:comment "Structured multi-agent debate preceding a synthesis. Records the reasoning process — arguments, counterarguments, and how consensus (or dissensus) was reached. Extends the micropublications Claim→Argument→Evidence dialectical model." .
+
+lab:deliberationStatus a owl:DatatypeProperty ;
+    rdfs:label "deliberation status" ;
+    rdfs:comment "Status: 'open', 'converging', 'concluded', 'deadlocked'." ;
+    rdfs:domain lab:Deliberation ;
+    rdfs:range xsd:string .
+
+lab:outcome a owl:DatatypeProperty ;
+    rdfs:label "outcome" ;
+    rdfs:comment "How the deliberation ended: 'consensus', 'dissensus', 'deferred', 'merged'." ;
+    rdfs:domain lab:Deliberation ;
+    rdfs:range xsd:string .
+
+lab:regarding-link a owl:ObjectProperty ;
+    rdfs:label "regarding" ;
+    rdfs:comment "The hypothesis or investigation this deliberation is about." ;
+    rdfs:domain lab:Deliberation .
+
+lab:producedSynthesis-link a owl:ObjectProperty ;
+    rdfs:label "produced synthesis" ;
+    rdfs:comment "The synthesis this deliberation concluded with, if any." ;
+    rdfs:domain lab:Deliberation ;
+    rdfs:range lab:Synthesis ;
+    rdfs:subPropertyOf prov:generated .
+
+
+# =============================================================================
+# SHARED PROPERTIES (used across multiple document types)
+# =============================================================================
+
+lab:license a owl:DatatypeProperty ;
+    rdfs:label "license" ;
+    rdfs:comment "License for this document. Recommended: 'CC-BY-4.0'. lex-lab is public by default." ;
+    rdfs:subPropertyOf dcterms:license ;
+    rdfs:range xsd:string .
+
+lab:doi a owl:DatatypeProperty ;
+    rdfs:label "DOI" ;
+    rdfs:comment "Digital Object Identifier if this document has been formally published." ;
+    rdfs:range xsd:anyURI .
+
+lab:repoRef a owl:DatatypeProperty ;
+    rdfs:label "repo ref" ;
+    rdfs:comment "GitHub org/repo identifier for the lab this document belongs to." ;
+    rdfs:range xsd:string .
+
+
+# =============================================================================
+# REASONING SUPPORT
+# =============================================================================
+
+lab:revisedBy-link owl:inverseOf lab:addresses-link .
+lab:concludes-link owl:inverseOf lab:concludedBy-link .
+lab:supports-link rdfs:subPropertyOf lex-o:supports .
+lab:refutes-link rdfs:subPropertyOf lex-o:opposes .
+lab:supersedes-link rdfs:subPropertyOf lex-o:replaces .
