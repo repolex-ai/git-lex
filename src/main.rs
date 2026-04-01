@@ -747,7 +747,7 @@ fn cmd_init(kit: Option<String>) {
     fs::create_dir_all(&hooks_dir).ok();
 
     let pre_commit_path = hooks_dir.join("pre-commit");
-    let pre_commit_content = "#!/bin/sh\ngit-lex extract\ngit add .lex/extract/ 2>/dev/null\n";
+    let pre_commit_content = "#!/bin/sh\ngit-lex extract\ngit add .lex/extract/ 2>/dev/null\ngit-lex validate || exit 1\n";
     if !pre_commit_path.exists() || !fs::read_to_string(&pre_commit_path).unwrap_or_default().contains("git-lex extract") {
         fs::write(&pre_commit_path, pre_commit_content).ok();
         #[cfg(unix)]
@@ -2736,7 +2736,8 @@ fn frontmatter_to_turtle(filepath: &std::path::Path, root: &std::path::Path, kit
     Some(ttl)
 }
 
-fn cmd_validate() {
+/// Returns true if all files pass, false if any violations found.
+fn cmd_validate() -> bool {
     let start = Instant::now();
 
     let root = match find_git_root() {
@@ -2751,7 +2752,7 @@ fn cmd_validate() {
         Some(k) => k,
         None => {
             println!("No kit configured — nothing to validate.");
-            return;
+            return true;
         }
     };
 
@@ -2780,7 +2781,7 @@ fn cmd_validate() {
         Some(s) => s,
         None => {
             println!("No SHACL shapes found for kit '{}' — skipping validation.", kit);
-            return;
+            return true;
         }
     };
 
@@ -2808,14 +2809,14 @@ fn cmd_validate() {
         Ok(c) => c,
         Err(e) => {
             eprintln!("Failed to create rudof config: {}", e);
-            return;
+            return true;
         }
     };
     let mut rudof = match rudof_lib::Rudof::new(&config) {
         Ok(r) => r,
         Err(e) => {
             eprintln!("Failed to create rudof instance: {}", e);
-            return;
+            return true;
         }
     };
 
@@ -2828,7 +2829,7 @@ fn cmd_validate() {
         Some(&rudof_lib::ReaderMode::Lax),
     ) {
         eprintln!("Failed to load SHACL shapes: {}", e);
-        return;
+        return true;
     }
 
     let mut total_files = 0;
@@ -2884,10 +2885,12 @@ fn cmd_validate() {
     if total_violations == 0 {
         eprintln!("Validated {} files in {:.1}ms — all pass ✓",
             total_files, elapsed.as_secs_f64() * 1000.0);
+        true
     } else {
         eprintln!("Validated {} files in {:.1}ms — {} violation(s) in {} file(s)",
             total_files, elapsed.as_secs_f64() * 1000.0,
             total_violations, failed_files.len());
+        false
     }
 }
 
@@ -3526,7 +3529,11 @@ fn main() {
             print!("{}{}{}", git_nq, fm_nq, lex_nq);
         }
         Commands::Extract => cmd_extract(),
-        Commands::Validate => cmd_validate(),
+        Commands::Validate => {
+            if !cmd_validate() {
+                exit(1);
+            }
+        }
         Commands::Llm { command } => match command {
             LlmCommands::List => cmd_llm_list(),
             LlmCommands::Extract { file, model } => cmd_llm_extract(&file, &model),
