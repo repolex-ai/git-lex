@@ -19,12 +19,18 @@
 #
 # Extracted automatically from .jsonl files:
 #   tool usage, channel messages, file changes, timing
+#
+# Field naming convention:
+#   plain string  — single literal value    (DatatypeProperty)
+#   -list         — multiple literal values (DatatypeProperty, YAML list)
+#   -link         — reference to one entity (ObjectProperty)
+#   -links        — references to multiple  (ObjectProperty)
 # =============================================================================
 
 <https://repolex.ai/ontology/kit/claude-code> a owl:Ontology ;
     rdfs:label "Claude Code Kit Ontology" ;
     rdfs:comment "Structured indexing of Claude Code conversations and project artifacts. Extracts from .jsonl conversation files." ;
-    owl:versionInfo "0.1" .
+    owl:versionInfo "0.2" .
 
 
 # =============================================================================
@@ -112,7 +118,7 @@ cc:channelMessageCount a owl:DatatypeProperty ;
     rdfs:domain cc:Session ;
     rdfs:range xsd:integer .
 
-cc:hasSubagent a owl:ObjectProperty ;
+cc:hasSubagent-links a owl:ObjectProperty ;
     rdfs:label "has subagent" ;
     rdfs:comment "Subagent sessions spawned from this session." ;
     rdfs:domain cc:Session ;
@@ -180,7 +186,7 @@ cc:todoStatus a owl:DatatypeProperty ;
     rdfs:domain cc:Todo ;
     rdfs:range xsd:string .
 
-cc:todoSession a owl:ObjectProperty ;
+cc:todoSession-link a owl:ObjectProperty ;
     rdfs:label "todo session" ;
     rdfs:comment "Which session this todo was created in." ;
     rdfs:domain cc:Todo ;

@@ -1,0 +1,245 @@
+@prefix sh:      <http://www.w3.org/ns/shacl#> .
+@prefix lab:     <https://repolex.ai/ontology/kit/lex-lab/> .
+@prefix xsd:     <http://www.w3.org/2001/XMLSchema#> .
+@prefix rdfs:    <http://www.w3.org/2000/01/rdf-schema#> .
+
+# =============================================================================
+# LEX-LAB KIT SHACL SHAPES
+# =============================================================================
+# Validates lex-lab kit documents against the lab ontology.
+# Run via: rudof validate --shapes lab-shapes.ttl --data <file.ttl>
+# =============================================================================
+
+
+# --- Investigation ---
+
+lab:InvestigationShape a sh:NodeShape ;
+    sh:targetClass lab:Investigation ;
+    sh:property [
+        sh:path lab:researchQuestion ;
+        sh:datatype xsd:string ;
+        sh:minCount 1 ;
+        sh:message "Investigation must have a researchQuestion." ;
+    ] ;
+    sh:property [
+        sh:path lab:investigationStatus ;
+        sh:in ( "open" "active" "paused" "concluded" "abandoned" ) ;
+        sh:minCount 1 ;
+        sh:message "investigationStatus must be 'open', 'active', 'paused', 'concluded', or 'abandoned'." ;
+    ] ;
+    sh:property [
+        sh:path lab:lead-link ;
+        sh:nodeKind sh:IRI ;
+        sh:message "lead-link must be an IRI reference to the leading agent." ;
+    ] ;
+    sh:property [
+        sh:path lab:contributors-links ;
+        sh:nodeKind sh:IRI ;
+        sh:message "contributors-links must be IRI references to agents." ;
+    ] ;
+    sh:property [
+        sh:path lab:parentInvestigation-link ;
+        sh:nodeKind sh:IRI ;
+        sh:message "parentInvestigation-link must be an IRI reference to a lab:Investigation." ;
+    ] ;
+    sh:property [
+        sh:path lab:concludedBy-link ;
+        sh:nodeKind sh:IRI ;
+        sh:message "concludedBy-link must be an IRI reference to a lab:Synthesis." ;
+    ] .
+
+
+# --- Hypothesis ---
+
+lab:HypothesisShape a sh:NodeShape ;
+    sh:targetClass lab:Hypothesis ;
+    sh:property [
+        sh:path lab:claim ;
+        sh:datatype xsd:string ;
+        sh:minCount 1 ;
+        sh:message "Hypothesis must have a claim — the falsifiable statement being evaluated." ;
+    ] ;
+    sh:property [
+        sh:path lab:hypothesisStatus ;
+        sh:in ( "proposed" "active" "supported" "refuted" "revised" "abandoned" ) ;
+        sh:minCount 1 ;
+        sh:message "hypothesisStatus must be 'proposed', 'active', 'supported', 'refuted', 'revised', or 'abandoned'." ;
+    ] ;
+    sh:property [
+        sh:path lab:confidence ;
+        sh:in ( "speculative" "plausible" "likely" "supported" "refuted" ) ;
+        sh:message "confidence must be 'speculative', 'plausible', 'likely', 'supported', or 'refuted'." ;
+    ] ;
+    sh:property [
+        sh:path lab:revisedBy-link ;
+        sh:nodeKind sh:IRI ;
+        sh:message "revisedBy-link must be an IRI reference to a lab:Hypothesis." ;
+    ] ;
+    sh:property [
+        sh:path lab:addresses-link ;
+        sh:nodeKind sh:IRI ;
+        sh:message "addresses-link must be an IRI reference to a lab:Investigation." ;
+    ] .
+
+
+# --- Experiment ---
+
+lab:ExperimentShape a sh:NodeShape ;
+    sh:targetClass lab:Experiment ;
+    sh:property [
+        sh:path lab:protocol ;
+        sh:datatype xsd:string ;
+        sh:minCount 1 ;
+        sh:message "Experiment must have a protocol describing what was done." ;
+    ] ;
+    sh:property [
+        sh:path lab:experimentStatus ;
+        sh:in ( "planned" "running" "complete" "failed" "abandoned" ) ;
+        sh:minCount 1 ;
+        sh:message "experimentStatus must be 'planned', 'running', 'complete', 'failed', or 'abandoned'." ;
+    ] ;
+    sh:property [
+        sh:path lab:tests-link ;
+        sh:nodeKind sh:IRI ;
+        sh:message "tests-link must be an IRI reference to a lab:Hypothesis." ;
+    ] ;
+    sh:property [
+        sh:path lab:partOf-link ;
+        sh:nodeKind sh:IRI ;
+        sh:message "partOf-link must be an IRI reference to a lab:Investigation." ;
+    ] ;
+    sh:property [
+        sh:path lab:replicates-link ;
+        sh:nodeKind sh:IRI ;
+        sh:message "replicates-link must be an IRI reference to a lab:Experiment." ;
+    ] ;
+    sh:property [
+        sh:path lab:runBy-link ;
+        sh:nodeKind sh:IRI ;
+        sh:message "runBy-link must be an IRI reference to an agent." ;
+    ] ;
+    sh:property [
+        sh:path lab:dataset-link ;
+        sh:nodeKind sh:IRI ;
+        sh:message "dataset-link must be an IRI reference." ;
+    ] .
+
+
+# --- Survey ---
+
+lab:SurveyShape a sh:NodeShape ;
+    sh:targetClass lab:Survey ;
+    sh:property [
+        sh:path lab:scope ;
+        sh:datatype xsd:string ;
+        sh:minCount 1 ;
+        sh:message "Survey must have a scope describing what was surveyed." ;
+    ] ;
+    sh:property [
+        sh:path lab:surveyStatus ;
+        sh:in ( "planned" "in-progress" "complete" ) ;
+        sh:minCount 1 ;
+        sh:message "surveyStatus must be 'planned', 'in-progress', or 'complete'." ;
+    ] ;
+    sh:property [
+        sh:path lab:informs-link ;
+        sh:nodeKind sh:IRI ;
+        sh:message "informs-link must be an IRI reference to a lab:Investigation." ;
+    ] .
+
+
+# --- Synthesis ---
+
+lab:SynthesisShape a sh:NodeShape ;
+    sh:targetClass lab:Synthesis ;
+    sh:property [
+        sh:path lab:synthesizedClaim ;
+        sh:datatype xsd:string ;
+        sh:minCount 1 ;
+        sh:message "Synthesis must have a synthesizedClaim — the central citable statement." ;
+    ] ;
+    sh:property [
+        sh:path lab:synthesisStatus ;
+        sh:in ( "draft" "review" "published" "superseded" ) ;
+        sh:minCount 1 ;
+        sh:message "synthesisStatus must be 'draft', 'review', 'published', or 'superseded'." ;
+    ] ;
+    sh:property [
+        sh:path lab:evidenceStrength ;
+        sh:in ( "weak" "moderate" "strong" "conclusive" ) ;
+        sh:message "evidenceStrength must be 'weak', 'moderate', 'strong', or 'conclusive'." ;
+    ] ;
+    sh:property [
+        sh:path lab:concludes-link ;
+        sh:nodeKind sh:IRI ;
+        sh:message "concludes-link must be an IRI reference to a lab:Investigation." ;
+    ] ;
+    sh:property [
+        sh:path lab:basedOn-links ;
+        sh:nodeKind sh:IRI ;
+        sh:message "basedOn-links must be IRI references to experiments or surveys." ;
+    ] ;
+    sh:property [
+        sh:path lab:supports-link ;
+        sh:nodeKind sh:IRI ;
+        sh:message "supports-link must be an IRI reference to a lab:Hypothesis." ;
+    ] ;
+    sh:property [
+        sh:path lab:refutes-link ;
+        sh:nodeKind sh:IRI ;
+        sh:message "refutes-link must be an IRI reference to a lab:Hypothesis." ;
+    ] ;
+    sh:property [
+        sh:path lab:supersedes-link ;
+        sh:nodeKind sh:IRI ;
+        sh:message "supersedes-link must be an IRI reference to a lab:Synthesis." ;
+    ] ;
+    sh:property [
+        sh:path lab:authors-links ;
+        sh:nodeKind sh:IRI ;
+        sh:message "authors-links must be IRI references to agents." ;
+    ] .
+
+
+# --- Deliberation ---
+
+lab:DeliberationShape a sh:NodeShape ;
+    sh:targetClass lab:Deliberation ;
+    sh:property [
+        sh:path lab:deliberationStatus ;
+        sh:in ( "open" "converging" "concluded" "deadlocked" ) ;
+        sh:minCount 1 ;
+        sh:message "deliberationStatus must be 'open', 'converging', 'concluded', or 'deadlocked'." ;
+    ] ;
+    sh:property [
+        sh:path lab:outcome ;
+        sh:in ( "consensus" "dissensus" "deferred" "merged" ) ;
+        sh:message "outcome must be 'consensus', 'dissensus', 'deferred', or 'merged'." ;
+    ] ;
+    sh:property [
+        sh:path lab:regarding-link ;
+        sh:nodeKind sh:IRI ;
+        sh:message "regarding-link must be an IRI reference to a hypothesis or investigation." ;
+    ] ;
+    sh:property [
+        sh:path lab:producedSynthesis-link ;
+        sh:nodeKind sh:IRI ;
+        sh:message "producedSynthesis-link must be an IRI reference to a lab:Synthesis." ;
+    ] .
+
+
+# --- ResearchBranch ---
+
+lab:ResearchBranchShape a sh:NodeShape ;
+    sh:targetClass lab:ResearchBranch ;
+    sh:property [
+        sh:path lab:branchName ;
+        sh:datatype xsd:string ;
+        sh:minCount 1 ;
+        sh:message "ResearchBranch must have a branchName." ;
+    ] ;
+    sh:property [
+        sh:path lab:embodiesHypothesis-link ;
+        sh:nodeKind sh:IRI ;
+        sh:message "embodiesHypothesis-link must be an IRI reference to a lab:Hypothesis." ;
+    ] .

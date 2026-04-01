@@ -16,12 +16,18 @@
 #
 # Document types (= valid `git lex create` commands):
 #   memory, decision, task, research, contact, note
+#
+# Field naming convention:
+#   plain string  — single literal value    (DatatypeProperty)
+#   -list         — multiple literal values (DatatypeProperty, YAML list)
+#   -link         — reference to one entity (ObjectProperty)
+#   -links        — references to multiple  (ObjectProperty)
 # =============================================================================
 
 <https://repolex.ai/ontology/kit/solo> a owl:Ontology ;
     rdfs:label "Solo Kit Ontology" ;
     rdfs:comment "Personal agent memory. One agent, persistent identity across conversations and projects." ;
-    owl:versionInfo "0.1" .
+    owl:versionInfo "0.2" .
 
 
 # =============================================================================
@@ -81,7 +87,7 @@ solo:outcome a owl:DatatypeProperty ;
     rdfs:domain solo:Decision ;
     rdfs:range xsd:string .
 
-solo:supersededBy a owl:ObjectProperty ;
+solo:supersededBy-link a owl:ObjectProperty ;
     rdfs:label "superseded by" ;
     rdfs:comment "A later decision that replaces this one." ;
     rdfs:domain solo:Decision ;
@@ -109,7 +115,7 @@ solo:priority a owl:DatatypeProperty ;
 
 solo:blockedBy a owl:DatatypeProperty ;
     rdfs:label "blocked by" ;
-    rdfs:comment "What's blocking this task." ;
+    rdfs:comment "What's blocking this task (free text description)." ;
     rdfs:domain solo:Task ;
     rdfs:range xsd:string .
 
@@ -203,7 +209,7 @@ solo:topic a owl:DatatypeProperty ;
     rdfs:domain solo:Note ;
     rdfs:range xsd:string .
 
-solo:relatedTo a owl:ObjectProperty ;
+solo:relatedTo-links a owl:ObjectProperty ;
     rdfs:label "related to" ;
     rdfs:comment "Other documents this note references." ;
     rdfs:domain solo:Note .

@@ -1,0 +1,60 @@
+@prefix sh:  <http://www.w3.org/ns/shacl#> .
+@prefix cc:  <https://repolex.ai/ontology/kit/claude-code/> .
+@prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
+@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+
+# =============================================================================
+# CLAUDE CODE KIT SHACL SHAPES
+# =============================================================================
+# Validates claude-code kit documents against the claude-code ontology.
+# Run via: rudof validate --shapes claude-code-shapes.ttl --data <file.ttl>
+# =============================================================================
+
+
+# --- Session ---
+
+cc:SessionShape a sh:NodeShape ;
+    sh:targetClass cc:Session ;
+    sh:property [
+        sh:path cc:sessionId ;
+        sh:datatype xsd:string ;
+        sh:minCount 1 ;
+        sh:message "Session must have a sessionId (UUID)." ;
+    ] ;
+    sh:property [
+        sh:path cc:startTime ;
+        sh:datatype xsd:dateTime ;
+        sh:message "startTime must be an xsd:dateTime." ;
+    ] ;
+    sh:property [
+        sh:path cc:endTime ;
+        sh:datatype xsd:dateTime ;
+        sh:message "endTime must be an xsd:dateTime." ;
+    ] ;
+    sh:property [
+        sh:path cc:hasSubagent-links ;
+        sh:nodeKind sh:IRI ;
+        sh:message "hasSubagent-links must be IRI references to cc:Session." ;
+    ] .
+
+
+# --- Plan ---
+
+cc:PlanShape a sh:NodeShape ;
+    sh:targetClass cc:Plan ;
+    sh:property [
+        sh:path cc:planStatus ;
+        sh:in ( "active" "completed" "abandoned" ) ;
+        sh:message "planStatus must be 'active', 'completed', or 'abandoned'." ;
+    ] .
+
+
+# --- Todo ---
+
+cc:TodoShape a sh:NodeShape ;
+    sh:targetClass cc:Todo ;
+    sh:property [
+        sh:path cc:todoSession-link ;
+        sh:nodeKind sh:IRI ;
+        sh:message "todoSession-link must be an IRI reference to a cc:Session." ;
+    ] .

@@ -1,0 +1,98 @@
+@prefix sh:   <http://www.w3.org/ns/shacl#> .
+@prefix solo: <https://repolex.ai/ontology/kit/solo/> .
+@prefix xsd:  <http://www.w3.org/2001/XMLSchema#> .
+@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+
+# =============================================================================
+# SOLO KIT SHACL SHAPES
+# =============================================================================
+# Validates solo kit documents against the solo ontology.
+# Run via: rudof validate --shapes solo-shapes.ttl --data <file.ttl>
+# =============================================================================
+
+
+# --- Memory ---
+
+solo:MemoryShape a sh:NodeShape ;
+    sh:targetClass solo:Memory ;
+    sh:property [
+        sh:path solo:confidence ;
+        sh:in ( "certain" "likely" "hypothesis" "hunch" ) ;
+        sh:message "confidence must be 'certain', 'likely', 'hypothesis', or 'hunch'." ;
+    ] ;
+    sh:property [
+        sh:path solo:category ;
+        sh:in ( "fact" "preference" "skill" "observation" "lesson" ) ;
+        sh:message "category must be 'fact', 'preference', 'skill', 'observation', or 'lesson'." ;
+    ] .
+
+
+# --- Decision ---
+
+solo:DecisionShape a sh:NodeShape ;
+    sh:targetClass solo:Decision ;
+    sh:property [
+        sh:path solo:outcome ;
+        sh:in ( "pending" "worked" "failed" "superseded" ) ;
+        sh:message "outcome must be 'pending', 'worked', 'failed', or 'superseded'." ;
+    ] ;
+    sh:property [
+        sh:path solo:supersededBy-link ;
+        sh:nodeKind sh:IRI ;
+        sh:message "supersededBy-link must be an IRI reference to a solo:Decision." ;
+    ] .
+
+
+# --- Task ---
+
+solo:TaskShape a sh:NodeShape ;
+    sh:targetClass solo:Task ;
+    sh:property [
+        sh:path solo:taskStatus ;
+        sh:in ( "todo" "in-progress" "blocked" "done" "dropped" ) ;
+        sh:minCount 1 ;
+        sh:message "Task must have a taskStatus: 'todo', 'in-progress', 'blocked', 'done', or 'dropped'." ;
+    ] ;
+    sh:property [
+        sh:path solo:priority ;
+        sh:in ( "low" "normal" "high" "urgent" ) ;
+        sh:message "priority must be 'low', 'normal', 'high', or 'urgent'." ;
+    ] .
+
+
+# --- Research ---
+
+solo:ResearchShape a sh:NodeShape ;
+    sh:targetClass solo:Research ;
+    sh:property [
+        sh:path solo:researchStatus ;
+        sh:in ( "exploring" "active" "paused" "concluded" ) ;
+        sh:message "researchStatus must be 'exploring', 'active', 'paused', or 'concluded'." ;
+    ] .
+
+
+# --- Contact ---
+
+solo:ContactShape a sh:NodeShape ;
+    sh:targetClass solo:Contact ;
+    sh:property [
+        sh:path solo:contactType ;
+        sh:in ( "human" "agent" "team" "organization" ) ;
+        sh:message "contactType must be 'human', 'agent', 'team', or 'organization'." ;
+    ] ;
+    sh:property [
+        sh:path solo:relationship ;
+        sh:in ( "boss" "squadmate" "collaborator" "user" ) ;
+        sh:message "relationship must be 'boss', 'squadmate', 'collaborator', or 'user'." ;
+    ] .
+
+
+# --- Note ---
+
+solo:NoteShape a sh:NodeShape ;
+    sh:targetClass solo:Note ;
+    sh:property [
+        sh:path solo:relatedTo-links ;
+        sh:nodeKind sh:IRI ;
+        sh:message "relatedTo-links must be IRI references." ;
+    ] .
