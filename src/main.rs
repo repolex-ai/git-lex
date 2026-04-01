@@ -196,6 +196,47 @@ fn nq_escape(s: &str) -> String {
         .replace('\r', "\\r")
 }
 
+/// Unescape a git-quoted path.
+/// Git wraps paths with non-ASCII chars in double quotes and uses octal escapes.
+/// e.g. "message/list_messages-\342\200\224-foo.md" → message/list_messages-—-foo.md
+fn git_unescape_path(s: &str) -> String {
+    let s = if s.starts_with('"') && s.ends_with('"') && s.len() >= 2 {
+        &s[1..s.len() - 1]
+    } else {
+        return s.to_string();
+    };
+    let mut result = Vec::new();
+    let bytes = s.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'\\' && i + 1 < bytes.len() {
+            match bytes[i + 1] {
+                b'n' => { result.push(b'\n'); i += 2; }
+                b't' => { result.push(b'\t'); i += 2; }
+                b'r' => { result.push(b'\r'); i += 2; }
+                b'\\' => { result.push(b'\\'); i += 2; }
+                b'"' => { result.push(b'"'); i += 2; }
+                // Octal escape: \NNN
+                d if d.is_ascii_digit() && i + 3 < bytes.len()
+                    && bytes[i + 2].is_ascii_digit()
+                    && bytes[i + 3].is_ascii_digit() =>
+                {
+                    let octal = (d - b'0') as u32 * 64
+                        + (bytes[i + 2] - b'0') as u32 * 8
+                        + (bytes[i + 3] - b'0') as u32;
+                    result.push(octal as u8);
+                    i += 4;
+                }
+                _ => { result.push(bytes[i]); i += 1; }
+            }
+        } else {
+            result.push(bytes[i]);
+            i += 1;
+        }
+    }
+    String::from_utf8_lossy(&result).into_owned()
+}
+
 /// Percent-encode a path for use in URIs (spaces, special chars).
 fn uri_encode_path(s: &str) -> String {
     s.chars()
@@ -1037,13 +1078,13 @@ fn generate_git_nquads() -> String {
                 for line in stdout.lines() {
                     let parts: Vec<&str> = line.splitn(2, '\t').collect();
                     if parts.len() < 2 { continue; }
-                    let path = parts[1];
+                    let path = git_unescape_path(parts[1]);
                     let meta: Vec<&str> = parts[0].split_whitespace().collect();
                     if meta.len() < 4 { continue; }
                     let (obj_type, blob_hash, size) = (meta[1], meta[2], meta[3]);
-                    let fu = format!("<{}/tree/{}/{}>", base, ref_sha, uri_encode_path(path));
+                    let fu = format!("<{}/tree/{}/{}>", base, ref_sha, uri_encode_path(&path));
                     nq.push_str(&format!("{} <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://repolex.ai/ontology/git-lex/git/Blob> {} .\n", fu, graph));
-                    nq.push_str(&format!("{} <https://repolex.ai/ontology/git-lex/git/path> \"{}\" {} .\n", fu, nq_escape(path), graph));
+                    nq.push_str(&format!("{} <https://repolex.ai/ontology/git-lex/git/path> \"{}\" {} .\n", fu, nq_escape(&path), graph));
                     nq.push_str(&format!("{} <https://repolex.ai/ontology/git-lex/git/blobHash> \"{}\" {} .\n", fu, blob_hash, graph));
                     nq.push_str(&format!("{} <https://repolex.ai/ontology/git-lex/git/blob> <{}/blob/{}> {} .\n", fu, base, blob_hash, graph));
                     nq.push_str(&format!("{} <https://repolex.ai/ontology/git-lex/git/size> \"{}\"^^<http://www.w3.org/2001/XMLSchema#integer> {} .\n", fu, size, graph));
@@ -1117,9 +1158,9 @@ fn generate_git_nquads() -> String {
                 let parts: Vec<&str> = line.split('\t').collect();
                 if parts.len() < 2 { continue; }
                 let status = parts[0];
-                let path = parts[1];
+                let path = git_unescape_path(parts[1]);
                 let graph = format!("<{}/changeset/{}>", base, current_sha);
-                let change_uri = format!("<{}/changeset/{}/{}>", base, current_sha, uri_encode_path(path));
+                let change_uri = format!("<{}/changeset/{}/{}>", base, current_sha, uri_encode_path(&path));
                 let commit_uri = format!("<{}/commit/{}>", base, current_sha);
 
                 // Link commit to changeset (in commits graph so joins work)
@@ -1127,7 +1168,7 @@ fn generate_git_nquads() -> String {
                 nq.push_str(&format!("{} <https://repolex.ai/ontology/git-lex/git/changed> {} {} .\n", commit_uri, change_uri, commits_graph));
 
                 // Change details
-                nq.push_str(&format!("{} <https://repolex.ai/ontology/git-lex/git/path> \"{}\" {} .\n", change_uri, nq_escape(path), graph));
+                nq.push_str(&format!("{} <https://repolex.ai/ontology/git-lex/git/path> \"{}\" {} .\n", change_uri, nq_escape(&path), graph));
 
                 let status_label = match status.chars().next() {
                     Some('A') => "added",
@@ -1140,7 +1181,8 @@ fn generate_git_nquads() -> String {
 
                 // For renames, capture the new path
                 if status.starts_with('R') && parts.len() >= 3 {
-                    nq.push_str(&format!("{} <https://repolex.ai/ontology/git-lex/git/renamedTo> \"{}\" {} .\n", change_uri, nq_escape(parts[2]), graph));
+                    let renamed_to = git_unescape_path(parts[2]);
+                    nq.push_str(&format!("{} <https://repolex.ai/ontology/git-lex/git/renamedTo> \"{}\" {} .\n", change_uri, nq_escape(&renamed_to), graph));
                 }
             }
         }
