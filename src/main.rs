@@ -1793,7 +1793,7 @@ fn generate_frontmatter_nquads() -> String {
                         };
                         for val in values {
                             if val.is_empty() { continue; }
-                            // Strip @ prefix if present, normalize to slug
+                            // Strip @ prefix(es) if present, normalize to slug
                             let slug = val.trim_start_matches('@').to_lowercase()
                                 .replace(' ', "-")
                                 .replace(|c: char| !c.is_alphanumeric() && c != '-' && c != '/' && c != '.', "");
@@ -1810,6 +1810,14 @@ fn generate_frontmatter_nquads() -> String {
                                 "{} {} {} {} .\n",
                                 doc_uri, fm_predicate, object_uri, graph
                             ));
+
+                            // to-links → also emit lex:mentions so channel broker can route notifications
+                            if subject.ends_with(".to-links") || subject == "to-links" {
+                                nq.push_str(&format!(
+                                    "{} <https://repolex.ai/ontology/git-lex/lex/mentions> \"{}\" {} .\n",
+                                    doc_uri, nq_escape(&slug), graph
+                                ));
+                            }
                         }
                     } else {
                         nq.push_str(&format!(
