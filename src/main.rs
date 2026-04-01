@@ -450,6 +450,7 @@ const ONT_LEX_O: &str = include_str!("../ontology/git-lex/lex-o/lex-o.ttl");
 const ONT_KIT_SQUAD: &str = include_str!("../ontology/git-lex/kit/squad/squad.ttl");
 const ONT_KIT_SOLO: &str = include_str!("../ontology/git-lex/kit/solo/solo.ttl");
 const ONT_KIT_CLAUDE_CODE: &str = include_str!("../ontology/git-lex/kit/claude-code/claude-code.ttl");
+const ONT_KIT_LEX_LAB: &str = include_str!("../ontology/git-lex/kit/lex-lab/lab.ttl");
 
 fn cmd_init(kit: Option<String>) {
     let root = match find_git_root() {
@@ -477,8 +478,8 @@ fn cmd_init(kit: Option<String>) {
     // Validate kit
     let kit_name = kit.as_deref().unwrap_or("none");
     if let Some(ref k) = kit {
-        if k != "squad" && k != "solo" && k != "claude-code" {
-            eprintln!("Unknown kit: {}. Available kits: solo, squad, claude-code", k);
+        if k != "squad" && k != "solo" && k != "claude-code" && k != "lex-lab" {
+            eprintln!("Unknown kit: {}. Available kits: solo, squad, claude-code, lex-lab", k);
             exit(1);
         }
     }
@@ -511,9 +512,15 @@ fn cmd_init(kit: Option<String>) {
             "squad" => ONT_KIT_SQUAD,
             "solo" => ONT_KIT_SOLO,
             "claude-code" => ONT_KIT_CLAUDE_CODE,
+            "lex-lab" => ONT_KIT_LEX_LAB,
             _ => unreachable!(),
         };
-        let kit_path = ont_dir.join(format!("kit/{}/{}.ttl", k, k));
+        let kit_filename = match k.as_str() {
+            "lex-lab" => "lab",
+            "claude-code" => "claude-code",
+            other => other,
+        };
+        let kit_path = ont_dir.join(format!("kit/{}/{}.ttl", k, kit_filename));
         fs::create_dir_all(kit_path.parent().unwrap()).ok();
         if !kit_path.exists() {
             fs::write(&kit_path, kit_content).expect("failed to write kit ontology");
@@ -662,10 +669,20 @@ fn cmd_init(kit: Option<String>) {
                     doc.push_str(&format!("### {}\n\n", type_name));
                     doc.push_str(&format!("Create: `git lex create {}`\n\n", type_name.to_lowercase()));
                     if !properties.is_empty() {
-                        doc.push_str("| Property | Type |\n");
-                        doc.push_str("|---|---|\n");
-                        for (prop_name, prop_type, _) in properties {
-                            doc.push_str(&format!("| {} | {} |\n", prop_name, prop_type));
+                        let has_comments = properties.iter().any(|(_, _, _, c)| !c.is_empty());
+                        if has_comments {
+                            doc.push_str("| Property | Type | Description |\n");
+                            doc.push_str("|---|---|---|\n");
+                        } else {
+                            doc.push_str("| Property | Type |\n");
+                            doc.push_str("|---|---|\n");
+                        }
+                        for (prop_name, prop_type, _, comment) in properties {
+                            if comment.is_empty() {
+                                doc.push_str(&format!("| {} | {} |\n", prop_name, prop_type));
+                            } else {
+                                doc.push_str(&format!("| {} | {} | {} |\n", prop_name, prop_type, comment));
+                            }
                         }
                         doc.push_str("\n");
                     }
@@ -2255,32 +2272,52 @@ fn get_kit() -> Option<String> {
 }
 
 /// Parse the kit ontology to find document types and their properties.
-fn get_kit_types(kit: &str) -> Vec<(String, Vec<(String, String, bool)>)> {
+/// Returns: Vec<(ClassName, Vec<(prop_name, prop_type, required, comment)>)>
+fn get_kit_types(kit: &str) -> Vec<(String, Vec<(String, String, bool, String)>)> {
     let root = match find_git_root() {
         Some(r) => r,
         None => return Vec::new(),
     };
 
-    let ontology_path = root.join(".lex").join("ontology").join("kit").join(kit).join(format!("{}.ttl", kit));
+    // Try {kit}.ttl first, then find any .ttl in the kit directory
+    let kit_dir = root.join(".lex").join("ontology").join("kit").join(kit);
+    let ontology_path = kit_dir.join(format!("{}.ttl", kit));
     let content = match fs::read_to_string(&ontology_path) {
         Ok(c) => c,
-        Err(_) => return Vec::new(),
+        Err(_) => {
+            // Fallback: find the first .ttl file in the kit directory
+            match fs::read_dir(&kit_dir).ok().and_then(|entries| {
+                entries.filter_map(|e| e.ok())
+                    .find(|e| e.path().extension().is_some_and(|ext| ext == "ttl"))
+                    .and_then(|e| fs::read_to_string(e.path()).ok())
+            }) {
+                Some(c) => c,
+                None => return Vec::new(),
+            }
+        }
     };
 
-    // Extract the kit prefix namespace
+    // Extract the kit prefix — find the @prefix that maps to this kit's namespace URL
+    let kit_ns_pattern = format!("/kit/{}/", kit);
     let mut prefix = String::new();
+    let mut prefix_name = kit.to_string();
     for line in content.lines() {
-        if line.starts_with(&format!("@prefix {}:", kit)) {
+        if line.starts_with("@prefix ") && line.contains(&kit_ns_pattern) {
+            // Extract prefix name: @prefix lab: <...> .
+            if let Some(colon_pos) = line[8..].find(':') {
+                prefix_name = line[8..8 + colon_pos].trim().to_string();
+            }
             if let Some(start) = line.find('<') {
                 if let Some(end) = line.find('>') {
                     prefix = line[start + 1..end].to_string();
                 }
             }
+            break;
         }
     }
 
     // Find all owl:Class declarations and their properties
-    let mut types: HashMap<String, Vec<(String, String, bool)>> = HashMap::new();
+    let mut types: HashMap<String, Vec<(String, String, bool, String)>> = HashMap::new();
     let mut current_class = String::new();
 
     for line in content.lines() {
@@ -2290,7 +2327,7 @@ fn get_kit_types(kit: &str) -> Vec<(String, Vec<(String, String, bool)>)> {
         if trimmed.contains("a owl:Class") {
             if let Some(class_name) = trimmed.split_whitespace().next() {
                 let name = class_name
-                    .strip_prefix(&format!("{}:", kit))
+                    .strip_prefix(&format!("{}:", prefix_name))
                     .unwrap_or(class_name)
                     .to_string();
                 current_class = name.clone();
@@ -2299,15 +2336,16 @@ fn get_kit_types(kit: &str) -> Vec<(String, Vec<(String, String, bool)>)> {
         }
 
         // Detect property with domain: "rdfs:domain squad:Decision ;"
-        if trimmed.contains("rdfs:domain") && trimmed.contains(&format!("{}:", kit)) {
+        if trimmed.contains("rdfs:domain") && trimmed.contains(&format!("{}:", prefix_name)) {
             // Look back to find the property name — this is tricky with TTL
             // Instead, we'll parse properties differently
         }
     }
 
-    // Parse properties: track current property name and type across multi-line TTL blocks
+    // Parse properties: track current property name, type, and comment across multi-line TTL blocks
     let mut current_prop = String::new();
     let mut current_prop_type = String::new();
+    let mut current_comment = String::new();
 
     for line in content.lines() {
         let trimmed = line.trim();
@@ -2316,7 +2354,7 @@ fn get_kit_types(kit: &str) -> Vec<(String, Vec<(String, String, bool)>)> {
         if trimmed.contains("a owl:DatatypeProperty") || trimmed.contains("a owl:ObjectProperty") {
             if let Some(prop) = trimmed.split_whitespace().next() {
                 current_prop = prop
-                    .strip_prefix(&format!("{}:", kit))
+                    .strip_prefix(&format!("{}:", prefix_name))
                     .unwrap_or(prop)
                     .to_string();
                 current_prop_type = if trimmed.contains("DatatypeProperty") {
@@ -2324,6 +2362,17 @@ fn get_kit_types(kit: &str) -> Vec<(String, Vec<(String, String, bool)>)> {
                 } else {
                     "reference".to_string()
                 };
+                current_comment.clear();
+            }
+        }
+
+        // Capture rdfs:comment within a property block
+        if !current_prop.is_empty() && trimmed.starts_with("rdfs:comment") {
+            // Extract the quoted string: rdfs:comment "Some text." ;
+            if let Some(start) = trimmed.find('"') {
+                if let Some(end) = trimmed[start + 1..].find('"') {
+                    current_comment = trimmed[start + 1..start + 1 + end].to_string();
+                }
             }
         }
 
@@ -2331,13 +2380,13 @@ fn get_kit_types(kit: &str) -> Vec<(String, Vec<(String, String, bool)>)> {
         if !current_prop.is_empty() && trimmed.starts_with("rdfs:domain") {
             if let Some(domain) = trimmed.split_whitespace().nth(1) {
                 let class_name = domain
-                    .strip_prefix(&format!("{}:", kit))
+                    .strip_prefix(&format!("{}:", prefix_name))
                     .unwrap_or(domain)
                     .trim_end_matches(|c: char| c == ' ' || c == ';' || c == '.')
                     .to_string();
 
                 if let Some(props) = types.get_mut(&class_name) {
-                    props.push((current_prop.clone(), current_prop_type.clone(), false));
+                    props.push((current_prop.clone(), current_prop_type.clone(), false, current_comment.clone()));
                 }
             }
         }
@@ -2345,6 +2394,7 @@ fn get_kit_types(kit: &str) -> Vec<(String, Vec<(String, String, bool)>)> {
         // A blank line or a new top-level definition ends the current property block
         if trimmed.is_empty() {
             current_prop.clear();
+            current_comment.clear();
         }
     }
 
@@ -2417,15 +2467,22 @@ fn cmd_create(doctype: &str, title: Option<&str>) {
     fm.push_str(&format!("{}:\n", kit));
     fm.push_str(&format!("  type: {}\n", class_name));
 
-    for (prop_name, prop_type, _required) in &properties {
+    for (prop_name, prop_type, _required, comment) in &properties {
+        // Build the comment suffix from rdfs:comment
+        let comment_suffix = if comment.is_empty() {
+            String::new()
+        } else {
+            format!("  # {}", comment)
+        };
+
         // Auto-fill agentEmail for Agent type
         if prop_name == "agentEmail" && class_name == "Agent" {
-            fm.push_str(&format!("  {}: \"{}\"\n", prop_name, agent_email));
+            fm.push_str(&format!("  {}: \"{}\"{}\n", prop_name, agent_email, comment_suffix));
         } else {
             match prop_type.as_str() {
-                "string" => fm.push_str(&format!("  {}: \"\"\n", prop_name)),
-                "reference" => fm.push_str(&format!("  {}: \n", prop_name)),
-                _ => fm.push_str(&format!("  {}: \n", prop_name)),
+                "string" => fm.push_str(&format!("  {}: \"\"{}\n", prop_name, comment_suffix)),
+                "reference" => fm.push_str(&format!("  {}: {}\n", prop_name, comment_suffix.trim_start())),
+                _ => fm.push_str(&format!("  {}: {}\n", prop_name, comment_suffix.trim_start())),
             }
         }
     }
@@ -2874,18 +2931,44 @@ fn add_prefixes(query: &str) -> String {
         .unwrap_or_default();
     let o_prefix = format!("PREFIX o: <https://repolex.ai/ont/{}/>", first_commit);
 
-    // Also read kit from repo.yml for squad: prefix
+    // Also read kit from repo.yml and get the actual prefix from the TTL
     let kit_prefix = find_git_root().and_then(|r| {
         let content = fs::read_to_string(r.join(".lex").join("repo.yml")).ok()?;
         for line in content.lines() {
             if let Some(kit) = line.strip_prefix("kit: ") {
                 let kit = kit.trim();
-                if kit != "none" {
-                    return Some((
-                        format!("{}:", kit),
-                        format!("PREFIX {}: <https://repolex.ai/ontology/kit/{}/>", kit, kit),
-                    ));
+                if kit == "none" { return None; }
+                // Read the kit TTL to find the actual prefix name
+                // Try {kit}.ttl first, then find any .ttl in the kit dir
+                let kit_dir = r.join(".lex").join("ontology").join("kit").join(kit);
+                let ttl_path = kit_dir.join(format!("{}.ttl", kit));
+                let ttl_path = if ttl_path.exists() { ttl_path } else {
+                    fs::read_dir(&kit_dir).ok()
+                        .and_then(|entries| entries.filter_map(|e| e.ok())
+                            .find(|e| e.path().extension().is_some_and(|ext| ext == "ttl"))
+                            .map(|e| e.path()))
+                        .unwrap_or(ttl_path)
+                };
+                let kit_ns_pattern = format!("/kit/{}/", kit);
+                if let Ok(ttl) = fs::read_to_string(&ttl_path) {
+                    for tline in ttl.lines() {
+                        if tline.starts_with("@prefix ") && tline.contains(&kit_ns_pattern) {
+                            if let Some(colon_pos) = tline[8..].find(':') {
+                                let pname = tline[8..8 + colon_pos].trim();
+                                let ns = format!("https://repolex.ai/ontology/kit/{}/", kit);
+                                return Some((
+                                    format!("{}:", pname),
+                                    format!("PREFIX {}: <{}>", pname, ns),
+                                ));
+                            }
+                        }
+                    }
                 }
+                // Fallback: use kit name as prefix
+                return Some((
+                    format!("{}:", kit),
+                    format!("PREFIX {}: <https://repolex.ai/ontology/kit/{}/>", kit, kit),
+                ));
             }
         }
         None
