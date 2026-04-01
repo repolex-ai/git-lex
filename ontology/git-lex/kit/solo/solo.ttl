@@ -57,7 +57,7 @@ solo:source a owl:DatatypeProperty ;
 
 solo:category a owl:DatatypeProperty ;
     rdfs:label "category" ;
-    rdfs:comment "Memory category: 'fact', 'preference', 'skill', 'observation', 'lesson'." ;
+    rdfs:comment "Memory category: 'fact', 'preference', 'skill', 'observation', 'lesson', 'reference', 'decision'." ;
     rdfs:domain solo:Memory ;
     rdfs:range xsd:string .
 
@@ -83,7 +83,7 @@ solo:rationale a owl:DatatypeProperty ;
 
 solo:outcome a owl:DatatypeProperty ;
     rdfs:label "outcome" ;
-    rdfs:comment "What happened: 'pending', 'worked', 'failed', 'superseded'." ;
+    rdfs:comment "What happened: 'pending', 'implemented', 'failed', 'superseded'." ;
     rdfs:domain solo:Decision ;
     rdfs:range xsd:string .
 
