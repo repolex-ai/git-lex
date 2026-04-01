@@ -129,6 +129,13 @@ enum Commands {
     },
     /// Show status of .lex/ in the current repo
     Status,
+    /// Join a squad repo (creates mutual identity binding)
+    Join {
+        /// Path to the squad repo to join
+        squad_path: String,
+    },
+    /// Show this repo's identity
+    Identity,
 }
 
 /// Find the git repo root from the current directory.
@@ -784,6 +791,41 @@ fn cmd_init(kit: Option<String>) {
                 let _ = Command::new("git").args(["commit", "-m", "Initial content"]).status();
                 println!("Committed existing content.");
             }
+        }
+    }
+
+    // Write .lex/identity.yml with first commit SHA (the repo's cryptographic identity)
+    let identity_path = root.join(".lex").join("identity.yml");
+    if !identity_path.exists() {
+        let first_sha = Command::new("git")
+            .args(["rev-list", "--max-parents=0", "HEAD"])
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+            .unwrap_or_default();
+
+        if !first_sha.is_empty() {
+            let now = Command::new("date").args(["-u", "+%Y-%m-%dT%H:%M:%SZ"])
+                .output().ok()
+                .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+                .unwrap_or_else(|| "unknown".to_string());
+
+            let identity = format!(
+                "# git-lex identity — do not edit\n\
+                 # This file anchors this repo's cryptographic identity.\n\
+                 # The SHA below is the first commit hash — immutable and unique.\n\
+                 identity: {}\n\
+                 created: {}\n\
+                 kit: {}\n",
+                first_sha, now, kit_name
+            );
+            fs::write(&identity_path, &identity).ok();
+
+            // Commit the identity file
+            let _ = Command::new("git").args(["add", ".lex/identity.yml"]).status();
+            let _ = Command::new("git").args(["commit", "-m", "git lex identity"]).status();
+            println!("Identity: {}", first_sha);
         }
     }
 }
@@ -2736,6 +2778,164 @@ fn frontmatter_to_turtle(filepath: &std::path::Path, root: &std::path::Path, kit
     Some(ttl)
 }
 
+// ─── git lex identity ──────────────────────────────────────────
+
+fn read_identity(root: &std::path::Path) -> Option<String> {
+    let content = fs::read_to_string(root.join(".lex").join("identity.yml")).ok()?;
+    for line in content.lines() {
+        if let Some(sha) = line.strip_prefix("identity: ") {
+            return Some(sha.trim().to_string());
+        }
+    }
+    None
+}
+
+fn cmd_identity() {
+    let root = match find_git_root() {
+        Some(r) => r,
+        None => {
+            eprintln!("fatal: not a git repository");
+            exit(1);
+        }
+    };
+
+    let identity_path = root.join(".lex").join("identity.yml");
+    if !identity_path.exists() {
+        eprintln!("No identity found. Run 'git lex init' to create one.");
+        exit(1);
+    }
+
+    let content = fs::read_to_string(&identity_path).unwrap_or_default();
+    println!("{}", content.trim());
+
+    // Show tickets if any
+    let tickets_dir = root.join(".lex").join("tickets");
+    if tickets_dir.exists() {
+        if let Ok(entries) = fs::read_dir(&tickets_dir) {
+            let tickets: Vec<_> = entries.filter_map(|e| e.ok())
+                .filter(|e| e.path().extension().is_some_and(|ext| ext == "ticket"))
+                .collect();
+            if !tickets.is_empty() {
+                println!("\nSquad memberships:");
+                for entry in tickets {
+                    let ticket = fs::read_to_string(entry.path()).unwrap_or_default();
+                    let squad_name = ticket.lines()
+                        .find(|l| l.starts_with("squad_name:"))
+                        .map(|l| l.strip_prefix("squad_name:").unwrap_or("").trim())
+                        .unwrap_or("unknown");
+                    println!("  {} ({})", squad_name, entry.file_name().to_string_lossy());
+                }
+            }
+        }
+    }
+}
+
+// ─── git lex join ──────────────────────────────────────────────
+
+fn cmd_join(squad_path: &str) {
+    let root = match find_git_root() {
+        Some(r) => r,
+        None => {
+            eprintln!("fatal: not a git repository");
+            exit(1);
+        }
+    };
+
+    let squad_root = PathBuf::from(squad_path);
+    if !squad_root.join(".lex").join("repo.yml").exists() {
+        eprintln!("Not a git-lex repo: {}", squad_path);
+        exit(1);
+    }
+
+    // Read this agent's identity
+    let agent_sha = match read_identity(&root) {
+        Some(sha) => sha,
+        None => {
+            eprintln!("No identity found. Run 'git lex init' first.");
+            exit(1);
+        }
+    };
+
+    // Read squad's identity
+    let squad_sha = match read_identity(&squad_root) {
+        Some(sha) => sha,
+        None => {
+            eprintln!("Squad repo has no identity: {}", squad_path);
+            exit(1);
+        }
+    };
+
+    // Read squad name from repo.yml or directory name
+    let squad_name = squad_root.file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_else(|| "unknown".to_string());
+
+    // Read agent name from identity or directory name
+    let agent_name = root.file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_else(|| "unknown".to_string());
+
+    let now = Command::new("date").args(["-u", "+%Y-%m-%dT%H:%M:%SZ"])
+        .output().ok()
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .unwrap_or_else(|| "unknown".to_string());
+
+    // --- Write ticket to agent's solo repo ---
+    let tickets_dir = root.join(".lex").join("tickets");
+    fs::create_dir_all(&tickets_dir).ok();
+
+    let ticket_slug = squad_name.to_lowercase()
+        .replace(|c: char| !c.is_alphanumeric() && c != '-', "-");
+    let ticket_path = tickets_dir.join(format!("{}.ticket", ticket_slug));
+
+    if ticket_path.exists() {
+        println!("Already a member of {} — ticket exists at .lex/tickets/{}.ticket",
+            squad_name, ticket_slug);
+        return;
+    }
+
+    let ticket_content = format!(
+        "# Squad membership ticket — do not edit\n\
+         # Mutual binding: this agent is a verified member of this squad.\n\
+         squad_name: {}\n\
+         squad_path: {}\n\
+         squad_identity: {}\n\
+         agent_name: {}\n\
+         agent_identity: {}\n\
+         joined: {}\n",
+        squad_name, squad_path, squad_sha,
+        agent_name, agent_sha, now
+    );
+    fs::write(&ticket_path, &ticket_content).expect("failed to write ticket");
+
+    // --- Write member entry to squad repo ---
+    let members_dir = squad_root.join(".lex").join("members");
+    fs::create_dir_all(&members_dir).ok();
+
+    let member_slug = agent_name.to_lowercase()
+        .replace(|c: char| !c.is_alphanumeric() && c != '-', "-");
+    let member_path = members_dir.join(format!("{}.yml", member_slug));
+
+    let member_content = format!(
+        "# Squad member — do not edit\n\
+         # This agent has joined this squad via 'git lex join'.\n\
+         agent_name: {}\n\
+         agent_identity: {}\n\
+         agent_repo: {}\n\
+         joined: {}\n",
+        agent_name, agent_sha,
+        root.to_string_lossy(), now
+    );
+    fs::write(&member_path, &member_content).expect("failed to write member entry");
+
+    println!("Joined squad: {}", squad_name);
+    println!("  Agent:  {} ({})", agent_name, &agent_sha[..12]);
+    println!("  Squad:  {} ({})", squad_name, &squad_sha[..12]);
+    println!("  Ticket: .lex/tickets/{}.ticket", ticket_slug);
+    println!("  Member: {} .lex/members/{}.yml", squad_path, member_slug);
+    println!("\nCommit both repos to finalize the binding.");
+}
+
 /// Returns true if all files pass, false if any violations found.
 fn cmd_validate() -> bool {
     let start = Instant::now();
@@ -3534,6 +3734,8 @@ fn main() {
                 exit(1);
             }
         }
+        Commands::Join { squad_path } => cmd_join(&squad_path),
+        Commands::Identity => cmd_identity(),
         Commands::Llm { command } => match command {
             LlmCommands::List => cmd_llm_list(),
             LlmCommands::Extract { file, model } => cmd_llm_extract(&file, &model),
