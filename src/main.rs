@@ -1813,10 +1813,27 @@ fn generate_frontmatter_nquads() -> String {
 
                             // to-links → also emit lex:mentions so channel broker can route notifications
                             if subject.ends_with(".to-links") || subject == "to-links" {
-                                nq.push_str(&format!(
-                                    "{} <https://repolex.ai/ontology/git-lex/lex/mentions> \"{}\" {} .\n",
-                                    doc_uri, nq_escape(&slug), graph
-                                ));
+                                if slug == "squad" {
+                                    // @squad broadcast — expand to all agents in squad agent/ dir
+                                    if let Ok(entries) = fs::read_dir(root.join("agent")) {
+                                        for entry in entries.filter_map(|e| e.ok()) {
+                                            let name = entry.file_name().to_string_lossy()
+                                                .trim_end_matches(".md").to_lowercase()
+                                                .replace(' ', "-");
+                                            if !name.is_empty() && !name.starts_with('.') {
+                                                nq.push_str(&format!(
+                                                    "{} <https://repolex.ai/ontology/git-lex/lex/mentions> \"{}\" {} .\n",
+                                                    doc_uri, nq_escape(&name), graph
+                                                ));
+                                            }
+                                        }
+                                    }
+                                } else {
+                                    nq.push_str(&format!(
+                                        "{} <https://repolex.ai/ontology/git-lex/lex/mentions> \"{}\" {} .\n",
+                                        doc_uri, nq_escape(&slug), graph
+                                    ));
+                                }
                             }
                         }
                     } else {
