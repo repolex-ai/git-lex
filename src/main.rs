@@ -90,6 +90,8 @@ enum Commands {
     },
     /// Extract frontmatter from .md files → write .spo sidecars + compile log
     Extract,
+    /// Validate documents against SHACL shapes from the kit ontology
+    Validate,
     /// Dump all generated N-Quads to stdout (debug)
     Dump,
     /// Resolve extraction log into RDF N-Quads (mechanical transformation)
@@ -451,6 +453,10 @@ const ONT_KIT_SQUAD: &str = include_str!("../ontology/git-lex/kit/squad/squad.tt
 const ONT_KIT_SOLO: &str = include_str!("../ontology/git-lex/kit/solo/solo.ttl");
 const ONT_KIT_CLAUDE_CODE: &str = include_str!("../ontology/git-lex/kit/claude-code/claude-code.ttl");
 const ONT_KIT_LEX_LAB: &str = include_str!("../ontology/git-lex/kit/lex-lab/lab.ttl");
+const SHAPES_SQUAD: &str = include_str!("../ontology/git-lex/kit/squad/squad-shapes.ttl");
+const SHAPES_SOLO: &str = include_str!("../ontology/git-lex/kit/solo/solo-shapes.ttl");
+const SHAPES_CLAUDE_CODE: &str = include_str!("../ontology/git-lex/kit/claude-code/claude-code-shapes.ttl");
+const SHAPES_LEX_LAB: &str = include_str!("../ontology/git-lex/kit/lex-lab/lab-shapes.ttl");
 
 fn cmd_init(kit: Option<String>) {
     let root = match find_git_root() {
@@ -524,6 +530,21 @@ fn cmd_init(kit: Option<String>) {
         fs::create_dir_all(kit_path.parent().unwrap()).ok();
         if !kit_path.exists() {
             fs::write(&kit_path, kit_content).expect("failed to write kit ontology");
+        }
+
+        // Install SHACL shapes if available
+        let shapes_content = match k.as_str() {
+            "squad" => Some(("squad-shapes.ttl", SHAPES_SQUAD)),
+            "solo" => Some(("solo-shapes.ttl", SHAPES_SOLO)),
+            "claude-code" => Some(("claude-code-shapes.ttl", SHAPES_CLAUDE_CODE)),
+            "lex-lab" => Some(("lab-shapes.ttl", SHAPES_LEX_LAB)),
+            _ => None,
+        };
+        if let Some((shapes_filename, shapes)) = shapes_content {
+            let shapes_path = ont_dir.join(format!("kit/{}/{}", k, shapes_filename));
+            if !shapes_path.exists() {
+                fs::write(&shapes_path, shapes).expect("failed to write SHACL shapes");
+            }
         }
     }
 
@@ -2586,6 +2607,290 @@ fn cmd_save(message: &str) {
     }
 }
 
+// ─── SHACL validation via rudof ────────────────────────────────
+
+/// Convert frontmatter from a markdown file to Turtle RDF for SHACL validation.
+/// Returns None if the file has no frontmatter or no kit-specific block.
+fn frontmatter_to_turtle(filepath: &std::path::Path, root: &std::path::Path, kit: &str) -> Option<String> {
+    let content = fs::read_to_string(filepath).ok()?;
+
+    if !content.starts_with("---\n") && !content.starts_with("---\r\n") {
+        return None;
+    }
+
+    let rest = &content[4..];
+    let end = rest.find("\n---")?;
+    let yaml_str = &rest[..end];
+
+    let yaml: HashMap<String, serde_yaml::Value> = serde_yaml::from_str(yaml_str).ok()?;
+
+    // Get kit-specific block
+    let kit_block = yaml.get(kit)?;
+    let kit_map = kit_block.as_mapping()?;
+
+    // Get the document type
+    let doc_type = kit_map.get(&serde_yaml::Value::String("type".to_string()))?
+        .as_str()?;
+
+    // Read the kit ontology to find the prefix name and namespace
+    let kit_dir = root.join(".lex").join("ontology").join("kit").join(kit);
+    let ttl_path = {
+        let primary = kit_dir.join(format!("{}.ttl", kit));
+        if primary.exists() { primary } else {
+            fs::read_dir(&kit_dir).ok()?
+                .filter_map(|e| e.ok())
+                .find(|e| e.path().extension().is_some_and(|ext| ext == "ttl"))?
+                .path()
+        }
+    };
+    let kit_ttl = fs::read_to_string(&ttl_path).ok()?;
+
+    // Find prefix name and namespace from TTL
+    let kit_ns_pattern = format!("/kit/{}/", kit);
+    let mut prefix_name = kit.to_string();
+    let mut namespace = format!("https://repolex.ai/ontology/kit/{}/", kit);
+    for line in kit_ttl.lines() {
+        if line.starts_with("@prefix ") && line.contains(&kit_ns_pattern) {
+            if let Some(colon_pos) = line[8..].find(':') {
+                prefix_name = line[8..8 + colon_pos].trim().to_string();
+            }
+            if let Some(start) = line.find('<') {
+                if let Some(end) = line.find('>') {
+                    namespace = line[start + 1..end].to_string();
+                }
+            }
+            break;
+        }
+    }
+
+    // Build Turtle RDF for this document
+    let relpath = filepath.strip_prefix(root).ok()?;
+    let doc_id = relpath.to_string_lossy().replace('/', "_").replace('.', "_");
+
+    let mut ttl = String::new();
+    ttl.push_str(&format!("@prefix {}: <{}> .\n", prefix_name, namespace));
+    ttl.push_str("@prefix sh: <http://www.w3.org/ns/shacl#> .\n");
+    ttl.push_str("@prefix xsd: <http://www.w3.org/2001/XMLSchema#> .\n\n");
+
+    // Declare the document as an instance of the type
+    ttl.push_str(&format!("<urn:doc:{}> a {}:{} .\n", doc_id, prefix_name, doc_type));
+
+    // Add properties from the kit block
+    for (key, value) in kit_map.iter() {
+        let key_str = key.as_str().unwrap_or_default();
+        if key_str == "type" { continue; }
+
+        match value {
+            serde_yaml::Value::String(s) if !s.is_empty() => {
+                if key_str.ends_with("-link") || key_str.ends_with("-links") {
+                    // For -links, split on commas
+                    let values: Vec<&str> = if key_str.ends_with("-links") {
+                        s.split(',').map(|v| v.trim()).filter(|v| !v.is_empty()).collect()
+                    } else {
+                        vec![s.trim()]
+                    };
+                    for val in values {
+                        let slug = val.trim_start_matches('@').to_lowercase()
+                            .replace(' ', "-")
+                            .replace(|c: char| !c.is_alphanumeric() && c != '-', "");
+                        if !slug.is_empty() {
+                            ttl.push_str(&format!(
+                                "<urn:doc:{}> {}:{} <urn:entity:{}> .\n",
+                                doc_id, prefix_name, key_str, slug
+                            ));
+                        }
+                    }
+                } else {
+                    ttl.push_str(&format!(
+                        "<urn:doc:{}> {}:{} \"{}\" .\n",
+                        doc_id, prefix_name, key_str, s.replace('"', "\\\"")
+                    ));
+                }
+            }
+            serde_yaml::Value::Sequence(seq) => {
+                for item in seq {
+                    if let Some(s) = item.as_str() {
+                        if key_str.ends_with("-links") {
+                            let slug = s.trim_start_matches('@').to_lowercase()
+                                .replace(' ', "-")
+                                .replace(|c: char| !c.is_alphanumeric() && c != '-', "");
+                            if !slug.is_empty() {
+                                ttl.push_str(&format!(
+                                    "<urn:doc:{}> {}:{} <urn:entity:{}> .\n",
+                                    doc_id, prefix_name, key_str, slug
+                                ));
+                            }
+                        } else {
+                            ttl.push_str(&format!(
+                                "<urn:doc:{}> {}:{} \"{}\" .\n",
+                                doc_id, prefix_name, key_str, s.replace('"', "\\\"")
+                            ));
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    Some(ttl)
+}
+
+fn cmd_validate() {
+    let start = Instant::now();
+
+    let root = match find_git_root() {
+        Some(r) => r,
+        None => {
+            eprintln!("fatal: not a git repository");
+            exit(1);
+        }
+    };
+
+    let kit = match get_kit() {
+        Some(k) => k,
+        None => {
+            println!("No kit configured — nothing to validate.");
+            return;
+        }
+    };
+
+    // Load kit ontology TTL
+    let kit_dir = root.join(".lex").join("ontology").join("kit").join(&kit);
+    let ont_ttl = {
+        let primary = kit_dir.join(format!("{}.ttl", &kit));
+        if primary.exists() {
+            fs::read_to_string(&primary).unwrap_or_default()
+        } else {
+            fs::read_dir(&kit_dir).ok()
+                .and_then(|entries| entries.filter_map(|e| e.ok())
+                    .find(|e| e.path().extension().is_some_and(|ext| ext == "ttl"))
+                    .and_then(|e| fs::read_to_string(e.path()).ok()))
+                .unwrap_or_default()
+        }
+    };
+
+    // Load SHACL shapes TTL
+    let shapes_ttl = fs::read_dir(&kit_dir).ok()
+        .and_then(|entries| entries.filter_map(|e| e.ok())
+            .find(|e| e.file_name().to_string_lossy().contains("shapes"))
+            .and_then(|e| fs::read_to_string(e.path()).ok()));
+
+    let shapes_ttl = match shapes_ttl {
+        Some(s) => s,
+        None => {
+            println!("No SHACL shapes found for kit '{}' — skipping validation.", kit);
+            return;
+        }
+    };
+
+    // Combine ontology + shapes for rudof (shapes reference ontology classes)
+    let combined_shapes = format!("{}\n{}", ont_ttl, shapes_ttl);
+
+    // Find all .md files in the repo
+    fn walk_md(dir: &std::path::Path, files: &mut Vec<PathBuf>) {
+        if let Ok(entries) = fs::read_dir(dir) {
+            for entry in entries.filter_map(|e| e.ok()) {
+                let path = entry.path();
+                let name = entry.file_name().to_string_lossy().to_string();
+                if name.starts_with('.') { continue; }
+                if path.is_dir() { walk_md(&path, files); }
+                else if name.ends_with(".md") { files.push(path); }
+            }
+        }
+    }
+
+    let mut files = Vec::new();
+    walk_md(&root, &mut files);
+
+    // Initialize rudof
+    let config = match rudof_lib::RudofConfig::new() {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("Failed to create rudof config: {}", e);
+            return;
+        }
+    };
+    let mut rudof = match rudof_lib::Rudof::new(&config) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("Failed to create rudof instance: {}", e);
+            return;
+        }
+    };
+
+    // Load shapes once
+    if let Err(e) = rudof.read_shacl(
+        &mut combined_shapes.as_bytes(),
+        "shapes",
+        Some(&rudof_lib::ShaclFormat::Turtle),
+        None,
+        Some(&rudof_lib::ReaderMode::Lax),
+    ) {
+        eprintln!("Failed to load SHACL shapes: {}", e);
+        return;
+    }
+
+    let mut total_files = 0;
+    let mut total_violations = 0;
+    let mut failed_files = Vec::new();
+
+    for filepath in &files {
+        let ttl = match frontmatter_to_turtle(filepath, &root, &kit) {
+            Some(t) => t,
+            None => continue,
+        };
+        total_files += 1;
+
+        // Reset data, keep shapes cached
+        rudof.reset_data();
+
+        if let Err(e) = rudof.read_data(
+            &mut ttl.as_bytes(),
+            &filepath.to_string_lossy(),
+            Some(&rudof_lib::RDFFormat::Turtle),
+            None,
+            Some(&rudof_lib::ReaderMode::Strict),
+            Some(false),
+        ) {
+            eprintln!("  Parse error in {}: {}", filepath.display(), e);
+            continue;
+        }
+
+        match rudof.validate_shacl(
+            Some(&rudof_lib::ShaclValidationMode::Native),
+            Some(&rudof_lib::ShapesGraphSource::CurrentSchema),
+        ) {
+            Ok(report) => {
+                if !report.conforms() {
+                    let relpath = filepath.strip_prefix(&root).unwrap_or(filepath);
+                    let violations = report.count_violations();
+                    total_violations += violations;
+                    failed_files.push(relpath.to_string_lossy().to_string());
+                    eprintln!("  {} — {} violation(s):", relpath.display(), violations);
+                    for result in report.results() {
+                        let msg = result.message().unwrap_or("(no message)");
+                        eprintln!("    → {}", msg);
+                    }
+                }
+            }
+            Err(e) => {
+                eprintln!("  Validation error for {}: {}", filepath.display(), e);
+            }
+        }
+    }
+
+    let elapsed = start.elapsed();
+    if total_violations == 0 {
+        eprintln!("Validated {} files in {:.1}ms — all pass ✓",
+            total_files, elapsed.as_secs_f64() * 1000.0);
+    } else {
+        eprintln!("Validated {} files in {:.1}ms — {} violation(s) in {} file(s)",
+            total_files, elapsed.as_secs_f64() * 1000.0,
+            total_violations, failed_files.len());
+    }
+}
+
 fn cmd_extract() {
     let start = Instant::now();
 
@@ -3221,6 +3526,7 @@ fn main() {
             print!("{}{}{}", git_nq, fm_nq, lex_nq);
         }
         Commands::Extract => cmd_extract(),
+        Commands::Validate => cmd_validate(),
         Commands::Llm { command } => match command {
             LlmCommands::List => cmd_llm_list(),
             LlmCommands::Extract { file, model } => cmd_llm_extract(&file, &model),
