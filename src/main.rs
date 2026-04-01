@@ -1677,10 +1677,41 @@ fn generate_frontmatter_nquads() -> String {
                 } else {
                     // Frontmatter key-value
                     let fm_predicate = format!("<https://repolex.ai/ontology/git-lex/fm/{}>", uri_encode_path(subject));
-                    nq.push_str(&format!(
-                        "{} {} \"{}\" {} .\n",
-                        doc_uri, fm_predicate, nq_escape(object), graph
-                    ));
+
+                    // Check if this is a -link or -links property → resolve object as entity URI
+                    if subject.ends_with("-link") || subject.ends_with("-links") {
+                        // Resolve each value (could be comma-separated for -links)
+                        let values: Vec<&str> = if subject.ends_with("-links") {
+                            object.split(',').map(|s| s.trim()).filter(|s| !s.is_empty()).collect()
+                        } else {
+                            vec![object.trim()]
+                        };
+                        for val in values {
+                            if val.is_empty() { continue; }
+                            // Strip @ prefix if present, normalize to slug
+                            let slug = val.trim_start_matches('@').to_lowercase()
+                                .replace(' ', "-")
+                                .replace(|c: char| !c.is_alphanumeric() && c != '-' && c != '/' && c != '.', "");
+                            if slug.is_empty() { continue; }
+
+                            // If it looks like a file path (contains / or .md), use file URI
+                            let object_uri = if slug.contains('/') || slug.ends_with(".md") {
+                                format!("<{}/file/{}>", base, uri_encode_path(&slug))
+                            } else {
+                                // Otherwise, resolve as an entity by slug
+                                format!("<{}/entity/{}>", base, uri_encode_path(&slug))
+                            };
+                            nq.push_str(&format!(
+                                "{} {} {} {} .\n",
+                                doc_uri, fm_predicate, object_uri, graph
+                            ));
+                        }
+                    } else {
+                        nq.push_str(&format!(
+                            "{} {} \"{}\" {} .\n",
+                            doc_uri, fm_predicate, nq_escape(object), graph
+                        ));
+                    }
                 }
             }
         }
@@ -2167,10 +2198,29 @@ fn cmd_resolve(full: bool) {
             format!("<https://repolex.ai/r/{}/predicate/{}>", get_repo_id(), sanitize_uri_segment(predicate))
         };
 
-        // Handle object: if predicate is isA or hasValue, object is a literal
-        // Otherwise, object is another entity from the same file
-        let object_nq = if predicate == "isA" || predicate == "hasValue" {
+        // Handle object based on property type:
+        // - isA → literal (class name)
+        // - hasValue with -link/-links subject → resolve as entity URI
+        // - hasValue otherwise → literal
+        // - other predicates → entity from same file
+        let object_nq = if predicate == "isA" {
             format!("\"{}\"", nq_escape(object))
+        } else if predicate == "hasValue" {
+            if subject.ends_with("-link") || subject.ends_with("-links") {
+                // Resolve -link values as entity URIs
+                let slug = object.trim().trim_start_matches('@').to_lowercase()
+                    .replace(' ', "-")
+                    .replace(|c: char| !c.is_alphanumeric() && c != '-' && c != '/' && c != '.', "");
+                if slug.contains('/') || slug.ends_with(".md") {
+                    format!("<{}/file/{}>", base, uri_encode_path(&slug))
+                } else if !slug.is_empty() {
+                    format!("<{}/entity/{}>", base, uri_encode_path(&slug))
+                } else {
+                    format!("\"{}\"", nq_escape(object))
+                }
+            } else {
+                format!("\"{}\"", nq_escape(object))
+            }
         } else {
             format!("<{}/entity/{}~{}>", base, sanitize_uri_segment(object), blob_hash)
         };
