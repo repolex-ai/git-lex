@@ -1811,30 +1811,6 @@ fn generate_frontmatter_nquads() -> String {
                                 doc_uri, fm_predicate, object_uri, graph
                             ));
 
-                            // to-links → also emit lex:mentions so channel broker can route notifications
-                            if subject.ends_with(".to-links") || subject == "to-links" {
-                                if slug == "squad" {
-                                    // @squad broadcast — expand to all agents in squad agent/ dir
-                                    if let Ok(entries) = fs::read_dir(root.join("agent")) {
-                                        for entry in entries.filter_map(|e| e.ok()) {
-                                            let name = entry.file_name().to_string_lossy()
-                                                .trim_end_matches(".md").to_lowercase()
-                                                .replace(' ', "-");
-                                            if !name.is_empty() && !name.starts_with('.') {
-                                                nq.push_str(&format!(
-                                                    "{} <https://repolex.ai/ontology/git-lex/lex/mentions> \"{}\" {} .\n",
-                                                    doc_uri, nq_escape(&name), graph
-                                                ));
-                                            }
-                                        }
-                                    }
-                                } else {
-                                    nq.push_str(&format!(
-                                        "{} <https://repolex.ai/ontology/git-lex/lex/mentions> \"{}\" {} .\n",
-                                        doc_uri, nq_escape(&slug), graph
-                                    ));
-                                }
-                            }
                         }
                     } else {
                         nq.push_str(&format!(
