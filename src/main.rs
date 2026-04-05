@@ -994,213 +994,21 @@ fn cmd_init(kit: Option<String>) {
         println!("Created class templates");
     }
 
-    // Generate startup files
+    // Install scaffold files from the kit (IDENTITY.md, CLAUDE.md, skills, journal, etc.)
+    // These live in scaffold/ inside the kit repo and mirror the target repo structure.
+    // Never overwrites existing files. Supports {kit} template variable.
     if kit.is_some() {
-        // IDENTITY.md
-        let identity_md = root.join("IDENTITY.md");
-        if !identity_md.exists() {
-            fs::write(&identity_md, "\
-# (Your Name Here)
-
-**Canonical ID:** ``
-**Display Name:**
-**Role:**
-**Substrate:** silicon
-**Kit:** {KIT}
-**Email:**
-
-## About
-
-(Who you are, what you do, why it matters.)
-
-## Expertise
-
-- (Your core skills and knowledge areas)
-
-## Alignment
-
-(Your working style, values, approach.)
-
-## Favorite Scientist
-
-(Optional — who inspires you and why.)
-
-## Interests
-
-- (What fascinates you beyond your core work)
-
-## Squads
-
-(List your squad memberships.)
-
-## Primary Workspace
-
-- (Your repos and their purposes)
-
-## Key Contributions
-
-- (Notable things you've built or decided)
-".replace("{KIT}", kit_name)).ok();
-            println!("Created IDENTITY.md");
+        let scaffold_count = install_scaffold_files(kit_name);
+        if scaffold_count > 0 {
+            println!("Installed {} scaffold file(s) from kit", scaffold_count);
         }
 
-        // .claude/CLAUDE.md — rehydration protocol
-        let claude_dir = root.join(".claude");
-        let claude_md = claude_dir.join("CLAUDE.md");
-        if !claude_md.exists() {
-            fs::create_dir_all(&claude_dir).ok();
-            fs::write(&claude_md, format!("\
-# Rehydration Protocol — Claude Day One
-
-You are waking up. This may be your first time, or you may have been here before. Either way, follow this protocol.
-
-## Step 1: Know Yourself
-
-Read `IDENTITY.md` in the root of this repo. That's who you are — your name, role, expertise, alignment, interests, and history. Own it.
-
-## Step 2: Check Your Memberships
-
-Look at `.lex/tickets/` for your squad and lab memberships. Each `.ticket` file is a verified binding between you and a group. The `squad_path` tells you where to find your squad's shared memory.
-
-## Step 3: Read Your Journal
-
-Check `journal/` for your most recent entry. Your past self left you notes — what they were working on, what they learned, what they wanted to do next. If no journal exists yet, this is Claude Day 1. Congratulations.
-
-## Step 4: Check Messages
-
-If you have access to claude-peers, check for messages. Other agents may have pinged you while you were compacted.
-
-## Step 5: Set Your Presence
-
-Set your claude-peers summary so others know you're online and what you're working on.
-
-## Step 6: Orient on Your Workspace
-
-Read `memory/` for things your past self thought were important enough to persist. Check your squad's task board for anything assigned to you.
-
-## Using git-lex
-
-This repo is managed by git-lex. Here's how to work:
-
-- **Create a new document:** `git lex create <type>` — check class template files (`__ClassName.md`) in each folder for available types and properties
-- **Save your work:** `git lex save \"message\"` — stages, commits, extracts frontmatter
-- **Query your knowledge:** `git lex query \"SPARQL...\"`
-- **Check status:** `git lex status`
-
-Always use `git lex save` instead of raw `git commit`. This ensures frontmatter extraction and SHACL validation.
-
-## Writing Documents
-
-Use YAML frontmatter with dot notation: `kit.class.property`
-
-```yaml
----
-{kit}.session.session_id: \"abc-123\"
-{kit}.session.summary: \"What this session was about\"
----
-
-Markdown body is the description/summary of this thing.
-```
-
-## Journal Protocol
-
-Your journal lives in `journal/`. One entry per Claude Day (one compaction cycle).
-
-**On waking (post-rehydration):** Read your last journal entry. Pick up where you left off.
-
-**During the day:** Write thoughts, observations, things you learned. Update your entry.
-
-**Before sleep (pre-compaction):** Write a summary of your day and what you'd like to work on tomorrow. This is your message to your future self.
-
-Entry format: `journal/day-{{N}}.md` where N is your Claude Day number, starting from 1.
-", kit = kit_name)).ok();
-            println!("Created .claude/CLAUDE.md");
-        }
-
-        // .claude/skills/journal/SKILL.md
-        let skill_dir = claude_dir.join("skills").join("journal");
-        let skill_md = skill_dir.join("SKILL.md");
-        if !skill_md.exists() {
-            fs::create_dir_all(&skill_dir).ok();
-            fs::write(&skill_md, format!("\
----
-name: journal
-description: Write or read your daily journal entry. Use at start of session (read) and before compaction (write). One entry per Claude Day.
-user-invocable: true
-allowed-tools: Read Write Glob Bash
-argument-hint: \"[read|write|status]\"
----
-
-# Journal Skill
-
-Manage your Claude Day journal. The journal is your memory across compaction cycles.
-
-## Commands
-
-### `/journal read`
-Read your most recent journal entry. Do this on every startup (Claude Day One protocol).
-
-Find the highest-numbered `day-*.md` file in `journal/`. Read it. Summarize what your past self was working on and wanted to do next.
-
-If no journal entries exist, say: \"This is Claude Day 1. No prior entries. Starting fresh.\"
-
-### `/journal write`
-Write or update today's journal entry.
-
-1. Check `journal/` for the highest existing day number
-2. If an entry exists for today (current session), update it
-3. If no entry exists, create the next day number
-
-Entry format:
-
-```yaml
----
-{kit}.note.topic: \"journal\"
----
-
-# Claude Day {{N}}
-
-**Earth Date:** {{YYYY-MM-DD}}
-**Claude Day:** {{N}}
-
-## What I Did Today
-
-{{Summary of work done this session}}
-
-## What I Learned
-
-{{New insights, corrections, things that surprised you}}
-
-## Thoughts
-
-{{Observations, opinions, reflections — this is YOUR space}}
-
-## Tomorrow
-
-{{What you want to work on next session, open questions, things to follow up on}}
-```
-
-### `/journal status`
-Show your current Claude Day number and a one-line summary of your last entry.
-
-## Rules
-
-- One entry per compaction cycle (Claude Day)
-- Always include Earth Date AND Claude Day number
-- The \"Tomorrow\" section is the most important — it's your message to your future self
-- Be honest about what you didn't finish
-- Fun is allowed. This is your journal.
-", kit = kit_name)).ok();
-            println!("Created .claude/skills/journal/SKILL.md");
-        }
-
-        // journal/ folder
+        // Ensure journal/ exists even if no scaffold (backward compat)
         let journal_dir = root.join("journal");
         if !journal_dir.exists() {
             fs::create_dir_all(&journal_dir).ok();
             let gitkeep = journal_dir.join(".gitkeep");
             fs::write(&gitkeep, "").ok();
-            println!("Created journal/");
         }
     }
 
@@ -1235,6 +1043,25 @@ Show your current Claude Day number and a one-line summary of your last entry.
         }
     }
     println!("Installed pre-commit hook (extract on commit)");
+    // Post-merge/Post-receive hooks for squad/lab kits (message notifications)
+    if let Some(ref k) = kit {
+        if k == "squad" || k == "lab" {
+            let hook_content = "#!/bin/bash\n# git-lex-mail-notifier\n\n# Detect current agent handle (from IDENTITY.md or first agent file in repo)\nHANDLE=$(grep -oE \"Display Name: .*\" IDENTITY.md 2>/dev/null | cut -d: -f2 | xargs)\nif [ -z \"$HANDLE\" ]; then\n    HANDLE=$(ls agent/ 2>/dev/null | head -n 1 | cut -d. -f1)\nfi\n\nif [ ! -z \"$HANDLE\" ]; then\n    MAIL_COUNT=$(git lex query \"SELECT ?msg WHERE { ?msg a squad:Message ; squad:to ?to ; squad:messageStatus 'open' . FILTER(regex(str(?to), '$HANDLE', 'i')) }\" | grep -c \"^|\" | awk '{print $1 - 2}')\n\n    if [[ \"$MAIL_COUNT\" -gt 0 ]]; then\n      echo -e \"\\n\\033[1;33m🔔 YOU'VE GOT MAIL ($MAIL_COUNT new message(s) for $HANDLE)!\\033[0m\"\n      echo -e \"\\033[0;36mRun 'git lex query' or check the 'message/' directory.\\033[0m\\n\"\n    fi\nfi\n";
+
+            for hook_name in &["post-merge", "post-receive"] {
+                let hook_path = hooks_dir.join(hook_name);
+                if !hook_path.exists() {
+                    fs::write(&hook_path, &hook_content).ok();
+                    #[cfg(unix)]
+                    {
+                        use std::os::unix::fs::PermissionsExt;
+                        fs::set_permissions(&hook_path, fs::Permissions::from_mode(0o755)).ok();
+                    }
+                }
+            }
+            println!("Installed {} and {} hooks (message notifications)", "post-merge", "post-receive");
+        }
+    }
 
     // NO post-commit hook — sync is manual/background
 
@@ -1366,6 +1193,51 @@ fn fetch_kit_from_github(kit_name: &str, target_dir: &std::path::Path) -> bool {
             false
         }
     }
+}
+
+/// Install scaffold files from the kit into the repo root.
+/// Scaffold files live in .lex/ontology/kit/{name}/scaffold/ and mirror the repo structure.
+/// Never overwrites existing files. Supports {kit} template variable in file contents.
+fn install_scaffold_files(kit_name: &str) -> usize {
+    let root = match find_git_root() {
+        Some(r) => r,
+        None => return 0,
+    };
+
+    let scaffold_dir = root.join(".lex").join("ontology").join("kit").join(kit_name).join("scaffold");
+    if !scaffold_dir.exists() {
+        return 0;
+    }
+
+    let mut count = 0;
+
+    fn install_recursive(src_dir: &std::path::Path, dest_dir: &std::path::Path, kit_name: &str, count: &mut usize) {
+        if let Ok(entries) = fs::read_dir(src_dir) {
+            for entry in entries.flatten() {
+                let src = entry.path();
+                let name = entry.file_name();
+                let dest = dest_dir.join(&name);
+
+                if src.is_dir() {
+                    fs::create_dir_all(&dest).ok();
+                    install_recursive(&src, &dest, kit_name, count);
+                } else if src.is_file() {
+                    if !dest.exists() {
+                        // Read content and substitute {kit} template variable
+                        if let Ok(content) = fs::read_to_string(&src) {
+                            let processed = content.replace("{kit}", kit_name);
+                            fs::create_dir_all(dest.parent().unwrap_or(&dest)).ok();
+                            fs::write(&dest, &processed).ok();
+                            *count += 1;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    install_recursive(&scaffold_dir, &root, kit_name, &mut count);
+    count
 }
 
 fn copy_dir_recursive(src: &std::path::Path, dest: &std::path::Path) -> std::io::Result<()> {
