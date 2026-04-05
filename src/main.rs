@@ -2211,6 +2211,7 @@ fn generate_frontmatter_nquads() -> String {
 
     // Build ObjectProperty lookup from kit ontology
     let obj_props = get_kit().map(|k| get_object_properties(&k)).unwrap_or_default();
+    let prop_datatypes = get_kit().map(|k| get_property_datatypes(&k)).unwrap_or_default();
 
     // Open git repo for blob hash lookups
     let repo = git2::Repository::discover(".").ok();
@@ -2471,11 +2472,18 @@ fn generate_frontmatter_nquads() -> String {
                                 ));
                             }
                         } else {
-                            // DatatypeProperty: emit as literal
-                            nq.push_str(&format!(
-                                "{} {} \"{}\" {} .\n",
-                                doc_uri, kit_predicate, nq_escape(object), graph
-                            ));
+                            // DatatypeProperty: emit as typed literal if ontology specifies a non-string range
+                            if let Some(datatype) = prop_datatypes.get(prop_seg) {
+                                nq.push_str(&format!(
+                                    "{} {} \"{}\"^^<{}> {} .\n",
+                                    doc_uri, kit_predicate, nq_escape(object), datatype, graph
+                                ));
+                            } else {
+                                nq.push_str(&format!(
+                                    "{} {} \"{}\" {} .\n",
+                                    doc_uri, kit_predicate, nq_escape(object), graph
+                                ));
+                            }
                         }
                     } else {
                         // Legacy or non-kit frontmatter (title, tags, etc.) — use fm: namespace
@@ -3172,6 +3180,91 @@ fn get_object_properties(kit: &str) -> HashSet<String> {
     obj_props
 }
 
+/// Build a map of property name → XSD datatype from the kit ontology TTL.
+/// Only includes properties with non-string ranges (xsd:integer, xsd:date, xsd:dateTime, xsd:boolean, xsd:decimal).
+/// Properties with xsd:string or no range are omitted (they use the default string behavior).
+fn get_property_datatypes(kit: &str) -> HashMap<String, String> {
+    let root = match find_git_root() {
+        Some(r) => r,
+        None => return HashMap::new(),
+    };
+
+    let kit_dir = root.join(".lex").join("ontology").join("kit").join(kit);
+    let content = {
+        let primary = kit_dir.join(format!("{}.ttl", kit));
+        match fs::read_to_string(&primary) {
+            Ok(c) => c,
+            Err(_) => {
+                fs::read_dir(&kit_dir).ok()
+                    .and_then(|entries| entries.filter_map(|e| e.ok())
+                        .find(|e| e.path().extension().is_some_and(|ext| ext == "ttl") && !e.file_name().to_string_lossy().contains("shapes"))
+                        .and_then(|e| fs::read_to_string(e.path()).ok()))
+                    .unwrap_or_default()
+            }
+        }
+    };
+
+    if content.is_empty() { return HashMap::new(); }
+
+    // Find prefix name
+    let kit_ns_pattern = format!("/kit/{}/", kit);
+    let mut prefix_name = kit.to_string();
+    for line in content.lines() {
+        if line.starts_with("@prefix ") && line.contains(&kit_ns_pattern) {
+            if let Some(colon_pos) = line[8..].find(':') {
+                prefix_name = line[8..8 + colon_pos].trim().to_string();
+            }
+            break;
+        }
+    }
+
+    // Parse property blocks: track current property name, then capture rdfs:range
+    let mut datatypes = HashMap::new();
+    let mut current_prop = String::new();
+
+    for line in content.lines() {
+        let trimmed = line.trim();
+
+        // New property block
+        if trimmed.contains("a owl:DatatypeProperty") {
+            if let Some(prop) = trimmed.split_whitespace().next() {
+                current_prop = prop
+                    .strip_prefix(&format!("{}:", prefix_name))
+                    .unwrap_or(prop)
+                    .to_string();
+            }
+        }
+
+        // Capture rdfs:range with XSD type
+        if !current_prop.is_empty() && trimmed.starts_with("rdfs:range") {
+            if let Some(range) = trimmed.split_whitespace().nth(1) {
+                let range = range.trim_end_matches(|c: char| c == ' ' || c == ';' || c == '.');
+                // Map XSD prefix to full URI
+                let xsd_type = match range {
+                    "xsd:integer" => Some("http://www.w3.org/2001/XMLSchema#integer"),
+                    "xsd:date" => Some("http://www.w3.org/2001/XMLSchema#date"),
+                    "xsd:dateTime" => Some("http://www.w3.org/2001/XMLSchema#dateTime"),
+                    "xsd:boolean" => Some("http://www.w3.org/2001/XMLSchema#boolean"),
+                    "xsd:decimal" => Some("http://www.w3.org/2001/XMLSchema#decimal"),
+                    "xsd:float" => Some("http://www.w3.org/2001/XMLSchema#float"),
+                    "xsd:double" => Some("http://www.w3.org/2001/XMLSchema#double"),
+                    _ => None, // xsd:string or unknown → default string behavior
+                };
+                if let Some(dt) = xsd_type {
+                    datatypes.insert(current_prop.clone(), dt.to_string());
+                }
+            }
+        }
+
+        // Blank line ends property block
+        if trimmed.is_empty() {
+            current_prop.clear();
+        }
+    }
+
+    datatypes
+}
+
 /// Parse the kit ontology to find document types and their properties.
 /// Returns: Vec<(ClassName, Vec<(prop_name, prop_type, required, comment)>)>
 fn get_kit_types(kit: &str) -> Vec<(String, Vec<(String, String, bool, String)>)> {
@@ -3476,10 +3569,15 @@ fn frontmatter_to_turtle(filepath: &std::path::Path, root: &std::path::Path, kit
                     });
                 }
 
-                if let Some(s) = value.as_str() {
-                    if !s.is_empty() {
-                        kit_props.push((prop_name.to_string(), s.to_string()));
-                    }
+                // Handle all YAML value types (string, number, bool)
+                let val_str = match value {
+                    serde_yaml::Value::String(s) if !s.is_empty() => Some(s.clone()),
+                    serde_yaml::Value::Number(n) => Some(n.to_string()),
+                    serde_yaml::Value::Bool(b) => Some(b.to_string()),
+                    _ => None,
+                };
+                if let Some(s) = val_str {
+                    kit_props.push((prop_name.to_string(), s));
                 }
             }
         }
@@ -3521,8 +3619,9 @@ fn frontmatter_to_turtle(filepath: &std::path::Path, root: &std::path::Path, kit
         }
     }
 
-    // Build ObjectProperty set for IRI resolution
+    // Build ObjectProperty set and datatype map for proper literal emission
     let obj_props = get_object_properties(kit);
+    let prop_datatypes = get_property_datatypes(kit);
 
     // Build Turtle RDF for this document
     let relpath = filepath.strip_prefix(root).ok()?;
@@ -3552,8 +3651,14 @@ fn frontmatter_to_turtle(filepath: &std::path::Path, root: &std::path::Path, kit
                     ));
                 }
             }
+        } else if let Some(datatype) = prop_datatypes.get(prop_name.as_str()) {
+            // Typed literal (xsd:integer, xsd:date, etc.)
+            ttl.push_str(&format!(
+                "<urn:doc:{}> {}:{} \"{}\"^^<{}> .\n",
+                doc_id, prefix_name, prop_name, value.replace('"', "\\\""), datatype
+            ));
         } else {
-            // DatatypeProperty — emit as literal
+            // Plain string literal
             ttl.push_str(&format!(
                 "<urn:doc:{}> {}:{} \"{}\" .\n",
                 doc_id, prefix_name, prop_name, value.replace('"', "\\\"")
@@ -4243,6 +4348,7 @@ fn cmd_sync() {
     let kit_name = kit.as_deref().unwrap_or("none");
     let kit_prefix_name = get_kit_prefix_name(kit_name);
     let obj_props = kit.as_ref().map(|k| get_object_properties(k)).unwrap_or_default();
+    let prop_datatypes = kit.as_ref().map(|k| get_property_datatypes(k)).unwrap_or_default();
 
     // Build slug index for reference resolution in class graphs
     let mut class_slug_index: HashMap<String, String> = HashMap::new();
@@ -4390,10 +4496,18 @@ fn cmd_sync() {
                                 }
                             }
                         } else {
-                            class_nq.push_str(&format!(
-                                "{} {} \"{}\" {} .\n",
-                                doc_uri, pred_uri, nq_escape(object), class_graph
-                            ));
+                            // Typed literal if ontology specifies non-string range
+                            if let Some(datatype) = prop_datatypes.get(prop_name) {
+                                class_nq.push_str(&format!(
+                                    "{} {} \"{}\"^^<{}> {} .\n",
+                                    doc_uri, pred_uri, nq_escape(object), datatype, class_graph
+                                ));
+                            } else {
+                                class_nq.push_str(&format!(
+                                    "{} {} \"{}\" {} .\n",
+                                    doc_uri, pred_uri, nq_escape(object), class_graph
+                                ));
+                            }
                         }
                     } else {
                         // Legacy non-dotted key — use fm: namespace
