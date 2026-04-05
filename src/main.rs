@@ -930,17 +930,32 @@ fn cmd_init(kit: Option<String>) {
         }
     }
 
-    // Generate class template files (__ClassName.md) in each type folder
+    // Generate SHACL shapes from ontology, then class templates
+    if kit.is_some() {
+        if let Some(shapes_path) = build_shacl_shapes(kit_name) {
+            println!("SHACL shapes generated: {}", shapes_path.file_name().unwrap_or_default().to_string_lossy());
+        }
+    }
     if kit.is_some() {
         let kit_types = get_kit_types(kit_name);
-        let shapes_content = match kit_name {
-            "solo" => SHAPES_SOLO,
-            "squad" => SHAPES_SQUAD,
-            "claude-code" => SHAPES_CLAUDE_CODE,
-            "lex-lab" => SHAPES_LEX_LAB,
-            _ => "",
+        let shapes_content = {
+            let r = find_git_root().unwrap();
+            let shapes_path = r.join(".lex").join("ontology").join("kit").join(kit_name).join(format!("{}-shapes.ttl", kit_name));
+            let generated = fs::read_to_string(&shapes_path).unwrap_or_default();
+            if generated.is_empty() {
+                // Fall back to embedded shapes if generation failed
+                match kit_name {
+                    "solo" => SHAPES_SOLO.to_string(),
+                    "squad" => SHAPES_SQUAD.to_string(),
+                    "claude-code" => SHAPES_CLAUDE_CODE.to_string(),
+                    "lex-lab" => SHAPES_LEX_LAB.to_string(),
+                    _ => String::new(),
+                }
+            } else {
+                generated
+            }
         };
-        let shacl_hints = parse_shacl_hints(shapes_content);
+        let shacl_hints = parse_shacl_hints(&shapes_content);
 
         for (type_name, properties) in &kit_types {
             let type_lower = type_name.to_lowercase();
@@ -1385,16 +1400,18 @@ fn cmd_kit_update() {
     if fetch_kit_from_github(&kit, &kit_dir) {
         println!("Kit '{}' updated from GitHub.", kit);
 
-        // Regenerate class templates
+        // Generate SHACL shapes from ontology (single source of truth)
+        if let Some(shapes_path) = build_shacl_shapes(&kit) {
+            println!("SHACL shapes generated: {}", shapes_path.file_name().unwrap_or_default().to_string_lossy());
+        }
+
+        // Regenerate class templates using the generated shapes for hints
         let kit_types = get_kit_types(&kit);
-        let shapes_content = match kit.as_str() {
-            "solo" => SHAPES_SOLO,
-            "squad" => SHAPES_SQUAD,
-            "claude-code" => SHAPES_CLAUDE_CODE,
-            "lex-lab" => SHAPES_LEX_LAB,
-            _ => "",
+        let shapes_content = {
+            let shapes_path = kit_dir.join(format!("{}-shapes.ttl", kit));
+            fs::read_to_string(&shapes_path).unwrap_or_default()
         };
-        let shacl_hints = parse_shacl_hints(shapes_content);
+        let shacl_hints = parse_shacl_hints(&shapes_content);
 
         for (type_name, properties) in &kit_types {
             let type_lower = type_name.to_lowercase();
@@ -3125,6 +3142,260 @@ fn get_kit() -> Option<String> {
         }
     }
     None
+}
+
+// ─── Ontology Builder ──────���───────────────────────────────────
+// Loads kit TTL into oxigraph, queries OWL constraints, generates SHACL shapes.
+// Single source of truth: the TTL. Shapes are derived artifacts.
+
+/// Find the kit TTL file path. Tries {kit}.ttl first, then any .ttl in the kit dir.
+fn find_kit_ttl(kit: &str) -> Option<PathBuf> {
+    let root = find_git_root()?;
+    let kit_dir = root.join(".lex").join("ontology").join("kit").join(kit);
+    let primary = kit_dir.join(format!("{}.ttl", kit));
+    if primary.exists() {
+        return Some(primary);
+    }
+    fs::read_dir(&kit_dir).ok()
+        .and_then(|entries| entries.filter_map(|e| e.ok())
+            .find(|e| {
+                let name = e.file_name().to_string_lossy().to_string();
+                name.ends_with(".ttl") && !name.contains("shapes")
+            })
+            .map(|e| e.path()))
+}
+
+/// Load a kit TTL into an in-memory oxigraph store for SPARQL querying.
+fn load_kit_into_store(kit: &str) -> Option<Store> {
+    let ttl_path = find_kit_ttl(kit)?;
+    let content = fs::read_to_string(&ttl_path).ok()?;
+    let store = Store::new().ok()?;
+    store.load_from_reader(RdfFormat::Turtle, Cursor::new(content.as_bytes())).ok()?;
+    Some(store)
+}
+
+/// Generate SHACL shapes TTL from a kit ontology using SPARQL queries.
+/// Reads OWL constraints (owl:oneOf, owl:Restriction, owl:ObjectProperty, rdfs:range)
+/// and emits equivalent SHACL shapes.
+fn generate_shacl_shapes(kit: &str) -> Option<String> {
+    let store = load_kit_into_store(kit)?;
+    let ttl_path = find_kit_ttl(kit)?;
+    let ttl_content = fs::read_to_string(&ttl_path).ok()?;
+
+    // Find the kit prefix name and namespace from the TTL
+    let kit_ns_pattern = format!("/kit/{}/", kit);
+    let mut prefix_name = kit.to_string();
+    let mut namespace = format!("https://repolex.ai/ontology/kit/{}/", kit);
+    for line in ttl_content.lines() {
+        if line.starts_with("@prefix ") && line.contains(&kit_ns_pattern) {
+            if let Some(colon_pos) = line[8..].find(':') {
+                prefix_name = line[8..8 + colon_pos].trim().to_string();
+            }
+            if let Some(start) = line.find('<') {
+                if let Some(end) = line.find('>') {
+                    namespace = line[start + 1..end].to_string();
+                }
+            }
+            break;
+        }
+    }
+
+    // Helper: extract local name from full IRI
+    let local_name = |iri: &str| -> String {
+        iri.rsplit('/').next().unwrap_or(iri).to_string()
+    };
+
+    // Query 1: Find all classes
+    let classes: Vec<String> = {
+        let q = "PREFIX owl: <http://www.w3.org/2002/07/owl#>
+                 SELECT ?class WHERE { ?class a owl:Class }";
+        match store.query(q) {
+            Ok(oxigraph::sparql::QueryResults::Solutions(sols)) => {
+                sols.filter_map(|s| s.ok().and_then(|s| {
+                    s.get("class").map(|t| match t {
+                        Term::NamedNode(n) => n.as_str().to_string(),
+                        _ => String::new(),
+                    })
+                })).filter(|s| s.starts_with(&namespace)).collect()
+            }
+            _ => Vec::new(),
+        }
+    };
+
+    // Query 2: Find properties with domains, types, and ranges
+    struct PropInfo {
+        iri: String,
+        is_object_prop: bool,
+        domain: String,
+        range: String,
+    }
+    let properties: Vec<PropInfo> = {
+        let q = "PREFIX owl: <http://www.w3.org/2002/07/owl#>
+                 PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>
+                 SELECT ?prop ?propType ?domain ?range WHERE {
+                     ?prop rdfs:domain ?domain .
+                     ?prop a ?propType .
+                     FILTER(?propType IN (owl:DatatypeProperty, owl:ObjectProperty))
+                     OPTIONAL { ?prop rdfs:range ?range }
+                 } ORDER BY ?domain ?prop";
+        match store.query(q) {
+            Ok(oxigraph::sparql::QueryResults::Solutions(sols)) => {
+                sols.filter_map(|s| s.ok().map(|s| {
+                    let term_str = |name: &str| -> String {
+                        s.get(name).map(|t| match t {
+                            Term::NamedNode(n) => n.as_str().to_string(),
+                            _ => String::new(),
+                        }).unwrap_or_default()
+                    };
+                    PropInfo {
+                        iri: term_str("prop"),
+                        is_object_prop: term_str("propType").contains("ObjectProperty"),
+                        domain: term_str("domain"),
+                        range: term_str("range"),
+                    }
+                })).collect()
+            }
+            _ => Vec::new(),
+        }
+    };
+
+    // Query 3: Find enum values (rdfs:Datatype with owl:oneOf)
+    let mut enum_values: HashMap<String, Vec<String>> = HashMap::new();
+    {
+        let q = "PREFIX owl: <http://www.w3.org/2002/07/owl#>
+                 PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>
+                 PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
+                 SELECT ?dtype ?value WHERE {
+                     ?dtype a rdfs:Datatype ;
+                            owl:oneOf ?list .
+                     ?list rdf:rest*/rdf:first ?value .
+                 } ORDER BY ?dtype ?value";
+        if let Ok(oxigraph::sparql::QueryResults::Solutions(sols)) = store.query(q) {
+            for s in sols.flatten() {
+                let dtype = s.get("dtype").map(|t| match t {
+                    Term::NamedNode(n) => n.as_str().to_string(),
+                    _ => String::new(),
+                }).unwrap_or_default();
+                let value = s.get("value").map(|t| match t {
+                    Term::Literal(l) => l.value().to_string(),
+                    _ => String::new(),
+                }).unwrap_or_default();
+                if !dtype.is_empty() && !value.is_empty() {
+                    enum_values.entry(dtype).or_default().push(value);
+                }
+            }
+        }
+    }
+
+    // Query 4: Find required fields (owl:Restriction with minCardinality)
+    let mut required_props: HashSet<(String, String)> = HashSet::new(); // (class_iri, prop_iri)
+    {
+        let q = "PREFIX owl: <http://www.w3.org/2002/07/owl#>
+                 PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>
+                 SELECT ?class ?prop WHERE {
+                     ?class rdfs:subClassOf ?restriction .
+                     ?restriction a owl:Restriction ;
+                                  owl:onProperty ?prop ;
+                                  owl:minCardinality ?minCard .
+                     FILTER(?minCard >= 1)
+                 }";
+        if let Ok(oxigraph::sparql::QueryResults::Solutions(sols)) = store.query(q) {
+            for s in sols.flatten() {
+                let class = s.get("class").map(|t| match t {
+                    Term::NamedNode(n) => n.as_str().to_string(),
+                    _ => String::new(),
+                }).unwrap_or_default();
+                let prop = s.get("prop").map(|t| match t {
+                    Term::NamedNode(n) => n.as_str().to_string(),
+                    _ => String::new(),
+                }).unwrap_or_default();
+                if !class.is_empty() && !prop.is_empty() {
+                    required_props.insert((class, prop));
+                }
+            }
+        }
+    }
+
+    // Build the SHACL Turtle output
+    let mut shacl = String::new();
+    shacl.push_str(&format!("@prefix sh:    <http://www.w3.org/ns/shacl#> .\n"));
+    shacl.push_str(&format!("@prefix {}: <{}> .\n", prefix_name, namespace));
+    shacl.push_str(&format!("@prefix xsd:   <http://www.w3.org/2001/XMLSchema#> .\n"));
+    shacl.push_str(&format!("@prefix rdfs:  <http://www.w3.org/2000/01/rdf-schema#> .\n\n"));
+    shacl.push_str(&format!("# Auto-generated SHACL shapes from {} ontology.\n", kit));
+    shacl.push_str(&format!("# Do not hand-edit — regenerate with: git lex kit update\n\n"));
+
+    for class_iri in &classes {
+        let class_name = local_name(class_iri);
+        let shape_name = format!("{}Shape", class_name);
+
+        shacl.push_str(&format!("\n# --- {} ---\n\n", class_name));
+        shacl.push_str(&format!("{}:{} a sh:NodeShape ;\n", prefix_name, shape_name));
+        shacl.push_str(&format!("    sh:targetClass {}:{}", prefix_name, class_name));
+
+        // Collect properties for this class
+        let class_props: Vec<&PropInfo> = properties.iter()
+            .filter(|p| p.domain == *class_iri)
+            .collect();
+
+        if class_props.is_empty() {
+            shacl.push_str(" .\n");
+            continue;
+        }
+
+        for (i, prop) in class_props.iter().enumerate() {
+            let prop_name = local_name(&prop.iri);
+            let is_last = i == class_props.len() - 1;
+            let is_required = required_props.contains(&(class_iri.clone(), prop.iri.clone()));
+
+            shacl.push_str(" ;\n    sh:property [\n");
+            shacl.push_str(&format!("        sh:path {}:{} ;\n", prefix_name, prop_name));
+
+            if prop.is_object_prop {
+                shacl.push_str("        sh:nodeKind sh:IRI ;\n");
+                let msg = format!("{} must be an IRI reference.", prop_name);
+                shacl.push_str(&format!("        sh:message \"{}\" ;\n", msg));
+            } else if let Some(values) = enum_values.get(&prop.range) {
+                let quoted: Vec<String> = values.iter().map(|v| format!("\"{}\"", v)).collect();
+                shacl.push_str(&format!("        sh:in ( {} ) ;\n", quoted.join(" ")));
+                let msg = format!("{} must be {}.",
+                    prop_name,
+                    values.iter().map(|v| format!("'{}'", v)).collect::<Vec<_>>().join(", "));
+                shacl.push_str(&format!("        sh:message \"{}\" ;\n", msg));
+            } else {
+                let xsd_prefix = "http://www.w3.org/2001/XMLSchema#";
+                if prop.range.starts_with(xsd_prefix) && prop.range != format!("{}string", xsd_prefix) {
+                    let xsd_type = &prop.range[xsd_prefix.len()..];
+                    shacl.push_str(&format!("        sh:datatype xsd:{} ;\n", xsd_type));
+                    let msg = format!("Expected datatype: xsd:{}.", xsd_type);
+                    shacl.push_str(&format!("        sh:message \"{}\" ;\n", msg));
+                }
+            }
+
+            if is_required {
+                shacl.push_str("        sh:minCount 1 ;\n");
+            }
+
+            if is_last {
+                shacl.push_str("    ] .\n");
+            } else {
+                shacl.push_str("    ]");
+            }
+        }
+    }
+
+    Some(shacl)
+}
+
+/// Generate and write SHACL shapes for the current kit.
+/// Returns the path to the generated shapes file.
+fn build_shacl_shapes(kit: &str) -> Option<PathBuf> {
+    let root = find_git_root()?;
+    let shacl = generate_shacl_shapes(kit)?;
+    let kit_dir = root.join(".lex").join("ontology").join("kit").join(kit);
+    let shapes_path = kit_dir.join(format!("{}-shapes.ttl", kit));
+    fs::write(&shapes_path, &shacl).ok()?;
+    Some(shapes_path)
 }
 
 /// Build a set of ObjectProperty names from the kit ontology TTL.
