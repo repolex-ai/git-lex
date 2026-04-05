@@ -10,6 +10,7 @@ use std::process::{Command, exit};
 use std::time::Instant;
 use std::fs;
 use std::collections::{HashMap, HashSet};
+use tree_sitter;
 
 #[derive(Parser)]
 #[command(name = "git-lex", about = "Git extensions for knowledge graphs")]
@@ -136,6 +137,11 @@ enum Commands {
     },
     /// Show this repo's identity
     Identity,
+    /// Parse a markdown file and show the syntax tree (debug)
+    Parse {
+        /// File to parse
+        file: String,
+    },
     /// Manage kits (install, update, list)
     Kit {
         #[command(subcommand)]
@@ -4128,6 +4134,86 @@ fn cmd_validate() -> bool {
     }
 }
 
+// ─── Tree-sitter markdown parsing ──────────────────────────────
+
+fn cmd_parse(file: &str) {
+    let root = find_git_root().unwrap_or_else(|| std::env::current_dir().unwrap());
+    let filepath = root.join(file);
+    let content = match fs::read_to_string(&filepath) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("Cannot read {}: {}", file, e);
+            exit(1);
+        }
+    };
+
+    let mut parser = tree_sitter_md::MarkdownParser::default();
+
+    let tree = match parser.parse(content.as_bytes(), None) {
+        Some(t) => t,
+        None => {
+            eprintln!("Failed to parse {}", file);
+            exit(1);
+        }
+    };
+
+    let root_node = tree.block_tree().root_node();
+
+    fn print_node(node: tree_sitter::Node, source: &str, depth: usize) {
+        let indent = "  ".repeat(depth);
+        let text = &source[node.start_byte()..node.end_byte()];
+        let preview = {
+            let escaped = text.replace('\n', "\\n");
+            if escaped.chars().count() > 80 {
+                format!("{}...", escaped.chars().take(77).collect::<String>())
+            } else {
+                escaped
+            }
+        };
+        println!("{}{}  [{}:{}–{}:{}]  \"{}\"",
+            indent, node.kind(),
+            node.start_position().row + 1, node.start_position().column,
+            node.end_position().row + 1, node.end_position().column,
+            preview);
+
+        let mut cursor = node.walk();
+        if cursor.goto_first_child() {
+            loop {
+                print_node(cursor.node(), source, depth + 1);
+                if !cursor.goto_next_sibling() { break; }
+            }
+        }
+    }
+
+    println!("Tree-sitter parse: {}", file);
+    println!();
+    print_node(root_node, &content, 0);
+
+    // Summary stats
+    let mut node_count = 0;
+    let mut type_counts: HashMap<String, usize> = HashMap::new();
+    fn count_nodes(node: tree_sitter::Node, count: &mut usize, types: &mut HashMap<String, usize>) {
+        *count += 1;
+        *types.entry(node.kind().to_string()).or_insert(0) += 1;
+        let mut cursor = node.walk();
+        if cursor.goto_first_child() {
+            loop {
+                count_nodes(cursor.node(), count, types);
+                if !cursor.goto_next_sibling() { break; }
+            }
+        }
+    }
+    count_nodes(root_node, &mut node_count, &mut type_counts);
+
+    println!();
+    println!("Total nodes: {}", node_count);
+    let mut sorted: Vec<_> = type_counts.iter().collect();
+    sorted.sort_by(|a, b| b.1.cmp(a.1));
+    for (kind, count) in sorted.iter().take(20) {
+        println!("  {:30} {}", kind, count);
+    }
+}
+
 fn cmd_extract() {
     let start = Instant::now();
 
@@ -4964,6 +5050,7 @@ fn main() {
         }
         Commands::Join { squad_path } => cmd_join(&squad_path),
         Commands::Identity => cmd_identity(),
+        Commands::Parse { file } => cmd_parse(&file),
         Commands::Kit { command } => match command {
             KitCommands::Update => cmd_kit_update(),
             KitCommands::List => cmd_kit_list(),
