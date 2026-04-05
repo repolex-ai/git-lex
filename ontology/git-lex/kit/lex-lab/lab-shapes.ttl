@@ -28,24 +28,24 @@ lab:InvestigationShape a sh:NodeShape ;
         sh:message "investigationStatus must be 'open', 'active', 'paused', 'concluded', or 'abandoned'." ;
     ] ;
     sh:property [
-        sh:path lab:lead-link ;
+        sh:path lab:lead ;
         sh:nodeKind sh:IRI ;
-        sh:message "lead-link must be an IRI reference to the leading agent." ;
+        sh:message "lead must be an IRI reference to the leading agent." ;
     ] ;
     sh:property [
-        sh:path lab:contributors-links ;
+        sh:path lab:contributors ;
         sh:nodeKind sh:IRI ;
-        sh:message "contributors-links must be IRI references to agents." ;
+        sh:message "contributors must be IRI references to agents." ;
     ] ;
     sh:property [
-        sh:path lab:parentInvestigation-link ;
+        sh:path lab:parentInvestigation ;
         sh:nodeKind sh:IRI ;
-        sh:message "parentInvestigation-link must be an IRI reference to a lab:Investigation." ;
+        sh:message "parentInvestigation must be an IRI reference to a lab:Investigation." ;
     ] ;
     sh:property [
-        sh:path lab:concludedBy-link ;
+        sh:path lab:concludedBy ;
         sh:nodeKind sh:IRI ;
-        sh:message "concludedBy-link must be an IRI reference to a lab:Synthesis." ;
+        sh:message "concludedBy must be an IRI reference to a lab:Synthesis." ;
     ] .
 
 
@@ -71,14 +71,14 @@ lab:HypothesisShape a sh:NodeShape ;
         sh:message "confidence must be 'speculative', 'plausible', 'likely', 'supported', or 'refuted'." ;
     ] ;
     sh:property [
-        sh:path lab:revisedBy-link ;
+        sh:path lab:revisedBy ;
         sh:nodeKind sh:IRI ;
-        sh:message "revisedBy-link must be an IRI reference to a lab:Hypothesis." ;
+        sh:message "revisedBy must be an IRI reference to a lab:Hypothesis." ;
     ] ;
     sh:property [
-        sh:path lab:addresses-link ;
+        sh:path lab:addresses ;
         sh:nodeKind sh:IRI ;
-        sh:message "addresses-link must be an IRI reference to a lab:Investigation." ;
+        sh:message "addresses must be an IRI reference to a lab:Investigation." ;
     ] .
 
 
@@ -99,29 +99,29 @@ lab:ExperimentShape a sh:NodeShape ;
         sh:message "experimentStatus must be 'planned', 'running', 'complete', 'failed', or 'abandoned'." ;
     ] ;
     sh:property [
-        sh:path lab:tests-link ;
+        sh:path lab:tests ;
         sh:nodeKind sh:IRI ;
-        sh:message "tests-link must be an IRI reference to a lab:Hypothesis." ;
+        sh:message "tests must be an IRI reference to a lab:Hypothesis." ;
     ] ;
     sh:property [
-        sh:path lab:partOf-link ;
+        sh:path lab:partOf ;
         sh:nodeKind sh:IRI ;
-        sh:message "partOf-link must be an IRI reference to a lab:Investigation." ;
+        sh:message "partOf must be an IRI reference to a lab:Investigation." ;
     ] ;
     sh:property [
-        sh:path lab:replicates-link ;
+        sh:path lab:replicates ;
         sh:nodeKind sh:IRI ;
-        sh:message "replicates-link must be an IRI reference to a lab:Experiment." ;
+        sh:message "replicates must be an IRI reference to a lab:Experiment." ;
     ] ;
     sh:property [
-        sh:path lab:runBy-link ;
+        sh:path lab:runBy ;
         sh:nodeKind sh:IRI ;
-        sh:message "runBy-link must be an IRI reference to an agent." ;
+        sh:message "runBy must be an IRI reference to an agent." ;
     ] ;
     sh:property [
-        sh:path lab:dataset-link ;
+        sh:path lab:dataset ;
         sh:nodeKind sh:IRI ;
-        sh:message "dataset-link must be an IRI reference." ;
+        sh:message "dataset must be an IRI reference." ;
     ] .
 
 
@@ -142,9 +142,9 @@ lab:SurveyShape a sh:NodeShape ;
         sh:message "surveyStatus must be 'planned', 'in-progress', or 'complete'." ;
     ] ;
     sh:property [
-        sh:path lab:informs-link ;
+        sh:path lab:informs ;
         sh:nodeKind sh:IRI ;
-        sh:message "informs-link must be an IRI reference to a lab:Investigation." ;
+        sh:message "informs must be an IRI reference to a lab:Investigation." ;
     ] .
 
 
@@ -170,34 +170,34 @@ lab:SynthesisShape a sh:NodeShape ;
         sh:message "evidenceStrength must be 'weak', 'moderate', 'strong', or 'conclusive'." ;
     ] ;
     sh:property [
-        sh:path lab:concludes-link ;
+        sh:path lab:concludes ;
         sh:nodeKind sh:IRI ;
-        sh:message "concludes-link must be an IRI reference to a lab:Investigation." ;
+        sh:message "concludes must be an IRI reference to a lab:Investigation." ;
     ] ;
     sh:property [
-        sh:path lab:basedOn-links ;
+        sh:path lab:basedOn ;
         sh:nodeKind sh:IRI ;
-        sh:message "basedOn-links must be IRI references to experiments or surveys." ;
+        sh:message "basedOn must be IRI references to experiments or surveys." ;
     ] ;
     sh:property [
-        sh:path lab:supports-link ;
+        sh:path lab:supports ;
         sh:nodeKind sh:IRI ;
-        sh:message "supports-link must be an IRI reference to a lab:Hypothesis." ;
+        sh:message "supports must be an IRI reference to a lab:Hypothesis." ;
     ] ;
     sh:property [
-        sh:path lab:refutes-link ;
+        sh:path lab:refutes ;
         sh:nodeKind sh:IRI ;
-        sh:message "refutes-link must be an IRI reference to a lab:Hypothesis." ;
+        sh:message "refutes must be an IRI reference to a lab:Hypothesis." ;
     ] ;
     sh:property [
-        sh:path lab:supersedes-link ;
+        sh:path lab:supersedes ;
         sh:nodeKind sh:IRI ;
-        sh:message "supersedes-link must be an IRI reference to a lab:Synthesis." ;
+        sh:message "supersedes must be an IRI reference to a lab:Synthesis." ;
     ] ;
     sh:property [
-        sh:path lab:authors-links ;
+        sh:path lab:authors ;
         sh:nodeKind sh:IRI ;
-        sh:message "authors-links must be IRI references to agents." ;
+        sh:message "authors must be IRI references to agents." ;
     ] .
 
 
@@ -217,14 +217,14 @@ lab:DeliberationShape a sh:NodeShape ;
         sh:message "outcome must be 'consensus', 'dissensus', 'deferred', or 'merged'." ;
     ] ;
     sh:property [
-        sh:path lab:regarding-link ;
+        sh:path lab:regarding ;
         sh:nodeKind sh:IRI ;
-        sh:message "regarding-link must be an IRI reference to a hypothesis or investigation." ;
+        sh:message "regarding must be an IRI reference to a hypothesis or investigation." ;
     ] ;
     sh:property [
-        sh:path lab:producedSynthesis-link ;
+        sh:path lab:producedSynthesis ;
         sh:nodeKind sh:IRI ;
-        sh:message "producedSynthesis-link must be an IRI reference to a lab:Synthesis." ;
+        sh:message "producedSynthesis must be an IRI reference to a lab:Synthesis." ;
     ] .
 
 
@@ -239,7 +239,7 @@ lab:ResearchBranchShape a sh:NodeShape ;
         sh:message "ResearchBranch must have a branchName." ;
     ] ;
     sh:property [
-        sh:path lab:embodiesHypothesis-link ;
+        sh:path lab:embodiesHypothesis ;
         sh:nodeKind sh:IRI ;
-        sh:message "embodiesHypothesis-link must be an IRI reference to a lab:Hypothesis." ;
+        sh:message "embodiesHypothesis must be an IRI reference to a lab:Hypothesis." ;
     ] .

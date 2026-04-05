@@ -17,11 +17,8 @@
 # Document types (= valid `git lex create` commands):
 #   memory, decision, task, research, contact, note
 #
-# Field naming convention:
-#   plain string  — single literal value    (DatatypeProperty)
-#   -list         — multiple literal values (DatatypeProperty, YAML list)
-#   -link         — reference to one entity (ObjectProperty)
-#   -links        — references to multiple  (ObjectProperty)
+# Property types are declared by owl:DatatypeProperty / owl:ObjectProperty.
+# SHACL shapes validate and document each field.
 # =============================================================================
 
 <https://repolex.ai/ontology/kit/solo> a owl:Ontology ;
@@ -87,7 +84,7 @@ solo:outcome a owl:DatatypeProperty ;
     rdfs:domain solo:Decision ;
     rdfs:range xsd:string .
 
-solo:supersededBy-link a owl:ObjectProperty ;
+solo:supersededBy a owl:ObjectProperty ;
     rdfs:label "superseded by" ;
     rdfs:comment "A later decision that replaces this one." ;
     rdfs:domain solo:Decision ;
@@ -209,7 +206,7 @@ solo:topic a owl:DatatypeProperty ;
     rdfs:domain solo:Note ;
     rdfs:range xsd:string .
 
-solo:relatedTo-links a owl:ObjectProperty ;
+solo:relatedTo a owl:ObjectProperty ;
     rdfs:label "related to" ;
     rdfs:comment "Other documents this note references." ;
     rdfs:domain solo:Note .

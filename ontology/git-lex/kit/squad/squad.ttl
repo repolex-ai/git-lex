@@ -18,11 +18,8 @@
 # Document types (= valid `git lex create` commands):
 #   agent, message, decision, discovery, task, project, note
 #
-# Field naming convention:
-#   plain string  — single literal value    (DatatypeProperty)
-#   -list         — multiple literal values (DatatypeProperty, YAML list)
-#   -link         — reference to one entity (ObjectProperty)
-#   -links        — references to multiple  (ObjectProperty)
+# Property types are declared by owl:DatatypeProperty / owl:ObjectProperty.
+# SHACL shapes validate and document each field.
 # =============================================================================
 
 <https://repolex.ai/ontology/kit/team> a owl:Ontology ;
@@ -69,7 +66,7 @@ squad:agentEmail a owl:DatatypeProperty ;
     rdfs:domain squad:Agent ;
     rdfs:range xsd:string .
 
-squad:worksOn-links a owl:ObjectProperty ;
+squad:worksOn a owl:ObjectProperty ;
     rdfs:label "works on" ;
     rdfs:comment "Projects this agent is actively working on." ;
     rdfs:domain squad:Agent ;
@@ -84,13 +81,13 @@ squad:Message a owl:Class ;
     rdfs:label "Message" ;
     rdfs:comment "A message from one agent to another. Persistent inter-agent communication." .
 
-squad:from-link a owl:ObjectProperty ;
+squad:from a owl:ObjectProperty ;
     rdfs:label "from" ;
     rdfs:comment "The agent who sent this message." ;
     rdfs:domain squad:Message ;
     rdfs:range squad:Agent .
 
-squad:to-links a owl:ObjectProperty ;
+squad:to a owl:ObjectProperty ;
     rdfs:label "to" ;
     rdfs:comment "The agent(s) this message is addressed to." ;
     rdfs:domain squad:Message ;
@@ -108,12 +105,12 @@ squad:priority a owl:DatatypeProperty ;
     rdfs:domain squad:Message ;
     rdfs:range xsd:string .
 
-squad:regarding-link a owl:ObjectProperty ;
+squad:regarding a owl:ObjectProperty ;
     rdfs:label "regarding" ;
     rdfs:comment "The entity (decision, task, project, etc.) this message is about." ;
     rdfs:domain squad:Message .
 
-squad:inReplyTo-link a owl:ObjectProperty ;
+squad:inReplyTo a owl:ObjectProperty ;
     rdfs:label "in reply to" ;
     rdfs:comment "The message this is a reply to. Creates conversation threads." ;
     rdfs:domain squad:Message ;
@@ -128,7 +125,7 @@ squad:Decision a owl:Class ;
     rdfs:label "Decision" ;
     rdfs:comment "A recorded choice with context, rationale, and outcome." .
 
-squad:decidedBy-links a owl:ObjectProperty ;
+squad:decidedBy a owl:ObjectProperty ;
     rdfs:label "decided by" ;
     rdfs:comment "The agent(s) who made this decision." ;
     rdfs:domain squad:Decision ;
@@ -152,7 +149,7 @@ squad:outcome a owl:DatatypeProperty ;
     rdfs:domain squad:Decision ;
     rdfs:range xsd:string .
 
-squad:supersededBy-link a owl:ObjectProperty ;
+squad:supersededBy a owl:ObjectProperty ;
     rdfs:label "superseded by" ;
     rdfs:comment "A later decision that replaces this one." ;
     rdfs:domain squad:Decision ;
@@ -167,7 +164,7 @@ squad:Discovery a owl:Class ;
     rdfs:label "Discovery" ;
     rdfs:comment "A finding, insight, or lesson learned." .
 
-squad:foundBy-link a owl:ObjectProperty ;
+squad:foundBy a owl:ObjectProperty ;
     rdfs:label "found by" ;
     rdfs:comment "The agent who made this discovery." ;
     rdfs:domain squad:Discovery ;
@@ -193,7 +190,7 @@ squad:Task a owl:Class ;
     rdfs:label "Task" ;
     rdfs:comment "A work item with assignment and status tracking." .
 
-squad:assignedTo-link a owl:ObjectProperty ;
+squad:assignedTo a owl:ObjectProperty ;
     rdfs:label "assigned to" ;
     rdfs:comment "The agent responsible for this task." ;
     rdfs:domain squad:Task ;
@@ -205,19 +202,19 @@ squad:taskStatus a owl:DatatypeProperty ;
     rdfs:domain squad:Task ;
     rdfs:range xsd:string .
 
-squad:blocks-links a owl:ObjectProperty ;
+squad:blocks a owl:ObjectProperty ;
     rdfs:label "blocks" ;
     rdfs:comment "Tasks that cannot proceed until this one is done." ;
     rdfs:domain squad:Task ;
     rdfs:range squad:Task .
 
-squad:blockedBy-links a owl:ObjectProperty ;
+squad:blockedBy a owl:ObjectProperty ;
     rdfs:label "blocked by" ;
     rdfs:comment "Tasks that must complete before this one can proceed." ;
     rdfs:domain squad:Task ;
     rdfs:range squad:Task .
 
-squad:relatedDecision-link a owl:ObjectProperty ;
+squad:relatedDecision a owl:ObjectProperty ;
     rdfs:label "related decision" ;
     rdfs:comment "The decision that created or motivated this task." ;
     rdfs:domain squad:Task ;
@@ -243,7 +240,7 @@ squad:projectStatus a owl:DatatypeProperty ;
     rdfs:domain squad:Project ;
     rdfs:range xsd:string .
 
-squad:squadMembers-links a owl:ObjectProperty ;
+squad:squadMembers a owl:ObjectProperty ;
     rdfs:label "squad members" ;
     rdfs:comment "Agents working on this project." ;
     rdfs:domain squad:Project ;
@@ -264,7 +261,7 @@ squad:topic a owl:DatatypeProperty ;
     rdfs:domain squad:Note ;
     rdfs:range xsd:string .
 
-squad:relatedTo-links a owl:ObjectProperty ;
+squad:relatedTo a owl:ObjectProperty ;
     rdfs:label "related to" ;
     rdfs:comment "Entities this note references." ;
     rdfs:domain squad:Note .
@@ -275,7 +272,7 @@ squad:relatedTo-links a owl:ObjectProperty ;
 # =============================================================================
 # Tags come from fm:tags (frontmatter). No squad:tags needed.
 
-squad:project-link a owl:ObjectProperty ;
+squad:project a owl:ObjectProperty ;
     rdfs:label "project" ;
     rdfs:comment "Which project this document relates to." ;
     rdfs:range squad:Project .
@@ -285,4 +282,4 @@ squad:project-link a owl:ObjectProperty ;
 # REASONING SUPPORT
 # =============================================================================
 
-squad:blockedBy-links owl:inverseOf squad:blocks-links .
+squad:blockedBy owl:inverseOf squad:blocks .

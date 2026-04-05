@@ -32,9 +32,9 @@ cc:SessionShape a sh:NodeShape ;
         sh:message "endTime must be an xsd:dateTime." ;
     ] ;
     sh:property [
-        sh:path cc:hasSubagent-links ;
+        sh:path cc:hasSubagent ;
         sh:nodeKind sh:IRI ;
-        sh:message "hasSubagent-links must be IRI references to cc:Session." ;
+        sh:message "hasSubagent must be IRI references to cc:Session." ;
     ] .
 
 
@@ -54,7 +54,7 @@ cc:PlanShape a sh:NodeShape ;
 cc:TodoShape a sh:NodeShape ;
     sh:targetClass cc:Todo ;
     sh:property [
-        sh:path cc:todoSession-link ;
+        sh:path cc:todoSession ;
         sh:nodeKind sh:IRI ;
-        sh:message "todoSession-link must be an IRI reference to a cc:Session." ;
+        sh:message "todoSession must be an IRI reference to a cc:Session." ;
     ] .

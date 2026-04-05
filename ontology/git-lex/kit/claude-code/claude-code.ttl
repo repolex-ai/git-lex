@@ -20,11 +20,8 @@
 # Extracted automatically from .jsonl files:
 #   tool usage, channel messages, file changes, timing
 #
-# Field naming convention:
-#   plain string  — single literal value    (DatatypeProperty)
-#   -list         — multiple literal values (DatatypeProperty, YAML list)
-#   -link         — reference to one entity (ObjectProperty)
-#   -links        — references to multiple  (ObjectProperty)
+# Property types are declared by owl:DatatypeProperty / owl:ObjectProperty.
+# SHACL shapes validate and document each field.
 # =============================================================================
 
 <https://repolex.ai/ontology/kit/claude-code> a owl:Ontology ;
@@ -118,7 +115,7 @@ cc:channelMessageCount a owl:DatatypeProperty ;
     rdfs:domain cc:Session ;
     rdfs:range xsd:integer .
 
-cc:hasSubagent-links a owl:ObjectProperty ;
+cc:hasSubagent a owl:ObjectProperty ;
     rdfs:label "has subagent" ;
     rdfs:comment "Subagent sessions spawned from this session." ;
     rdfs:domain cc:Session ;
@@ -186,7 +183,7 @@ cc:todoStatus a owl:DatatypeProperty ;
     rdfs:domain cc:Todo ;
     rdfs:range xsd:string .
 
-cc:todoSession-link a owl:ObjectProperty ;
+cc:todoSession a owl:ObjectProperty ;
     rdfs:label "todo session" ;
     rdfs:comment "Which session this todo was created in." ;
     rdfs:domain cc:Todo ;

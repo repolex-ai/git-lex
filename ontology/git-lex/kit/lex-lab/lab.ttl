@@ -22,11 +22,8 @@
 # Document types (= valid `git lex create` commands):
 #   investigation, experiment, survey, synthesis, hypothesis
 #
-# Field naming convention:
-#   plain string       — single literal value
-#   -list              — multiple literal values  (YAML list)
-#   -link              — reference to one entity  (file path or URI)
-#   -links             — references to multiple entities
+# Property types are declared by owl:DatatypeProperty / owl:ObjectProperty.
+# SHACL shapes validate and document each field.
 #
 # The gap this kit fills:
 #   Existing research ontologies (PROV-O, nanopub, FaBiO) cover what research IS
@@ -70,25 +67,25 @@ lab:investigationStatus a owl:DatatypeProperty ;
     rdfs:domain lab:Investigation ;
     rdfs:range xsd:string .
 
-lab:lead-link a owl:ObjectProperty ;
+lab:lead a owl:ObjectProperty ;
     rdfs:label "lead" ;
     rdfs:comment "The agent leading this investigation." ;
     rdfs:domain lab:Investigation ;
     rdfs:subPropertyOf prov:wasAssociatedWith .
 
-lab:contributors-links a owl:ObjectProperty ;
+lab:contributors a owl:ObjectProperty ;
     rdfs:label "contributors" ;
     rdfs:comment "Other agents contributing to this investigation." ;
     rdfs:domain lab:Investigation ;
     rdfs:subPropertyOf prov:wasAssociatedWith .
 
-lab:parentInvestigation-link a owl:ObjectProperty ;
+lab:parentInvestigation a owl:ObjectProperty ;
     rdfs:label "parent investigation" ;
     rdfs:comment "The broader investigation this one is a sub-thread of." ;
     rdfs:domain lab:Investigation ;
     rdfs:range lab:Investigation .
 
-lab:concludedBy-link a owl:ObjectProperty ;
+lab:concludedBy a owl:ObjectProperty ;
     rdfs:label "concluded by" ;
     rdfs:comment "The synthesis document that concludes this investigation." ;
     rdfs:domain lab:Investigation ;
@@ -118,14 +115,14 @@ lab:hypothesisStatus a owl:DatatypeProperty ;
     rdfs:domain lab:Hypothesis ;
     rdfs:range xsd:string .
 
-lab:revisedBy-link a owl:ObjectProperty ;
+lab:revisedBy a owl:ObjectProperty ;
     rdfs:label "revised by" ;
     rdfs:comment "A later hypothesis that refines or replaces this one." ;
     rdfs:domain lab:Hypothesis ;
     rdfs:range lab:Hypothesis ;
     rdfs:subPropertyOf dcterms:isReplacedBy .
 
-lab:addresses-link a owl:ObjectProperty ;
+lab:addresses a owl:ObjectProperty ;
     rdfs:label "addresses" ;
     rdfs:comment "The investigation this hypothesis is formulated to answer." ;
     rdfs:domain lab:Hypothesis ;
@@ -172,28 +169,28 @@ lab:experimentStatus a owl:DatatypeProperty ;
     rdfs:domain lab:Experiment ;
     rdfs:range xsd:string .
 
-lab:tests-link a owl:ObjectProperty ;
+lab:tests a owl:ObjectProperty ;
     rdfs:label "tests" ;
     rdfs:comment "The hypothesis this experiment is designed to test." ;
     rdfs:domain lab:Experiment ;
     rdfs:range lab:Hypothesis ;
     rdfs:subPropertyOf cito:citesAsEvidence .
 
-lab:partOf-link a owl:ObjectProperty ;
+lab:partOf a owl:ObjectProperty ;
     rdfs:label "part of" ;
     rdfs:comment "The investigation this experiment contributes to." ;
     rdfs:domain lab:Experiment ;
     rdfs:range lab:Investigation ;
     rdfs:subPropertyOf lex-o:partOf .
 
-lab:replicates-link a owl:ObjectProperty ;
+lab:replicates a owl:ObjectProperty ;
     rdfs:label "replicates" ;
     rdfs:comment "An earlier experiment this one attempts to reproduce." ;
     rdfs:domain lab:Experiment ;
     rdfs:range lab:Experiment ;
     rdfs:subPropertyOf cito:usesMethodIn .
 
-lab:runBy-link a owl:ObjectProperty ;
+lab:runBy a owl:ObjectProperty ;
     rdfs:label "run by" ;
     rdfs:comment "The agent who ran this experiment." ;
     rdfs:domain lab:Experiment ;
@@ -205,7 +202,7 @@ lab:commitRef a owl:DatatypeProperty ;
     rdfs:domain lab:Experiment ;
     rdfs:range xsd:string .
 
-lab:dataset-link a owl:ObjectProperty ;
+lab:dataset a owl:ObjectProperty ;
     rdfs:label "dataset" ;
     rdfs:comment "Link to dataset(s) used or produced by this experiment." ;
     rdfs:domain lab:Experiment .
@@ -245,7 +242,7 @@ lab:surveyStatus a owl:DatatypeProperty ;
     rdfs:domain lab:Survey ;
     rdfs:range xsd:string .
 
-lab:informs-link a owl:ObjectProperty ;
+lab:informs a owl:ObjectProperty ;
     rdfs:label "informs" ;
     rdfs:comment "The investigation this survey informs." ;
     rdfs:domain lab:Survey ;
@@ -282,40 +279,40 @@ lab:evidenceStrength a owl:DatatypeProperty ;
     rdfs:domain lab:Synthesis ;
     rdfs:range xsd:string .
 
-lab:concludes-link a owl:ObjectProperty ;
+lab:concludes a owl:ObjectProperty ;
     rdfs:label "concludes" ;
     rdfs:comment "The investigation this synthesis concludes." ;
     rdfs:domain lab:Synthesis ;
     rdfs:range lab:Investigation .
 
-lab:basedOn-links a owl:ObjectProperty ;
+lab:basedOn a owl:ObjectProperty ;
     rdfs:label "based on" ;
     rdfs:comment "Experiments and surveys this synthesis draws from." ;
     rdfs:domain lab:Synthesis ;
     rdfs:subPropertyOf cito:citesAsEvidence .
 
-lab:supports-link a owl:ObjectProperty ;
+lab:supports a owl:ObjectProperty ;
     rdfs:label "supports" ;
     rdfs:comment "A hypothesis this synthesis supports." ;
     rdfs:domain lab:Synthesis ;
     rdfs:range lab:Hypothesis ;
     rdfs:subPropertyOf cito:supports .
 
-lab:refutes-link a owl:ObjectProperty ;
+lab:refutes a owl:ObjectProperty ;
     rdfs:label "refutes" ;
     rdfs:comment "A hypothesis this synthesis refutes." ;
     rdfs:domain lab:Synthesis ;
     rdfs:range lab:Hypothesis ;
     rdfs:subPropertyOf cito:disputes .
 
-lab:supersedes-link a owl:ObjectProperty ;
+lab:supersedes a owl:ObjectProperty ;
     rdfs:label "supersedes" ;
     rdfs:comment "An earlier synthesis this one replaces." ;
     rdfs:domain lab:Synthesis ;
     rdfs:range lab:Synthesis ;
     rdfs:subPropertyOf dcterms:replaces .
 
-lab:authors-links a owl:ObjectProperty ;
+lab:authors a owl:ObjectProperty ;
     rdfs:label "authors" ;
     rdfs:comment "The agents who wrote this synthesis." ;
     rdfs:domain lab:Synthesis ;
@@ -343,7 +340,7 @@ lab:branchName a owl:DatatypeProperty ;
     rdfs:domain lab:ResearchBranch ;
     rdfs:range xsd:string .
 
-lab:embodiesHypothesis-link a owl:ObjectProperty ;
+lab:embodiesHypothesis a owl:ObjectProperty ;
     rdfs:label "embodies hypothesis" ;
     rdfs:comment "The hypothesis being developed on this branch." ;
     rdfs:domain lab:ResearchBranch ;
@@ -373,12 +370,12 @@ lab:outcome a owl:DatatypeProperty ;
     rdfs:domain lab:Deliberation ;
     rdfs:range xsd:string .
 
-lab:regarding-link a owl:ObjectProperty ;
+lab:regarding a owl:ObjectProperty ;
     rdfs:label "regarding" ;
     rdfs:comment "The hypothesis or investigation this deliberation is about." ;
     rdfs:domain lab:Deliberation .
 
-lab:producedSynthesis-link a owl:ObjectProperty ;
+lab:producedSynthesis a owl:ObjectProperty ;
     rdfs:label "produced synthesis" ;
     rdfs:comment "The synthesis this deliberation concluded with, if any." ;
     rdfs:domain lab:Deliberation ;
@@ -411,8 +408,8 @@ lab:repoRef a owl:DatatypeProperty ;
 # REASONING SUPPORT
 # =============================================================================
 
-lab:revisedBy-link owl:inverseOf lab:addresses-link .
-lab:concludes-link owl:inverseOf lab:concludedBy-link .
-lab:supports-link rdfs:subPropertyOf lex-o:supports .
-lab:refutes-link rdfs:subPropertyOf lex-o:opposes .
-lab:supersedes-link rdfs:subPropertyOf lex-o:replaces .
+lab:revisedBy owl:inverseOf lab:addresses .
+lab:concludes owl:inverseOf lab:concludedBy .
+lab:supports rdfs:subPropertyOf lex-o:supports .
+lab:refutes rdfs:subPropertyOf lex-o:opposes .
+lab:supersedes rdfs:subPropertyOf lex-o:replaces .

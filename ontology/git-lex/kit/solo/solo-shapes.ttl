@@ -37,9 +37,9 @@ solo:DecisionShape a sh:NodeShape ;
         sh:message "outcome must be 'pending', 'implemented', 'failed', or 'superseded'." ;
     ] ;
     sh:property [
-        sh:path solo:supersededBy-link ;
+        sh:path solo:supersededBy ;
         sh:nodeKind sh:IRI ;
-        sh:message "supersededBy-link must be an IRI reference to a solo:Decision." ;
+        sh:message "supersededBy must be an IRI reference to a solo:Decision." ;
     ] .
 
 
@@ -92,7 +92,7 @@ solo:ContactShape a sh:NodeShape ;
 solo:NoteShape a sh:NodeShape ;
     sh:targetClass solo:Note ;
     sh:property [
-        sh:path solo:relatedTo-links ;
+        sh:path solo:relatedTo ;
         sh:nodeKind sh:IRI ;
-        sh:message "relatedTo-links must be IRI references." ;
+        sh:message "relatedTo must be IRI references." ;
     ] .

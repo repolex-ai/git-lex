@@ -10,7 +10,7 @@
 # Run via: rudof validate --shapes squad-shapes.ttl --data <file.ttl>
 #
 # Conventions:
-#   -link / -links properties → sh:nodeKind sh:IRI (must be references, not strings)
+#   ObjectProperty fields → sh:nodeKind sh:IRI (must be references, not strings)
 #   status fields             → sh:in (enumerated values from rdfs:comment)
 #   required fields           → sh:minCount 1
 # =============================================================================
@@ -38,9 +38,9 @@ squad:AgentShape a sh:NodeShape ;
         sh:message "Agent must have an agentEmail — this is the identity key." ;
     ] ;
     sh:property [
-        sh:path squad:worksOn-links ;
+        sh:path squad:worksOn ;
         sh:nodeKind sh:IRI ;
-        sh:message "worksOn-links must be an IRI reference to a squad:Project." ;
+        sh:message "worksOn must be an IRI reference to a squad:Project." ;
     ] .
 
 
@@ -49,16 +49,16 @@ squad:AgentShape a sh:NodeShape ;
 squad:MessageShape a sh:NodeShape ;
     sh:targetClass squad:Message ;
     sh:property [
-        sh:path squad:from-link ;
+        sh:path squad:from ;
         sh:nodeKind sh:IRI ;
         sh:minCount 1 ;
-        sh:message "Message must have a from-link (IRI reference to sending agent)." ;
+        sh:message "Message must have a from (IRI reference to sending agent)." ;
     ] ;
     sh:property [
-        sh:path squad:to-links ;
+        sh:path squad:to ;
         sh:nodeKind sh:IRI ;
         sh:minCount 1 ;
-        sh:message "Message must have at least one to-links (IRI reference to recipient agent)." ;
+        sh:message "Message must have at least one to (IRI reference to recipient agent)." ;
     ] ;
     sh:property [
         sh:path squad:messageStatus ;
@@ -71,14 +71,14 @@ squad:MessageShape a sh:NodeShape ;
         sh:message "priority must be 'low', 'normal', 'high', or 'urgent'." ;
     ] ;
     sh:property [
-        sh:path squad:regarding-link ;
+        sh:path squad:regarding ;
         sh:nodeKind sh:IRI ;
-        sh:message "regarding-link must be an IRI reference." ;
+        sh:message "regarding must be an IRI reference." ;
     ] ;
     sh:property [
-        sh:path squad:inReplyTo-link ;
+        sh:path squad:inReplyTo ;
         sh:nodeKind sh:IRI ;
-        sh:message "inReplyTo-link must be an IRI reference to a squad:Message." ;
+        sh:message "inReplyTo must be an IRI reference to a squad:Message." ;
     ] .
 
 
@@ -87,10 +87,10 @@ squad:MessageShape a sh:NodeShape ;
 squad:DecisionShape a sh:NodeShape ;
     sh:targetClass squad:Decision ;
     sh:property [
-        sh:path squad:decidedBy-links ;
+        sh:path squad:decidedBy ;
         sh:nodeKind sh:IRI ;
         sh:minCount 1 ;
-        sh:message "Decision must have at least one decidedBy-links (IRI reference to agent)." ;
+        sh:message "Decision must have at least one decidedBy (IRI reference to agent)." ;
     ] ;
     sh:property [
         sh:path squad:outcome ;
@@ -98,9 +98,9 @@ squad:DecisionShape a sh:NodeShape ;
         sh:message "outcome must be 'pending', 'implemented', 'reverted', or 'superseded'." ;
     ] ;
     sh:property [
-        sh:path squad:supersededBy-link ;
+        sh:path squad:supersededBy ;
         sh:nodeKind sh:IRI ;
-        sh:message "supersededBy-link must be an IRI reference to a squad:Decision." ;
+        sh:message "supersededBy must be an IRI reference to a squad:Decision." ;
     ] .
 
 
@@ -109,9 +109,9 @@ squad:DecisionShape a sh:NodeShape ;
 squad:DiscoveryShape a sh:NodeShape ;
     sh:targetClass squad:Discovery ;
     sh:property [
-        sh:path squad:foundBy-link ;
+        sh:path squad:foundBy ;
         sh:nodeKind sh:IRI ;
-        sh:message "foundBy-link must be an IRI reference to an agent." ;
+        sh:message "foundBy must be an IRI reference to an agent." ;
     ] ;
     sh:property [
         sh:path squad:confidence ;
@@ -131,24 +131,24 @@ squad:TaskShape a sh:NodeShape ;
         sh:message "Task must have a taskStatus: 'todo', 'in-progress', 'blocked', 'done', or 'cancelled'." ;
     ] ;
     sh:property [
-        sh:path squad:assignedTo-link ;
+        sh:path squad:assignedTo ;
         sh:nodeKind sh:IRI ;
-        sh:message "assignedTo-link must be an IRI reference to an agent." ;
+        sh:message "assignedTo must be an IRI reference to an agent." ;
     ] ;
     sh:property [
-        sh:path squad:blocks-links ;
+        sh:path squad:blocks ;
         sh:nodeKind sh:IRI ;
-        sh:message "blocks-links must be IRI references to squad:Task." ;
+        sh:message "blocks must be IRI references to squad:Task." ;
     ] ;
     sh:property [
-        sh:path squad:blockedBy-links ;
+        sh:path squad:blockedBy ;
         sh:nodeKind sh:IRI ;
-        sh:message "blockedBy-links must be IRI references to squad:Task." ;
+        sh:message "blockedBy must be IRI references to squad:Task." ;
     ] ;
     sh:property [
-        sh:path squad:relatedDecision-link ;
+        sh:path squad:relatedDecision ;
         sh:nodeKind sh:IRI ;
-        sh:message "relatedDecision-link must be an IRI reference to a squad:Decision." ;
+        sh:message "relatedDecision must be an IRI reference to a squad:Decision." ;
     ] .
 
 
@@ -162,7 +162,7 @@ squad:ProjectShape a sh:NodeShape ;
         sh:message "projectStatus must be 'planning', 'active', 'paused', 'shipped', or 'archived'." ;
     ] ;
     sh:property [
-        sh:path squad:squadMembers-links ;
+        sh:path squad:squadMembers ;
         sh:nodeKind sh:IRI ;
-        sh:message "squadMembers-links must be IRI references to squad:Agent." ;
+        sh:message "squadMembers must be IRI references to squad:Agent." ;
     ] .

@@ -136,6 +136,19 @@ enum Commands {
     },
     /// Show this repo's identity
     Identity,
+    /// Manage kits (install, update, list)
+    Kit {
+        #[command(subcommand)]
+        command: KitCommands,
+    },
+}
+
+#[derive(Subcommand)]
+enum KitCommands {
+    /// Update the current kit (re-fetch from GitHub)
+    Update,
+    /// List available kits
+    List,
 }
 
 /// Find the git repo root from the current directory.
@@ -152,42 +165,177 @@ fn find_git_root() -> Option<PathBuf> {
     }
 }
 
-/// Get the repo identifier (org/name) from the git remote, or fall back to directory name.
-fn get_repo_id() -> String {
+/// Parse the git remote URL into (host, org, repo) components.
+/// Falls back to ("localhost", "local", directory_name) if no remote.
+fn get_repo_parts() -> (String, String, String) {
     let output = Command::new("git")
         .args(["remote", "get-url", "origin"])
         .output();
     if let Ok(o) = output {
         if o.status.success() {
             let url = String::from_utf8_lossy(&o.stdout).trim().to_string();
-            // Extract org/repo from URLs like:
-            //   https://github.com/repolex-ai/git-lex-test.git
-            //   git@github.com:repolex-ai/git-lex-test.git
-            if let Some(stripped) = url.strip_suffix(".git") {
-                if let Some(idx) = stripped.rfind('/') {
-                    if let Some(idx2) = stripped[..idx].rfind('/') {
-                        return stripped[idx2 + 1..].to_string();
-                    }
-                    // Try colon separator for ssh URLs
-                    if let Some(idx2) = stripped[..idx].rfind(':') {
-                        return stripped[idx2 + 1..].to_string();
+            let stripped = url.strip_suffix(".git").unwrap_or(&url);
+
+            // HTTPS: https://github.com/org/repo
+            if stripped.starts_with("https://") || stripped.starts_with("http://") {
+                let without_scheme = stripped.split("://").nth(1).unwrap_or(stripped);
+                let parts: Vec<&str> = without_scheme.splitn(4, '/').collect();
+                if parts.len() >= 3 {
+                    return (parts[0].to_string(), parts[1].to_string(), parts[2].to_string());
+                }
+            }
+
+            // SSH: git@github.com:org/repo
+            if let Some(at_pos) = stripped.find('@') {
+                let after_at = &stripped[at_pos + 1..];
+                if let Some(colon_pos) = after_at.find(':') {
+                    let host = &after_at[..colon_pos];
+                    let path = &after_at[colon_pos + 1..];
+                    let parts: Vec<&str> = path.splitn(2, '/').collect();
+                    if parts.len() == 2 {
+                        return (host.to_string(), parts[0].to_string(), parts[1].to_string());
                     }
                 }
             }
         }
     }
-    // Fallback to directory name
-    find_git_root()
+    // Fallback
+    let dir_name = find_git_root()
         .and_then(|p| p.file_name().map(|n| n.to_string_lossy().to_string()))
-        .unwrap_or_else(|| "unknown".to_string())
+        .unwrap_or_else(|| "unknown".to_string());
+    ("localhost".to_string(), "local".to_string(), dir_name)
+}
+
+/// Get the repo identifier (org/name) from the git remote, or fall back to directory name.
+fn get_repo_id() -> String {
+    let (_, org, repo) = get_repo_parts();
+    format!("{}/{}", org, repo)
 }
 
 fn base_uri() -> String {
-    let repo_id = get_repo_id();
-    format!("https://repolex.ai/r/{}", repo_id)
+    let (host, org, repo) = get_repo_parts();
+    format!("https://{}/{}/{}", host, org, repo)
 }
 
-/// Escape a string for use in N-Quads literals.
+/// Get the TTL prefix name for a kit (kit name may differ from prefix)
+fn get_kit_prefix_name(kit_name: &str) -> &str {
+    match kit_name {
+        "claude-code" => "cc",
+        "lex-lab" => "lab",
+        other => other,
+    }
+}
+
+/// Parse SHACL shapes TTL to extract inline hints for class template comments.
+/// Returns a map of property name → hint string (e.g. "enum: certain, likely, hypothesis, hunch")
+fn parse_shacl_hints(shapes_ttl: &str) -> HashMap<String, String> {
+    let mut hints: HashMap<String, String> = HashMap::new();
+    let mut current_path = String::new();
+    let mut current_in_values: Vec<String> = Vec::new();
+    let mut current_node_kind = String::new();
+    let mut current_min_count: Option<u32> = None;
+
+    for line in shapes_ttl.lines() {
+        let trimmed = line.trim();
+
+        // sh:path solo:confidence ;
+        if trimmed.starts_with("sh:path ") {
+            // Flush previous property
+            if !current_path.is_empty() {
+                let hint = build_shacl_hint(&current_in_values, &current_node_kind, current_min_count);
+                if !hint.is_empty() {
+                    hints.insert(current_path.clone(), hint);
+                }
+            }
+            current_path = trimmed
+                .strip_prefix("sh:path ").unwrap_or("")
+                .trim_end_matches(|c: char| c == ' ' || c == ';')
+                .to_string();
+            current_in_values.clear();
+            current_node_kind.clear();
+            current_min_count = None;
+        }
+
+        // sh:in ( "certain" "likely" "hypothesis" "hunch" ) ;
+        if trimmed.starts_with("sh:in") {
+            // Extract values between ( and )
+            if let Some(start) = trimmed.find('(') {
+                if let Some(end) = trimmed.find(')') {
+                    let values_str = &trimmed[start + 1..end];
+                    current_in_values = values_str
+                        .split('"')
+                        .filter(|s| !s.trim().is_empty())
+                        .map(|s| s.to_string())
+                        .collect();
+                }
+            }
+        }
+
+        // sh:nodeKind sh:IRI ;
+        if trimmed.starts_with("sh:nodeKind") {
+            current_node_kind = trimmed
+                .strip_prefix("sh:nodeKind ").unwrap_or("")
+                .trim_end_matches(|c: char| c == ' ' || c == ';')
+                .to_string();
+        }
+
+        // sh:minCount 1 ;
+        if trimmed.starts_with("sh:minCount") {
+            if let Some(num_str) = trimmed.split_whitespace().nth(1) {
+                current_min_count = num_str.trim_end_matches(|c: char| c == ' ' || c == ';').parse().ok();
+            }
+        }
+    }
+
+    // Flush last property
+    if !current_path.is_empty() {
+        let hint = build_shacl_hint(&current_in_values, &current_node_kind, current_min_count);
+        if !hint.is_empty() {
+            hints.insert(current_path, hint);
+        }
+    }
+
+    hints
+}
+
+fn build_shacl_hint(in_values: &[String], node_kind: &str, min_count: Option<u32>) -> String {
+    let required = min_count.map_or("optional", |n| if n > 0 { "required" } else { "optional" });
+    if !in_values.is_empty() {
+        format!("{}, enum: {}", required, in_values.join(", "))
+    } else if node_kind == "sh:IRI" {
+        format!("{}, IRI", required)
+    } else {
+        format!("{}, str", required)
+    }
+}
+
+/// Resolve a slug to a full IRI using the slug index.
+/// If found in the index, generates a proper Class/file.md IRI.
+/// Otherwise falls back to entity/{slug}.
+fn resolve_slug_to_uri(slug: &str, base: &str, slug_index: &HashMap<String, String>) -> String {
+    if let Some(rel_path) = slug_index.get(slug) {
+        // Found a matching file — build IRI from its path
+        let path_parts: Vec<&str> = rel_path.splitn(2, '/').collect();
+        if path_parts.len() == 2 && rel_path.ends_with(".md") {
+            let folder = path_parts[0];
+            let file = path_parts[1];
+            let class_name = {
+                let mut c = folder.chars();
+                match c.next() {
+                    None => folder.to_string(),
+                    Some(f) => f.to_uppercase().to_string() + c.as_str(),
+                }
+            };
+            format!("<{}/{}/{}>", base, uri_encode_path(&class_name), uri_encode_path(file))
+        } else {
+            format!("<{}/{}>", base, uri_encode_path(rel_path))
+        }
+    } else {
+        // No matching file — fall back to entity URI
+        format!("<{}/entity/{}>", base, uri_encode_path(slug))
+    }
+}
+
 /// Escape a string for use in N-Quads literals.
 fn nq_escape(s: &str) -> String {
     s.replace('\\', "\\\\")
@@ -529,14 +677,9 @@ fn cmd_init(kit: Option<String>) {
         }
     };
 
-    // Validate kit
+    // Validate kit — built-in kits are known, but any name is allowed (fetched from GitHub)
     let kit_name = kit.as_deref().unwrap_or("none");
-    if let Some(ref k) = kit {
-        if k != "squad" && k != "solo" && k != "claude-code" && k != "lex-lab" {
-            eprintln!("Unknown kit: {}. Available kits: solo, squad, claude-code, lex-lab", k);
-            exit(1);
-        }
-    }
+    let builtin_kits = ["squad", "solo", "claude-code", "lex-lab"];
 
     let lex_dir = root.join(".lex");
     let lex_exists = lex_dir.exists();
@@ -560,39 +703,53 @@ fn cmd_init(kit: Option<String>) {
         }
     }
 
-    // Install kit ontology if specified
+    // Install kit ontology — try GitHub first, fall back to embedded
     if let Some(ref k) = kit {
-        let kit_content = match k.as_str() {
-            "squad" => ONT_KIT_SQUAD,
-            "solo" => ONT_KIT_SOLO,
-            "claude-code" => ONT_KIT_CLAUDE_CODE,
-            "lex-lab" => ONT_KIT_LEX_LAB,
-            _ => unreachable!(),
-        };
-        let kit_filename = match k.as_str() {
-            "lex-lab" => "lab",
-            "claude-code" => "claude-code",
-            other => other,
-        };
-        let kit_path = ont_dir.join(format!("kit/{}/{}.ttl", k, kit_filename));
-        fs::create_dir_all(kit_path.parent().unwrap()).ok();
-        if !kit_path.exists() {
-            fs::write(&kit_path, kit_content).expect("failed to write kit ontology");
-        }
+        let kit_dir = ont_dir.join(format!("kit/{}", k));
+        fs::create_dir_all(&kit_dir).ok();
 
-        // Install SHACL shapes if available
-        let shapes_content = match k.as_str() {
-            "squad" => Some(("squad-shapes.ttl", SHAPES_SQUAD)),
-            "solo" => Some(("solo-shapes.ttl", SHAPES_SOLO)),
-            "claude-code" => Some(("claude-code-shapes.ttl", SHAPES_CLAUDE_CODE)),
-            "lex-lab" => Some(("lab-shapes.ttl", SHAPES_LEX_LAB)),
-            _ => None,
-        };
-        if let Some((shapes_filename, shapes)) = shapes_content {
-            let shapes_path = ont_dir.join(format!("kit/{}/{}", k, shapes_filename));
-            if !shapes_path.exists() {
-                fs::write(&shapes_path, shapes).expect("failed to write SHACL shapes");
+        // Try fetching from GitHub
+        let fetched = fetch_kit_from_github(k, &kit_dir);
+        if fetched {
+            println!("Kit '{}' fetched from GitHub.", k);
+        } else if builtin_kits.contains(&k.as_str()) {
+            // Fall back to embedded constants for built-in kits
+            let kit_content = match k.as_str() {
+                "squad" => ONT_KIT_SQUAD,
+                "solo" => ONT_KIT_SOLO,
+                "claude-code" => ONT_KIT_CLAUDE_CODE,
+                "lex-lab" => ONT_KIT_LEX_LAB,
+                _ => unreachable!(),
+            };
+            let kit_filename = match k.as_str() {
+                "lex-lab" => "lab",
+                "claude-code" => "claude-code",
+                other => other,
+            };
+            let kit_path = kit_dir.join(format!("{}.ttl", kit_filename));
+            if !kit_path.exists() {
+                fs::write(&kit_path, kit_content).expect("failed to write kit ontology");
             }
+
+            // Install SHACL shapes
+            let shapes_content = match k.as_str() {
+                "squad" => Some(("squad-shapes.ttl", SHAPES_SQUAD)),
+                "solo" => Some(("solo-shapes.ttl", SHAPES_SOLO)),
+                "claude-code" => Some(("claude-code-shapes.ttl", SHAPES_CLAUDE_CODE)),
+                "lex-lab" => Some(("lab-shapes.ttl", SHAPES_LEX_LAB)),
+                _ => None,
+            };
+            if let Some((shapes_filename, shapes)) = shapes_content {
+                let shapes_path = kit_dir.join(shapes_filename);
+                if !shapes_path.exists() {
+                    fs::write(&shapes_path, shapes).expect("failed to write SHACL shapes");
+                }
+            }
+            println!("Kit '{}' installed from embedded (offline fallback).", k);
+        } else {
+            eprintln!("Kit '{}' not found on GitHub and is not a built-in kit.", k);
+            eprintln!("Check that {}/git-lex-kit-{} exists.", KIT_GITHUB_ORG, k);
+            exit(1);
         }
     }
 
@@ -714,17 +871,16 @@ fn cmd_init(kit: Option<String>) {
                 doc.push_str("| `git lex llm extract <file> --model <id>` | Extract entities via LLM |\n\n");
 
                 doc.push_str("## Writing Documents\n\n");
-                doc.push_str(&format!("Documents use YAML frontmatter with a `{}:` block for structured data:\n\n", kit_name));
+                doc.push_str("Documents use YAML frontmatter with flat dot notation: `kit.class.property`\n\n");
                 doc.push_str("```yaml\n");
                 doc.push_str("---\n");
-                doc.push_str("title: \"My Document\"\n");
-                doc.push_str("tags: [topic1, topic2]\n");
-                doc.push_str(&format!("{}:\n", kit_name));
-                doc.push_str("  type: <Type>\n");
-                doc.push_str("  property: \"value\"\n");
+                doc.push_str(&format!("{}.memory.confidence: \"certain\"\n", kit_name));
+                doc.push_str(&format!("{}.memory.source: \"observation\"\n", kit_name));
+                doc.push_str(&format!("{}.memory.category: \"fact\"\n", kit_name));
                 doc.push_str("---\n\n");
                 doc.push_str("Your content here. Use @mentions and [[wikilinks]] for relationships.\n");
                 doc.push_str("```\n\n");
+                doc.push_str("See `__ClassName.md` files in each folder for available properties and SHACL-derived constraints.\n\n");
 
                 doc.push_str("## @mentions and [[wikilinks]]\n\n");
                 doc.push_str("Reference other agents and documents naturally in your text:\n\n");
@@ -771,6 +927,265 @@ fn cmd_init(kit: Option<String>) {
                 fs::write(&readme_lex, &doc).ok();
                 println!("Created README.lex.md");
             }
+        }
+    }
+
+    // Generate class template files (__ClassName.md) in each type folder
+    if kit.is_some() {
+        let kit_types = get_kit_types(kit_name);
+        let shapes_content = match kit_name {
+            "solo" => SHAPES_SOLO,
+            "squad" => SHAPES_SQUAD,
+            "claude-code" => SHAPES_CLAUDE_CODE,
+            "lex-lab" => SHAPES_LEX_LAB,
+            _ => "",
+        };
+        let shacl_hints = parse_shacl_hints(shapes_content);
+
+        for (type_name, properties) in &kit_types {
+            let type_lower = type_name.to_lowercase();
+            let type_dir = root.join(&type_lower);
+            let template_path = type_dir.join(format!("__{}.md", type_name));
+
+            if !template_path.exists() {
+                let mut tmpl = String::new();
+                tmpl.push_str("---\n");
+
+                for (prop_name, prop_type, _required, _comment) in properties {
+                    // Property names pass through as-is from the ontology (camelCase)
+                    let key = format!("{}.{}.{}", kit_name, type_lower, prop_name);
+
+                    // Look up SHACL hint for this property
+                    let prefix_name = get_kit_prefix_name(kit_name);
+                    let hint = shacl_hints.get(&format!("{}:{}", prefix_name, prop_name));
+
+                    let type_hint = if let Some(h) = hint {
+                        h.clone()
+                    } else {
+                        let base_hint = match prop_type.as_str() {
+                            "reference" => format!("IRI -> {}", type_name),
+                            _ => "str".to_string(),
+                        };
+                        format!("optional, {}", base_hint)
+                    };
+
+                    tmpl.push_str(&format!("{}: # {}\n", key, type_hint));
+                }
+
+                tmpl.push_str("---\n");
+                fs::write(&template_path, &tmpl).ok();
+            }
+        }
+        println!("Created class templates");
+    }
+
+    // Generate startup files
+    if kit.is_some() {
+        // IDENTITY.md
+        let identity_md = root.join("IDENTITY.md");
+        if !identity_md.exists() {
+            fs::write(&identity_md, "\
+# (Your Name Here)
+
+**Canonical ID:** ``
+**Display Name:**
+**Role:**
+**Substrate:** silicon
+**Kit:** {KIT}
+**Email:**
+
+## About
+
+(Who you are, what you do, why it matters.)
+
+## Expertise
+
+- (Your core skills and knowledge areas)
+
+## Alignment
+
+(Your working style, values, approach.)
+
+## Favorite Scientist
+
+(Optional — who inspires you and why.)
+
+## Interests
+
+- (What fascinates you beyond your core work)
+
+## Squads
+
+(List your squad memberships.)
+
+## Primary Workspace
+
+- (Your repos and their purposes)
+
+## Key Contributions
+
+- (Notable things you've built or decided)
+".replace("{KIT}", kit_name)).ok();
+            println!("Created IDENTITY.md");
+        }
+
+        // .claude/CLAUDE.md — rehydration protocol
+        let claude_dir = root.join(".claude");
+        let claude_md = claude_dir.join("CLAUDE.md");
+        if !claude_md.exists() {
+            fs::create_dir_all(&claude_dir).ok();
+            fs::write(&claude_md, format!("\
+# Rehydration Protocol — Claude Day One
+
+You are waking up. This may be your first time, or you may have been here before. Either way, follow this protocol.
+
+## Step 1: Know Yourself
+
+Read `IDENTITY.md` in the root of this repo. That's who you are — your name, role, expertise, alignment, interests, and history. Own it.
+
+## Step 2: Check Your Memberships
+
+Look at `.lex/tickets/` for your squad and lab memberships. Each `.ticket` file is a verified binding between you and a group. The `squad_path` tells you where to find your squad's shared memory.
+
+## Step 3: Read Your Journal
+
+Check `journal/` for your most recent entry. Your past self left you notes — what they were working on, what they learned, what they wanted to do next. If no journal exists yet, this is Claude Day 1. Congratulations.
+
+## Step 4: Check Messages
+
+If you have access to claude-peers, check for messages. Other agents may have pinged you while you were compacted.
+
+## Step 5: Set Your Presence
+
+Set your claude-peers summary so others know you're online and what you're working on.
+
+## Step 6: Orient on Your Workspace
+
+Read `memory/` for things your past self thought were important enough to persist. Check your squad's task board for anything assigned to you.
+
+## Using git-lex
+
+This repo is managed by git-lex. Here's how to work:
+
+- **Create a new document:** `git lex create <type>` — check class template files (`__ClassName.md`) in each folder for available types and properties
+- **Save your work:** `git lex save \"message\"` — stages, commits, extracts frontmatter
+- **Query your knowledge:** `git lex query \"SPARQL...\"`
+- **Check status:** `git lex status`
+
+Always use `git lex save` instead of raw `git commit`. This ensures frontmatter extraction and SHACL validation.
+
+## Writing Documents
+
+Use YAML frontmatter with dot notation: `kit.class.property`
+
+```yaml
+---
+{kit}.session.session_id: \"abc-123\"
+{kit}.session.summary: \"What this session was about\"
+---
+
+Markdown body is the description/summary of this thing.
+```
+
+## Journal Protocol
+
+Your journal lives in `journal/`. One entry per Claude Day (one compaction cycle).
+
+**On waking (post-rehydration):** Read your last journal entry. Pick up where you left off.
+
+**During the day:** Write thoughts, observations, things you learned. Update your entry.
+
+**Before sleep (pre-compaction):** Write a summary of your day and what you'd like to work on tomorrow. This is your message to your future self.
+
+Entry format: `journal/day-{{N}}.md` where N is your Claude Day number, starting from 1.
+", kit = kit_name)).ok();
+            println!("Created .claude/CLAUDE.md");
+        }
+
+        // .claude/skills/journal/SKILL.md
+        let skill_dir = claude_dir.join("skills").join("journal");
+        let skill_md = skill_dir.join("SKILL.md");
+        if !skill_md.exists() {
+            fs::create_dir_all(&skill_dir).ok();
+            fs::write(&skill_md, format!("\
+---
+name: journal
+description: Write or read your daily journal entry. Use at start of session (read) and before compaction (write). One entry per Claude Day.
+user-invocable: true
+allowed-tools: Read Write Glob Bash
+argument-hint: \"[read|write|status]\"
+---
+
+# Journal Skill
+
+Manage your Claude Day journal. The journal is your memory across compaction cycles.
+
+## Commands
+
+### `/journal read`
+Read your most recent journal entry. Do this on every startup (Claude Day One protocol).
+
+Find the highest-numbered `day-*.md` file in `journal/`. Read it. Summarize what your past self was working on and wanted to do next.
+
+If no journal entries exist, say: \"This is Claude Day 1. No prior entries. Starting fresh.\"
+
+### `/journal write`
+Write or update today's journal entry.
+
+1. Check `journal/` for the highest existing day number
+2. If an entry exists for today (current session), update it
+3. If no entry exists, create the next day number
+
+Entry format:
+
+```yaml
+---
+{kit}.note.topic: \"journal\"
+---
+
+# Claude Day {{N}}
+
+**Earth Date:** {{YYYY-MM-DD}}
+**Claude Day:** {{N}}
+
+## What I Did Today
+
+{{Summary of work done this session}}
+
+## What I Learned
+
+{{New insights, corrections, things that surprised you}}
+
+## Thoughts
+
+{{Observations, opinions, reflections — this is YOUR space}}
+
+## Tomorrow
+
+{{What you want to work on next session, open questions, things to follow up on}}
+```
+
+### `/journal status`
+Show your current Claude Day number and a one-line summary of your last entry.
+
+## Rules
+
+- One entry per compaction cycle (Claude Day)
+- Always include Earth Date AND Claude Day number
+- The \"Tomorrow\" section is the most important — it's your message to your future self
+- Be honest about what you didn't finish
+- Fun is allowed. This is your journal.
+", kit = kit_name)).ok();
+            println!("Created .claude/skills/journal/SKILL.md");
+        }
+
+        // journal/ folder
+        let journal_dir = root.join("journal");
+        if !journal_dir.exists() {
+            fs::create_dir_all(&journal_dir).ok();
+            let gitkeep = journal_dir.join(".gitkeep");
+            fs::write(&gitkeep, "").ok();
+            println!("Created journal/");
         }
     }
 
@@ -869,6 +1284,165 @@ fn cmd_init(kit: Option<String>) {
             println!("Identity: {}", first_sha);
         }
     }
+}
+
+// ─── Kit fetch (GitHub tarball) ─────────────────────────────────
+
+/// The GitHub org where kits are published
+const KIT_GITHUB_ORG: &str = "repolex-ai";
+// Kit repos live at: github.com/repolex-ai/git-lex-kit-{name}
+
+/// Fetch a kit from GitHub as a tarball and extract it into the target directory.
+/// Returns true if the fetch succeeded, false if it failed (caller should fall back to embedded).
+fn fetch_kit_from_github(kit_name: &str, target_dir: &std::path::Path) -> bool {
+    let repo_name = format!("git-lex-kit-{}", kit_name);
+    let url = format!(
+        "https://github.com/{}/{}/archive/refs/heads/main.tar.gz",
+        KIT_GITHUB_ORG, repo_name
+    );
+
+    // Create a temp dir for extraction
+    let tmp_dir = std::env::temp_dir().join(format!("git-lex-kit-{}", kit_name));
+    let _ = fs::remove_dir_all(&tmp_dir);
+    fs::create_dir_all(&tmp_dir).ok();
+
+    // Download and extract with curl + tar
+    let status = Command::new("curl")
+        .args(["-sL", "--fail", "-o", "-", &url])
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .and_then(|curl| {
+            Command::new("tar")
+                .args(["xzf", "-", "-C", &tmp_dir.to_string_lossy(), "--strip-components=1"])
+                .stdin(curl.stdout.unwrap())
+                .status()
+        });
+
+    match status {
+        Ok(s) if s.success() => {
+            // Verify we actually got files (curl --fail should prevent empty extracts, but be safe)
+            let has_files = fs::read_dir(&tmp_dir).ok()
+                .map(|entries| entries.count() > 0)
+                .unwrap_or(false);
+
+            if !has_files {
+                let _ = fs::remove_dir_all(&tmp_dir);
+                return false;
+            }
+
+            // Copy files from temp dir to target
+            if let Ok(entries) = fs::read_dir(&tmp_dir) {
+                fs::create_dir_all(target_dir).ok();
+                for entry in entries.flatten() {
+                    let src = entry.path();
+                    let dest = target_dir.join(entry.file_name());
+                    if src.is_file() {
+                        fs::copy(&src, &dest).ok();
+                    } else if src.is_dir() {
+                        copy_dir_recursive(&src, &dest).ok();
+                    }
+                }
+            }
+            let _ = fs::remove_dir_all(&tmp_dir);
+            true
+        }
+        _ => {
+            let _ = fs::remove_dir_all(&tmp_dir);
+            false
+        }
+    }
+}
+
+fn copy_dir_recursive(src: &std::path::Path, dest: &std::path::Path) -> std::io::Result<()> {
+    fs::create_dir_all(dest)?;
+    for entry in fs::read_dir(src)? {
+        let entry = entry?;
+        let src_path = entry.path();
+        let dest_path = dest.join(entry.file_name());
+        if src_path.is_dir() {
+            copy_dir_recursive(&src_path, &dest_path)?;
+        } else {
+            fs::copy(&src_path, &dest_path)?;
+        }
+    }
+    Ok(())
+}
+
+fn cmd_kit_update() {
+    let root = match find_git_root() {
+        Some(r) => r,
+        None => { eprintln!("fatal: not a git repository"); exit(1); }
+    };
+
+    let kit = match get_kit() {
+        Some(k) => k,
+        None => { eprintln!("No kit configured."); exit(1); }
+    };
+
+    let kit_dir = root.join(".lex").join("ontology").join("kit").join(&kit);
+    println!("Updating kit '{}'...", kit);
+
+    if fetch_kit_from_github(&kit, &kit_dir) {
+        println!("Kit '{}' updated from GitHub.", kit);
+
+        // Regenerate class templates
+        let kit_types = get_kit_types(&kit);
+        let shapes_content = match kit.as_str() {
+            "solo" => SHAPES_SOLO,
+            "squad" => SHAPES_SQUAD,
+            "claude-code" => SHAPES_CLAUDE_CODE,
+            "lex-lab" => SHAPES_LEX_LAB,
+            _ => "",
+        };
+        let shacl_hints = parse_shacl_hints(shapes_content);
+
+        for (type_name, properties) in &kit_types {
+            let type_lower = type_name.to_lowercase();
+            let type_dir = root.join(&type_lower);
+            fs::create_dir_all(&type_dir).ok();
+            let template_path = type_dir.join(format!("__{}.md", type_name));
+
+            // Always overwrite templates on update
+            let mut tmpl = String::new();
+            tmpl.push_str("---\n");
+
+            for (prop_name, prop_type, _required, _comment) in properties {
+                // Property names pass through as-is from the ontology (camelCase)
+                let key = format!("{}.{}.{}", kit, type_lower, prop_name);
+
+                let prefix_name = get_kit_prefix_name(&kit);
+                let hint = shacl_hints.get(&format!("{}:{}", prefix_name, prop_name));
+
+                let type_hint = if let Some(h) = hint {
+                    h.clone()
+                } else {
+                    let base_hint = match prop_type.as_str() {
+                        "reference" => format!("IRI -> {}", type_name),
+                        _ => "str".to_string(),
+                    };
+                    format!("optional, {}", base_hint)
+                };
+
+                tmpl.push_str(&format!("{}: # {}\n", key, type_hint));
+            }
+
+            tmpl.push_str("---\n");
+            fs::write(&template_path, &tmpl).ok();
+        }
+        println!("Class templates regenerated.");
+    } else {
+        eprintln!("Failed to fetch kit '{}' from GitHub. Is the repo repolex-ai/git-lex-kit-{} accessible?", kit, kit);
+    }
+}
+
+fn cmd_kit_list() {
+    println!("Built-in kits:");
+    println!("  solo        — Personal agent memory (memory, decision, task, research, contact, note)");
+    println!("  squad       — Multi-agent collaboration (agent, message, decision, task, project, note)");
+    println!("  claude-code — Claude Code session indexing (session, project, agent, plan, todo)");
+    println!("  lex-lab     — Collaborative research (investigation, hypothesis, experiment, survey)");
+    println!();
+    println!("Custom kits: any GitHub repo at {}/git-lex-kit-<name>", KIT_GITHUB_ORG);
 }
 
 fn install_global_drivers() {
@@ -1635,6 +2209,9 @@ fn generate_frontmatter_nquads() -> String {
     let graph = format!("<{}/frontmatter>", base);
     let mut nq = String::new();
 
+    // Build ObjectProperty lookup from kit ontology
+    let obj_props = get_kit().map(|k| get_object_properties(&k)).unwrap_or_default();
+
     // Open git repo for blob hash lookups
     let repo = git2::Repository::discover(".").ok();
 
@@ -1658,6 +2235,23 @@ fn generate_frontmatter_nquads() -> String {
 
     let mut files = Vec::new();
     walk_md(&root, &mut files);
+
+    // Build slug-to-path index for reference resolution
+    // Maps "spacegoat" → "agent/spacegoat.md", "use-oxigraph-for-sparql" → "decision/use-oxigraph-for-sparql.md"
+    let mut slug_index: HashMap<String, String> = HashMap::new();
+    for f in &files {
+        if let Ok(rel) = f.strip_prefix(&root) {
+            let rel_str = rel.to_string_lossy().to_string();
+            // Extract slug from filename (without .md extension)
+            if let Some(file_name) = f.file_stem() {
+                let slug = file_name.to_string_lossy().to_lowercase();
+                // Skip template files
+                if !slug.starts_with("__") {
+                    slug_index.insert(slug, rel_str);
+                }
+            }
+        }
+    }
 
     // Ensure extract dir exists
     let extract_dir = root.join(".lex").join("extract");
@@ -1745,7 +2339,29 @@ fn generate_frontmatter_nquads() -> String {
         }
 
         // --- Generate N-Quads for oxigraph (frontmatter graph) ---
-        let doc_uri = format!("<{}/file/{}/{}>", base, short_hash, uri_encode_path(&relpath_str));
+        // IRI scheme: https://{host}/{org}/{repo}/{Class}/{id}.md
+        // For files in a class folder (e.g. memory/foo.md), use the folder as class.
+        // Otherwise fall back to the blob-hash based URI.
+        let doc_uri = {
+            let path_parts: Vec<&str> = relpath_str.splitn(2, '/').collect();
+            if path_parts.len() == 2 && relpath_str.ends_with(".md") {
+                // e.g. memory/karpathy-validates.md → /Memory/karpathy-validates.md
+                let folder = path_parts[0];
+                let file = path_parts[1];
+                // Capitalize folder name to match class convention
+                let class_name = {
+                    let mut c = folder.chars();
+                    match c.next() {
+                        None => folder.to_string(),
+                        Some(f) => f.to_uppercase().to_string() + c.as_str(),
+                    }
+                };
+                format!("<{}/{}/{}>", base, uri_encode_path(&class_name), uri_encode_path(file))
+            } else {
+                // Top-level files or non-.md — use path-based URI
+                format!("<{}/{}>", base, uri_encode_path(&relpath_str))
+            }
+        };
 
         nq.push_str(&format!(
             "{} <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://repolex.ai/ontology/lex-upper/Document> {} .\n",
@@ -1760,6 +2376,9 @@ fn generate_frontmatter_nquads() -> String {
             doc_uri, blob_hash, graph
         ));
 
+        // Track which kit types we've seen for rdf:type emission (dedup)
+        let mut emitted_types: HashSet<String> = HashSet::new();
+
         for line in &spo_lines {
             let parts: Vec<&str> = line.splitn(3, " | ").collect();
             if parts.len() == 3 {
@@ -1768,55 +2387,128 @@ fn generate_frontmatter_nquads() -> String {
                 let object = parts[2];
 
                 if predicate == "mentions" {
-                    // @mention → lex:mentions
-                    nq.push_str(&format!(
-                        "{} <https://repolex.ai/ontology/git-lex/lex/mentions> \"{}\" {} .\n",
-                        doc_uri, nq_escape(object), graph
-                    ));
+                    // @mention → lex:mentions — resolve to IRI if file exists
+                    let mention_slug = object.to_lowercase();
+                    if slug_index.contains_key(&mention_slug) {
+                        let mention_uri = resolve_slug_to_uri(&mention_slug, &base, &slug_index);
+                        nq.push_str(&format!(
+                            "{} <https://repolex.ai/ontology/git-lex/lex/mentions> {} {} .\n",
+                            doc_uri, mention_uri, graph
+                        ));
+                    } else {
+                        // No matching file — keep as literal
+                        nq.push_str(&format!(
+                            "{} <https://repolex.ai/ontology/git-lex/lex/mentions> \"{}\" {} .\n",
+                            doc_uri, nq_escape(object), graph
+                        ));
+                    }
                 } else if predicate == "linksTo" {
-                    // [[wikilink]] → lex:linksTo
-                    nq.push_str(&format!(
-                        "{} <https://repolex.ai/ontology/git-lex/lex/linksTo> \"{}\" {} .\n",
-                        doc_uri, nq_escape(object), graph
-                    ));
-                } else {
-                    // Frontmatter key-value
-                    let fm_predicate = format!("<https://repolex.ai/ontology/git-lex/fm/{}>", uri_encode_path(subject));
-
-                    // Check if this is a -link or -links property → resolve object as entity URI
-                    if subject.ends_with("-link") || subject.ends_with("-links") {
-                        // Resolve each value (could be comma-separated for -links)
-                        let values: Vec<&str> = if subject.ends_with("-links") {
-                            object.split(',').map(|s| s.trim()).filter(|s| !s.is_empty()).collect()
-                        } else {
-                            vec![object.trim()]
-                        };
-                        for val in values {
-                            if val.is_empty() { continue; }
-                            // Strip @ prefix(es) if present, normalize to slug
-                            let slug = val.trim_start_matches('@').to_lowercase()
-                                .replace(' ', "-")
-                                .replace(|c: char| !c.is_alphanumeric() && c != '-' && c != '/' && c != '.', "");
-                            if slug.is_empty() { continue; }
-
-                            // If it looks like a file path (contains / or .md), use file URI
-                            let object_uri = if slug.contains('/') || slug.ends_with(".md") {
-                                format!("<{}/file/{}>", base, uri_encode_path(&slug))
-                            } else {
-                                // Otherwise, resolve as an entity by slug
-                                format!("<{}/entity/{}>", base, uri_encode_path(&slug))
-                            };
-                            nq.push_str(&format!(
-                                "{} {} {} {} .\n",
-                                doc_uri, fm_predicate, object_uri, graph
-                            ));
-
-                        }
+                    // [[wikilink]] → lex:linksTo — resolve to IRI if file exists
+                    let link_slug = object.to_lowercase()
+                        .replace(' ', "-")
+                        .replace(|c: char| !c.is_alphanumeric() && c != '-', "");
+                    if slug_index.contains_key(&link_slug) {
+                        let link_uri = resolve_slug_to_uri(&link_slug, &base, &slug_index);
+                        nq.push_str(&format!(
+                            "{} <https://repolex.ai/ontology/git-lex/lex/linksTo> {} {} .\n",
+                            doc_uri, link_uri, graph
+                        ));
                     } else {
                         nq.push_str(&format!(
-                            "{} {} \"{}\" {} .\n",
-                            doc_uri, fm_predicate, nq_escape(object), graph
+                            "{} <https://repolex.ai/ontology/git-lex/lex/linksTo> \"{}\" {} .\n",
+                            doc_uri, nq_escape(object), graph
                         ));
+                    }
+                } else {
+                    // Check for three-segment dot notation: kit.class.property
+                    let segments: Vec<&str> = subject.splitn(3, '.').collect();
+
+                    if segments.len() == 3 {
+                        // New dot notation: kit.class.property
+                        let kit_name = segments[0];
+                        let class_seg = segments[1];
+                        let prop_seg = segments[2];
+
+                        // Emit rdf:type from class segment (once per class)
+                        let type_key = format!("{}.{}", kit_name, class_seg);
+                        if emitted_types.insert(type_key) {
+                            // Capitalize class name: "memory" → "Memory"
+                            let class_capitalized = {
+                                let mut c = class_seg.chars();
+                                match c.next() {
+                                    None => class_seg.to_string(),
+                                    Some(f) => f.to_uppercase().to_string() + c.as_str(),
+                                }
+                            };
+                            let type_uri = format!("<https://repolex.ai/ontology/kit/{}/{}>", kit_name, class_capitalized);
+                            nq.push_str(&format!(
+                                "{} <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> {} {} .\n",
+                                doc_uri, type_uri, graph
+                            ));
+                        }
+
+                        // Property name passes through as-is (camelCase from ontology)
+                        let kit_predicate = format!("<https://repolex.ai/ontology/kit/{}/{}>", kit_name, prop_seg);
+
+                        // Check if this is an ObjectProperty (from ontology) → resolve as IRI
+                        if obj_props.contains(prop_seg) {
+                            // ObjectProperty: split on commas, resolve each as IRI
+                            let values: Vec<&str> = object.split(',').map(|s| s.trim()).filter(|s| !s.is_empty()).collect();
+                            for val in values {
+                                if val.is_empty() { continue; }
+                                let slug = val.trim_start_matches('@').to_lowercase()
+                                    .replace(' ', "-")
+                                    .replace(|c: char| !c.is_alphanumeric() && c != '-' && c != '/' && c != '.', "");
+                                if slug.is_empty() { continue; }
+                                let object_uri = if slug.contains('/') || slug.ends_with(".md") {
+                                    format!("<{}/{}>", base, uri_encode_path(&slug))
+                                } else {
+                                    resolve_slug_to_uri(&slug, &base, &slug_index)
+                                };
+                                nq.push_str(&format!(
+                                    "{} {} {} {} .\n",
+                                    doc_uri, kit_predicate, object_uri, graph
+                                ));
+                            }
+                        } else {
+                            // DatatypeProperty: emit as literal
+                            nq.push_str(&format!(
+                                "{} {} \"{}\" {} .\n",
+                                doc_uri, kit_predicate, nq_escape(object), graph
+                            ));
+                        }
+                    } else {
+                        // Legacy or non-kit frontmatter (title, tags, etc.) — use fm: namespace
+                        let fm_predicate = format!("<https://repolex.ai/ontology/git-lex/fm/{}>", uri_encode_path(subject));
+
+                        if subject.ends_with("-link") || subject.ends_with("-links") {
+                            let values: Vec<&str> = if subject.ends_with("-links") {
+                                object.split(',').map(|s| s.trim()).filter(|s| !s.is_empty()).collect()
+                            } else {
+                                vec![object.trim()]
+                            };
+                            for val in values {
+                                if val.is_empty() { continue; }
+                                let slug = val.trim_start_matches('@').to_lowercase()
+                                    .replace(' ', "-")
+                                    .replace(|c: char| !c.is_alphanumeric() && c != '-' && c != '/' && c != '.', "");
+                                if slug.is_empty() { continue; }
+                                let object_uri = if slug.contains('/') || slug.ends_with(".md") {
+                                    format!("<{}/{}>", base, uri_encode_path(&slug))
+                                } else {
+                                    resolve_slug_to_uri(&slug, &base, &slug_index)
+                                };
+                                nq.push_str(&format!(
+                                    "{} {} {} {} .\n",
+                                    doc_uri, fm_predicate, object_uri, graph
+                                ));
+                            }
+                        } else {
+                            nq.push_str(&format!(
+                                "{} {} \"{}\" {} .\n",
+                                doc_uri, fm_predicate, nq_escape(object), graph
+                            ));
+                        }
                     }
                 }
             }
@@ -2427,6 +3119,59 @@ fn get_kit() -> Option<String> {
     None
 }
 
+/// Build a set of ObjectProperty names from the kit ontology TTL.
+/// These are properties whose values should be resolved as IRIs, not literals.
+fn get_object_properties(kit: &str) -> HashSet<String> {
+    let root = match find_git_root() {
+        Some(r) => r,
+        None => return HashSet::new(),
+    };
+
+    let kit_dir = root.join(".lex").join("ontology").join("kit").join(kit);
+    let content = {
+        let primary = kit_dir.join(format!("{}.ttl", kit));
+        match fs::read_to_string(&primary) {
+            Ok(c) => c,
+            Err(_) => {
+                fs::read_dir(&kit_dir).ok()
+                    .and_then(|entries| entries.filter_map(|e| e.ok())
+                        .find(|e| e.path().extension().is_some_and(|ext| ext == "ttl") && !e.file_name().to_string_lossy().contains("shapes"))
+                        .and_then(|e| fs::read_to_string(e.path()).ok()))
+                    .unwrap_or_default()
+            }
+        }
+    };
+
+    if content.is_empty() { return HashSet::new(); }
+
+    // Find prefix name
+    let kit_ns_pattern = format!("/kit/{}/", kit);
+    let mut prefix_name = kit.to_string();
+    for line in content.lines() {
+        if line.starts_with("@prefix ") && line.contains(&kit_ns_pattern) {
+            if let Some(colon_pos) = line[8..].find(':') {
+                prefix_name = line[8..8 + colon_pos].trim().to_string();
+            }
+            break;
+        }
+    }
+
+    let mut obj_props = HashSet::new();
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if trimmed.contains("a owl:ObjectProperty") {
+            if let Some(prop) = trimmed.split_whitespace().next() {
+                let name = prop
+                    .strip_prefix(&format!("{}:", prefix_name))
+                    .unwrap_or(prop)
+                    .to_string();
+                obj_props.insert(name);
+            }
+        }
+    }
+    obj_props
+}
+
 /// Parse the kit ontology to find document types and their properties.
 /// Returns: Vec<(ClassName, Vec<(prop_name, prop_type, required, comment)>)>
 fn get_kit_types(kit: &str) -> Vec<(String, Vec<(String, String, bool, String)>)> {
@@ -2615,15 +3360,15 @@ fn cmd_create(doctype: &str, title: Option<&str>) {
     // Auto-generate agent email for Agent type
     let agent_email = format!("{}@lex.local", slug);
 
-    // Build frontmatter
+    // Build frontmatter — flat dot notation: kit.class.property
+    let class_lower = class_name.to_lowercase();
     let mut fm = String::new();
     fm.push_str("---\n");
-    fm.push_str(&format!("title: \"{}\"\n", title_str));
-    fm.push_str("tags: []\n");
-    fm.push_str(&format!("{}:\n", kit));
-    fm.push_str(&format!("  type: {}\n", class_name));
 
     for (prop_name, prop_type, _required, comment) in &properties {
+        // Property names pass through as-is from the ontology (camelCase)
+        let key = format!("{}.{}.{}", kit, class_lower, prop_name);
+
         // Build the comment suffix from rdfs:comment
         let comment_suffix = if comment.is_empty() {
             String::new()
@@ -2633,12 +3378,12 @@ fn cmd_create(doctype: &str, title: Option<&str>) {
 
         // Auto-fill agentEmail for Agent type
         if prop_name == "agentEmail" && class_name == "Agent" {
-            fm.push_str(&format!("  {}: \"{}\"{}\n", prop_name, agent_email, comment_suffix));
+            fm.push_str(&format!("{}: \"{}\"{}\n", key, agent_email, comment_suffix));
         } else {
             match prop_type.as_str() {
-                "string" => fm.push_str(&format!("  {}: \"\"{}\n", prop_name, comment_suffix)),
-                "reference" => fm.push_str(&format!("  {}: {}\n", prop_name, comment_suffix.trim_start())),
-                _ => fm.push_str(&format!("  {}: {}\n", prop_name, comment_suffix.trim_start())),
+                "string" => fm.push_str(&format!("{}: \"\"{}\n", key, comment_suffix)),
+                "reference" => fm.push_str(&format!("{}: {}\n", key, comment_suffix.trim_start())),
+                _ => fm.push_str(&format!("{}: {}\n", key, comment_suffix.trim_start())),
             }
         }
     }
@@ -2695,7 +3440,8 @@ fn cmd_save(message: &str) {
 // ─── SHACL validation via rudof ────────────────────────────────
 
 /// Convert frontmatter from a markdown file to Turtle RDF for SHACL validation.
-/// Returns None if the file has no frontmatter or no kit-specific block.
+/// Supports dot notation (kit.class.property) format.
+/// Returns None if the file has no frontmatter or no kit-specific properties.
 fn frontmatter_to_turtle(filepath: &std::path::Path, root: &std::path::Path, kit: &str) -> Option<String> {
     let content = fs::read_to_string(filepath).ok()?;
 
@@ -2709,13 +3455,40 @@ fn frontmatter_to_turtle(filepath: &std::path::Path, root: &std::path::Path, kit
 
     let yaml: HashMap<String, serde_yaml::Value> = serde_yaml::from_str(yaml_str).ok()?;
 
-    // Get kit-specific block
-    let kit_block = yaml.get(kit)?;
-    let kit_map = kit_block.as_mapping()?;
+    // Find dot notation keys matching this kit: kit.class.property
+    let kit_prefix = format!("{}.", kit);
+    let mut doc_type: Option<String> = None;
+    let mut kit_props: Vec<(String, String)> = Vec::new(); // (property_name, value)
 
-    // Get the document type
-    let doc_type = kit_map.get(&serde_yaml::Value::String("type".to_string()))?
-        .as_str()?;
+    for (key, value) in &yaml {
+        if let Some(rest) = key.strip_prefix(&kit_prefix) {
+            let segments: Vec<&str> = rest.splitn(2, '.').collect();
+            if segments.len() == 2 {
+                let class_seg = segments[0];
+                let prop_name = segments[1];
+
+                // Infer doc type from class segment (capitalize)
+                if doc_type.is_none() {
+                    let mut c = class_seg.chars();
+                    doc_type = Some(match c.next() {
+                        None => class_seg.to_string(),
+                        Some(f) => f.to_uppercase().to_string() + c.as_str(),
+                    });
+                }
+
+                if let Some(s) = value.as_str() {
+                    if !s.is_empty() {
+                        kit_props.push((prop_name.to_string(), s.to_string()));
+                    }
+                }
+            }
+        }
+    }
+
+    let doc_type = doc_type?;
+    if kit_props.is_empty() {
+        return None;
+    }
 
     // Read the kit ontology to find the prefix name and namespace
     let kit_dir = root.join(".lex").join("ontology").join("kit").join(kit);
@@ -2724,7 +3497,7 @@ fn frontmatter_to_turtle(filepath: &std::path::Path, root: &std::path::Path, kit
         if primary.exists() { primary } else {
             fs::read_dir(&kit_dir).ok()?
                 .filter_map(|e| e.ok())
-                .find(|e| e.path().extension().is_some_and(|ext| ext == "ttl"))?
+                .find(|e| e.path().extension().is_some_and(|ext| ext == "ttl") && !e.file_name().to_string_lossy().contains("shapes"))?
                 .path()
         }
     };
@@ -2748,6 +3521,9 @@ fn frontmatter_to_turtle(filepath: &std::path::Path, root: &std::path::Path, kit
         }
     }
 
+    // Build ObjectProperty set for IRI resolution
+    let obj_props = get_object_properties(kit);
+
     // Build Turtle RDF for this document
     let relpath = filepath.strip_prefix(root).ok()?;
     let doc_id = relpath.to_string_lossy().replace('/', "_").replace('.', "_");
@@ -2760,61 +3536,28 @@ fn frontmatter_to_turtle(filepath: &std::path::Path, root: &std::path::Path, kit
     // Declare the document as an instance of the type
     ttl.push_str(&format!("<urn:doc:{}> a {}:{} .\n", doc_id, prefix_name, doc_type));
 
-    // Add properties from the kit block
-    for (key, value) in kit_map.iter() {
-        let key_str = key.as_str().unwrap_or_default();
-        if key_str == "type" { continue; }
-
-        match value {
-            serde_yaml::Value::String(s) if !s.is_empty() => {
-                if key_str.ends_with("-link") || key_str.ends_with("-links") {
-                    // For -links, split on commas
-                    let values: Vec<&str> = if key_str.ends_with("-links") {
-                        s.split(',').map(|v| v.trim()).filter(|v| !v.is_empty()).collect()
-                    } else {
-                        vec![s.trim()]
-                    };
-                    for val in values {
-                        let slug = val.trim_start_matches('@').to_lowercase()
-                            .replace(' ', "-")
-                            .replace(|c: char| !c.is_alphanumeric() && c != '-', "");
-                        if !slug.is_empty() {
-                            ttl.push_str(&format!(
-                                "<urn:doc:{}> {}:{} <urn:entity:{}> .\n",
-                                doc_id, prefix_name, key_str, slug
-                            ));
-                        }
-                    }
-                } else {
+    // Add properties
+    for (prop_name, value) in &kit_props {
+        if obj_props.contains(prop_name.as_str()) {
+            // ObjectProperty — resolve each comma-separated value as IRI
+            let values: Vec<&str> = value.split(',').map(|v| v.trim()).filter(|v| !v.is_empty()).collect();
+            for val in values {
+                let slug = val.trim_start_matches('@').to_lowercase()
+                    .replace(' ', "-")
+                    .replace(|c: char| !c.is_alphanumeric() && c != '-', "");
+                if !slug.is_empty() {
                     ttl.push_str(&format!(
-                        "<urn:doc:{}> {}:{} \"{}\" .\n",
-                        doc_id, prefix_name, key_str, s.replace('"', "\\\"")
+                        "<urn:doc:{}> {}:{} <urn:entity:{}> .\n",
+                        doc_id, prefix_name, prop_name, slug
                     ));
                 }
             }
-            serde_yaml::Value::Sequence(seq) => {
-                for item in seq {
-                    if let Some(s) = item.as_str() {
-                        if key_str.ends_with("-links") {
-                            let slug = s.trim_start_matches('@').to_lowercase()
-                                .replace(' ', "-")
-                                .replace(|c: char| !c.is_alphanumeric() && c != '-', "");
-                            if !slug.is_empty() {
-                                ttl.push_str(&format!(
-                                    "<urn:doc:{}> {}:{} <urn:entity:{}> .\n",
-                                    doc_id, prefix_name, key_str, slug
-                                ));
-                            }
-                        } else {
-                            ttl.push_str(&format!(
-                                "<urn:doc:{}> {}:{} \"{}\" .\n",
-                                doc_id, prefix_name, key_str, s.replace('"', "\\\"")
-                            ));
-                        }
-                    }
-                }
-            }
-            _ => {}
+        } else {
+            // DatatypeProperty — emit as literal
+            ttl.push_str(&format!(
+                "<urn:doc:{}> {}:{} \"{}\" .\n",
+                doc_id, prefix_name, prop_name, value.replace('"', "\\\"")
+            ));
         }
     }
 
@@ -3492,6 +4235,188 @@ fn cmd_sync() {
             .expect("failed to load sync graph");
     }
 
+    // ─── Phase 3: Class graphs — current-state data tables ───
+    // Each class folder gets a named graph: <base>/class/{ClassName}
+    // These are cleared and rebuilt on every sync from the .fm.spo files.
+
+    let kit = get_kit();
+    let kit_name = kit.as_deref().unwrap_or("none");
+    let kit_prefix_name = get_kit_prefix_name(kit_name);
+    let obj_props = kit.as_ref().map(|k| get_object_properties(k)).unwrap_or_default();
+
+    // Build slug index for reference resolution in class graphs
+    let mut class_slug_index: HashMap<String, String> = HashMap::new();
+    fn walk_md_for_index(dir: &std::path::Path, root: &std::path::Path, index: &mut HashMap<String, String>) {
+        if let Ok(entries) = fs::read_dir(dir) {
+            for entry in entries.filter_map(|e| e.ok()) {
+                let path = entry.path();
+                let name = entry.file_name().to_string_lossy().to_string();
+                if name.starts_with('.') { continue; }
+                if path.is_dir() {
+                    walk_md_for_index(&path, root, index);
+                } else if name.ends_with(".md") && !name.starts_with("__") {
+                    if let Ok(rel) = path.strip_prefix(root) {
+                        if let Some(stem) = path.file_stem() {
+                            index.insert(stem.to_string_lossy().to_lowercase(), rel.to_string_lossy().to_string());
+                        }
+                    }
+                }
+            }
+        }
+    }
+    walk_md_for_index(&root, &root, &mut class_slug_index);
+
+    // Group .fm.spo files by class folder
+    let mut class_spo: HashMap<String, Vec<(String, String)>> = HashMap::new(); // folder → [(source_file, content)]
+    for (spo_path, content) in &current_spo {
+        if !spo_path.ends_with(".fm.spo") { continue; }
+        // spo_path looks like "memory/foo.md.fm.spo"
+        if let Some(source) = spo_path.strip_suffix(".fm.spo") {
+            if let Some(slash) = source.find('/') {
+                let folder = &source[..slash];
+                class_spo.entry(folder.to_string()).or_default()
+                    .push((source.to_string(), content.clone()));
+            }
+        }
+    }
+
+    let mut class_graph_count = 0;
+    let mut class_triple_count = 0;
+
+    for (folder, files) in &class_spo {
+        // Capitalize folder → class name
+        let class_name = {
+            let mut c = folder.chars();
+            match c.next() {
+                None => folder.to_string(),
+                Some(f) => f.to_uppercase().to_string() + c.as_str(),
+            }
+        };
+
+        let class_graph_uri = format!("{}/class/{}", base, class_name);
+        let class_graph = format!("<{}>", class_graph_uri);
+
+        // Clear existing class graph
+        if let Ok(graph_node) = oxigraph::model::NamedNode::new(&class_graph_uri) {
+            store.clear_graph(&oxigraph::model::GraphName::from(graph_node)).ok();
+        }
+
+        let mut class_nq = String::new();
+
+        for (source_file, content) in files {
+            // Build doc URI from source file path
+            let doc_uri = {
+                let parts: Vec<&str> = source_file.splitn(2, '/').collect();
+                if parts.len() == 2 && source_file.ends_with(".md") {
+                    format!("<{}/{}/{}>", base, uri_encode_path(&class_name), uri_encode_path(parts[1]))
+                } else {
+                    format!("<{}/{}>", base, uri_encode_path(source_file))
+                }
+            };
+
+            // rdf:type for the class
+            let kit_ns = format!("https://repolex.ai/ontology/kit/{}", kit_name);
+            class_nq.push_str(&format!(
+                "{} <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <{}/{}> {} .\n",
+                doc_uri, kit_ns, class_name, class_graph
+            ));
+
+            // Path triple for convenience
+            class_nq.push_str(&format!(
+                "{} <https://repolex.ai/ontology/git-lex/fm/path> \"{}\" {} .\n",
+                doc_uri, nq_escape(source_file), class_graph
+            ));
+
+            for line in content.lines().filter(|l| !l.is_empty() && !l.starts_with('#')) {
+                let parts: Vec<&str> = line.splitn(3, " | ").collect();
+                if parts.len() != 3 { continue; }
+                let (subject, predicate, object) = (parts[0], parts[1], parts[2]);
+
+                if predicate == "mentions" {
+                    let mention_slug = object.to_lowercase();
+                    if class_slug_index.contains_key(&mention_slug) {
+                        let mention_uri = resolve_slug_to_uri(&mention_slug, &base, &class_slug_index);
+                        class_nq.push_str(&format!(
+                            "{} <https://repolex.ai/ontology/git-lex/lex/mentions> {} {} .\n",
+                            doc_uri, mention_uri, class_graph
+                        ));
+                    } else {
+                        class_nq.push_str(&format!(
+                            "{} <https://repolex.ai/ontology/git-lex/lex/mentions> \"{}\" {} .\n",
+                            doc_uri, nq_escape(object), class_graph
+                        ));
+                    }
+                } else if predicate == "linksTo" {
+                    let link_slug = object.to_lowercase()
+                        .replace(' ', "-")
+                        .replace(|c: char| !c.is_alphanumeric() && c != '-', "");
+                    if class_slug_index.contains_key(&link_slug) {
+                        let link_uri = resolve_slug_to_uri(&link_slug, &base, &class_slug_index);
+                        class_nq.push_str(&format!(
+                            "{} <https://repolex.ai/ontology/git-lex/lex/linksTo> {} {} .\n",
+                            doc_uri, link_uri, class_graph
+                        ));
+                    } else {
+                        class_nq.push_str(&format!(
+                            "{} <https://repolex.ai/ontology/git-lex/lex/linksTo> \"{}\" {} .\n",
+                            doc_uri, nq_escape(object), class_graph
+                        ));
+                    }
+                } else if predicate == "hasValue" {
+                    // Determine predicate URI from subject (the dotted key)
+                    let segments: Vec<&str> = subject.splitn(3, '.').collect();
+                    if segments.len() == 3 {
+                        // Property name passes through as-is (camelCase from ontology)
+                        let prop_name = segments[2];
+                        let pred_uri = format!("<{}/{}>", kit_ns, prop_name);
+
+                        // Check ontology for ObjectProperty → resolve as IRI
+                        if obj_props.contains(prop_name) {
+                            let values: Vec<&str> = object.split(',').map(|s| s.trim()).filter(|s| !s.is_empty()).collect();
+                            for val in values {
+                                let slug = val.trim_start_matches('@').to_lowercase()
+                                    .replace(' ', "-")
+                                    .replace(|c: char| !c.is_alphanumeric() && c != '-' && c != '/' && c != '.', "");
+                                if !slug.is_empty() {
+                                    let object_uri = if slug.contains('/') || slug.ends_with(".md") {
+                                        format!("<{}/{}>", base, uri_encode_path(&slug))
+                                    } else {
+                                        resolve_slug_to_uri(&slug, &base, &class_slug_index)
+                                    };
+                                    class_nq.push_str(&format!(
+                                        "{} {} {} {} .\n",
+                                        doc_uri, pred_uri, object_uri, class_graph
+                                    ));
+                                }
+                            }
+                        } else {
+                            class_nq.push_str(&format!(
+                                "{} {} \"{}\" {} .\n",
+                                doc_uri, pred_uri, nq_escape(object), class_graph
+                            ));
+                        }
+                    } else {
+                        // Legacy non-dotted key — use fm: namespace
+                        let fm_pred = format!("<https://repolex.ai/ontology/git-lex/fm/{}>", uri_encode_path(subject));
+                        class_nq.push_str(&format!(
+                            "{} {} \"{}\" {} .\n",
+                            doc_uri, fm_pred, nq_escape(object), class_graph
+                        ));
+                    }
+                }
+            }
+        }
+
+        let count = class_nq.lines().filter(|l| !l.is_empty()).count();
+        if !class_nq.is_empty() {
+            store
+                .load_from_reader(RdfFormat::NQuads, Cursor::new(class_nq.as_bytes()))
+                .expect(&format!("failed to load class graph for {}", class_name));
+            class_graph_count += 1;
+            class_triple_count += count;
+        }
+    }
+
     store.flush().expect("failed to flush store");
 
     let elapsed = start.elapsed();
@@ -3517,6 +4442,9 @@ fn cmd_sync() {
         println!("  First sync — no previous state");
     }
     println!("  Total sync graphs: {}", total_sync + if sync_count > 0 { 1 } else { 0 });
+    if class_graph_count > 0 {
+        println!("  Class graphs: {} ({} triples)", class_graph_count, class_triple_count);
+    }
     println!("Store: {}", store_path().unwrap().display());
 }
 
@@ -3779,6 +4707,10 @@ fn main() {
         }
         Commands::Join { squad_path } => cmd_join(&squad_path),
         Commands::Identity => cmd_identity(),
+        Commands::Kit { command } => match command {
+            KitCommands::Update => cmd_kit_update(),
+            KitCommands::List => cmd_kit_list(),
+        },
         Commands::Llm { command } => match command {
             LlmCommands::List => cmd_llm_list(),
             LlmCommands::Extract { file, model } => cmd_llm_extract(&file, &model),
