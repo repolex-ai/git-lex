@@ -2299,7 +2299,7 @@ fn generate_frontmatter_nquads() -> String {
                         ));
                     }
                 } else if predicate == "linksTo" {
-                    // [[wikilink]] → lex:linksTo — resolve to IRI if file exists
+                    // [[wikilink]] → lex:linksTo (resolved) or lex:unresolvedLink (broken)
                     let link_slug = object.to_lowercase()
                         .replace(' ', "-")
                         .replace(|c: char| !c.is_alphanumeric() && c != '-', "");
@@ -2311,7 +2311,7 @@ fn generate_frontmatter_nquads() -> String {
                         ));
                     } else {
                         nq.push_str(&format!(
-                            "{} <https://repolex.ai/ontology/git-lex/lex/linksTo> \"{}\" {} .\n",
+                            "{} <https://repolex.ai/ontology/git-lex/lex/unresolvedLink> \"{}\" {} .\n",
                             doc_uri, nq_escape(object), graph
                         ));
                     }
@@ -4136,6 +4136,201 @@ fn cmd_validate() -> bool {
 
 // ─── Tree-sitter markdown parsing ──────────────────────────────
 
+/// Extract structural triples from markdown files using tree-sitter.
+/// Writes .ast.spo sidecars with heading structure, links, code blocks,
+/// task checkboxes, and images.
+fn extract_markdown_ast() {
+    let root = match find_git_root() {
+        Some(r) => r,
+        None => return,
+    };
+
+    let extract_dir = root.join(".lex").join("extract");
+    fs::create_dir_all(&extract_dir).ok();
+
+    let mut parser = tree_sitter_md::MarkdownParser::default();
+
+    // Walk all .md files
+    fn walk_md(dir: &std::path::Path, files: &mut Vec<PathBuf>) {
+        if let Ok(entries) = fs::read_dir(dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                let name = entry.file_name().to_string_lossy().to_string();
+                if name.starts_with('.') { continue; }
+                if path.is_dir() { walk_md(&path, files); }
+                else if name.ends_with(".md") && !name.starts_with("__") { files.push(path); }
+            }
+        }
+    }
+
+    let mut files = Vec::new();
+    walk_md(&root, &mut files);
+
+    let mut total_triples = 0;
+
+    for filepath in &files {
+        let content = match fs::read_to_string(filepath) {
+            Ok(c) => c,
+            Err(_) => continue,
+        };
+
+        let relpath = filepath.strip_prefix(&root).unwrap_or(filepath);
+        let relpath_str = relpath.to_string_lossy().to_string();
+
+        let tree = match parser.parse(content.as_bytes(), None) {
+            Some(t) => t,
+            None => continue,
+        };
+
+        let mut spo_lines: Vec<String> = Vec::new();
+        let block_root = tree.block_tree().root_node();
+
+        // Walk the block tree for headings, code blocks, task lists
+        fn extract_block_nodes(node: tree_sitter::Node, source: &str, lines: &mut Vec<String>) {
+            let kind = node.kind();
+            let row = node.start_position().row + 1;
+
+            match kind {
+                "atx_heading" => {
+                    // Extract heading level from marker child
+                    let level = node.child(0)
+                        .map(|c| match c.kind() {
+                            "atx_h1_marker" => 1,
+                            "atx_h2_marker" => 2,
+                            "atx_h3_marker" => 3,
+                            "atx_h4_marker" => 4,
+                            "atx_h5_marker" => 5,
+                            "atx_h6_marker" => 6,
+                            _ => 0,
+                        })
+                        .unwrap_or(0);
+                    // Extract heading text from inline child
+                    let text = node.children(&mut node.walk())
+                        .find(|c| c.kind() == "inline")
+                        .map(|c| &source[c.start_byte()..c.end_byte()])
+                        .unwrap_or("");
+                    if level > 0 && !text.is_empty() {
+                        lines.push(format!("heading | level | {}", level));
+                        lines.push(format!("heading | text | {}", text.trim()));
+                        lines.push(format!("heading | line | {}", row));
+                    }
+                }
+                "fenced_code_block" => {
+                    // Extract language from info_string child
+                    let lang = node.children(&mut node.walk())
+                        .find(|c| c.kind() == "info_string")
+                        .map(|c| source[c.start_byte()..c.end_byte()].trim().to_string())
+                        .unwrap_or_default();
+                    let line_count = node.end_position().row - node.start_position().row;
+                    lines.push(format!("codeBlock | language | {}", if lang.is_empty() { "unknown".to_string() } else { lang }));
+                    lines.push(format!("codeBlock | lines | {}", line_count));
+                    lines.push(format!("codeBlock | line | {}", row));
+                }
+                "task_list_marker_checked" => {
+                    lines.push(format!("taskCheckbox | checked | true"));
+                    lines.push(format!("taskCheckbox | line | {}", row));
+                }
+                "task_list_marker_unchecked" => {
+                    lines.push(format!("taskCheckbox | checked | false"));
+                    lines.push(format!("taskCheckbox | line | {}", row));
+                }
+                _ => {}
+            }
+
+            // Recurse into children
+            let mut cursor = node.walk();
+            if cursor.goto_first_child() {
+                loop {
+                    extract_block_nodes(cursor.node(), source, lines);
+                    if !cursor.goto_next_sibling() { break; }
+                }
+            }
+        }
+
+        extract_block_nodes(block_root, &content, &mut spo_lines);
+
+        // Walk inline trees for links and images
+        for inline_tree in tree.inline_trees() {
+            let inline_root = inline_tree.root_node();
+            fn extract_inline_nodes(node: tree_sitter::Node, source: &str, lines: &mut Vec<String>) {
+                let kind = node.kind();
+                let row = node.start_position().row + 1;
+
+                match kind {
+                    "inline_link" => {
+                        let text = node.children(&mut node.walk())
+                            .find(|c| c.kind() == "link_text")
+                            .map(|c| source[c.start_byte()..c.end_byte()].trim_matches(|ch| ch == '[' || ch == ']').to_string())
+                            .unwrap_or_default();
+                        let dest = node.children(&mut node.walk())
+                            .find(|c| c.kind() == "link_destination")
+                            .map(|c| source[c.start_byte()..c.end_byte()].to_string())
+                            .unwrap_or_default();
+                        if !dest.is_empty() {
+                            lines.push(format!("link | text | {}", text));
+                            lines.push(format!("link | destination | {}", dest));
+                            lines.push(format!("link | line | {}", row));
+                        }
+                    }
+                    "image" => {
+                        let alt = node.children(&mut node.walk())
+                            .find(|c| c.kind() == "image_description")
+                            .map(|c| source[c.start_byte()..c.end_byte()].trim_matches(|ch| ch == '[' || ch == ']' || ch == '!').to_string())
+                            .unwrap_or_default();
+                        let dest = node.children(&mut node.walk())
+                            .find(|c| c.kind() == "link_destination")
+                            .map(|c| source[c.start_byte()..c.end_byte()].to_string())
+                            .unwrap_or_default();
+                        if !dest.is_empty() {
+                            lines.push(format!("image | alt | {}", alt));
+                            lines.push(format!("image | destination | {}", dest));
+                            lines.push(format!("image | line | {}", row));
+                        }
+                    }
+                    "code_span" => {
+                        let text = &source[node.start_byte()..node.end_byte()];
+                        let text = text.trim_matches('`').trim();
+                        if !text.is_empty() {
+                            lines.push(format!("codeSpan | text | {}", text));
+                            lines.push(format!("codeSpan | line | {}", row));
+                        }
+                    }
+                    "uri_autolink" | "email_autolink" => {
+                        let text = &source[node.start_byte()..node.end_byte()];
+                        let text = text.trim_matches(|c| c == '<' || c == '>');
+                        lines.push(format!("link | destination | {}", text));
+                        lines.push(format!("link | line | {}", row));
+                    }
+                    _ => {}
+                }
+
+                let mut cursor = node.walk();
+                if cursor.goto_first_child() {
+                    loop {
+                        extract_inline_nodes(cursor.node(), source, lines);
+                        if !cursor.goto_next_sibling() { break; }
+                    }
+                }
+            }
+            extract_inline_nodes(inline_root, &content, &mut spo_lines);
+        }
+
+        // Write .ast.spo sidecar
+        if !spo_lines.is_empty() {
+            spo_lines.sort();
+            spo_lines.dedup();
+            let spo_path = extract_dir.join(format!("{}.ast.spo", relpath_str));
+            fs::create_dir_all(spo_path.parent().unwrap()).ok();
+            fs::write(&spo_path, spo_lines.join("\n") + "\n").ok();
+            total_triples += spo_lines.len();
+        }
+    }
+
+    if total_triples > 0 {
+        eprintln!("AST extraction: {} triples from {} files", total_triples, files.len());
+    }
+}
+
 fn cmd_parse(file: &str) {
     let root = find_git_root().unwrap_or_else(|| std::env::current_dir().unwrap());
     let filepath = root.join(file);
@@ -4693,7 +4888,7 @@ fn cmd_sync() {
                         ));
                     } else {
                         class_nq.push_str(&format!(
-                            "{} <https://repolex.ai/ontology/git-lex/lex/linksTo> \"{}\" {} .\n",
+                            "{} <https://repolex.ai/ontology/git-lex/lex/unresolvedLink> \"{}\" {} .\n",
                             doc_uri, nq_escape(object), class_graph
                         ));
                     }

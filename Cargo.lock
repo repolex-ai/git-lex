@@ -698,6 +698,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "be1e0bca6c3637f992fc1cc7cbc52a78c1ef6db076dbf1059c4323d6a2048376"
 
 [[package]]
+name = "dateparser"
+version = "0.3.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fa7c3b5f25f753dcbf8f77a535166e08cba151529b6df9be966984053a68cf39"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "regex",
+]
+
+[[package]]
 name = "dctap"
 version = "0.2.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1091,6 +1102,7 @@ name = "git-lex"
 version = "0.0.1"
 dependencies = [
  "clap",
+ "dateparser",
  "git2",
  "hex",
  "oxigraph",

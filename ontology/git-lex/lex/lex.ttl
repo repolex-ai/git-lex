@@ -39,7 +39,12 @@ lex:mentions a owl:ObjectProperty ;
 
 lex:linksTo a owl:ObjectProperty ;
     rdfs:label "links to" ;
-    rdfs:comment "An internal reference via [[wikilink]] or [text](path.md). Links to another document or entity within the repo." .
+    rdfs:comment "An internal reference via [[wikilink]] or [text](path.md). Resolved to an IRI when the target file exists." .
+
+lex:unresolvedLink a owl:DatatypeProperty ;
+    rdfs:label "unresolved link" ;
+    rdfs:comment "A [[wikilink]] or [text](path.md) reference that could not be resolved to an existing file. Stored as the raw link text. Useful for finding broken links." ;
+    rdfs:range xsd:string .
 
 lex:externalLink a owl:DatatypeProperty ;
     rdfs:label "external link" ;
