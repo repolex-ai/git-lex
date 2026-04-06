@@ -1,0 +1,37 @@
+@prefix md: <https://repolex.ai/ontology/git-lex/md/> .
+@prefix owl: <http://www.w3.org/2002/07/owl#> .
+@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+@prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
+
+# =============================================================================
+# GIT-LEX MARKDOWN ONTOLOGY
+# =============================================================================
+# Properties extracted from markdown body text via tree-sitter.
+# Tier 1 extraction — pattern-based, no LLM.
+#
+# Namespace: md: = https://repolex.ai/ontology/git-lex/md/
+# =============================================================================
+
+<https://repolex.ai/ontology/git-lex/md> a owl:Ontology ;
+    rdfs:label "git-lex Markdown Ontology" ;
+    rdfs:comment "Properties extracted from markdown body text. Links, structure, and content." ;
+    owl:versionInfo "0.1" .
+
+
+# =============================================================================
+# LINKS
+# =============================================================================
+
+md:internalLink a owl:ObjectProperty ;
+    rdfs:label "internal link" ;
+    rdfs:comment "A markdown link [text](path) that resolves to a file within the repo." .
+
+md:externalLink a owl:DatatypeProperty ;
+    rdfs:label "external link" ;
+    rdfs:comment "A markdown link [text](https://...) pointing to an external URL." ;
+    rdfs:range xsd:anyURI .
+
+md:unresolvedLink a owl:DatatypeProperty ;
+    rdfs:label "unresolved link" ;
+    rdfs:comment "A markdown link [text](path) where the target file does not exist in the repo." ;
+    rdfs:range xsd:string .

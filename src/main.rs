@@ -4136,10 +4136,9 @@ fn cmd_validate() -> bool {
 
 // ─── Tree-sitter markdown parsing ──────────────────────────────
 
-/// Extract structural triples from markdown files using tree-sitter.
-/// Writes .ast.spo sidecars with heading structure, links, code blocks,
-/// task checkboxes, and images.
-fn extract_markdown_ast() {
+/// Extract markdown links from body text using tree-sitter.
+/// Writes .md.spo sidecars with link type (internal/external/unresolved) and destination.
+fn extract_markdown_links() {
     let root = match find_git_root() {
         Some(r) => r,
         None => return,
@@ -4166,7 +4165,15 @@ fn extract_markdown_ast() {
     let mut files = Vec::new();
     walk_md(&root, &mut files);
 
-    let mut total_triples = 0;
+    // Build file index for resolving internal links
+    let mut file_index: HashSet<String> = HashSet::new();
+    for f in &files {
+        if let Ok(rel) = f.strip_prefix(&root) {
+            file_index.insert(rel.to_string_lossy().to_string());
+        }
+    }
+
+    let mut total_links = 0;
 
     for filepath in &files {
         let content = match fs::read_to_string(filepath) {
@@ -4183,151 +4190,79 @@ fn extract_markdown_ast() {
         };
 
         let mut spo_lines: Vec<String> = Vec::new();
-        let block_root = tree.block_tree().root_node();
 
-        // Walk the block tree for headings, code blocks, task lists
-        fn extract_block_nodes(node: tree_sitter::Node, source: &str, lines: &mut Vec<String>) {
-            let kind = node.kind();
-            let row = node.start_position().row + 1;
-
-            match kind {
-                "atx_heading" => {
-                    // Extract heading level from marker child
-                    let level = node.child(0)
-                        .map(|c| match c.kind() {
-                            "atx_h1_marker" => 1,
-                            "atx_h2_marker" => 2,
-                            "atx_h3_marker" => 3,
-                            "atx_h4_marker" => 4,
-                            "atx_h5_marker" => 5,
-                            "atx_h6_marker" => 6,
-                            _ => 0,
-                        })
-                        .unwrap_or(0);
-                    // Extract heading text from inline child
-                    let text = node.children(&mut node.walk())
-                        .find(|c| c.kind() == "inline")
-                        .map(|c| &source[c.start_byte()..c.end_byte()])
-                        .unwrap_or("");
-                    if level > 0 && !text.is_empty() {
-                        lines.push(format!("heading | level | {}", level));
-                        lines.push(format!("heading | text | {}", text.trim()));
-                        lines.push(format!("heading | line | {}", row));
-                    }
-                }
-                "fenced_code_block" => {
-                    // Extract language from info_string child
-                    let lang = node.children(&mut node.walk())
-                        .find(|c| c.kind() == "info_string")
-                        .map(|c| source[c.start_byte()..c.end_byte()].trim().to_string())
-                        .unwrap_or_default();
-                    let line_count = node.end_position().row - node.start_position().row;
-                    lines.push(format!("codeBlock | language | {}", if lang.is_empty() { "unknown".to_string() } else { lang }));
-                    lines.push(format!("codeBlock | lines | {}", line_count));
-                    lines.push(format!("codeBlock | line | {}", row));
-                }
-                "task_list_marker_checked" => {
-                    lines.push(format!("taskCheckbox | checked | true"));
-                    lines.push(format!("taskCheckbox | line | {}", row));
-                }
-                "task_list_marker_unchecked" => {
-                    lines.push(format!("taskCheckbox | checked | false"));
-                    lines.push(format!("taskCheckbox | line | {}", row));
-                }
-                _ => {}
-            }
-
-            // Recurse into children
-            let mut cursor = node.walk();
-            if cursor.goto_first_child() {
-                loop {
-                    extract_block_nodes(cursor.node(), source, lines);
-                    if !cursor.goto_next_sibling() { break; }
-                }
-            }
-        }
-
-        extract_block_nodes(block_root, &content, &mut spo_lines);
-
-        // Walk inline trees for links and images
+        // Walk inline trees for links
         for inline_tree in tree.inline_trees() {
             let inline_root = inline_tree.root_node();
-            fn extract_inline_nodes(node: tree_sitter::Node, source: &str, lines: &mut Vec<String>) {
-                let kind = node.kind();
-                let row = node.start_position().row + 1;
 
-                match kind {
-                    "inline_link" => {
-                        let text = node.children(&mut node.walk())
-                            .find(|c| c.kind() == "link_text")
-                            .map(|c| source[c.start_byte()..c.end_byte()].trim_matches(|ch| ch == '[' || ch == ']').to_string())
-                            .unwrap_or_default();
-                        let dest = node.children(&mut node.walk())
-                            .find(|c| c.kind() == "link_destination")
-                            .map(|c| source[c.start_byte()..c.end_byte()].to_string())
-                            .unwrap_or_default();
-                        if !dest.is_empty() {
-                            lines.push(format!("link | text | {}", text));
-                            lines.push(format!("link | destination | {}", dest));
-                            lines.push(format!("link | line | {}", row));
+            fn extract_links(node: tree_sitter::Node, source: &str, lines: &mut Vec<String>, file_index: &HashSet<String>, doc_dir: &str) {
+                if node.kind() == "inline_link" {
+                    let dest = node.children(&mut node.walk())
+                        .find(|c| c.kind() == "link_destination")
+                        .map(|c| source[c.start_byte()..c.end_byte()].to_string())
+                        .unwrap_or_default();
+
+                    if !dest.is_empty() {
+                        if dest.starts_with("http://") || dest.starts_with("https://") {
+                            // External link
+                            lines.push(format!("md.externalLink | hasValue | {}", dest));
+                        } else {
+                            // Internal link — resolve relative to doc's directory
+                            let resolved = if dest.starts_with('/') {
+                                dest[1..].to_string()
+                            } else if !doc_dir.is_empty() {
+                                format!("{}/{}", doc_dir, dest)
+                            } else {
+                                dest.clone()
+                            };
+
+                            if file_index.contains(&resolved) {
+                                lines.push(format!("md.internalLink | hasValue | {}", resolved));
+                            } else {
+                                lines.push(format!("md.unresolvedLink | hasValue | {}", dest));
+                            }
                         }
                     }
-                    "image" => {
-                        let alt = node.children(&mut node.walk())
-                            .find(|c| c.kind() == "image_description")
-                            .map(|c| source[c.start_byte()..c.end_byte()].trim_matches(|ch| ch == '[' || ch == ']' || ch == '!').to_string())
-                            .unwrap_or_default();
-                        let dest = node.children(&mut node.walk())
-                            .find(|c| c.kind() == "link_destination")
-                            .map(|c| source[c.start_byte()..c.end_byte()].to_string())
-                            .unwrap_or_default();
-                        if !dest.is_empty() {
-                            lines.push(format!("image | alt | {}", alt));
-                            lines.push(format!("image | destination | {}", dest));
-                            lines.push(format!("image | line | {}", row));
-                        }
+                }
+
+                // Also catch bare autolinks
+                if node.kind() == "uri_autolink" {
+                    let text = &source[node.start_byte()..node.end_byte()];
+                    let url = text.trim_matches(|c| c == '<' || c == '>');
+                    if !url.is_empty() {
+                        lines.push(format!("md.externalLink | hasValue | {}", url));
                     }
-                    "code_span" => {
-                        let text = &source[node.start_byte()..node.end_byte()];
-                        let text = text.trim_matches('`').trim();
-                        if !text.is_empty() {
-                            lines.push(format!("codeSpan | text | {}", text));
-                            lines.push(format!("codeSpan | line | {}", row));
-                        }
-                    }
-                    "uri_autolink" | "email_autolink" => {
-                        let text = &source[node.start_byte()..node.end_byte()];
-                        let text = text.trim_matches(|c| c == '<' || c == '>');
-                        lines.push(format!("link | destination | {}", text));
-                        lines.push(format!("link | line | {}", row));
-                    }
-                    _ => {}
                 }
 
                 let mut cursor = node.walk();
                 if cursor.goto_first_child() {
                     loop {
-                        extract_inline_nodes(cursor.node(), source, lines);
+                        extract_links(cursor.node(), source, lines, file_index, doc_dir);
                         if !cursor.goto_next_sibling() { break; }
                     }
                 }
             }
-            extract_inline_nodes(inline_root, &content, &mut spo_lines);
+
+            let doc_dir = relpath.parent()
+                .map(|p| p.to_string_lossy().to_string())
+                .unwrap_or_default();
+
+            extract_links(inline_root, &content, &mut spo_lines, &file_index, &doc_dir);
         }
 
-        // Write .ast.spo sidecar
+        // Write .md.spo sidecar
         if !spo_lines.is_empty() {
             spo_lines.sort();
             spo_lines.dedup();
-            let spo_path = extract_dir.join(format!("{}.ast.spo", relpath_str));
+            let spo_path = extract_dir.join(format!("{}.md.spo", relpath_str));
             fs::create_dir_all(spo_path.parent().unwrap()).ok();
             fs::write(&spo_path, spo_lines.join("\n") + "\n").ok();
-            total_triples += spo_lines.len();
+            total_links += spo_lines.len();
         }
     }
 
-    if total_triples > 0 {
-        eprintln!("AST extraction: {} triples from {} files", total_triples, files.len());
+    if total_links > 0 {
+        eprintln!("Markdown links: {} from {} files", total_links, files.len());
     }
 }
 
@@ -4414,6 +4349,9 @@ fn cmd_extract() {
 
     // Run frontmatter extraction (writes .spo sidecars as a side effect)
     generate_frontmatter_nquads();
+
+    // Run markdown link extraction via tree-sitter
+    extract_markdown_links();
 
     // Run JSONL extraction for claude-code kit
     extract_jsonl_sessions();
