@@ -832,21 +832,27 @@ fn cmd_init(kit: Option<String>) {
         )).ok();
     }
 
-    // Create type folders from kit ontology
+    // Create type folders from kit ontology (only if kit.yml says createTypeFolders: true)
     if kit.is_some() {
+        let create_folders = kit_config_bool(kit_name, "createTypeFolders", false);
         let kit_types = get_kit_types(kit_name);
-        for (type_name, _) in &kit_types {
-            let type_dir = root.join(type_name.to_lowercase());
-            fs::create_dir_all(&type_dir).ok();
-            // Add a .gitkeep so empty dirs are tracked
-            let gitkeep = type_dir.join(".gitkeep");
-            if !gitkeep.exists() {
-                fs::write(&gitkeep, "").ok();
+        if create_folders {
+            for (type_name, _) in &kit_types {
+                let type_dir = root.join(type_name.to_lowercase());
+                fs::create_dir_all(&type_dir).ok();
+                // Add a .gitkeep so empty dirs are tracked
+                let gitkeep = type_dir.join(".gitkeep");
+                if !gitkeep.exists() {
+                    fs::write(&gitkeep, "").ok();
+                }
+            }
+            if !kit_types.is_empty() {
+                let type_names: Vec<String> = kit_types.iter().map(|(n, _)| n.to_lowercase()).collect();
+                println!("Created type folders: {}", type_names.join(", "));
             }
         }
+        let type_names: Vec<String> = kit_types.iter().map(|(n, _)| n.to_lowercase()).collect();
         if !kit_types.is_empty() {
-            let type_names: Vec<String> = kit_types.iter().map(|(n, _)| n.to_lowercase()).collect();
-            println!("Created type folders: {}", type_names.join(", "));
 
             // Generate README.lex.md
             let readme_lex = root.join("README.lex.md");
@@ -3025,6 +3031,29 @@ fn get_kit() -> Option<String> {
 // ─── Ontology Builder ──────���───────────────────────────────────
 // Loads kit TTL into oxigraph, queries OWL constraints, generates SHACL shapes.
 // Single source of truth: the TTL. Shapes are derived artifacts.
+
+/// Read a boolean config value from the kit's kit.yml file.
+/// Returns the default if the file doesn't exist or the key isn't found.
+fn kit_config_bool(kit: &str, key: &str, default: bool) -> bool {
+    let root = match find_git_root() {
+        Some(r) => r,
+        None => return default,
+    };
+    let config_path = root.join(".lex").join("ontology").join("kit").join(kit).join("kit.yml");
+    let content = match fs::read_to_string(&config_path) {
+        Ok(c) => c,
+        Err(_) => return default,
+    };
+    for line in content.lines() {
+        let line = line.trim();
+        if line.starts_with('#') { continue; }
+        if let Some(val) = line.strip_prefix(&format!("{}:", key)) {
+            let val = val.trim();
+            return val == "true" || val == "yes";
+        }
+    }
+    default
+}
 
 /// Find the kit TTL file path. Tries {kit}.ttl first, then any .ttl in the kit dir.
 fn find_kit_ttl(kit: &str) -> Option<PathBuf> {
