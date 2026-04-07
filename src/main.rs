@@ -345,6 +345,43 @@ fn resolve_slug_to_uri(slug: &str, base: &str, slug_index: &HashMap<String, Stri
     }
 }
 
+/// Normalize a path-style wikilink target into a relpath that can be matched
+/// against the file index. Resolves the target relative to `source_dir`,
+/// collapses `.` and `..` segments, strips a leading `/`, and appends `.md`
+/// if no extension is present.
+///
+/// Returns None if the target tries to escape the repo root (more `..`
+/// segments than the source path can absorb).
+fn normalize_wikilink_path(target: &str, source_dir: &str) -> Option<String> {
+    // Leading `/` means "from repo root"; otherwise relative to source_dir.
+    let combined = if let Some(rest) = target.strip_prefix('/') {
+        rest.to_string()
+    } else if source_dir.is_empty() {
+        target.to_string()
+    } else {
+        format!("{}/{}", source_dir, target)
+    };
+
+    // Walk segments, collapsing . and ..
+    let mut stack: Vec<&str> = Vec::new();
+    for seg in combined.split('/') {
+        match seg {
+            "" | "." => continue,
+            ".." => {
+                if stack.pop().is_none() { return None; }
+            }
+            other => stack.push(other),
+        }
+    }
+    if stack.is_empty() { return None; }
+    let mut joined = stack.join("/");
+    // Append .md if there is no file extension on the trailing segment
+    if !stack.last().map(|s| s.contains('.')).unwrap_or(false) {
+        joined.push_str(".md");
+    }
+    Some(joined)
+}
+
 /// Escape a string for use in N-Quads literals.
 fn nq_escape(s: &str) -> String {
     s.replace('\\', "\\\\")
@@ -2139,10 +2176,16 @@ fn generate_frontmatter_nquads() -> String {
     // resolve to the same file (the dot-stripped form is canonical), and a
     // file named `spaceg.o.a.t..md` would still be reachable via either the
     // original `spaceg.o.a.t.` slug or the `spacegoat` slug.
+    //
+    // The path_index is a sibling lookup keyed by the full relpath, used by
+    // path-style wikilinks like `[[../people/dara]]` that resolve relative
+    // to their source file's directory.
     let mut slug_index: HashMap<String, String> = HashMap::new();
+    let mut path_index: HashSet<String> = HashSet::new();
     for f in &files {
         if let Ok(rel) = f.strip_prefix(&root) {
             let rel_str = rel.to_string_lossy().to_string();
+            path_index.insert(rel_str.clone());
             // Extract slug from filename (without .md extension)
             if let Some(file_name) = f.file_stem() {
                 let slug = file_name.to_string_lossy().to_lowercase();
@@ -2312,15 +2355,59 @@ fn generate_frontmatter_nquads() -> String {
                         ));
                     }
                 } else if predicate == "linksTo" {
-                    // [[wikilink]] → lex:linksTo (resolved) or lex:unresolvedLink (broken)
-                    let link_slug = object.to_lowercase()
-                        .replace(' ', "-")
-                        .replace(|c: char| !c.is_alphanumeric() && c != '-', "");
-                    if slug_index.contains_key(&link_slug) {
-                        let link_uri = resolve_slug_to_uri(&link_slug, &base, &slug_index);
+                    // [[wikilink]] → lex:linksTo (resolved) or lex:unresolvedLink (broken).
+                    //
+                    // Three resolution strategies, tried in order:
+                    //   1. Path-style — if the target contains `/`, treat it as a path
+                    //      relative to the source file's directory. Normalize `..`, look
+                    //      up against the path index. Handles `[[../people/dara]]`,
+                    //      `[[notes/foo]]`, `[[/repo-root/file.md]]`, etc.
+                    //   2. Trailing-segment fallback — if path resolution fails, take the
+                    //      last segment of the target and try the bare-wikilink path.
+                    //      Handles "I typed a path because I had to disambiguate but the
+                    //      path is wrong / the file moved".
+                    //   3. Bare wikilink — slugify (lowercase, hyphens, alnum-only) and
+                    //      look up in the slug index keyed by file stem. Original behavior.
+                    //
+                    // Falls through to lex:unresolvedLink only when all three miss.
+                    let source_dir = std::path::Path::new(&relpath_str)
+                        .parent()
+                        .map(|p| p.to_string_lossy().to_string())
+                        .unwrap_or_default();
+
+                    let resolved_path: Option<String> = if object.contains('/') {
+                        normalize_wikilink_path(object, &source_dir)
+                            .filter(|p| path_index.contains(p))
+                    } else {
+                        None
+                    };
+
+                    let link_uri: Option<String> = if let Some(p) = resolved_path {
+                        Some(format!("<{}/{}>", base, uri_encode_path(&p)))
+                    } else {
+                        // Strategy 2: trailing-segment fallback if the target had a `/`.
+                        let candidate = if let Some(idx) = object.rfind('/') {
+                            &object[idx + 1..]
+                        } else {
+                            object
+                        };
+                        // Strip trailing .md if present so the stem matches the index.
+                        let stem = candidate.strip_suffix(".md").unwrap_or(candidate);
+                        // Strategy 3: slugify and look up in slug_index.
+                        let link_slug = stem.to_lowercase()
+                            .replace(' ', "-")
+                            .replace(|c: char| !c.is_alphanumeric() && c != '-', "");
+                        if !link_slug.is_empty() && slug_index.contains_key(&link_slug) {
+                            Some(resolve_slug_to_uri(&link_slug, &base, &slug_index))
+                        } else {
+                            None
+                        }
+                    };
+
+                    if let Some(uri) = link_uri {
                         nq.push_str(&format!(
                             "{} <https://repolex.ai/ontology/git-lex/lex/linksTo> {} {} .\n",
-                            doc_uri, link_uri, graph
+                            doc_uri, uri, graph
                         ));
                     } else {
                         nq.push_str(&format!(
