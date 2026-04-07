@@ -4327,7 +4327,10 @@ fn cmd_parse(file: &str) {
 // Embedded D3 frontend, served on localhost. Agent pushes CONSTRUCT
 // query results over WebSocket to drive the viz.
 
+// Viz UI assets — embedded at compile time
 const VIZ_INDEX_HTML: &str = include_str!("../viz/index.html");
+const VIZ_CSS_MAIN: &str = include_str!("../viz/css/main.css");
+const VIZ_JS_MAIN: &str = include_str!("../viz/js/main.js");
 
 #[tokio::main(flavor = "multi_thread", worker_threads = 2)]
 async fn run_viz_server(port: u16) {
@@ -4349,6 +4352,12 @@ async fn run_viz_server(port: u16) {
 
     let app = Router::new()
         .route("/", get(|| async { Html(VIZ_INDEX_HTML) }))
+        .route("/css/main.css", get(|| async {
+            ([("content-type", "text/css")], VIZ_CSS_MAIN)
+        }))
+        .route("/js/main.js", get(|| async {
+            ([("content-type", "application/javascript")], VIZ_JS_MAIN)
+        }))
         .route("/api/query", post({
             let state = state.clone();
             move |Json(payload): Json<serde_json::Value>| {

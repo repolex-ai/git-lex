@@ -3,93 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <title>git-lex viz</title>
-    <style>
-        * { box-sizing: border-box; }
-        body {
-            font-family: -apple-system, BlinkMacSystemFont, 'JetBrains Mono', monospace;
-            background: #0a0a0a;
-            color: #e0e0e0;
-            margin: 0;
-            padding: 0;
-            min-height: 100vh;
-        }
-        header {
-            border-bottom: 1px solid #333;
-            padding: 1rem 2rem;
-            background: #111;
-        }
-        h1 {
-            margin: 0;
-            font-size: 1.2rem;
-            color: #22c55e;
-            font-weight: normal;
-        }
-        h1 .accent { color: #f97316; }
-        .container {
-            display: grid;
-            grid-template-columns: 1fr 1fr;
-            gap: 1rem;
-            padding: 1.5rem 2rem;
-            min-height: calc(100vh - 60px);
-        }
-        .panel {
-            background: #111;
-            border: 1px solid #333;
-            border-radius: 4px;
-            padding: 1rem;
-            display: flex;
-            flex-direction: column;
-        }
-        .panel h2 {
-            margin: 0 0 0.5rem 0;
-            font-size: 0.85rem;
-            text-transform: uppercase;
-            color: #888;
-            letter-spacing: 0.05em;
-        }
-        textarea {
-            background: #0a0a0a;
-            color: #e0e0e0;
-            border: 1px solid #333;
-            border-radius: 3px;
-            padding: 0.5rem;
-            font-family: 'JetBrains Mono', monospace;
-            font-size: 0.85rem;
-            resize: vertical;
-            min-height: 120px;
-            width: 100%;
-        }
-        button {
-            background: #22c55e;
-            color: #0a0a0a;
-            border: none;
-            padding: 0.5rem 1rem;
-            border-radius: 3px;
-            cursor: pointer;
-            font-family: inherit;
-            font-weight: bold;
-            margin-top: 0.5rem;
-        }
-        button:hover { background: #16a34a; }
-        pre {
-            background: #0a0a0a;
-            border: 1px solid #333;
-            padding: 1rem;
-            border-radius: 3px;
-            overflow-x: auto;
-            font-size: 0.8rem;
-            color: #ccc;
-            flex: 1;
-            margin: 0;
-        }
-        .status {
-            font-size: 0.75rem;
-            color: #666;
-            margin-top: 0.5rem;
-        }
-        .status.connected { color: #22c55e; }
-        .status.error { color: #ef4444; }
-    </style>
+    <link rel="stylesheet" href="/css/main.css">
 </head>
 <body>
     <header>
@@ -107,38 +21,6 @@
             <pre id="results">// Results will appear here</pre>
         </div>
     </div>
-    <script>
-        const ws = new WebSocket('ws://' + location.host + '/ws');
-        const status = document.getElementById('status');
-
-        ws.onopen = () => {
-            status.textContent = 'WebSocket connected';
-            status.className = 'status connected';
-        };
-        ws.onclose = () => {
-            status.textContent = 'WebSocket disconnected';
-            status.className = 'status error';
-        };
-        ws.onmessage = (e) => {
-            console.log('ws:', e.data);
-        };
-
-        async function runQuery() {
-            const query = document.getElementById('query').value;
-            const results = document.getElementById('results');
-            results.textContent = '// Running...';
-            try {
-                const r = await fetch('/api/query', {
-                    method: 'POST',
-                    headers: {'Content-Type': 'application/json'},
-                    body: JSON.stringify({query})
-                });
-                const data = await r.json();
-                results.textContent = JSON.stringify(data, null, 2);
-            } catch (e) {
-                results.textContent = '// Error: ' + e.message;
-            }
-        }
-    </script>
+    <script src="/js/main.js"></script>
 </body>
 </html>
