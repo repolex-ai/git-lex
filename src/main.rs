@@ -142,6 +142,12 @@ enum Commands {
         /// File to parse
         file: String,
     },
+    /// Start the visualization server (HTTP + WebSocket on localhost)
+    Viz {
+        /// Port to listen on
+        #[arg(long, default_value = "7878")]
+        port: u16,
+    },
     /// Manage kits (install, update, list)
     Kit {
         #[command(subcommand)]
@@ -4373,6 +4379,123 @@ fn cmd_parse(file: &str) {
     }
 }
 
+// ─── git lex viz ────────────────────────────────────────────────
+// HTTP + WebSocket server for visualizing the knowledge graph.
+// Embedded D3 frontend, served on localhost. Agent pushes CONSTRUCT
+// query results over WebSocket to drive the viz.
+
+const VIZ_INDEX_HTML: &str = include_str!("../viz/index.html");
+
+#[tokio::main(flavor = "multi_thread", worker_threads = 2)]
+async fn run_viz_server(port: u16) {
+    use axum::{
+        Router,
+        routing::{get, post},
+        response::{Html, Json},
+        extract::{ws::WebSocketUpgrade, State},
+    };
+    use std::sync::Arc;
+
+    #[derive(Clone)]
+    struct AppState {
+        store: Arc<Store>,
+    }
+
+    let store = Arc::new(open_or_create_store());
+    let state = AppState { store };
+
+    let app = Router::new()
+        .route("/", get(|| async { Html(VIZ_INDEX_HTML) }))
+        .route("/api/query", post({
+            let state = state.clone();
+            move |Json(payload): Json<serde_json::Value>| {
+                let state = state.clone();
+                async move {
+                    let query = payload.get("query")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("SELECT ?s ?p ?o WHERE { ?s ?p ?o } LIMIT 10");
+                    let prefixed = add_prefixes(query);
+                    let result = match oxigraph::sparql::Query::parse(&prefixed, None) {
+                        Ok(mut parsed) => {
+                            parsed.dataset_mut().set_default_graph_as_union();
+                            match state.store.query(parsed) {
+                                Ok(oxigraph::sparql::QueryResults::Solutions(sols)) => {
+                                    let vars: Vec<String> = sols.variables().iter().map(|v| v.as_str().to_string()).collect();
+                                    let mut rows = Vec::new();
+                                    for sol in sols {
+                                        if let Ok(s) = sol {
+                                            let mut row = serde_json::Map::new();
+                                            for var in &vars {
+                                                if let Some(t) = s.get(var.as_str()) {
+                                                    let val = match t {
+                                                        Term::NamedNode(n) => n.as_str().to_string(),
+                                                        Term::Literal(l) => l.value().to_string(),
+                                                        Term::BlankNode(b) => format!("_:{}", b.as_str()),
+                                                        Term::Triple(t) => format!("<<{} {} {}>>", t.subject, t.predicate, t.object),
+                                                    };
+                                                    row.insert(var.clone(), serde_json::Value::String(val));
+                                                }
+                                            }
+                                            rows.push(serde_json::Value::Object(row));
+                                        }
+                                    }
+                                    serde_json::json!({"vars": vars, "results": rows})
+                                }
+                                Ok(_) => serde_json::json!({"error": "non-SELECT queries not yet supported"}),
+                                Err(e) => serde_json::json!({"error": format!("query error: {}", e)}),
+                            }
+                        }
+                        Err(e) => serde_json::json!({"error": format!("parse error: {}", e)}),
+                    };
+                    Json(result)
+                }
+            }
+        }))
+        .route("/ws", get({
+            let state = state.clone();
+            move |ws: WebSocketUpgrade| {
+                let _state = state.clone();
+                async move {
+                    ws.on_upgrade(|mut socket| async move {
+                        use axum::extract::ws::Message;
+                        let _ = socket.send(Message::Text("hello from git-lex viz".into())).await;
+                        while let Some(msg) = socket.recv().await {
+                            if let Ok(Message::Text(text)) = msg {
+                                let _ = socket.send(Message::Text(format!("echo: {}", text).into())).await;
+                            }
+                        }
+                    })
+                }
+            }
+        }));
+
+    let addr = format!("127.0.0.1:{}", port);
+    let listener = match tokio::net::TcpListener::bind(&addr).await {
+        Ok(l) => l,
+        Err(e) => {
+            eprintln!("Failed to bind to {}: {}", addr, e);
+            return;
+        }
+    };
+
+    println!("git-lex viz server listening on http://{}", addr);
+    println!("Open http://{} in your browser", addr);
+    println!("Press Ctrl+C to stop");
+
+    if let Err(e) = axum::serve(listener, app).await {
+        eprintln!("Server error: {}", e);
+    }
+}
+
+fn cmd_viz(port: u16) {
+    if open_store().is_none() {
+        eprintln!("No knowledge graph store found.");
+        eprintln!("Run 'git lex sync' first to build the store.");
+        exit(1);
+    }
+    run_viz_server(port);
+}
+
 fn cmd_extract() {
     let start = Instant::now();
 
@@ -5213,6 +5336,7 @@ fn main() {
         Commands::Join { squad_path } => cmd_join(&squad_path),
         Commands::Identity => cmd_identity(),
         Commands::Parse { file } => cmd_parse(&file),
+        Commands::Viz { port } => cmd_viz(port),
         Commands::Kit { command } => match command {
             KitCommands::Update => cmd_kit_update(),
             KitCommands::List => cmd_kit_list(),
