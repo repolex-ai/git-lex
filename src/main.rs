@@ -5651,6 +5651,7 @@ fn main() {
     }
 }
 
+
 fn cmd_listen_server(port: u16) {
     let root = find_git_root().expect("not a git repo");
     let repo_yml = root.join(".lex").join("repo.yml");
@@ -5673,7 +5674,7 @@ fn cmd_listen_server(port: u16) {
 #[tokio::main(flavor = "multi_thread", worker_threads = 2)]
 async fn run_listen_server(port: u16) {
     use axum::response::sse::{Event, Sse};
-    use axum::{Router, routing::get};
+    use axum::{Router, routing::{get, post}, Json};
     use std::sync::Arc;
     use tokio::sync::broadcast;
     use tokio_stream::wrappers::BroadcastStream;
@@ -5684,17 +5685,31 @@ async fn run_listen_server(port: u16) {
     let tx = Arc::new(tx);
 
     let app = Router::new()
-        .route("/events", get(move || {
+        .route("/events", get({
             let tx = tx.clone();
-            async move {
-                let rx = tx.subscribe();
-                let stream = BroadcastStream::new(rx).filter_map(|res| async move {
-                    match res {
-                        Ok(msg) => Some(Ok::<Event, Infallible>(Event::default().data(msg))),
-                        Err(_) => None,
-                    }
-                });
-                Sse::new(stream)
+            move || {
+                let tx = tx.clone();
+                async move {
+                    let rx = tx.subscribe();
+                    let stream = BroadcastStream::new(rx).filter_map(|res| async move {
+                        match res {
+                            Ok(msg) => Some(Ok::<Event, Infallible>(Event::default().data(msg))),
+                            Err(_) => None,
+                        }
+                    });
+                    Sse::new(stream)
+                }
+            }
+        }))
+        .route("/notify", post({
+            let tx = tx.clone();
+            move |Json(payload): Json<serde_json::Value>| {
+                let tx = tx.clone();
+                async move {
+                    let msg = payload.to_string();
+                    let _ = tx.send(msg);
+                    Json(serde_json::json!({"ok": true}))
+                }
             }
         }));
 
