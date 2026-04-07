@@ -531,7 +531,7 @@ async function loadGraph() {
         canonical.push({ id: s.id, title: s.title, type });
     }
 
-    // Build class palette from canonical types only.
+    // Build class palette from canonical types observed in instances.
     const classMap = {};
     canonical.forEach(n => {
         if (!classMap[n.type]) {
@@ -540,9 +540,39 @@ async function loadGraph() {
                 name: shortName(n.type),
                 color: colorForClass(Object.keys(classMap).length),
                 enabled: true,
+                count: 0,
             };
         }
+        classMap[n.type].count++;
     });
+
+    // Augment with empty classes from any kit TBox loaded into the store.
+    // This is what makes Brief / Pod / Proclamation / Freeform show in the
+    // legend even when no instances exist yet — the TBox load (commit 18e5847)
+    // puts every kit's owl:Class declarations into a graph we can query.
+    // Excludes lex-upper / lex / shacl / rdf / owl meta-classes.
+    const tboxClasses = await sparql(`
+        PREFIX owl: <http://www.w3.org/2002/07/owl#>
+        PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>
+        SELECT DISTINCT ?cls ?label WHERE {
+            GRAPH ?g {
+                ?cls a owl:Class .
+                OPTIONAL { ?cls rdfs:label ?label }
+            }
+            FILTER(STRSTARTS(STR(?g), "https://repolex.ai/ontology/kit/"))
+        }
+    `);
+    tboxClasses.forEach(r => {
+        if (classMap[r.cls]) return;
+        classMap[r.cls] = {
+            uri: r.cls,
+            name: r.label || shortName(r.cls),
+            color: colorForClass(Object.keys(classMap).length),
+            enabled: true,
+            count: 0,
+        };
+    });
+
     graphState.classes = Object.values(classMap).sort((a, b) => a.name.localeCompare(b.name));
 
     // Build node objects.
