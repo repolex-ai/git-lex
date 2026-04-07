@@ -1829,6 +1829,19 @@ fn open_or_create_store() -> Store {
     Store::open(&path).expect("failed to open store")
 }
 
+/// Open the persistent store in read-only mode. Does not acquire the
+/// RocksDB write lock, so writers (`git lex sync`, `git lex save`) can run
+/// concurrently. The view is a snapshot from open-time and will not reflect
+/// later writes until the store is reopened.
+fn open_store_read_only() -> Option<Store> {
+    let path = store_path()?;
+    if path.exists() {
+        Store::open_read_only(&path).ok()
+    } else {
+        None
+    }
+}
+
 /// Flatten a YAML value into .spo lines with dot-notation for nested keys.
 /// Individual .spo files use simple format: subject | predicate | object
 fn flatten_yaml(prefix: &str, value: &serde_yaml::Value, lines: &mut Vec<String>) {
@@ -4461,7 +4474,9 @@ async fn run_viz_server(port: u16) {
     use std::sync::Arc;
     use tokio::sync::{Mutex, broadcast};
 
-    let store = Arc::new(open_or_create_store());
+    let store = Arc::new(
+        open_store_read_only().expect("failed to open store read-only — run `git lex sync` first"),
+    );
     let scene: Arc<Mutex<Option<serde_json::Value>>> = Arc::new(Mutex::new(None));
     let (tx, _rx) = broadcast::channel::<String>(64);
 
@@ -4616,7 +4631,7 @@ async fn handle_ws(socket: axum::extract::ws::WebSocket, state: VizState) {
 }
 
 fn cmd_viz(port: u16) {
-    if open_store().is_none() {
+    if open_store_read_only().is_none() {
         eprintln!("No knowledge graph store found.");
         eprintln!("Run 'git lex sync' first to build the store.");
         exit(1);
