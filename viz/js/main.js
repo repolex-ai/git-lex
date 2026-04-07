@@ -1151,6 +1151,173 @@ function focusNeighborhood(rootId, hops) {
     kickSimulation();
 }
 
+// ════════════════════════════════════════════
+// MARKDOWN VIEWER PANE
+// ════════════════════════════════════════════
+//
+// Double-click any neighbor link in the detail panel (or any node on the
+// canvas) → opens a second card to the left of the detail card showing the
+// rendered markdown of that node's underlying file.
+//
+// Sketched against the contract: GET /api/file?uri=<encoded-iri> returns
+// { content: string, frontmatter?: string } as JSON. W4R3Z hasn't shipped
+// the endpoint yet — until then we render a graceful stub showing the URI
+// and the predicted endpoint URL so the user sees the wiring is real.
+
+function openMarkdownViewer(node) {
+    const viewer = document.getElementById('graph-md-viewer');
+    if (!viewer || !node) return;
+    viewer.hidden = false;
+
+    const url = '/api/file?uri=' + encodeURIComponent(node.id);
+    viewer.innerHTML = `
+        <div class="md-header">
+            <h3 class="md-title">${escapeHtml(node.label)}</h3>
+            <button class="md-close" aria-label="Close">×</button>
+        </div>
+        <div class="md-body"><div class="md-loading">loading…</div></div>
+    `;
+    viewer.querySelector('.md-close').addEventListener('click', closeMarkdownViewer);
+
+    fetch(url)
+        .then(r => {
+            if (!r.ok) throw new Error('HTTP ' + r.status);
+            return r.json();
+        })
+        .then(data => renderMarkdownInto(viewer, data, node))
+        .catch(err => renderMarkdownStub(viewer, node, err));
+}
+
+function closeMarkdownViewer() {
+    const viewer = document.getElementById('graph-md-viewer');
+    if (viewer) viewer.hidden = true;
+}
+
+function renderMarkdownInto(viewer, data, node) {
+    const body = viewer.querySelector('.md-body');
+    const fm = data.frontmatter ? `<div class="md-fm">${escapeHtml(data.frontmatter)}</div>` : '';
+    const html = renderMarkdown(data.content || '');
+    body.innerHTML = fm + html;
+}
+
+function renderMarkdownStub(viewer, node, err) {
+    const body = viewer.querySelector('.md-body');
+    body.innerHTML = `
+        <div class="md-error">file viewer endpoint not yet available</div>
+        <div class="md-stub-note">
+            Double-click jumps to the markdown for this entity.
+            <br><br>
+            URI: <code>${escapeHtml(node.id)}</code>
+            <br><br>
+            Wiring expects <code>GET /api/file?uri=&lt;iri&gt;</code> returning
+            <code>{ content, frontmatter? }</code>. Endpoint is queued for the
+            next sync of this pod's backend work; UI is shipped against the
+            contract so it'll light up the moment the server responds.
+            <br><br>
+            <span style="color:#bbb;font-size:0.6rem">${escapeHtml(err && err.message || '')}</span>
+        </div>
+    `;
+}
+
+// Tiny markdown renderer — handles the subset of CommonMark we actually use
+// in git-lex notes (headings, paragraphs, lists, code blocks, inline code,
+// bold, italic, links, blockquotes). Not a full parser; the goal is "good
+// enough to read your own notes," not "render arbitrary GFM."
+function renderMarkdown(src) {
+    if (!src) return '';
+    // Strip a leading YAML frontmatter block if the server didn't already.
+    let body = src;
+    const fmMatch = body.match(/^---\n([\s\S]*?)\n---\n?/);
+    if (fmMatch) body = body.slice(fmMatch[0].length);
+
+    // Pull out fenced code blocks first so we don't apply inline rules inside.
+    const codeBlocks = [];
+    body = body.replace(/```([a-z]*)\n([\s\S]*?)```/g, (m, lang, code) => {
+        codeBlocks.push(`<pre><code>${escapeHtml(code.replace(/\n$/, ''))}</code></pre>`);
+        return `\u0000CODE${codeBlocks.length - 1}\u0000`;
+    });
+
+    const inline = (s) => {
+        s = escapeHtml(s);
+        // Inline code (after escaping so backticks survive)
+        s = s.replace(/`([^`]+)`/g, '<code>$1</code>');
+        // Bold then italic (order matters)
+        s = s.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
+        s = s.replace(/(?<!\*)\*([^*]+)\*(?!\*)/g, '<em>$1</em>');
+        s = s.replace(/_([^_]+)_/g, '<em>$1</em>');
+        // Markdown links [text](url)
+        s = s.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>');
+        // Wikilinks [[Target]] — render as a styled span (not navigable yet)
+        s = s.replace(/\[\[([^\]]+)\]\]/g, '<a class="wikilink">$1</a>');
+        return s;
+    };
+
+    const lines = body.split('\n');
+    const out = [];
+    let i = 0;
+    while (i < lines.length) {
+        const line = lines[i];
+
+        // Code block placeholder
+        const cbMatch = line.match(/^\u0000CODE(\d+)\u0000$/);
+        if (cbMatch) { out.push(codeBlocks[parseInt(cbMatch[1])]); i++; continue; }
+
+        // Headings
+        const h = line.match(/^(#{1,6})\s+(.+)$/);
+        if (h) {
+            const level = Math.min(h[1].length, 3);
+            out.push(`<h${level}>${inline(h[2])}</h${level}>`);
+            i++; continue;
+        }
+
+        // Blockquote
+        if (/^>\s?/.test(line)) {
+            const block = [];
+            while (i < lines.length && /^>\s?/.test(lines[i])) {
+                block.push(lines[i].replace(/^>\s?/, ''));
+                i++;
+            }
+            out.push(`<blockquote>${inline(block.join(' '))}</blockquote>`);
+            continue;
+        }
+
+        // Unordered list
+        if (/^\s*[-*]\s+/.test(line)) {
+            out.push('<ul>');
+            while (i < lines.length && /^\s*[-*]\s+/.test(lines[i])) {
+                out.push(`<li>${inline(lines[i].replace(/^\s*[-*]\s+/, ''))}</li>`);
+                i++;
+            }
+            out.push('</ul>');
+            continue;
+        }
+
+        // Ordered list
+        if (/^\s*\d+\.\s+/.test(line)) {
+            out.push('<ol>');
+            while (i < lines.length && /^\s*\d+\.\s+/.test(lines[i])) {
+                out.push(`<li>${inline(lines[i].replace(/^\s*\d+\.\s+/, ''))}</li>`);
+                i++;
+            }
+            out.push('</ol>');
+            continue;
+        }
+
+        // Blank → paragraph break
+        if (line.trim() === '') { i++; continue; }
+
+        // Paragraph: gather contiguous non-blank lines
+        const para = [line];
+        i++;
+        while (i < lines.length && lines[i].trim() !== '' && !/^(#{1,6}\s|\s*[-*]\s|\s*\d+\.\s|>\s?|\u0000CODE\d+\u0000)/.test(lines[i])) {
+            para.push(lines[i]);
+            i++;
+        }
+        out.push(`<p>${inline(para.join(' '))}</p>`);
+    }
+    return out.join('\n');
+}
+
 function clearFocus() {
     graphState.focusedNodeIds = null;
     graphState.focusedRoot = null;
@@ -1240,6 +1407,7 @@ function showNodeDetail(node) {
         drawGraph();
     });
     // Click any neighbor link in the detail panel → jump selection to it.
+    // Double-click → also open the markdown viewer pane for that neighbor.
     detail.querySelectorAll('a[data-id]').forEach(a => {
         a.addEventListener('click', e => {
             e.preventDefault();
@@ -1251,7 +1419,21 @@ function showNodeDetail(node) {
                 drawGraph();
             }
         });
+        a.addEventListener('dblclick', e => {
+            e.preventDefault();
+            const id = a.dataset.id;
+            const target = graphState.nodes.find(n => n.id === id);
+            if (target) openMarkdownViewer(target);
+        });
     });
+    // Also let users double-click the title of the currently-selected node
+    // to view its own markdown without having to click a neighbor.
+    const titleEl = detail.querySelector('h3');
+    if (titleEl) {
+        titleEl.style.cursor = 'pointer';
+        titleEl.title = 'double-click to view markdown';
+        titleEl.addEventListener('dblclick', () => openMarkdownViewer(node));
+    }
 }
 
 // Graph mouse interaction
@@ -1295,6 +1477,17 @@ function initGraphInput() {
             showNodeDetail(hit);
             drawGraph();
         }
+    });
+
+    canvas.addEventListener('dblclick', e => {
+        const rect = canvas.getBoundingClientRect();
+        const wx = (e.clientX - rect.left - GW / 2 - graphState.pan.x) / graphState.zoom;
+        const wy = (e.clientY - rect.top - GH / 2 - graphState.pan.y) / graphState.zoom;
+        const hit = graphState.nodes.find(n => {
+            const dx = n.x - wx, dy = n.y - wy;
+            return dx * dx + dy * dy < (n.size + 4) * (n.size + 4);
+        });
+        if (hit) openMarkdownViewer(hit);
     });
 
     canvas.addEventListener('wheel', e => {

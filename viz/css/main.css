@@ -428,6 +428,142 @@ nav.modes {
     box-shadow: 4px 4px 0 rgba(0,0,0,0.06);
 }
 
+/* Markdown viewer pane — sits to the left of .graph-detail when both open. */
+.graph-md-viewer {
+    position: absolute;
+    bottom: 1rem;
+    right: calc(1rem + 380px + 12px);
+    width: 480px;
+    max-height: 70%;
+    background: var(--bg);
+    border: 1px solid var(--ink);
+    padding: 1rem 1.2rem 1.4rem;
+    overflow: auto;
+    box-shadow: 4px 4px 0 rgba(0,0,0,0.06);
+    font-size: 0.85rem;
+    line-height: 1.5;
+}
+
+.graph-md-viewer .md-header {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    border-bottom: 1px solid var(--rule-soft);
+    padding-bottom: 0.5rem;
+    margin-bottom: 0.8rem;
+}
+
+.graph-md-viewer .md-title {
+    font-size: 0.95rem;
+    color: var(--ink, #222);
+    font-weight: normal;
+    margin: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    flex: 1;
+    padding-right: 0.6rem;
+}
+
+.graph-md-viewer .md-close {
+    background: none;
+    border: none;
+    cursor: pointer;
+    font-size: 1.2rem;
+    color: var(--ink-faint, #888);
+    padding: 0 0.2rem;
+    line-height: 1;
+}
+.graph-md-viewer .md-close:hover { color: var(--accent, #bb2200); }
+
+.graph-md-viewer .md-body {
+    color: var(--ink-soft, #444);
+}
+.graph-md-viewer .md-body h1,
+.graph-md-viewer .md-body h2,
+.graph-md-viewer .md-body h3 {
+    font-weight: 600;
+    color: var(--ink, #222);
+    margin-top: 1.1rem;
+    margin-bottom: 0.4rem;
+}
+.graph-md-viewer .md-body h1 { font-size: 1.05rem; }
+.graph-md-viewer .md-body h2 { font-size: 0.95rem; }
+.graph-md-viewer .md-body h3 { font-size: 0.85rem; text-transform: uppercase; letter-spacing: 0.06em; color: var(--ink-faint); }
+.graph-md-viewer .md-body p { margin: 0.4rem 0 0.7rem; }
+.graph-md-viewer .md-body ul,
+.graph-md-viewer .md-body ol { margin: 0.4rem 0 0.7rem; padding-left: 1.2rem; }
+.graph-md-viewer .md-body li { margin: 0.15rem 0; }
+.graph-md-viewer .md-body code {
+    font-family: 'JetBrains Mono', Menlo, monospace;
+    font-size: 0.78rem;
+    background: var(--bg-soft, #f2f0eb);
+    padding: 0.05rem 0.3rem;
+    border-radius: 2px;
+    color: var(--accent, #bb2200);
+}
+.graph-md-viewer .md-body pre {
+    background: var(--bg-soft, #f2f0eb);
+    border: 1px solid var(--rule-soft);
+    border-radius: 3px;
+    padding: 0.5rem 0.7rem;
+    overflow-x: auto;
+    font-size: 0.74rem;
+    line-height: 1.4;
+    margin: 0.6rem 0;
+}
+.graph-md-viewer .md-body pre code {
+    background: none;
+    padding: 0;
+    color: var(--ink-soft, #444);
+}
+.graph-md-viewer .md-body strong { font-weight: 600; color: var(--ink, #222); }
+.graph-md-viewer .md-body em { font-style: italic; }
+.graph-md-viewer .md-body blockquote {
+    border-left: 2px solid var(--accent, #bb2200);
+    padding-left: 0.8rem;
+    margin: 0.6rem 0;
+    color: var(--ink-faint, #888);
+    font-style: italic;
+}
+
+.graph-md-viewer .md-fm {
+    background: var(--bg-soft, #f2f0eb);
+    border-left: 2px solid var(--rule-soft);
+    padding: 0.5rem 0.7rem;
+    margin-bottom: 0.8rem;
+    font-family: 'JetBrains Mono', Menlo, monospace;
+    font-size: 0.7rem;
+    line-height: 1.4;
+    color: var(--ink-faint, #888);
+    white-space: pre-wrap;
+    max-height: 9rem;
+    overflow-y: auto;
+}
+
+.graph-md-viewer .md-loading,
+.graph-md-viewer .md-error {
+    color: var(--ink-faint, #888);
+    font-size: 0.78rem;
+    padding: 1rem 0;
+    text-align: center;
+}
+.graph-md-viewer .md-error {
+    color: var(--accent, #bb2200);
+}
+.graph-md-viewer .md-stub-note {
+    margin-top: 1rem;
+    padding-top: 0.6rem;
+    border-top: 1px solid var(--rule-soft);
+    font-size: 0.66rem;
+    color: var(--ink-faint, #888);
+    line-height: 1.5;
+}
+.graph-md-viewer .md-stub-note code {
+    font-size: 0.66rem;
+    color: var(--accent, #bb2200);
+}
+
 .graph-detail h3 {
     font-size: 1.05rem;
     font-weight: normal;

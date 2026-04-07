@@ -4916,6 +4916,9 @@ struct VizState {
     scene: std::sync::Arc<tokio::sync::Mutex<Option<serde_json::Value>>>,
     /// Broadcast channel for live updates to all connected WebSocket clients
     tx: tokio::sync::broadcast::Sender<String>,
+    /// Repo root path, captured at viz startup, used by `/api/file` to read
+    /// markdown content for the W3BL0RD viewer pane.
+    repo_root: std::sync::Arc<PathBuf>,
 }
 
 /// Run a SPARQL query and return the result as JSON.
@@ -4990,6 +4993,90 @@ fn run_sparql_to_json(store: &Store, query: &str) -> serde_json::Value {
     }
 }
 
+/// GET /api/file?uri=<encoded-iri> — return the markdown content for the
+/// document with that IRI. Looks up `fm:path` in the store, resolves to a
+/// path under repo_root, reads the file, splits the YAML frontmatter from
+/// the body, and returns `{ content, frontmatter? }`.
+///
+/// Powers the W3BL0RD markdown viewer pane (double-click any node in the
+/// graph to read its underlying file). Refuses paths that escape repo_root
+/// via `..` traversal.
+fn api_file_for_uri(state: &VizState, uri: Option<&str>) -> serde_json::Value {
+    let uri = match uri {
+        Some(u) if !u.is_empty() => u,
+        _ => return serde_json::json!({"error": "missing 'uri' query parameter"}),
+    };
+
+    // Look up fm:path for this IRI in the store.
+    let query = format!(
+        "PREFIX fm: <https://repolex.ai/ontology/git-lex/fm/> \
+         SELECT ?path WHERE {{ <{}> fm:path ?path }} LIMIT 1",
+        uri
+    );
+    let mut parsed = match oxigraph::sparql::Query::parse(&query, None) {
+        Ok(p) => p,
+        Err(e) => return serde_json::json!({"error": format!("query parse error: {}", e)}),
+    };
+    parsed.dataset_mut().set_default_graph_as_union();
+    let results = match state.store.query(parsed) {
+        Ok(r) => r,
+        Err(e) => return serde_json::json!({"error": format!("query error: {}", e)}),
+    };
+    let mut rel_path: Option<String> = None;
+    if let oxigraph::sparql::QueryResults::Solutions(sols) = results {
+        for sol in sols.flatten() {
+            if let Some(Term::Literal(l)) = sol.get("path") {
+                rel_path = Some(l.value().to_string());
+                break;
+            }
+        }
+    }
+    let rel = match rel_path {
+        Some(p) => p,
+        None => return serde_json::json!({"error": "no fm:path for this IRI", "uri": uri}),
+    };
+
+    // Resolve under repo_root, refusing path-traversal escapes.
+    let abs = state.repo_root.join(&rel);
+    let canon_root = state.repo_root.canonicalize().unwrap_or_else(|_| (*state.repo_root).clone());
+    let canon_abs = match abs.canonicalize() {
+        Ok(p) => p,
+        Err(e) => return serde_json::json!({"error": format!("file not found: {}", e), "path": rel}),
+    };
+    if !canon_abs.starts_with(&canon_root) {
+        return serde_json::json!({"error": "path escapes repo root", "path": rel});
+    }
+    let raw = match std::fs::read_to_string(&canon_abs) {
+        Ok(s) => s,
+        Err(e) => return serde_json::json!({"error": format!("read failed: {}", e), "path": rel}),
+    };
+
+    // Split YAML frontmatter from body if present.
+    let (frontmatter, body) = if raw.starts_with("---\n") {
+        if let Some(end) = raw[4..].find("\n---\n") {
+            let fm_text = &raw[4..4 + end];
+            let body_text = &raw[4 + end + 5..];
+            (Some(fm_text.to_string()), body_text.to_string())
+        } else if let Some(end) = raw[4..].find("\n---") {
+            // EOF after closing fence (no trailing newline)
+            let fm_text = &raw[4..4 + end];
+            let body_text = raw.get(4 + end + 4..).unwrap_or("");
+            (Some(fm_text.to_string()), body_text.to_string())
+        } else {
+            (None, raw.clone())
+        }
+    } else {
+        (None, raw.clone())
+    };
+
+    serde_json::json!({
+        "uri": uri,
+        "path": rel,
+        "frontmatter": frontmatter,
+        "content": body,
+    })
+}
+
 #[tokio::main(flavor = "multi_thread", worker_threads = 2)]
 async fn run_viz_server(port: u16) {
     use axum::{
@@ -5007,7 +5094,8 @@ async fn run_viz_server(port: u16) {
     let scene: Arc<Mutex<Option<serde_json::Value>>> = Arc::new(Mutex::new(None));
     let (tx, _rx) = broadcast::channel::<String>(64);
 
-    let state = VizState { store, scene, tx };
+    let repo_root = Arc::new(find_git_root().unwrap_or_else(|| std::env::current_dir().unwrap()));
+    let state = VizState { store, scene, tx, repo_root };
     let dev_dir = Arc::new(resolve_viz_dev_dir());
 
     let app = Router::new()
@@ -5097,6 +5185,15 @@ async fn run_viz_server(port: u16) {
                     }).to_string();
                     let _ = state.tx.send(msg);
                     Json(serde_json::json!({"ok": true}))
+                }
+            }
+        }))
+        .route("/api/file", get({
+            let state = state.clone();
+            move |axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>| {
+                let state = state.clone();
+                async move {
+                    Json(api_file_for_uri(&state, params.get("uri").map(|s| s.as_str())))
                 }
             }
         }))
