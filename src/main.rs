@@ -148,6 +148,14 @@ enum Commands {
         #[arg(long, default_value = "7878")]
         port: u16,
     },
+    /// Run a SPARQL CONSTRUCT query and push the result to the local viz server
+    Display {
+        /// SPARQL CONSTRUCT query (uses viz: namespace for rendering hints)
+        query: String,
+        /// Port the viz server is running on
+        #[arg(long, default_value = "7878")]
+        port: u16,
+    },
     /// Manage kits (install, update, list)
     Kit {
         #[command(subcommand)]
@@ -4333,23 +4341,103 @@ const VIZ_INDEX_HTML: &str = include_str!("../viz/index.html");
 const VIZ_CSS_MAIN: &str = include_str!("../viz/css/main.css");
 const VIZ_JS_MAIN: &str = include_str!("../viz/js/main.js");
 
+#[derive(Clone)]
+struct VizState {
+    store: std::sync::Arc<Store>,
+    /// In-memory scene buffer — the most recent push from an agent
+    scene: std::sync::Arc<tokio::sync::Mutex<Option<serde_json::Value>>>,
+    /// Broadcast channel for live updates to all connected WebSocket clients
+    tx: tokio::sync::broadcast::Sender<String>,
+}
+
+/// Run a SPARQL query and return the result as JSON.
+/// Handles SELECT (rows of bindings), CONSTRUCT/DESCRIBE (triples), and ASK (boolean).
+fn run_sparql_to_json(store: &Store, query: &str) -> serde_json::Value {
+    let prefixed = add_prefixes(query);
+    let mut parsed = match oxigraph::sparql::Query::parse(&prefixed, None) {
+        Ok(p) => p,
+        Err(e) => return serde_json::json!({"error": format!("parse error: {}", e)}),
+    };
+    parsed.dataset_mut().set_default_graph_as_union();
+
+    let results = match store.query(parsed) {
+        Ok(r) => r,
+        Err(e) => return serde_json::json!({"error": format!("query error: {}", e)}),
+    };
+
+    match results {
+        oxigraph::sparql::QueryResults::Solutions(sols) => {
+            // Backward-compatible flat shape: each row is { var: "value", ... }
+            let vars: Vec<String> = sols.variables().iter().map(|v| v.as_str().to_string()).collect();
+            let mut rows = Vec::new();
+            for sol in sols.flatten() {
+                let mut row = serde_json::Map::new();
+                for var in &vars {
+                    if let Some(t) = sol.get(var.as_str()) {
+                        let val = match t {
+                            Term::NamedNode(n) => n.as_str().to_string(),
+                            Term::Literal(l) => l.value().to_string(),
+                            Term::BlankNode(b) => format!("_:{}", b.as_str()),
+                            Term::Triple(t) => format!("<<{} {} {}>>", t.subject, t.predicate, t.object),
+                        };
+                        row.insert(var.clone(), serde_json::Value::String(val));
+                    }
+                }
+                rows.push(serde_json::Value::Object(row));
+            }
+            serde_json::json!({"type": "select", "vars": vars, "results": rows})
+        }
+        oxigraph::sparql::QueryResults::Boolean(b) => {
+            serde_json::json!({"type": "ask", "boolean": b})
+        }
+        oxigraph::sparql::QueryResults::Graph(triples) => {
+            // CONSTRUCT/DESCRIBE — emit triples as JSON
+            let mut emitted = Vec::new();
+            for t in triples.flatten() {
+                let s = match t.subject {
+                    oxigraph::model::NamedOrBlankNode::NamedNode(n) => n.as_str().to_string(),
+                    oxigraph::model::NamedOrBlankNode::BlankNode(b) => format!("_:{}", b.as_str()),
+                };
+                let p = t.predicate.as_str().to_string();
+                let (o_val, o_type, o_datatype) = match t.object {
+                    Term::NamedNode(n) => (n.as_str().to_string(), "iri", None),
+                    Term::Literal(l) => (l.value().to_string(), "literal", Some(l.datatype().as_str().to_string())),
+                    Term::BlankNode(b) => (format!("_:{}", b.as_str()), "bnode", None),
+                    Term::Triple(t) => (format!("<<{} {} {}>>", t.subject, t.predicate, t.object), "triple", None),
+                };
+                let mut triple = serde_json::Map::new();
+                triple.insert("subject".to_string(), serde_json::Value::String(s));
+                triple.insert("predicate".to_string(), serde_json::Value::String(p));
+                let mut obj = serde_json::Map::new();
+                obj.insert("value".to_string(), serde_json::Value::String(o_val));
+                obj.insert("type".to_string(), serde_json::Value::String(o_type.to_string()));
+                if let Some(dt) = o_datatype {
+                    obj.insert("datatype".to_string(), serde_json::Value::String(dt));
+                }
+                triple.insert("object".to_string(), serde_json::Value::Object(obj));
+                emitted.push(serde_json::Value::Object(triple));
+            }
+            serde_json::json!({"type": "construct", "triples": emitted})
+        }
+    }
+}
+
 #[tokio::main(flavor = "multi_thread", worker_threads = 2)]
 async fn run_viz_server(port: u16) {
     use axum::{
         Router,
         routing::{get, post},
         response::{Html, Json},
-        extract::{ws::WebSocketUpgrade, State},
+        extract::ws::WebSocketUpgrade,
     };
     use std::sync::Arc;
-
-    #[derive(Clone)]
-    struct AppState {
-        store: Arc<Store>,
-    }
+    use tokio::sync::{Mutex, broadcast};
 
     let store = Arc::new(open_or_create_store());
-    let state = AppState { store };
+    let scene: Arc<Mutex<Option<serde_json::Value>>> = Arc::new(Mutex::new(None));
+    let (tx, _rx) = broadcast::channel::<String>(64);
+
+    let state = VizState { store, scene, tx };
 
     let app = Router::new()
         .route("/", get(|| async { Html(VIZ_INDEX_HTML) }))
@@ -4367,57 +4455,73 @@ async fn run_viz_server(port: u16) {
                     let query = payload.get("query")
                         .and_then(|v| v.as_str())
                         .unwrap_or("SELECT ?s ?p ?o WHERE { ?s ?p ?o } LIMIT 10");
-                    let prefixed = add_prefixes(query);
-                    let result = match oxigraph::sparql::Query::parse(&prefixed, None) {
-                        Ok(mut parsed) => {
-                            parsed.dataset_mut().set_default_graph_as_union();
-                            match state.store.query(parsed) {
-                                Ok(oxigraph::sparql::QueryResults::Solutions(sols)) => {
-                                    let vars: Vec<String> = sols.variables().iter().map(|v| v.as_str().to_string()).collect();
-                                    let mut rows = Vec::new();
-                                    for sol in sols {
-                                        if let Ok(s) = sol {
-                                            let mut row = serde_json::Map::new();
-                                            for var in &vars {
-                                                if let Some(t) = s.get(var.as_str()) {
-                                                    let val = match t {
-                                                        Term::NamedNode(n) => n.as_str().to_string(),
-                                                        Term::Literal(l) => l.value().to_string(),
-                                                        Term::BlankNode(b) => format!("_:{}", b.as_str()),
-                                                        Term::Triple(t) => format!("<<{} {} {}>>", t.subject, t.predicate, t.object),
-                                                    };
-                                                    row.insert(var.clone(), serde_json::Value::String(val));
-                                                }
-                                            }
-                                            rows.push(serde_json::Value::Object(row));
-                                        }
-                                    }
-                                    serde_json::json!({"vars": vars, "results": rows})
-                                }
-                                Ok(_) => serde_json::json!({"error": "non-SELECT queries not yet supported"}),
-                                Err(e) => serde_json::json!({"error": format!("query error: {}", e)}),
-                            }
-                        }
-                        Err(e) => serde_json::json!({"error": format!("parse error: {}", e)}),
-                    };
-                    Json(result)
+                    Json(run_sparql_to_json(&state.store, query))
+                }
+            }
+        }))
+        .route("/api/push", post({
+            let state = state.clone();
+            move |Json(payload): Json<serde_json::Value>| {
+                let state = state.clone();
+                async move {
+                    // Store the new scene
+                    {
+                        let mut scene = state.scene.lock().await;
+                        *scene = Some(payload.clone());
+                    }
+                    // Broadcast to all WebSocket clients
+                    let msg = serde_json::json!({
+                        "type": "scene",
+                        "data": payload
+                    }).to_string();
+                    let _ = state.tx.send(msg);
+                    Json(serde_json::json!({"ok": true}))
+                }
+            }
+        }))
+        .route("/api/run-and-push", post({
+            let state = state.clone();
+            move |Json(payload): Json<serde_json::Value>| {
+                let state = state.clone();
+                async move {
+                    let query = payload.get("query").and_then(|v| v.as_str()).unwrap_or("");
+                    if query.is_empty() {
+                        return Json(serde_json::json!({"error": "missing 'query' field"}));
+                    }
+                    let result = run_sparql_to_json(&state.store, query);
+                    let scene = serde_json::json!({
+                        "query": query,
+                        "result": result,
+                    });
+                    {
+                        let mut s = state.scene.lock().await;
+                        *s = Some(scene.clone());
+                    }
+                    let msg = serde_json::json!({
+                        "type": "scene",
+                        "data": scene
+                    }).to_string();
+                    let _ = state.tx.send(msg);
+                    Json(serde_json::json!({"ok": true}))
+                }
+            }
+        }))
+        .route("/api/scene", get({
+            let state = state.clone();
+            move || {
+                let state = state.clone();
+                async move {
+                    let scene = state.scene.lock().await;
+                    Json(scene.clone().unwrap_or(serde_json::Value::Null))
                 }
             }
         }))
         .route("/ws", get({
             let state = state.clone();
             move |ws: WebSocketUpgrade| {
-                let _state = state.clone();
+                let state = state.clone();
                 async move {
-                    ws.on_upgrade(|mut socket| async move {
-                        use axum::extract::ws::Message;
-                        let _ = socket.send(Message::Text("hello from git-lex viz".into())).await;
-                        while let Some(msg) = socket.recv().await {
-                            if let Ok(Message::Text(text)) = msg {
-                                let _ = socket.send(Message::Text(format!("echo: {}", text).into())).await;
-                            }
-                        }
-                    })
+                    ws.on_upgrade(move |socket| handle_ws(socket, state))
                 }
             }
         }));
@@ -4440,6 +4544,49 @@ async fn run_viz_server(port: u16) {
     }
 }
 
+async fn handle_ws(socket: axum::extract::ws::WebSocket, state: VizState) {
+    use axum::extract::ws::Message;
+    use futures_util::{SinkExt, StreamExt};
+
+    let (mut sender, mut receiver) = socket.split();
+
+    // Send the current scene immediately so the client gets caught up
+    {
+        let scene = state.scene.lock().await;
+        if let Some(s) = scene.as_ref() {
+            let initial = serde_json::json!({"type": "scene", "data": s}).to_string();
+            let _ = sender.send(Message::Text(initial.into())).await;
+        } else {
+            let _ = sender.send(Message::Text("{\"type\":\"hello\"}".into())).await;
+        }
+    }
+
+    // Subscribe to broadcasts
+    let mut rx = state.tx.subscribe();
+
+    // Spawn a task to forward broadcasts to this client
+    let mut send_task = tokio::spawn(async move {
+        while let Ok(msg) = rx.recv().await {
+            if sender.send(Message::Text(msg.into())).await.is_err() {
+                break;
+            }
+        }
+    });
+
+    // Read incoming messages (mostly ignored for now, but keeps the connection alive)
+    let mut recv_task = tokio::spawn(async move {
+        while let Some(Ok(_msg)) = receiver.next().await {
+            // Future: clients could send commands here
+        }
+    });
+
+    // If either task ends, abort the other
+    tokio::select! {
+        _ = (&mut send_task) => recv_task.abort(),
+        _ = (&mut recv_task) => send_task.abort(),
+    }
+}
+
 fn cmd_viz(port: u16) {
     if open_store().is_none() {
         eprintln!("No knowledge graph store found.");
@@ -4447,6 +4594,34 @@ fn cmd_viz(port: u16) {
         exit(1);
     }
     run_viz_server(port);
+}
+
+#[tokio::main(flavor = "current_thread")]
+async fn cmd_display(query: &str, port: u16) {
+    // Send the query to the running viz server — the server runs it against its
+    // own (already-open) oxigraph store and broadcasts the result. We don't try
+    // to open the store here because RocksDB is exclusive-locked by the server.
+    let payload = serde_json::json!({ "query": query });
+
+    let url = format!("http://127.0.0.1:{}/api/run-and-push", port);
+    let client = reqwest::Client::new();
+    match client.post(&url).json(&payload).send().await {
+        Ok(resp) if resp.status().is_success() => {
+            println!("Pushed scene to {}", url);
+        }
+        Ok(resp) => {
+            eprintln!("Push failed: HTTP {}", resp.status());
+            if let Ok(body) = resp.text().await {
+                eprintln!("{}", body);
+            }
+            exit(1);
+        }
+        Err(e) => {
+            eprintln!("Push failed: {}", e);
+            eprintln!("Is the viz server running? Try: git lex viz --port {}", port);
+            exit(1);
+        }
+    }
 }
 
 fn cmd_extract() {
@@ -5290,6 +5465,7 @@ fn main() {
         Commands::Identity => cmd_identity(),
         Commands::Parse { file } => cmd_parse(&file),
         Commands::Viz { port } => cmd_viz(port),
+        Commands::Display { query, port } => cmd_display(&query, port),
         Commands::Kit { command } => match command {
             KitCommands::Update => cmd_kit_update(),
             KitCommands::List => cmd_kit_list(),
