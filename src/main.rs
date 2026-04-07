@@ -4569,15 +4569,33 @@ async fn run_viz_server(port: u16) {
             }
         }));
 
-    let addr = format!("127.0.0.1:{}", port);
-    let listener = match tokio::net::TcpListener::bind(&addr).await {
-        Ok(l) => l,
-        Err(e) => {
-            eprintln!("Failed to bind to {}: {}", addr, e);
+    // Try the requested port; if taken, walk forward up to 20 ports until one
+    // binds. Lets multiple viz instances co-exist without hand-picking ports.
+    let mut chosen_port = port;
+    let mut listener = None;
+    for candidate in port..port.saturating_add(20) {
+        let addr = format!("127.0.0.1:{}", candidate);
+        match tokio::net::TcpListener::bind(&addr).await {
+            Ok(l) => {
+                chosen_port = candidate;
+                listener = Some(l);
+                break;
+            }
+            Err(_) => continue,
+        }
+    }
+    let listener = match listener {
+        Some(l) => l,
+        None => {
+            eprintln!("Failed to bind: ports {}..{} all in use", port, port.saturating_add(20));
             return;
         }
     };
 
+    let addr = format!("127.0.0.1:{}", chosen_port);
+    if chosen_port != port {
+        println!("Port {} was taken, using {} instead", port, chosen_port);
+    }
     println!("git-lex viz server listening on http://{}", addr);
     println!("Open http://{} in your browser", addr);
     println!("Press Ctrl+C to stop");
