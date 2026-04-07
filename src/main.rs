@@ -2275,6 +2275,9 @@ fn generate_frontmatter_nquads() -> String {
     // Build ObjectProperty lookup from kit ontology
     let obj_props = get_kit().map(|k| get_object_properties(&k)).unwrap_or_default();
     let prop_datatypes = get_kit().map(|k| get_property_datatypes(&k)).unwrap_or_default();
+    // Range map: ObjectProperty name → class IRI. Used to filter candidate
+    // resolutions by declared type (range-aware resolver).
+    let prop_ranges = get_kit().map(|k| get_property_ranges(&k)).unwrap_or_default();
 
     // Open git repo for blob hash lookups
     let repo = git2::Repository::discover(".").ok();
@@ -2331,6 +2334,10 @@ fn generate_frontmatter_nquads() -> String {
             }
         }
     }
+
+    // Entity → class IRI map. Used by the range-aware resolver to filter
+    // candidate resolutions. Built once per sync, O(n) in slug count.
+    let entity_classes = build_entity_class_map(&slug_index, &base);
 
     // Ensure extract dir exists
     let extract_dir = root.join(".lex").join("extract");
@@ -2586,23 +2593,76 @@ fn generate_frontmatter_nquads() -> String {
 
                         // Check if this is an ObjectProperty (from ontology) → resolve as IRI
                         if obj_props.contains(prop_seg) {
+                            // Range-aware resolution: if the property has a declared
+                            // rdfs:range, only accept candidate entities typed as that
+                            // class. If the candidate doesn't match, emit
+                            // lex:unresolvedLink and let downstream (Squadling, viz)
+                            // surface the problem.
+                            let declared_range = prop_ranges.get(prop_seg);
                             // ObjectProperty: split on commas, resolve each as IRI
                             let values: Vec<&str> = object.split(',').map(|s| s.trim()).filter(|s| !s.is_empty()).collect();
                             for val in values {
                                 if val.is_empty() { continue; }
-                                let slug = val.trim_start_matches('@').to_lowercase()
+                                // Strip `[[...]]` wikilink wrapper if present, plus `@`.
+                                let stripped = val
+                                    .trim_start_matches("[[")
+                                    .trim_end_matches("]]")
+                                    .trim_start_matches('@');
+                                let slug = stripped.to_lowercase()
                                     .replace(' ', "-")
                                     .replace(|c: char| !c.is_alphanumeric() && c != '-' && c != '/' && c != '.', "");
                                 if slug.is_empty() { continue; }
-                                let object_uri = if slug.contains('/') || slug.ends_with(".md") {
+                                let candidate_uri: String = if slug.contains('/') || slug.ends_with(".md") {
                                     format!("<{}/{}>", base, uri_encode_path(&slug))
-                                } else {
+                                } else if slug_index.contains_key(&slug) {
                                     resolve_slug_to_uri(&slug, &base, &slug_index)
+                                } else {
+                                    // Dot-strip fallback: `spaceg.o.a.t.` → `spacegoat`.
+                                    // Mirrors the @mention lookup at line ~2475.
+                                    let dotless = slug.replace('.', "");
+                                    if dotless != slug && slug_index.contains_key(&dotless) {
+                                        resolve_slug_to_uri(&dotless, &base, &slug_index)
+                                    } else {
+                                        // Not found — synthesize an IRI and let the
+                                        // range check below reject it as unresolved.
+                                        format!("<{}/{}>", base, uri_encode_path(&slug))
+                                    }
                                 };
-                                nq.push_str(&format!(
-                                    "{} {} {} {} .\n",
-                                    doc_uri, kit_predicate, object_uri, graph
-                                ));
+
+                                // If we have a declared range, verify the candidate
+                                // has that class. Strip <> to match entity_classes keys.
+                                let candidate_bare = candidate_uri
+                                    .trim_start_matches('<')
+                                    .trim_end_matches('>')
+                                    .to_string();
+                                let range_ok = match declared_range {
+                                    Some(expected_class) => {
+                                        match entity_classes.get(&candidate_bare) {
+                                            Some(actual_class) => actual_class == expected_class,
+                                            // Candidate exists but has no declared class
+                                            // (e.g. no-kit doc) — reject against a
+                                            // declared range. If the author meant to link
+                                            // to an Agent, an untyped doc isn't one.
+                                            None => false,
+                                        }
+                                    }
+                                    // No declared range → accept any resolution.
+                                    None => true,
+                                };
+
+                                if range_ok {
+                                    nq.push_str(&format!(
+                                        "{} {} {} {} .\n",
+                                        doc_uri, kit_predicate, candidate_uri, graph
+                                    ));
+                                } else {
+                                    // Range mismatch → unresolvedLink with the attempted slug.
+                                    // Preserves the intent for Squadling to surface.
+                                    nq.push_str(&format!(
+                                        "{} <https://repolex.ai/ontology/git-lex/lex/unresolvedLink> \"{}\" {} .\n",
+                                        doc_uri, nq_escape(stripped), graph
+                                    ));
+                                }
                             }
                         } else {
                             // DatatypeProperty: emit as typed literal if ontology specifies a non-string range
@@ -3700,6 +3760,150 @@ fn get_property_datatypes(kit: &str) -> HashMap<String, String> {
     }
 
     datatypes
+}
+
+/// Build a map of ObjectProperty name → range class IRI from the kit ontology TTL.
+/// Only includes properties whose range is a kit class (not xsd:*, not rdfs:Resource).
+/// Used by the range-aware wikilink/mention resolver at extraction time: if
+/// `squad:from rdfs:range squad:Agent`, then `[[4rx]]` on a `from` field gets
+/// resolved against the agent slug space, not the whole entity space.
+fn get_property_ranges(kit: &str) -> HashMap<String, String> {
+    let root = match find_git_root() {
+        Some(r) => r,
+        None => return HashMap::new(),
+    };
+
+    let kit_dir = root.join(".lex").join("ontology").join("kit").join(kit);
+    let content = {
+        let primary = kit_dir.join(format!("{}.ttl", kit));
+        match fs::read_to_string(&primary) {
+            Ok(c) => c,
+            Err(_) => {
+                fs::read_dir(&kit_dir).ok()
+                    .and_then(|entries| entries.filter_map(|e| e.ok())
+                        .find(|e| e.path().extension().is_some_and(|ext| ext == "ttl") && !e.file_name().to_string_lossy().contains("shapes"))
+                        .and_then(|e| fs::read_to_string(e.path()).ok()))
+                    .unwrap_or_default()
+            }
+        }
+    };
+
+    if content.is_empty() { return HashMap::new(); }
+
+    // Find prefix name — the kit's own namespace prefix in this TTL file.
+    let kit_ns_pattern = format!("/kit/{}/", kit);
+    let mut prefix_name = kit.to_string();
+    for line in content.lines() {
+        if line.starts_with("@prefix ") && line.contains(&kit_ns_pattern) {
+            if let Some(colon_pos) = line[8..].find(':') {
+                prefix_name = line[8..8 + colon_pos].trim().to_string();
+            }
+            break;
+        }
+    }
+
+    // Parse property blocks: capture rdfs:range for ObjectProperties only.
+    let mut ranges = HashMap::new();
+    let mut current_prop = String::new();
+    let mut current_is_object_prop = false;
+
+    for line in content.lines() {
+        let trimmed = line.trim();
+
+        if trimmed.contains("a owl:ObjectProperty") {
+            if let Some(prop) = trimmed.split_whitespace().next() {
+                current_prop = prop
+                    .strip_prefix(&format!("{}:", prefix_name))
+                    .unwrap_or(prop)
+                    .to_string();
+                current_is_object_prop = true;
+            }
+        } else if trimmed.contains("a owl:DatatypeProperty") {
+            current_is_object_prop = false;
+        }
+
+        if current_is_object_prop && !current_prop.is_empty() && trimmed.starts_with("rdfs:range") {
+            if let Some(range) = trimmed.split_whitespace().nth(1) {
+                let range = range.trim_end_matches(|c: char| c == ' ' || c == ';' || c == '.');
+                // Skip xsd:* and rdfs:* — only care about kit class ranges.
+                if range.starts_with("xsd:") || range.starts_with("rdfs:") {
+                    continue;
+                }
+                // Resolve prefix:ClassName to full IRI.
+                let class_iri = if let Some(local) = range.strip_prefix(&format!("{}:", prefix_name)) {
+                    format!("https://repolex.ai/ontology/kit/{}/{}", kit, local)
+                } else if range.starts_with('<') && range.ends_with('>') {
+                    range[1..range.len() - 1].to_string()
+                } else {
+                    continue; // unknown prefix, skip
+                };
+                ranges.insert(current_prop.clone(), class_iri);
+            }
+        }
+
+        if trimmed.is_empty() {
+            current_prop.clear();
+            current_is_object_prop = false;
+        }
+    }
+
+    ranges
+}
+
+/// Build a map of entity-IRI → class-IRI from the current `now` graph.
+/// Used by the range-aware resolver to filter candidate resolutions by
+/// declared class. Built once per sync run, O(n) in entity count.
+fn build_entity_class_map(slug_index: &HashMap<String, String>, base: &str) -> HashMap<String, String> {
+    // We don't have the store handy at this point, so the index is built
+    // from filesystem knowledge: for each slug, check the file's frontmatter
+    // for a `kit.class.*` dot notation and derive the class IRI.
+    let mut map = HashMap::new();
+    let root = match find_git_root() {
+        Some(r) => r,
+        None => return map,
+    };
+    for (_slug, relpath) in slug_index {
+        let full = root.join(relpath);
+        let content = match fs::read_to_string(&full) {
+            Ok(c) => c,
+            Err(_) => continue,
+        };
+        if !(content.starts_with("---\n") || content.starts_with("---\r\n")) {
+            continue;
+        }
+        let rest = &content[4..];
+        let end = match rest.find("\n---") {
+            Some(e) => e,
+            None => continue,
+        };
+        let yaml_str = &rest[..end];
+        let yaml: HashMap<String, serde_yaml::Value> = match serde_yaml::from_str(yaml_str) {
+            Ok(y) => y,
+            Err(_) => continue,
+        };
+        // Look for any top-level key of the form kit.class.property — the
+        // first such key reveals the file's class.
+        for key in yaml.keys() {
+            let segs: Vec<&str> = key.splitn(3, '.').collect();
+            if segs.len() == 3 {
+                let kit_name = segs[0];
+                let class_seg = segs[1];
+                // Capitalize to match the type IRI emission above.
+                let class_capitalized = {
+                    let mut c = class_seg.chars();
+                    match c.next() {
+                        None => class_seg.to_string(),
+                        Some(f) => f.to_uppercase().to_string() + c.as_str(),
+                    }
+                };
+                let class_iri = format!("https://repolex.ai/ontology/kit/{}/{}", kit_name, class_capitalized);
+                let entity_iri = format!("{}/{}", base, uri_encode_path(relpath));
+                map.insert(entity_iri, class_iri);
+                break;
+            }
+        }
+    }
+    map
 }
 
 /// Parse the kit ontology to find document types and their properties.
