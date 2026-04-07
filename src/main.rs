@@ -2105,7 +2105,13 @@ fn generate_frontmatter_nquads() -> String {
     };
 
     let base = base_uri();
-    let graph = format!("<{}/frontmatter>", base);
+    // The "now" graph is the canonical view of current state — extracted
+    // frontmatter, body wikilinks/mentions, and any triples derived from the
+    // working tree as it exists right now. Contrasts with sync/<sha>/ graphs,
+    // which hold historical snapshots at past commits. Previously named
+    // "frontmatter" but that was misleading: this graph holds more than the
+    // fm: namespace (wikilinks, mentions, etc are also here).
+    let graph = format!("<{}/now>", base);
     let mut nq = String::new();
 
     // Build ObjectProperty lookup from kit ontology
@@ -2238,7 +2244,7 @@ fn generate_frontmatter_nquads() -> String {
             fs::write(&spo_path, &spo_content).ok();
         }
 
-        // --- Generate N-Quads for oxigraph (frontmatter graph) ---
+        // --- Generate N-Quads for oxigraph (now graph) ---
         // IRI scheme: https://{host}/{org}/{repo}/{Class}/{id}.md
         // For files in a class folder (e.g. memory/foo.md), use the folder as class.
         // Otherwise fall back to the blob-hash based URI.
@@ -5408,7 +5414,7 @@ fn cmd_sync() {
         "Synced in {:.1}ms:",
         elapsed.as_secs_f64() * 1000.0
     );
-    println!("  Virtual: {} git + {} frontmatter", git_count, fm_count);
+    println!("  Virtual: {} git + {} now", git_count, fm_count);
     if new_assertions > 0 || retracted > 0 {
         println!(
             "  Sync /sync/{}/: +{} assertions, -{} retracted ({} quads)",
