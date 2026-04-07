@@ -5174,20 +5174,20 @@ fn cmd_sync() {
             .expect("failed to load sync graph");
     }
 
-    // ─── Phase 3: Class graphs — current-state data tables ───
-    // Each class folder gets a named graph: <base>/class/{ClassName}
-    // These are cleared and rebuilt on every sync from the .fm.spo files.
-
-    let kit = get_kit();
-    let kit_name = kit.as_deref().unwrap_or("none");
-    let kit_prefix_name = get_kit_prefix_name(kit_name);
-    let obj_props = kit.as_ref().map(|k| get_object_properties(k)).unwrap_or_default();
-    let prop_datatypes = kit.as_ref().map(|k| get_property_datatypes(k)).unwrap_or_default();
-
-    // Clear ALL existing class graphs first — handles renames (Contact → Friend)
-    // and deletions where the old class graph would otherwise stay forever.
+    // ─── Phase 3: Stale graph cleanup ───
+    // Class graphs (`<base>/class/{Name}`) used to be a "current-state data
+    // table" projection — but they were a duplicate of the `now` graph born
+    // from a misunderstanding (we thought `now` was fm-namespace-only). They
+    // are gone. The `now` graph is the single source of current state.
+    //
+    // Also sweeps the legacy `<base>/frontmatter` graph (renamed to `now` in
+    // a prior commit) so existing repos drop the stale snapshot on next sync.
+    //
+    // We sweep both on every sync — cheap, idempotent, handles old data left
+    // over from before the rename + class-graph deletion shipped.
     let class_prefix = format!("{}/class/", base);
-    let existing_class_graphs: Vec<String> = {
+    let legacy_frontmatter = format!("{}/frontmatter", base);
+    let stale_graphs: Vec<String> = {
         let q = "SELECT DISTINCT ?g WHERE { GRAPH ?g { ?s ?p ?o } }";
         match oxigraph::sparql::Query::parse(q, None) {
             Ok(mut parsed) => {
@@ -5198,7 +5198,7 @@ fn cmd_sync() {
                             s.get("g").and_then(|t| match t {
                                 Term::NamedNode(n) => {
                                     let uri = n.as_str().to_string();
-                                    if uri.starts_with(&class_prefix) {
+                                    if uri.starts_with(&class_prefix) || uri == legacy_frontmatter {
                                         Some(uri)
                                     } else {
                                         None
@@ -5214,190 +5214,9 @@ fn cmd_sync() {
             _ => Vec::new(),
         }
     };
-    for graph_uri in &existing_class_graphs {
+    for graph_uri in &stale_graphs {
         if let Ok(graph_node) = oxigraph::model::NamedNode::new(graph_uri) {
             store.clear_graph(&oxigraph::model::GraphName::from(graph_node)).ok();
-        }
-    }
-
-    // Build slug index for reference resolution in class graphs
-    let mut class_slug_index: HashMap<String, String> = HashMap::new();
-    fn walk_md_for_index(dir: &std::path::Path, root: &std::path::Path, index: &mut HashMap<String, String>) {
-        if let Ok(entries) = fs::read_dir(dir) {
-            for entry in entries.filter_map(|e| e.ok()) {
-                let path = entry.path();
-                let name = entry.file_name().to_string_lossy().to_string();
-                if name.starts_with('.') { continue; }
-                if path.is_dir() {
-                    walk_md_for_index(&path, root, index);
-                } else if name.ends_with(".md") && !name.starts_with("__") {
-                    if let Ok(rel) = path.strip_prefix(root) {
-                        if let Some(stem) = path.file_stem() {
-                            index.insert(stem.to_string_lossy().to_lowercase(), rel.to_string_lossy().to_string());
-                        }
-                    }
-                }
-            }
-        }
-    }
-    walk_md_for_index(&root, &root, &mut class_slug_index);
-
-    // Group .fm.spo files by class folder
-    let mut class_spo: HashMap<String, Vec<(String, String)>> = HashMap::new(); // folder → [(source_file, content)]
-    for (spo_path, content) in &current_spo {
-        if !spo_path.ends_with(".fm.spo") { continue; }
-        // spo_path looks like "memory/foo.md.fm.spo"
-        if let Some(source) = spo_path.strip_suffix(".fm.spo") {
-            if let Some(slash) = source.find('/') {
-                let folder = &source[..slash];
-                class_spo.entry(folder.to_string()).or_default()
-                    .push((source.to_string(), content.clone()));
-            }
-        }
-    }
-
-    let mut class_graph_count = 0;
-    let mut class_triple_count = 0;
-
-    for (folder, files) in &class_spo {
-        // Capitalize folder → class name
-        let class_name = {
-            let mut c = folder.chars();
-            match c.next() {
-                None => folder.to_string(),
-                Some(f) => f.to_uppercase().to_string() + c.as_str(),
-            }
-        };
-
-        let class_graph_uri = format!("{}/class/{}", base, class_name);
-        let class_graph = format!("<{}>", class_graph_uri);
-
-        // Clear existing class graph
-        if let Ok(graph_node) = oxigraph::model::NamedNode::new(&class_graph_uri) {
-            store.clear_graph(&oxigraph::model::GraphName::from(graph_node)).ok();
-        }
-
-        let mut class_nq = String::new();
-
-        for (source_file, content) in files {
-            // Build doc URI from source file path
-            let doc_uri = {
-                let parts: Vec<&str> = source_file.splitn(2, '/').collect();
-                if parts.len() == 2 && source_file.ends_with(".md") {
-                    format!("<{}/{}/{}>", base, uri_encode_path(&class_name), uri_encode_path(parts[1]))
-                } else {
-                    format!("<{}/{}>", base, uri_encode_path(source_file))
-                }
-            };
-
-            // rdf:type for the class
-            let kit_ns = format!("https://repolex.ai/ontology/kit/{}", kit_name);
-            class_nq.push_str(&format!(
-                "{} <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <{}/{}> {} .\n",
-                doc_uri, kit_ns, class_name, class_graph
-            ));
-
-            // Path triple for convenience
-            class_nq.push_str(&format!(
-                "{} <https://repolex.ai/ontology/git-lex/fm/path> \"{}\" {} .\n",
-                doc_uri, nq_escape(source_file), class_graph
-            ));
-
-            for line in content.lines().filter(|l| !l.is_empty() && !l.starts_with('#')) {
-                let parts: Vec<&str> = line.splitn(3, " | ").collect();
-                if parts.len() != 3 { continue; }
-                let (subject, predicate, object) = (parts[0], parts[1], parts[2]);
-
-                if predicate == "mentions" {
-                    let mention_slug = object.to_lowercase();
-                    if class_slug_index.contains_key(&mention_slug) {
-                        let mention_uri = resolve_slug_to_uri(&mention_slug, &base, &class_slug_index);
-                        class_nq.push_str(&format!(
-                            "{} <https://repolex.ai/ontology/git-lex/lex/mentions> {} {} .\n",
-                            doc_uri, mention_uri, class_graph
-                        ));
-                    } else {
-                        class_nq.push_str(&format!(
-                            "{} <https://repolex.ai/ontology/git-lex/lex/mentions> \"{}\" {} .\n",
-                            doc_uri, nq_escape(object), class_graph
-                        ));
-                    }
-                } else if predicate == "linksTo" {
-                    let link_slug = object.to_lowercase()
-                        .replace(' ', "-")
-                        .replace(|c: char| !c.is_alphanumeric() && c != '-', "");
-                    if class_slug_index.contains_key(&link_slug) {
-                        let link_uri = resolve_slug_to_uri(&link_slug, &base, &class_slug_index);
-                        class_nq.push_str(&format!(
-                            "{} <https://repolex.ai/ontology/git-lex/lex/linksTo> {} {} .\n",
-                            doc_uri, link_uri, class_graph
-                        ));
-                    } else {
-                        class_nq.push_str(&format!(
-                            "{} <https://repolex.ai/ontology/git-lex/lex/unresolvedLink> \"{}\" {} .\n",
-                            doc_uri, nq_escape(object), class_graph
-                        ));
-                    }
-                } else if predicate == "hasValue" {
-                    // Determine predicate URI from subject (the dotted key)
-                    let segments: Vec<&str> = subject.splitn(3, '.').collect();
-                    if segments.len() == 3 {
-                        // Property name passes through as-is (camelCase from ontology)
-                        let prop_name = segments[2];
-                        let pred_uri = format!("<{}/{}>", kit_ns, prop_name);
-
-                        // Check ontology for ObjectProperty → resolve as IRI
-                        if obj_props.contains(prop_name) {
-                            let values: Vec<&str> = object.split(',').map(|s| s.trim()).filter(|s| !s.is_empty()).collect();
-                            for val in values {
-                                let slug = val.trim_start_matches('@').to_lowercase()
-                                    .replace(' ', "-")
-                                    .replace(|c: char| !c.is_alphanumeric() && c != '-' && c != '/' && c != '.', "");
-                                if !slug.is_empty() {
-                                    let object_uri = if slug.contains('/') || slug.ends_with(".md") {
-                                        format!("<{}/{}>", base, uri_encode_path(&slug))
-                                    } else {
-                                        resolve_slug_to_uri(&slug, &base, &class_slug_index)
-                                    };
-                                    class_nq.push_str(&format!(
-                                        "{} {} {} {} .\n",
-                                        doc_uri, pred_uri, object_uri, class_graph
-                                    ));
-                                }
-                            }
-                        } else {
-                            // Typed literal if ontology specifies non-string range
-                            if let Some(datatype) = prop_datatypes.get(prop_name) {
-                                class_nq.push_str(&format!(
-                                    "{} {} \"{}\"^^<{}> {} .\n",
-                                    doc_uri, pred_uri, nq_escape(object), datatype, class_graph
-                                ));
-                            } else {
-                                class_nq.push_str(&format!(
-                                    "{} {} \"{}\" {} .\n",
-                                    doc_uri, pred_uri, nq_escape(object), class_graph
-                                ));
-                            }
-                        }
-                    } else {
-                        // Legacy non-dotted key — use fm: namespace
-                        let fm_pred = format!("<https://repolex.ai/ontology/git-lex/fm/{}>", uri_encode_path(subject));
-                        class_nq.push_str(&format!(
-                            "{} {} \"{}\" {} .\n",
-                            doc_uri, fm_pred, nq_escape(object), class_graph
-                        ));
-                    }
-                }
-            }
-        }
-
-        let count = class_nq.lines().filter(|l| !l.is_empty()).count();
-        if !class_nq.is_empty() {
-            store
-                .load_from_reader(RdfFormat::NQuads, Cursor::new(class_nq.as_bytes()))
-                .expect(&format!("failed to load class graph for {}", class_name));
-            class_graph_count += 1;
-            class_triple_count += count;
         }
     }
 
@@ -5426,8 +5245,8 @@ fn cmd_sync() {
         println!("  First sync — no previous state");
     }
     println!("  Total sync graphs: {}", total_sync + if sync_count > 0 { 1 } else { 0 });
-    if class_graph_count > 0 {
-        println!("  Class graphs: {} ({} triples)", class_graph_count, class_triple_count);
+    if !stale_graphs.is_empty() {
+        println!("  Cleaned up {} stale graph(s)", stale_graphs.len());
     }
     println!("Store: {}", store_path().unwrap().display());
 }
