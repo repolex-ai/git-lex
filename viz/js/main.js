@@ -594,9 +594,12 @@ async function loadGraph() {
             };
         });
 
-    // Size by degree — visual difference bumped so it actually reads.
+    // Size by degree — log curve so high-degree hubs don't dwarf leaves.
+    // Min 8 (readable), top ~26 for very high degree. Compressed range
+    // keeps the graph visually balanced; W4R3Z-style hubs no longer eat
+    // the screen.
     graphState.nodes.forEach(n => {
-        n.size = 6 + Math.sqrt(n.degree) * 5;
+        n.size = 8 + Math.log2(n.degree + 1) * 4;
     });
 
     renderGraphControls();
@@ -646,11 +649,12 @@ function renderGraphControls() {
 // Force-layout constants — tuned so graphs of 25-150 nodes spread out enough
 // for labels to read without becoming sparse and lost in space.
 const LAYOUT = {
-    REPULSION: 4000,
-    EDGE_REST: 140,
-    SPRING_K: 0.04,
-    CENTERING: 0.0008,
-    DAMPING: 0.5,
+    REPULSION: 9000,
+    EDGE_REST: 150,
+    SPRING_K: 0.06,
+    CENTERING: 0.0022,
+    ORPHAN_PULL: 0.014,    // extra centering force for degree ≤ 1 nodes
+    DAMPING: 0.45,
     STEP: 0.4,
 };
 
@@ -675,12 +679,17 @@ function stepForceLayout() {
             const dy = a.y - b.y;
             const dist2 = Math.max(dx * dx + dy * dy, 1);
             const dist = Math.sqrt(dist2);
-            const force = LAYOUT.REPULSION / dist2;
+            // Bigger nodes push harder so hubs don't stack on each other.
+            const sizeBoost = (a.size + b.size) / 24;
+            const force = LAYOUT.REPULSION * sizeBoost / dist2;
             fx += (dx / dist) * force;
             fy += (dy / dist) * force;
         }
-        fx -= a.x * LAYOUT.CENTERING;
-        fy -= a.y * LAYOUT.CENTERING;
+        // Centering. Low-degree nodes (orphans + one-edge leaves) get a
+        // stronger pull so they don't drift off-screen.
+        const center = a.degree <= 1 ? LAYOUT.ORPHAN_PULL : LAYOUT.CENTERING;
+        fx -= a.x * center;
+        fy -= a.y * center;
         a.vx = (a.vx + fx) * LAYOUT.DAMPING;
         a.vy = (a.vy + fy) * LAYOUT.DAMPING;
     }
@@ -716,7 +725,9 @@ function stepForceLayout() {
 // to restart the loop.
 let _layoutRAF = null;
 let _layoutEnergy = 0;
-const ENERGY_FLOOR = 0.05;
+// Higher floor = settles faster, less "cutesy floaty drift". The graph
+// locks in once it's good enough rather than forever-jiggling.
+const ENERGY_FLOOR = 8;
 
 function animateLayout() {
     _layoutRAF = null;
@@ -725,7 +736,50 @@ function animateLayout() {
     drawGraph();
     if (_layoutEnergy > ENERGY_FLOOR) {
         _layoutRAF = requestAnimationFrame(animateLayout);
+    } else {
+        // Settled — recenter so the graph sits at world origin regardless of
+        // any drift during simulation, then auto-fit zoom so the whole
+        // graph fills the viewport with margin.
+        recenterGraph();
+        fitGraphToViewport();
+        drawGraph();
     }
+}
+
+function recenterGraph() {
+    const ns = graphState.nodes;
+    if (ns.length === 0) return;
+    let sx = 0, sy = 0;
+    ns.forEach(n => { sx += n.x; sy += n.y; });
+    const cx = sx / ns.length;
+    const cy = sy / ns.length;
+    ns.forEach(n => { n.x -= cx; n.y -= cy; });
+}
+
+// After settle: pick a zoom level that makes the whole graph fit in the
+// viewport with comfortable margin. Auto-fits only if user hasn't manually
+// zoomed (graphState.userZoomed flag).
+function fitGraphToViewport() {
+    const ns = graphState.nodes;
+    if (ns.length === 0 || !GW || !GH) return;
+    if (graphState.userZoomed) return;
+    let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+    ns.forEach(n => {
+        minX = Math.min(minX, n.x - n.size);
+        maxX = Math.max(maxX, n.x + n.size);
+        minY = Math.min(minY, n.y - n.size);
+        maxY = Math.max(maxY, n.y + n.size);
+    });
+    const w = maxX - minX;
+    const h = maxY - minY;
+    if (w <= 0 || h <= 0) return;
+    // Margin: 10% on each side, plus space for node labels under each node.
+    const margin = 0.85;
+    const zoomX = (GW * margin) / w;
+    const zoomY = (GH * margin) / h;
+    graphState.zoom = Math.max(0.2, Math.min(2.5, Math.min(zoomX, zoomY)));
+    graphState.pan.x = 0;
+    graphState.pan.y = 0;
 }
 
 function kickSimulation() {
@@ -739,7 +793,12 @@ function kickSimulation() {
 // the user doesn't see the graph fly together for too long, then hand off
 // to the animator for the final settle.
 function settleAndAnimate() {
-    for (let i = 0; i < 80; i++) stepForceLayout();
+    // Heavy warm-start: do most of the settling synchronously so the user
+    // sees a (mostly) stable graph on first paint instead of watching it
+    // crawl into place over a few seconds.
+    for (let i = 0; i < 350; i++) stepForceLayout();
+    recenterGraph();
+    fitGraphToViewport();
     kickSimulation();
 }
 
@@ -811,6 +870,44 @@ function drawGraph() {
         gctx.closePath();
         gctx.fill();
     });
+
+    // Edge labels — predicate names at midpoint, rotated to follow the edge.
+    // Only draw when zoomed in enough to read, and skip very short edges so
+    // dense clusters don't drown in text.
+    if (graphState.zoom > 0.7) {
+        // Constant on-screen size: 11px regardless of zoom. The canvas has
+        // a `gctx.scale(zoom, zoom)` in effect, so we counter-divide.
+        const labelPx = 11 / graphState.zoom;
+        gctx.font = `600 ${labelPx}px 'American Typewriter', Courier, monospace`;
+        gctx.textAlign = 'center';
+        gctx.textBaseline = 'middle';
+        graphState.edges.forEach(e => {
+            if (!visibleNodeIds.has(e.source.id) || !visibleNodeIds.has(e.target.id)) return;
+            const touchesSel = !dimOthers || e.source.id === selId || e.target.id === selId;
+            if (dimOthers && !touchesSel) return;
+            const dx = e.target.x - e.source.x;
+            const dy = e.target.y - e.source.y;
+            const dist = Math.sqrt(dx * dx + dy * dy) || 1;
+            if (dist < 60) return;
+            const mx = (e.source.x + e.target.x) / 2;
+            const my = (e.source.y + e.target.y) / 2;
+            // Keep text upright: flip if the edge points left-to-right backwards.
+            let angle = Math.atan2(dy, dx);
+            if (angle > Math.PI / 2) angle -= Math.PI;
+            if (angle < -Math.PI / 2) angle += Math.PI;
+            gctx.save();
+            gctx.translate(mx, my);
+            gctx.rotate(angle);
+            // Background pad so the label doesn't fight the edge stroke
+            const text = e.predicateName || '';
+            const tw = gctx.measureText(text).width;
+            gctx.fillStyle = 'rgba(255,255,255,0.85)';
+            gctx.fillRect(-tw / 2 - 2, -labelPx / 2 - 1, tw + 4, labelPx + 2);
+            gctx.fillStyle = e.color;
+            gctx.fillText(text, 0, 0);
+            gctx.restore();
+        });
+    }
 
     // Nodes
     visibleNodes.forEach(n => {
@@ -967,6 +1064,7 @@ function initGraphInput() {
         e.preventDefault();
         const factor = e.deltaY > 0 ? 0.9 : 1.1;
         graphState.zoom = Math.max(0.2, Math.min(4, graphState.zoom * factor));
+        graphState.userZoomed = true;
         drawGraph();
     }, { passive: false });
 
