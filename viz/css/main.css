@@ -283,6 +283,82 @@ nav.modes {
     border: 1px solid var(--rule-soft);
 }
 
+/* History scrubber timeline */
+.timeline-section {
+    margin-bottom: 2rem;
+}
+.timeline-wrap {
+    position: relative;
+    padding: 0.4rem 0 0.6rem;
+}
+.timeline {
+    width: 100%;
+    height: 56px;
+    display: block;
+    cursor: crosshair;
+}
+.tl-tick {
+    fill: var(--ink-soft, #444);
+    transition: fill 0.08s;
+}
+.tl-tick:hover {
+    fill: var(--accent, #bb2200);
+}
+.tl-tick.active {
+    fill: var(--accent, #bb2200);
+}
+.tl-base {
+    stroke: var(--rule-soft, #ddd);
+    stroke-width: 1;
+}
+.tl-head {
+    stroke: var(--accent, #bb2200);
+    stroke-width: 1.4;
+    stroke-dasharray: 2 2;
+    opacity: 0.7;
+}
+.tl-head-label {
+    font-size: 8px;
+    fill: var(--accent, #bb2200);
+    font-family: 'American Typewriter', Courier, monospace;
+    letter-spacing: 0.1em;
+}
+.timeline-tooltip {
+    position: absolute;
+    transform: translate(-50%, -100%);
+    background: #fff;
+    border: 1px solid var(--rule-soft, #ddd);
+    border-radius: 3px;
+    padding: 0.45rem 0.6rem;
+    font-size: 0.72rem;
+    line-height: 1.35;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.08);
+    pointer-events: none;
+    max-width: 320px;
+    z-index: 10;
+}
+.timeline-tooltip .tt-msg {
+    font-weight: 600;
+    color: var(--ink, #222);
+    margin-bottom: 0.2rem;
+}
+.timeline-tooltip .tt-meta {
+    color: var(--ink-faint, #888);
+    font-size: 0.65rem;
+}
+.timeline-tooltip code {
+    font-size: 0.65rem;
+    color: var(--accent, #bb2200);
+}
+.timeline-hint {
+    font-size: 0.7rem;
+    color: var(--ink-faint, #888);
+    margin-top: 0.3rem;
+}
+.timeline-hint code {
+    font-size: 0.7rem;
+}
+
 .activity-row {
     display: grid;
     grid-template-columns: 110px 1fr auto auto;

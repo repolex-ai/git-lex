@@ -146,9 +146,10 @@ function connectWS() {
 async function loadActivity() {
     const view = views.activity;
 
-    const [repoInfo, recentCommits] = await Promise.all([
+    const [repoInfo, recentCommits, timeline] = await Promise.all([
         loadRepoInfo(),
         loadRecentCommits(30),
+        loadCommitTimeline(),
     ]);
 
     let html = '';
@@ -164,6 +165,12 @@ async function loadActivity() {
     if (repoInfo.totalTriples) html += `<span>${repoInfo.totalTriples.toLocaleString()} triples</span>`;
     html += '</div>';
     html += '</div>';
+
+    // History scrubber timeline (Day 7 sketch — slider stub).
+    // Wires to W4R3Z's planned /api/scrub?commit={sha} endpoint when it ships.
+    if (timeline.length > 1) {
+        html += renderTimeline(timeline);
+    }
 
     // Recent activity
     if (recentCommits.length > 0) {
@@ -183,6 +190,7 @@ async function loadActivity() {
     }
 
     view.innerHTML = html;
+    attachTimelineHandlers();
 }
 
 async function loadRepoInfo() {
@@ -326,6 +334,124 @@ async function loadClassCounts() {
     }
 
     return classes;
+}
+
+// Load every commit (capped) with its file-change count, for the history
+// scrubber strip. The change count is a v1 stand-in for true delta magnitude
+// — once W4R3Z's retraction-aware sync graphs land, swap COUNT(?changed) for
+// the per-sync-graph quad delta.
+async function loadCommitTimeline() {
+    const rows = await sparql(`
+        PREFIX git: <https://repolex.ai/ontology/git-lex/git/>
+        SELECT ?c ?date ?msg ?author (COUNT(?changed) AS ?n) WHERE {
+            ?c a git:Commit ;
+               git:committedDate ?date ;
+               git:message ?msg .
+            OPTIONAL { ?c git:authorName ?author }
+            OPTIONAL { ?c git:changed ?changed }
+        }
+        GROUP BY ?c ?date ?msg ?author
+        ORDER BY ?date
+        LIMIT 500
+    `);
+    return rows.map(r => ({
+        sha: (r.c.match(/\/commit\/([a-f0-9]+)/) || [])[1] || '',
+        uri: r.c,
+        date: r.date,
+        msg: (r.msg || '').split('\n')[0],
+        author: r.author || '',
+        n: parseInt(r.n) || 0,
+    }));
+}
+
+// Render a horizontal SVG timeline strip with one tick per commit.
+// Height ∝ delta magnitude. Hover = tooltip. Click = stub for now (will wire
+// to /api/scrub when the endpoint lands).
+function renderTimeline(commits) {
+    if (commits.length === 0) return '';
+    const maxN = Math.max(1, ...commits.map(c => c.n));
+    const W = 1000;       // viewBox width — scales to container
+    const H = 56;
+    const padX = 12;
+    const padY = 10;
+    const trackY = H - padY;
+    const trackW = W - padX * 2;
+    const span = trackW / Math.max(1, commits.length - 1);
+
+    let bars = '';
+    commits.forEach((c, i) => {
+        const x = padX + i * span;
+        const ratio = c.n / maxN;
+        const h = 4 + ratio * (H - padY * 2 - 4);
+        const y = trackY - h;
+        const w = Math.max(2, Math.min(span * 0.6, 6));
+        bars += `<rect class="tl-tick" x="${x - w / 2}" y="${y}" width="${w}" height="${h}" rx="1" data-sha="${c.sha}" data-i="${i}"></rect>`;
+    });
+    // HEAD marker = the latest commit
+    const lastX = padX + (commits.length - 1) * span;
+    bars += `<line class="tl-head" x1="${lastX}" y1="${padY - 2}" x2="${lastX}" y2="${trackY + 2}"></line>`;
+    bars += `<text class="tl-head-label" x="${lastX}" y="${padY - 4}" text-anchor="middle">HEAD</text>`;
+
+    // Baseline
+    bars += `<line class="tl-base" x1="${padX}" y1="${trackY}" x2="${W - padX}" y2="${trackY}"></line>`;
+
+    // Build the data-* JSON for client-side tooltip lookup
+    const dataJson = JSON.stringify(commits.map(c => ({
+        sha: c.sha.substring(0, 7),
+        msg: c.msg.substring(0, 80),
+        author: c.author,
+        date: c.date,
+        n: c.n,
+    })));
+
+    return `
+        <div class="section timeline-section">
+            <div class="section-title">History · ${commits.length} commits · ticks sized by file change count</div>
+            <div class="timeline-wrap">
+                <svg class="timeline" viewBox="0 0 ${W} ${H}" preserveAspectRatio="none">
+                    ${bars}
+                </svg>
+                <div class="timeline-tooltip" id="timeline-tooltip" hidden></div>
+            </div>
+            <div class="timeline-hint">Hover a tick to inspect a commit. Click is a stub — will swap the graph view to that point in time once <code>/api/scrub</code> ships.</div>
+            <script type="application/json" id="timeline-data">${escapeHtml(dataJson)}</script>
+        </div>
+    `;
+}
+
+// After loadActivity injects HTML, wire up the timeline interactions.
+function attachTimelineHandlers() {
+    const dataEl = document.getElementById('timeline-data');
+    if (!dataEl) return;
+    let commits;
+    try { commits = JSON.parse(dataEl.textContent); } catch { return; }
+    const tooltip = document.getElementById('timeline-tooltip');
+    document.querySelectorAll('.tl-tick').forEach(tick => {
+        tick.addEventListener('mouseenter', e => {
+            const i = parseInt(tick.dataset.i, 10);
+            const c = commits[i];
+            if (!c) return;
+            tooltip.innerHTML = `
+                <div class="tt-msg">${escapeHtml(c.msg)}</div>
+                <div class="tt-meta">${escapeHtml(c.author || '')} · ${formatDate(c.date)} · ${c.n} file${c.n === 1 ? '' : 's'} · <code>${c.sha}</code></div>
+            `;
+            const r = tick.getBoundingClientRect();
+            const wrapR = tick.closest('.timeline-wrap').getBoundingClientRect();
+            tooltip.style.left = (r.left + r.width / 2 - wrapR.left) + 'px';
+            tooltip.style.top = (r.top - wrapR.top - 8) + 'px';
+            tooltip.hidden = false;
+        });
+        tick.addEventListener('mouseleave', () => {
+            tooltip.hidden = true;
+        });
+        tick.addEventListener('click', () => {
+            const sha = tick.dataset.sha;
+            console.log('[scrub stub] would fetch /api/scrub?commit=' + sha);
+            // Visual feedback so the user sees something happen.
+            document.querySelectorAll('.tl-tick.active').forEach(t => t.classList.remove('active'));
+            tick.classList.add('active');
+        });
+    });
 }
 
 async function loadRecentCommits(limit = 30) {
