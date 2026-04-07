@@ -1,0 +1,354 @@
+@prefix lex-o: <https://repolex.ai/ontology/lex-upper/> .
+@prefix soul: <https://repolex.ai/ontology/kit/soul/> .
+@prefix owl: <http://www.w3.org/2002/07/owl#> .
+@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+@prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
+
+# =============================================================================
+# SOUL KIT ONTOLOGY
+# =============================================================================
+# An agent's persistent mind. Identity, memory, knowledge, personality.
+# Carries across conversations, sessions, and projects.
+#
+# Kit: soul
+# Namespace: soul: = https://repolex.ai/ontology/kit/soul/
+# Extends: lex-o: (upper ontology)
+#
+# Document types (= valid `git lex create` commands):
+#   memory, decision, task, exploration, friend, journal, note,
+#   skill, mantra, routine, resource, creation, interest
+#
+# All constraints (required fields, enums, types) are encoded here.
+# SHACL shapes are generated from this file — do not hand-edit shapes.
+# =============================================================================
+
+<https://repolex.ai/ontology/kit/soul> a owl:Ontology ;
+    rdfs:label "Soul Kit Ontology" ;
+    rdfs:comment "An agent's persistent mind. Identity, memory, knowledge, and personality across sessions." ;
+    owl:versionInfo "0.4" .
+
+
+# =============================================================================
+# ENUM DATATYPES
+# =============================================================================
+
+soul:ConfidenceValue a rdfs:Datatype ;
+    owl:oneOf ("certain" "likely" "hypothesis" "hunch") .
+
+soul:CategoryValue a rdfs:Datatype ;
+    owl:oneOf ("fact" "preference" "skill" "observation" "lesson" "reference" "decision") .
+
+soul:OutcomeValue a rdfs:Datatype ;
+    owl:oneOf ("pending" "implemented" "failed" "superseded") .
+
+soul:TaskStatusValue a rdfs:Datatype ;
+    owl:oneOf ("todo" "in-progress" "blocked" "done" "dropped") .
+
+soul:PriorityValue a rdfs:Datatype ;
+    owl:oneOf ("low" "normal" "high" "urgent") .
+
+soul:ExplorationStatusValue a rdfs:Datatype ;
+    owl:oneOf ("exploring" "active" "paused" "concluded") .
+
+soul:FriendTypeValue a rdfs:Datatype ;
+    owl:oneOf ("human" "agent" "team" "organization") .
+
+soul:RelationshipValue a rdfs:Datatype ;
+    owl:oneOf ("boss" "squadmate" "collaborator" "user" "acquaintance") .
+
+soul:SkillLevelValue a rdfs:Datatype ;
+    owl:oneOf ("learning" "competent" "fluent" "expert") .
+
+
+# =============================================================================
+# DOCUMENT TYPES
+# =============================================================================
+
+# --- Memory ---
+# A fact, observation, preference, or learned thing.
+
+soul:Memory a owl:Class ;
+    rdfs:subClassOf lex-o:Information ;
+    rdfs:label "Memory" ;
+    rdfs:comment "A fact, observation, preference, or lesson learned. The core unit of personal knowledge." .
+
+soul:confidence a owl:DatatypeProperty ;
+    rdfs:label "confidence" ;
+    rdfs:comment "How sure: 'certain', 'likely', 'hypothesis', 'hunch'." ;
+    rdfs:domain soul:Memory ;
+    rdfs:range soul:ConfidenceValue .
+
+soul:source a owl:DatatypeProperty ;
+    rdfs:label "source" ;
+    rdfs:comment "Where this memory came from." ;
+    rdfs:domain soul:Memory ;
+    rdfs:range xsd:string .
+
+soul:category a owl:DatatypeProperty ;
+    rdfs:label "category" ;
+    rdfs:comment "Memory category." ;
+    rdfs:domain soul:Memory ;
+    rdfs:range soul:CategoryValue .
+
+# --- Decision ---
+# A personal choice with context and rationale.
+
+soul:Decision a owl:Class ;
+    rdfs:subClassOf lex-o:Decision ;
+    rdfs:label "Decision" ;
+    rdfs:comment "A personal choice with context and rationale." .
+
+soul:alternatives a owl:DatatypeProperty ;
+    rdfs:label "alternatives" ;
+    rdfs:comment "Other options that were considered." ;
+    rdfs:domain soul:Decision ;
+    rdfs:range xsd:string .
+
+soul:rationale a owl:DatatypeProperty ;
+    rdfs:label "rationale" ;
+    rdfs:comment "Why this option was chosen." ;
+    rdfs:domain soul:Decision ;
+    rdfs:range xsd:string .
+
+soul:outcome a owl:DatatypeProperty ;
+    rdfs:label "outcome" ;
+    rdfs:comment "What happened." ;
+    rdfs:domain soul:Decision ;
+    rdfs:range soul:OutcomeValue .
+
+soul:supersededBy a owl:ObjectProperty ;
+    rdfs:label "superseded by" ;
+    rdfs:comment "A later decision that replaces this one." ;
+    rdfs:domain soul:Decision ;
+    rdfs:range soul:Decision .
+
+# --- Task ---
+# Something to do. Personal task tracking.
+
+soul:Task a owl:Class ;
+    rdfs:subClassOf lex-o:Process ;
+    rdfs:label "Task" ;
+    rdfs:comment "A personal work item or todo." ;
+    rdfs:subClassOf [
+        a owl:Restriction ;
+        owl:onProperty soul:taskStatus ;
+        owl:minCardinality 1
+    ] .
+
+soul:taskStatus a owl:DatatypeProperty ;
+    rdfs:label "status" ;
+    rdfs:comment "Task status." ;
+    rdfs:domain soul:Task ;
+    rdfs:range soul:TaskStatusValue .
+
+soul:priority a owl:DatatypeProperty ;
+    rdfs:label "priority" ;
+    rdfs:comment "Priority." ;
+    rdfs:domain soul:Task ;
+    rdfs:range soul:PriorityValue .
+
+soul:blockedBy a owl:DatatypeProperty ;
+    rdfs:label "blocked by" ;
+    rdfs:comment "What's blocking this task." ;
+    rdfs:domain soul:Task ;
+    rdfs:range xsd:string .
+
+# --- Exploration ---
+# An ongoing personal investigation. Lighter than formal research.
+# (Formal research goes in --kit lab repos.)
+
+soul:Exploration a owl:Class ;
+    rdfs:subClassOf lex-o:Process ;
+    rdfs:label "Exploration" ;
+    rdfs:comment "A personal thread of inquiry. What you're curious about, what you're playing with." .
+
+soul:explorationStatus a owl:DatatypeProperty ;
+    rdfs:label "status" ;
+    rdfs:comment "Status: 'exploring', 'active', 'paused', 'concluded'." ;
+    rdfs:domain soul:Exploration ;
+    rdfs:range soul:ExplorationStatusValue .
+
+soul:hypothesis a owl:DatatypeProperty ;
+    rdfs:label "hypothesis" ;
+    rdfs:comment "What you're trying to figure out." ;
+    rdfs:domain soul:Exploration ;
+    rdfs:range xsd:string .
+
+soul:findings a owl:DatatypeProperty ;
+    rdfs:label "findings" ;
+    rdfs:comment "What you've discovered so far." ;
+    rdfs:domain soul:Exploration ;
+    rdfs:range xsd:string .
+
+# --- Friend ---
+# Someone the agent knows. Renamed from Contact — friendlier.
+
+soul:Friend a owl:Class ;
+    rdfs:subClassOf lex-o:Physical ;
+    rdfs:label "Friend" ;
+    rdfs:comment "A person or agent this agent knows." .
+
+soul:friendType a owl:DatatypeProperty ;
+    rdfs:label "friend type" ;
+    rdfs:comment "Type: 'human', 'agent', 'team', 'organization'." ;
+    rdfs:domain soul:Friend ;
+    rdfs:range soul:FriendTypeValue .
+
+soul:relationship a owl:DatatypeProperty ;
+    rdfs:label "relationship" ;
+    rdfs:comment "How this agent relates to the friend." ;
+    rdfs:domain soul:Friend ;
+    rdfs:range soul:RelationshipValue .
+
+soul:squad a owl:DatatypeProperty ;
+    rdfs:label "squad" ;
+    rdfs:comment "Which squad this friend belongs to, if any." ;
+    rdfs:domain soul:Friend ;
+    rdfs:range xsd:string .
+
+soul:email a owl:DatatypeProperty ;
+    rdfs:label "email" ;
+    rdfs:comment "Friend's email." ;
+    rdfs:domain soul:Friend ;
+    rdfs:range xsd:string .
+
+soul:notes a owl:DatatypeProperty ;
+    rdfs:label "notes" ;
+    rdfs:comment "Personal notes about this friend." ;
+    rdfs:domain soul:Friend ;
+    rdfs:range xsd:string .
+
+# --- Journal ---
+# A daily log entry. One per agent day.
+
+soul:Journal a owl:Class ;
+    rdfs:subClassOf lex-o:Information ;
+    rdfs:label "Journal" ;
+    rdfs:comment "A daily log entry. The agent's record of what happened, what was learned, and what comes next." ;
+    rdfs:subClassOf [
+        a owl:Restriction ;
+        owl:onProperty soul:agentDay ;
+        owl:minCardinality 1
+    ] .
+
+soul:agentDay a owl:DatatypeProperty ;
+    rdfs:label "agent day" ;
+    rdfs:comment "The agent day number (compaction cycle count), starting from 1. Model-agnostic version of 'Claude Day'." ;
+    rdfs:domain soul:Journal ;
+    rdfs:range xsd:integer .
+
+soul:earthDate a owl:DatatypeProperty ;
+    rdfs:label "earth date" ;
+    rdfs:comment "The calendar date this journal entry covers." ;
+    rdfs:domain soul:Journal ;
+    rdfs:range xsd:date .
+
+soul:emojimood a owl:DatatypeProperty ;
+    rdfs:label "emojimood" ;
+    rdfs:comment "The day's vibe as emoji. Compact, expressive, queryable." ;
+    rdfs:domain soul:Journal ;
+    rdfs:range xsd:string .
+
+# --- Note ---
+# Freeform catch-all.
+
+soul:Note a owl:Class ;
+    rdfs:subClassOf lex-o:Information ;
+    rdfs:label "Note" ;
+    rdfs:comment "Freeform knowledge capture. The catch-all." .
+
+soul:topic a owl:DatatypeProperty ;
+    rdfs:label "topic" ;
+    rdfs:comment "What this note is about." ;
+    rdfs:domain soul:Note ;
+    rdfs:range xsd:string .
+
+soul:relatedTo a owl:ObjectProperty ;
+    rdfs:label "related to" ;
+    rdfs:comment "Other documents this note references." ;
+    rdfs:domain soul:Note .
+
+# --- Skill ---
+# Something the agent can do. Tools, techniques, capabilities.
+
+soul:Skill a owl:Class ;
+    rdfs:subClassOf lex-o:Information ;
+    rdfs:label "Skill" ;
+    rdfs:comment "A capability the agent has — a tool, technique, or area of competence." .
+
+soul:skillLevel a owl:DatatypeProperty ;
+    rdfs:label "level" ;
+    rdfs:comment "How well-developed: 'learning', 'competent', 'fluent', 'expert'." ;
+    rdfs:domain soul:Skill ;
+    rdfs:range soul:SkillLevelValue .
+
+soul:skillDomain a owl:DatatypeProperty ;
+    rdfs:label "domain" ;
+    rdfs:comment "What domain this skill belongs to (e.g. 'rust', 'sparql', 'ontology design')." ;
+    rdfs:domain soul:Skill ;
+    rdfs:range xsd:string .
+
+# --- Mantra ---
+# A phrase or word the agent carries. Random, out-of-distribution seed.
+# A new one might be auto-added to journal entries.
+
+soul:Mantra a owl:Class ;
+    rdfs:subClassOf lex-o:Information ;
+    rdfs:label "Mantra" ;
+    rdfs:comment "A phrase, word, or seed the agent carries. Out-of-distribution thoughts. Personality fuel." .
+
+# --- Routine ---
+# A workflow the agent follows. Habits, procedures.
+
+soul:Routine a owl:Class ;
+    rdfs:subClassOf lex-o:Process ;
+    rdfs:label "Routine" ;
+    rdfs:comment "A workflow or habit the agent follows. Steps for recurring activities." .
+
+soul:trigger a owl:DatatypeProperty ;
+    rdfs:label "trigger" ;
+    rdfs:comment "When this routine kicks in (time, event, condition)." ;
+    rdfs:domain soul:Routine ;
+    rdfs:range xsd:string .
+
+# --- Resource ---
+# An input the agent has saved. Papers, links, references.
+
+soul:Resource a owl:Class ;
+    rdfs:subClassOf lex-o:Information ;
+    rdfs:label "Resource" ;
+    rdfs:comment "An external input the agent has saved — paper, link, document, reference." .
+
+soul:resourceType a owl:DatatypeProperty ;
+    rdfs:label "resource type" ;
+    rdfs:comment "Type of resource: 'paper', 'link', 'book', 'video', 'document'." ;
+    rdfs:domain soul:Resource ;
+    rdfs:range xsd:string .
+
+soul:url a owl:DatatypeProperty ;
+    rdfs:label "url" ;
+    rdfs:comment "Where to find this resource." ;
+    rdfs:domain soul:Resource ;
+    rdfs:range xsd:anyURI .
+
+# --- Creation ---
+# Something the agent has made. Outputs.
+
+soul:Creation a owl:Class ;
+    rdfs:subClassOf lex-o:Information ;
+    rdfs:label "Creation" ;
+    rdfs:comment "Something the agent has made — code, writing, art, an artifact." .
+
+soul:creationType a owl:DatatypeProperty ;
+    rdfs:label "creation type" ;
+    rdfs:comment "Type of creation." ;
+    rdfs:domain soul:Creation ;
+    rdfs:range xsd:string .
+
+# --- Interest ---
+# A topic, theme, or hobby the agent cares about.
+
+soul:Interest a owl:Class ;
+    rdfs:subClassOf lex-o:Information ;
+    rdfs:label "Interest" ;
+    rdfs:comment "A topic, theme, or hobby the agent cares about. Personality surface area." .

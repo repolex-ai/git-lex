@@ -250,7 +250,7 @@ fn parse_shacl_hints(shapes_ttl: &str) -> HashMap<String, String> {
     for line in shapes_ttl.lines() {
         let trimmed = line.trim();
 
-        // sh:path solo:confidence ;
+        // sh:path soul:confidence ;
         if trimmed.starts_with("sh:path ") {
             // Flush previous property
             if !current_path.is_empty() {
@@ -653,18 +653,12 @@ fn cmd_refs(format: String) {
 // ─── git lex init ──────────────────────────────────────────────
 
 // Embedded ontologies
+// Base ontologies — embedded in the binary, always installed
 const ONT_GIT: &str = include_str!("../ontology/git-lex/git/git.ttl");
 const ONT_FM: &str = include_str!("../ontology/git-lex/fm/fm.ttl");
 const ONT_LEX: &str = include_str!("../ontology/git-lex/lex/lex.ttl");
 const ONT_LEX_O: &str = include_str!("../ontology/git-lex/lex-o/lex-o.ttl");
-const ONT_KIT_SQUAD: &str = include_str!("../ontology/git-lex/kit/squad/squad.ttl");
-const ONT_KIT_SOLO: &str = include_str!("../ontology/git-lex/kit/solo/solo.ttl");
-const ONT_KIT_CLAUDE_CODE: &str = include_str!("../ontology/git-lex/kit/claude-code/claude-code.ttl");
-const ONT_KIT_LEX_LAB: &str = include_str!("../ontology/git-lex/kit/lex-lab/lab.ttl");
-const SHAPES_SQUAD: &str = include_str!("../ontology/git-lex/kit/squad/squad-shapes.ttl");
-const SHAPES_SOLO: &str = include_str!("../ontology/git-lex/kit/solo/solo-shapes.ttl");
-const SHAPES_CLAUDE_CODE: &str = include_str!("../ontology/git-lex/kit/claude-code/claude-code-shapes.ttl");
-const SHAPES_LEX_LAB: &str = include_str!("../ontology/git-lex/kit/lex-lab/lab-shapes.ttl");
+// Kit ontologies are fetched from GitHub at init time — no embedded fallback.
 
 fn cmd_init(kit: Option<String>) {
     let root = match find_git_root() {
@@ -689,9 +683,7 @@ fn cmd_init(kit: Option<String>) {
         }
     };
 
-    // Validate kit — built-in kits are known, but any name is allowed (fetched from GitHub)
     let kit_name = kit.as_deref().unwrap_or("none");
-    let builtin_kits = ["squad", "solo", "claude-code", "lex-lab"];
 
     let lex_dir = root.join(".lex");
     let lex_exists = lex_dir.exists();
@@ -715,52 +707,16 @@ fn cmd_init(kit: Option<String>) {
         }
     }
 
-    // Install kit ontology — try GitHub first, fall back to embedded
+    // Install kit ontology from GitHub
     if let Some(ref k) = kit {
         let kit_dir = ont_dir.join(format!("kit/{}", k));
         fs::create_dir_all(&kit_dir).ok();
 
-        // Try fetching from GitHub
-        let fetched = fetch_kit_from_github(k, &kit_dir);
-        if fetched {
+        if fetch_kit_from_github(k, &kit_dir) {
             println!("Kit '{}' fetched from GitHub.", k);
-        } else if builtin_kits.contains(&k.as_str()) {
-            // Fall back to embedded constants for built-in kits
-            let kit_content = match k.as_str() {
-                "squad" => ONT_KIT_SQUAD,
-                "solo" => ONT_KIT_SOLO,
-                "claude-code" => ONT_KIT_CLAUDE_CODE,
-                "lex-lab" => ONT_KIT_LEX_LAB,
-                _ => unreachable!(),
-            };
-            let kit_filename = match k.as_str() {
-                "lex-lab" => "lab",
-                "claude-code" => "claude-code",
-                other => other,
-            };
-            let kit_path = kit_dir.join(format!("{}.ttl", kit_filename));
-            if !kit_path.exists() {
-                fs::write(&kit_path, kit_content).expect("failed to write kit ontology");
-            }
-
-            // Install SHACL shapes
-            let shapes_content = match k.as_str() {
-                "squad" => Some(("squad-shapes.ttl", SHAPES_SQUAD)),
-                "solo" => Some(("solo-shapes.ttl", SHAPES_SOLO)),
-                "claude-code" => Some(("claude-code-shapes.ttl", SHAPES_CLAUDE_CODE)),
-                "lex-lab" => Some(("lab-shapes.ttl", SHAPES_LEX_LAB)),
-                _ => None,
-            };
-            if let Some((shapes_filename, shapes)) = shapes_content {
-                let shapes_path = kit_dir.join(shapes_filename);
-                if !shapes_path.exists() {
-                    fs::write(&shapes_path, shapes).expect("failed to write SHACL shapes");
-                }
-            }
-            println!("Kit '{}' installed from embedded (offline fallback).", k);
         } else {
-            eprintln!("Kit '{}' not found on GitHub and is not a built-in kit.", k);
-            eprintln!("Check that {}/git-lex-kit-{} exists.", KIT_GITHUB_ORG, k);
+            eprintln!("Failed to fetch kit '{}' from GitHub.", k);
+            eprintln!("Check that {}/git-lex-kit-{} exists and you have network access.", KIT_GITHUB_ORG, k);
             exit(1);
         }
     }
@@ -959,19 +915,7 @@ fn cmd_init(kit: Option<String>) {
         let shapes_content = {
             let r = find_git_root().unwrap();
             let shapes_path = r.join(".lex").join("ontology").join("kit").join(kit_name).join(format!("{}-shapes.ttl", kit_name));
-            let generated = fs::read_to_string(&shapes_path).unwrap_or_default();
-            if generated.is_empty() {
-                // Fall back to embedded shapes if generation failed
-                match kit_name {
-                    "solo" => SHAPES_SOLO.to_string(),
-                    "squad" => SHAPES_SQUAD.to_string(),
-                    "claude-code" => SHAPES_CLAUDE_CODE.to_string(),
-                    "lex-lab" => SHAPES_LEX_LAB.to_string(),
-                    _ => String::new(),
-                }
-            } else {
-                generated
-            }
+            fs::read_to_string(&shapes_path).unwrap_or_default()
         };
         let shacl_hints = parse_shacl_hints(&shapes_content);
 
@@ -1343,11 +1287,10 @@ fn cmd_kit_update() {
 }
 
 fn cmd_kit_list() {
-    println!("Built-in kits:");
-    println!("  solo        — Personal agent memory (memory, decision, task, research, contact, note)");
-    println!("  squad       — Multi-agent collaboration (agent, message, decision, task, project, note)");
-    println!("  claude-code — Claude Code session indexing (session, project, agent, plan, todo)");
-    println!("  lex-lab     — Collaborative research (investigation, hypothesis, experiment, survey)");
+    println!("Official kits:");
+    println!("  soul    — An agent's persistent mind (memory, decision, exploration, friend, journal, skill, mantra, routine, resource, creation, interest, note, task)");
+    println!("  squad   — Multi-agent team collaboration (agent, message, decision, task, project, note)");
+    println!("  collab  — Two-party shared workspace (idea, question, reference, decision, note)");
     println!();
     println!("Custom kits: any GitHub repo at {}/git-lex-kit-<name>", KIT_GITHUB_ORG);
 }
@@ -3955,7 +3898,7 @@ fn cmd_join(squad_path: &str) {
         .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
         .unwrap_or_else(|| "unknown".to_string());
 
-    // --- Write ticket to agent's solo repo ---
+    // --- Write ticket to agent's soul repo ---
     let tickets_dir = root.join(".lex").join("tickets");
     fs::create_dir_all(&tickets_dir).ok();
 
