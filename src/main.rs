@@ -330,26 +330,15 @@ fn build_shacl_hint(in_values: &[String], node_kind: &str, min_count: Option<u32
 }
 
 /// Resolve a slug to a full IRI using the slug index.
-/// If found in the index, generates a proper Class/file.md IRI.
-/// Otherwise falls back to entity/{slug}.
+/// If found in the index, builds the IRI as path-verbatim (mirrors the on-disk
+/// path, no folder capitalization). Otherwise falls back to entity/{slug}.
+///
+/// IRIs always mirror the on-disk path so that wikilink/mention resolution
+/// produces the same IRI the entity itself was emitted with — anything else
+/// silently breaks edges.
 fn resolve_slug_to_uri(slug: &str, base: &str, slug_index: &HashMap<String, String>) -> String {
     if let Some(rel_path) = slug_index.get(slug) {
-        // Found a matching file — build IRI from its path
-        let path_parts: Vec<&str> = rel_path.splitn(2, '/').collect();
-        if path_parts.len() == 2 && rel_path.ends_with(".md") {
-            let folder = path_parts[0];
-            let file = path_parts[1];
-            let class_name = {
-                let mut c = folder.chars();
-                match c.next() {
-                    None => folder.to_string(),
-                    Some(f) => f.to_uppercase().to_string() + c.as_str(),
-                }
-            };
-            format!("<{}/{}/{}>", base, uri_encode_path(&class_name), uri_encode_path(file))
-        } else {
-            format!("<{}/{}>", base, uri_encode_path(rel_path))
-        }
+        format!("<{}/{}>", base, uri_encode_path(rel_path))
     } else {
         // No matching file — fall back to entity URI
         format!("<{}/entity/{}>", base, uri_encode_path(slug))
@@ -2245,29 +2234,16 @@ fn generate_frontmatter_nquads() -> String {
         }
 
         // --- Generate N-Quads for oxigraph (now graph) ---
-        // IRI scheme: https://{host}/{org}/{repo}/{Class}/{id}.md
-        // For files in a class folder (e.g. memory/foo.md), use the folder as class.
-        // Otherwise fall back to the blob-hash based URI.
-        let doc_uri = {
-            let path_parts: Vec<&str> = relpath_str.splitn(2, '/').collect();
-            if path_parts.len() == 2 && relpath_str.ends_with(".md") {
-                // e.g. memory/karpathy-validates.md → /Memory/karpathy-validates.md
-                let folder = path_parts[0];
-                let file = path_parts[1];
-                // Capitalize folder name to match class convention
-                let class_name = {
-                    let mut c = folder.chars();
-                    match c.next() {
-                        None => folder.to_string(),
-                        Some(f) => f.to_uppercase().to_string() + c.as_str(),
-                    }
-                };
-                format!("<{}/{}/{}>", base, uri_encode_path(&class_name), uri_encode_path(file))
-            } else {
-                // Top-level files or non-.md — use path-based URI
-                format!("<{}/{}>", base, uri_encode_path(&relpath_str))
-            }
-        };
+        // IRI scheme: https://{host}/{org}/{repo}/{path-as-on-disk}
+        // The IRI mirrors the file path verbatim — no folder capitalization,
+        // no folder→class derivation. Classes come from the ontology and from
+        // explicit dot-notation in frontmatter (kit.class.property), never
+        // from folder name guessing. Honors "ontology is the single source
+        // of truth" — sync stops inventing types the schema does not declare.
+        //
+        // No-kit repos get `lex-upper:Document` only (plus the git layer).
+        // Kit repos get classes their ontology declares, via frontmatter.
+        let doc_uri = format!("<{}/{}>", base, uri_encode_path(&relpath_str));
 
         nq.push_str(&format!(
             "{} <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://repolex.ai/ontology/lex-upper/Document> {} .\n",
