@@ -4382,6 +4382,41 @@ const VIZ_INDEX_HTML: &str = include_str!("../viz/index.html");
 const VIZ_CSS_MAIN: &str = include_str!("../viz/css/main.css");
 const VIZ_JS_MAIN: &str = include_str!("../viz/js/main.js");
 
+/// Path to the git-lex source's `viz/` directory at build time. Used as the
+/// default when `GIT_LEX_VIZ_DEV=1` is set without an explicit path, so the
+/// dev loop "just works" against the source tree the binary was built from.
+const VIZ_BUILD_TIME_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/viz");
+
+/// Resolve the dev-mode viz directory from the `GIT_LEX_VIZ_DEV` env var.
+/// - Unset / empty / "0" / "false" → None (use embedded assets)
+/// - "1" / "true" → use build-time CARGO_MANIFEST_DIR/viz
+/// - Any other value → use it as a path
+fn resolve_viz_dev_dir() -> Option<PathBuf> {
+    let val = std::env::var("GIT_LEX_VIZ_DEV").ok()?;
+    let trimmed = val.trim();
+    if trimmed.is_empty() || trimmed == "0" || trimmed.eq_ignore_ascii_case("false") {
+        return None;
+    }
+    let path = if trimmed == "1" || trimmed.eq_ignore_ascii_case("true") {
+        PathBuf::from(VIZ_BUILD_TIME_DIR)
+    } else {
+        PathBuf::from(trimmed)
+    };
+    if path.is_dir() { Some(path) } else { None }
+}
+
+/// Read a viz asset from the dev dir if set, otherwise return the embedded
+/// fallback. Lets the dev loop hot-reload HTML/CSS/JS without rebuilding.
+fn read_viz_asset(dev_dir: &Option<PathBuf>, rel: &str, embedded: &'static str) -> String {
+    if let Some(dir) = dev_dir {
+        let path = dir.join(rel);
+        if let Ok(s) = fs::read_to_string(&path) {
+            return s;
+        }
+    }
+    embedded.to_string()
+}
+
 #[derive(Clone)]
 struct VizState {
     store: std::sync::Arc<Store>,
@@ -4481,14 +4516,38 @@ async fn run_viz_server(port: u16) {
     let (tx, _rx) = broadcast::channel::<String>(64);
 
     let state = VizState { store, scene, tx };
+    let dev_dir = Arc::new(resolve_viz_dev_dir());
 
     let app = Router::new()
-        .route("/", get(|| async { Html(VIZ_INDEX_HTML) }))
-        .route("/css/main.css", get(|| async {
-            ([("content-type", "text/css")], VIZ_CSS_MAIN)
+        .route("/", get({
+            let dev_dir = dev_dir.clone();
+            move || {
+                let dev_dir = dev_dir.clone();
+                async move {
+                    let body = read_viz_asset(&dev_dir, "index.html", VIZ_INDEX_HTML);
+                    Html(body)
+                }
+            }
         }))
-        .route("/js/main.js", get(|| async {
-            ([("content-type", "application/javascript")], VIZ_JS_MAIN)
+        .route("/css/main.css", get({
+            let dev_dir = dev_dir.clone();
+            move || {
+                let dev_dir = dev_dir.clone();
+                async move {
+                    let body = read_viz_asset(&dev_dir, "css/main.css", VIZ_CSS_MAIN);
+                    ([("content-type", "text/css"), ("cache-control", "no-store")], body)
+                }
+            }
+        }))
+        .route("/js/main.js", get({
+            let dev_dir = dev_dir.clone();
+            move || {
+                let dev_dir = dev_dir.clone();
+                async move {
+                    let body = read_viz_asset(&dev_dir, "js/main.js", VIZ_JS_MAIN);
+                    ([("content-type", "application/javascript"), ("cache-control", "no-store")], body)
+                }
+            }
         }))
         .route("/api/query", post({
             let state = state.clone();
@@ -4598,6 +4657,9 @@ async fn run_viz_server(port: u16) {
     }
     let url = format!("http://{}", addr);
     println!("git-lex viz server listening on {}", url);
+    if let Some(dir) = dev_dir.as_ref() {
+        println!("[dev mode] serving viz assets from {}", dir.display());
+    }
     println!("Press Ctrl+C to stop, or: kill {}", std::process::id());
 
     // Open the URL in the user's default browser. Best-effort: ignore failure
