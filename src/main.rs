@@ -1458,6 +1458,34 @@ fn cmd_status() {
 /// Generate all virtual N-Quads from git (commits, tree, refs).
 fn generate_git_nquads() -> String {
     let mut nq = String::new();
+    let base = base_uri();
+
+    // Repo metadata from .lex/repo.yml — name, kit, version
+    if let Some(root) = find_git_root() {
+        let repo_yml_path = root.join(".lex").join("repo.yml");
+        if let Ok(content) = fs::read_to_string(&repo_yml_path) {
+            let repo_uri = format!("<{}>", base);
+            let graph = format!("<{}/repo>", base);
+            nq.push_str(&format!(
+                "{} <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://repolex.ai/ontology/git-lex/git/Repo> {} .\n",
+                repo_uri, graph
+            ));
+            for line in content.lines() {
+                let line = line.trim();
+                if line.is_empty() || line.starts_with('#') { continue; }
+                if let Some(idx) = line.find(':') {
+                    let key = line[..idx].trim();
+                    let val = line[idx + 1..].trim().trim_matches('"');
+                    if !val.is_empty() {
+                        nq.push_str(&format!(
+                            "{} <https://repolex.ai/ontology/git-lex/git/{}> \"{}\" {} .\n",
+                            repo_uri, key, nq_escape(val), graph
+                        ));
+                    }
+                }
+            }
+        }
+    }
 
     // Commits
     let output = Command::new("git")
@@ -4624,8 +4652,67 @@ async fn cmd_display(query: &str, port: u16) {
     }
 }
 
+/// Walk .lex/extract/ and remove any .spo sidecar whose source markdown file
+/// no longer exists in the working tree. Handles deletes and renames.
+fn cleanup_orphaned_sidecars() -> usize {
+    let root = match find_git_root() {
+        Some(r) => r,
+        None => return 0,
+    };
+    let extract_dir = root.join(".lex").join("extract");
+    if !extract_dir.exists() {
+        return 0;
+    }
+
+    let mut removed = 0;
+    fn walk(dir: &std::path::Path, extract_root: &std::path::Path, repo_root: &std::path::Path, removed: &mut usize) {
+        if let Ok(entries) = fs::read_dir(dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    walk(&path, extract_root, repo_root, removed);
+                    // Try to remove the dir if it's now empty
+                    let _ = fs::remove_dir(&path);
+                } else if path.extension().is_some_and(|e| e == "spo") {
+                    // Derive source markdown from sidecar path:
+                    // .lex/extract/contact/m4rq.md.fm.spo → contact/m4rq.md
+                    let rel = match path.strip_prefix(extract_root) {
+                        Ok(r) => r,
+                        Err(_) => continue,
+                    };
+                    let rel_str = rel.to_string_lossy().to_string();
+                    // Strip .{extractor}.spo suffix
+                    let source = if let Some(s) = rel_str.strip_suffix(".fm.spo") {
+                        s.to_string()
+                    } else if let Some(s) = rel_str.strip_suffix(".md.spo") {
+                        s.to_string()
+                    } else if let Some(s) = rel_str.strip_suffix(".cc.spo") {
+                        s.to_string()
+                    } else {
+                        continue; // unknown extractor
+                    };
+                    let source_path = repo_root.join(&source);
+                    if !source_path.exists() {
+                        if fs::remove_file(&path).is_ok() {
+                            *removed += 1;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    walk(&extract_dir, &extract_dir, &root, &mut removed);
+    removed
+}
+
 fn cmd_extract() {
     let start = Instant::now();
+
+    // Clean up orphaned sidecars (source .md files that no longer exist)
+    let cleaned = cleanup_orphaned_sidecars();
+    if cleaned > 0 {
+        eprintln!("Cleaned up {} orphaned sidecar(s)", cleaned);
+    }
 
     // Run frontmatter extraction (writes .spo sidecars as a side effect)
     generate_frontmatter_nquads();
@@ -4991,6 +5078,42 @@ fn cmd_sync() {
     let kit_prefix_name = get_kit_prefix_name(kit_name);
     let obj_props = kit.as_ref().map(|k| get_object_properties(k)).unwrap_or_default();
     let prop_datatypes = kit.as_ref().map(|k| get_property_datatypes(k)).unwrap_or_default();
+
+    // Clear ALL existing class graphs first — handles renames (Contact → Friend)
+    // and deletions where the old class graph would otherwise stay forever.
+    let class_prefix = format!("{}/class/", base);
+    let existing_class_graphs: Vec<String> = {
+        let q = "SELECT DISTINCT ?g WHERE { GRAPH ?g { ?s ?p ?o } }";
+        match oxigraph::sparql::Query::parse(q, None) {
+            Ok(mut parsed) => {
+                parsed.dataset_mut().set_default_graph_as_union();
+                match store.query(parsed) {
+                    Ok(oxigraph::sparql::QueryResults::Solutions(sols)) => {
+                        sols.flatten().filter_map(|s| {
+                            s.get("g").and_then(|t| match t {
+                                Term::NamedNode(n) => {
+                                    let uri = n.as_str().to_string();
+                                    if uri.starts_with(&class_prefix) {
+                                        Some(uri)
+                                    } else {
+                                        None
+                                    }
+                                }
+                                _ => None,
+                            })
+                        }).collect()
+                    }
+                    _ => Vec::new(),
+                }
+            }
+            _ => Vec::new(),
+        }
+    };
+    for graph_uri in &existing_class_graphs {
+        if let Ok(graph_node) = oxigraph::model::NamedNode::new(graph_uri) {
+            store.clear_graph(&oxigraph::model::GraphName::from(graph_node)).ok();
+        }
+    }
 
     // Build slug index for reference resolution in class graphs
     let mut class_slug_index: HashMap<String, String> = HashMap::new();
