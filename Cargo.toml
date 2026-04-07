@@ -25,8 +25,9 @@ rudof_lib = "0.2"
 tree-sitter = "0.26"
 tree-sitter-md = { version = "0.5", features = ["parser"] }
 dateparser = "0.3"
-axum = { version = "0.8", features = ["ws"] }
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "sync"] }
+axum = { version = "0.8", features = ["ws", "macros"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "sync", "net"] }
+tokio-stream = { version = "0.1", features = ["sync"] }
 tower = "0.5"
 reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
 futures-util = "0.3"

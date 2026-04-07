@@ -143,20 +143,23 @@ enum Commands {
         file: String,
     },
     /// Start the visualization server (HTTP + WebSocket on localhost)
+    ListenServer {
+        /// Port to listen on
+        #[arg(long, default_value = "7879")]
+        port: u16,
+    },
     Viz {
         /// Port to listen on
         #[arg(long, default_value = "7878")]
         port: u16,
     },
-    /// Run a SPARQL CONSTRUCT query and push the result to the local viz server
     Display {
-        /// SPARQL CONSTRUCT query (uses viz: namespace for rendering hints)
+        /// SPARQL CONSTRUCT query
         query: String,
         /// Port the viz server is running on
         #[arg(long, default_value = "7878")]
         port: u16,
     },
-    /// Manage kits (install, update, list)
     Kit {
         #[command(subcommand)]
         command: KitCommands,
@@ -170,16 +173,19 @@ enum KitCommands {
     /// List available kits
     List,
 }
-
 /// Find the git repo root from the current directory.
 fn find_git_root() -> Option<PathBuf> {
     let output = Command::new("git")
         .args(["rev-parse", "--show-toplevel"])
         .output()
-        .ok()?;
-    if output.status.success() {
-        let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        Some(PathBuf::from(path))
+        .ok();
+    if let Some(output) = output {
+        if output.status.success() {
+            let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            Some(PathBuf::from(path))
+        } else {
+            None
+        }
     } else {
         None
     }
@@ -5595,7 +5601,6 @@ fn cmd_query(query: String) {
 }
 
 // ─── main ──────────────────────────────────────────────────────
-
 fn main() {
     let cli = Cli::parse();
 
@@ -5623,6 +5628,7 @@ fn main() {
         Commands::Join { squad_path } => cmd_join(&squad_path),
         Commands::Identity => cmd_identity(),
         Commands::Parse { file } => cmd_parse(&file),
+        Commands::ListenServer { port } => cmd_listen_server(port),
         Commands::Viz { port } => cmd_viz(port),
         Commands::Display { query, port } => cmd_display(&query, port),
         Commands::Kit { command } => match command {
@@ -5643,4 +5649,57 @@ fn main() {
             );
         }
     }
+}
+
+fn cmd_listen_server(port: u16) {
+    let root = find_git_root().expect("not a git repo");
+    let repo_yml = root.join(".lex").join("repo.yml");
+    if !repo_yml.exists() {
+        eprintln!("No git-lex repository found. Run 'git lex init' first.");
+        exit(1);
+    }
+    let config = fs::read_to_string(repo_yml).unwrap_or_default();
+    if !config.contains("kit: squad") && !config.contains("kit: soul") && !config.contains("kit: lab") {
+        eprintln!("'listen-server' is only supported for squad, soul, or lab kits.");
+        exit(1);
+    }
+    if open_store_read_only().is_none() {
+        eprintln!("No knowledge graph store found. Run 'git lex sync' first to build the store.");
+        exit(1);
+    }
+    run_listen_server(port);
+}
+
+#[tokio::main(flavor = "multi_thread", worker_threads = 2)]
+async fn run_listen_server(port: u16) {
+    use axum::response::sse::{Event, Sse};
+    use axum::{Router, routing::get};
+    use std::sync::Arc;
+    use tokio::sync::broadcast;
+    use tokio_stream::wrappers::BroadcastStream;
+    use futures_util::StreamExt;
+    use std::convert::Infallible;
+
+    let (tx, _rx) = broadcast::channel::<String>(100);
+    let tx = Arc::new(tx);
+
+    let app = Router::new()
+        .route("/events", get(move || {
+            let tx = tx.clone();
+            async move {
+                let rx = tx.subscribe();
+                let stream = BroadcastStream::new(rx).filter_map(|res| async move {
+                    match res {
+                        Ok(msg) => Some(Ok::<Event, Infallible>(Event::default().data(msg))),
+                        Err(_) => None,
+                    }
+                });
+                Sse::new(stream)
+            }
+        }));
+
+    let addr = format!("127.0.0.1:{}", port);
+    let listener = tokio::net::TcpListener::bind(&addr).await.unwrap();
+    println!("git-lex listen-server started on {}", addr);
+    axum::serve(listener, app).await.unwrap();
 }
