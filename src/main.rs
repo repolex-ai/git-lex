@@ -1,5 +1,5 @@
 use clap::{Parser, Subcommand};
-use oxigraph::io::RdfFormat;
+use oxigraph::io::{RdfFormat, RdfParser};
 use oxigraph::model::*;
 use oxigraph::sparql::SparqlEvaluator;
 use oxigraph::store::Store;
@@ -412,6 +412,114 @@ fn is_word_boundary_before(text: &str, start: usize) -> bool {
         Some(c) => !(c.is_ascii_alphanumeric() || c == '_'),
         None => true,
     }
+}
+
+/// Extract the `owl:Ontology` IRI declaration from a Turtle file's body.
+/// Returns the subject IRI of the first `<IRI> a owl:Ontology` triple found,
+/// or None if the file doesn't declare itself as an ontology. Deterministic,
+/// regex-based — we don't need a full Turtle parser to pull this one fact out.
+fn extract_ontology_iri(ttl: &str) -> Option<String> {
+    // Matches patterns like:
+    //   <https://example.org/ont> a owl:Ontology
+    //   <https://example.org/ont> rdf:type owl:Ontology
+    // Newlines allowed between subject and `a`/`rdf:type` and `owl:Ontology`.
+    let re = regex::Regex::new(
+        r"<([^>]+)>\s*(?:a|rdf:type)\s+owl:Ontology\b",
+    ).ok()?;
+    re.captures(ttl)
+        .and_then(|c| c.get(1))
+        .map(|m| m.as_str().to_string())
+}
+
+/// Walk `.lex/ontology/**/*.ttl`, extract each ontology's self-declared IRI,
+/// and load each file into the store under that IRI as a named graph.
+/// Drop-and-replace on every call — drift-proof.
+///
+/// Shape files (`*-shapes.ttl`) are skipped here (SHACL lives elsewhere in
+/// the pipeline). Files without a `owl:Ontology` declaration are skipped
+/// with a warning.
+///
+/// On parse error we fail loudly: print the file path + parser error and
+/// exit non-zero. A broken TTL on disk is a user-visible state we want
+/// them to fix immediately, not silently paper over.
+fn load_ontology_tboxes(store: &Store, root: &std::path::Path) -> usize {
+    let ontology_dir = root.join(".lex").join("ontology");
+    if !ontology_dir.exists() {
+        return 0;
+    }
+
+    let mut ttl_files: Vec<std::path::PathBuf> = Vec::new();
+    fn collect_ttls(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+        if let Ok(entries) = fs::read_dir(dir) {
+            for entry in entries.filter_map(|e| e.ok()) {
+                let path = entry.path();
+                if path.is_dir() {
+                    collect_ttls(&path, out);
+                } else if path.extension().is_some_and(|e| e == "ttl") {
+                    let name = path.file_name()
+                        .and_then(|n| n.to_str())
+                        .unwrap_or("");
+                    // Skip SHACL shape files — they're loaded by the validator,
+                    // not the TBox loader.
+                    if name.contains("shapes") {
+                        continue;
+                    }
+                    out.push(path);
+                }
+            }
+        }
+    }
+    collect_ttls(&ontology_dir, &mut ttl_files);
+    ttl_files.sort();
+
+    let mut loaded = 0;
+    for path in &ttl_files {
+        let content = match fs::read_to_string(path) {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("error reading ontology {}: {}", path.display(), e);
+                exit(1);
+            }
+        };
+
+        let iri = match extract_ontology_iri(&content) {
+            Some(i) => i,
+            None => {
+                eprintln!(
+                    "warning: {} has no `owl:Ontology` declaration, skipping TBox load",
+                    path.display()
+                );
+                continue;
+            }
+        };
+
+        let graph = match oxigraph::model::NamedNode::new(&iri) {
+            Ok(n) => n,
+            Err(e) => {
+                eprintln!(
+                    "error: {} has invalid ontology IRI <{}>: {}",
+                    path.display(), iri, e
+                );
+                exit(1);
+            }
+        };
+
+        // Drop-and-replace: clear the graph first.
+        store
+            .clear_graph(&oxigraph::model::GraphName::from(graph.clone()))
+            .ok();
+
+        // Load the turtle into the named graph. Use with_default_graph so
+        // any triples in the TTL (which is graphless) land inside our IRI.
+        let parser = RdfParser::from_format(RdfFormat::Turtle)
+            .with_default_graph(graph.clone());
+        if let Err(e) = store.load_from_reader(parser, Cursor::new(content.as_bytes())) {
+            eprintln!("error: failed to parse/load {}: {}", path.display(), e);
+            exit(1);
+        }
+        loaded += 1;
+    }
+    loaded
 }
 
 /// Unescape a git-quoted path.
@@ -5039,6 +5147,11 @@ fn cmd_sync() {
         }
     }
 
+    // Load ontology TBoxes (upper + installed kits) into named graphs.
+    // Drop-and-replace on every sync — the TTL files on disk are the source
+    // of truth, the store should always match. Parse errors fail loudly.
+    let tbox_count = load_ontology_tboxes(&store, &root);
+
     // Regenerate git virtual triples
     let git_nq = generate_git_nquads();
     let git_count = git_nq.lines().count();
@@ -5379,7 +5492,7 @@ fn cmd_sync() {
         "Synced in {:.1}ms:",
         elapsed.as_secs_f64() * 1000.0
     );
-    println!("  Virtual: {} git + {} now", git_count, fm_count);
+    println!("  Virtual: {} git + {} now + {} TBox files", git_count, fm_count, tbox_count);
     if new_assertions > 0 || retracted > 0 {
         println!(
             "  Sync /sync/{}/: +{} assertions, -{} retracted ({} quads)",
