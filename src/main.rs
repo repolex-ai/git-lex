@@ -964,7 +964,7 @@ fn cmd_init(kit: Option<String>) {
         println!("Created class templates");
     }
 
-    // Install scaffold files from the kit (IDENTITY.md, CLAUDE.md, skills, journal, etc.)
+    // Install scaffold files from the kit (SOUL.md, AGENTS.md, skills, journal, etc.)
     // These live in scaffold/ inside the kit repo and mirror the target repo structure.
     // Never overwrites existing files. Supports {kit} template variable.
     if kit.is_some() {
@@ -1016,7 +1016,7 @@ fn cmd_init(kit: Option<String>) {
     // Post-merge/Post-receive hooks for squad/lab kits (message notifications)
     if let Some(ref k) = kit {
         if k == "squad" || k == "lab" {
-            let hook_content = "#!/bin/bash\n# git-lex-mail-notifier\n\n# Detect current agent handle (from IDENTITY.md or first agent file in repo)\nHANDLE=$(grep -oE \"Display Name: .*\" IDENTITY.md 2>/dev/null | cut -d: -f2 | xargs)\nif [ -z \"$HANDLE\" ]; then\n    HANDLE=$(ls agent/ 2>/dev/null | head -n 1 | cut -d. -f1)\nfi\n\nif [ ! -z \"$HANDLE\" ]; then\n    MAIL_COUNT=$(git lex query \"SELECT ?msg WHERE { ?msg a squad:Message ; squad:to ?to ; squad:messageStatus 'open' . FILTER(regex(str(?to), '$HANDLE', 'i')) }\" | grep -c \"^|\" | awk '{print $1 - 2}')\n\n    if [[ \"$MAIL_COUNT\" -gt 0 ]]; then\n      echo -e \"\\n\\033[1;33m🔔 YOU'VE GOT MAIL ($MAIL_COUNT new message(s) for $HANDLE)!\\033[0m\"\n      echo -e \"\\033[0;36mRun 'git lex query' or check the 'message/' directory.\\033[0m\\n\"\n    fi\nfi\n";
+            let hook_content = "#!/bin/bash\n# git-lex-mail-notifier\n\n# Detect current agent handle (from SOUL.md or first agent file in repo)\nHANDLE=$(grep -oE \"Display Name: .*\" SOUL.md 2>/dev/null | cut -d: -f2 | xargs)\nif [ -z \"$HANDLE\" ]; then\n    HANDLE=$(ls agent/ 2>/dev/null | head -n 1 | cut -d. -f1)\nfi\n\nif [ ! -z \"$HANDLE\" ]; then\n    MAIL_COUNT=$(git lex query \"SELECT ?msg WHERE { ?msg a squad:Message ; squad:to ?to ; squad:messageStatus 'open' . FILTER(regex(str(?to), '$HANDLE', 'i')) }\" | grep -c \"^|\" | awk '{print $1 - 2}')\n\n    if [[ \"$MAIL_COUNT\" -gt 0 ]]; then\n      echo -e \"\\n\\033[1;33m🔔 YOU'VE GOT MAIL ($MAIL_COUNT new message(s) for $HANDLE)!\\033[0m\"\n      echo -e \"\\033[0;36mRun 'git lex query' or check the 'message/' directory.\\033[0m\\n\"\n    fi\nfi\n";
 
             for hook_name in &["post-merge", "post-receive", "post-commit"] {
                 let hook_path = hooks_dir.join(hook_name);
