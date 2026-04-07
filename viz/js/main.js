@@ -1173,23 +1173,205 @@ function renderPushPayload(container, triples) {
         });
         html += '</table>';
     } else {
-        // Default: render as graph
+        // Default: render as live force-directed graph on a canvas.
+        // Reuses the same physics + drawing approach as the main graph view
+        // but scoped to its own state so it doesn't fight the squad/repo view.
         const nodes = Object.values(subjects).map(s => ({
             id: s.id,
             label: s.props[VIZ_NS + 'label'] || shortName(s.id),
             color: s.props[VIZ_NS + 'color'] || '#1f4e8a',
-            size: parseFloat(s.props[VIZ_NS + 'size']) || 8,
+            size: parseFloat(s.props[VIZ_NS + 'size']) || 12,
             edges: s.edges,
         }));
-        html += `<div style="color:#888">${nodes.length} nodes ready. (full graph render coming next iteration)</div>`;
-        html += '<ul style="margin-top:1rem;font-size:0.85rem">';
-        nodes.slice(0, 20).forEach(n => {
-            html += `<li><span style="display:inline-block;width:.7em;height:.7em;background:${n.color};margin-right:.5em"></span>${escapeHtml(n.label)} → ${n.edges.length} edges</li>`;
-        });
-        html += '</ul>';
+        html += `<div style="color:#888;font-size:0.7rem;margin-bottom:0.5rem">${nodes.length} nodes · ${nodes.reduce((a, n) => a + n.edges.length, 0)} edges</div>`;
+        html += `<canvas id="push-canvas" style="width:100%;height:560px;background:#fff;border:1px solid #e0e0e0;border-radius:4px;"></canvas>`;
+        container.innerHTML = html;
+        // Defer until the canvas is in the DOM so we can size it.
+        requestAnimationFrame(() => renderPushGraph(nodes));
+        return;
     }
 
     container.innerHTML = html;
+}
+
+// Self-contained force-layout + canvas render for push payloads. The push
+// view has its own simulation state so it doesn't trample the main graph.
+let pushRAF = null;
+function renderPushGraph(rawNodes) {
+    const canvas = document.getElementById('push-canvas');
+    if (!canvas) return;
+    if (pushRAF) { cancelAnimationFrame(pushRAF); pushRAF = null; }
+
+    // Build node + edge arrays. Edges reference target ids; resolve to refs.
+    const nodeById = {};
+    const nodes = rawNodes.map(n => {
+        const node = {
+            id: n.id,
+            label: n.label,
+            color: n.color,
+            size: n.size,
+            x: (Math.random() - 0.5) * 300,
+            y: (Math.random() - 0.5) * 300,
+            vx: 0,
+            vy: 0,
+        };
+        nodeById[n.id] = node;
+        return node;
+    });
+    const edges = [];
+    rawNodes.forEach(n => {
+        n.edges.forEach(targetId => {
+            const t = nodeById[targetId];
+            if (t) edges.push({ source: nodeById[n.id], target: t });
+        });
+    });
+
+    // Compute degree for orphan-pull centering.
+    nodes.forEach(n => { n.degree = 0; });
+    edges.forEach(e => { e.source.degree++; e.target.degree++; });
+
+    // Size canvas for retina.
+    const rect = canvas.getBoundingClientRect();
+    const W = rect.width;
+    const H = rect.height;
+    canvas.width = W * devicePixelRatio;
+    canvas.height = H * devicePixelRatio;
+    const ctx = canvas.getContext('2d');
+    ctx.setTransform(devicePixelRatio, 0, 0, devicePixelRatio, 0, 0);
+
+    // Use the same LAYOUT constants as the main graph for consistency.
+    let zoom = 1;
+    let pan = { x: 0, y: 0 };
+
+    function step() {
+        // Repulsion + size-aware push
+        for (let i = 0; i < nodes.length; i++) {
+            const a = nodes[i];
+            let fx = 0, fy = 0;
+            for (let j = 0; j < nodes.length; j++) {
+                if (i === j) continue;
+                const b = nodes[j];
+                const dx = a.x - b.x;
+                const dy = a.y - b.y;
+                const d2 = Math.max(dx * dx + dy * dy, 1);
+                const d = Math.sqrt(d2);
+                const sb = (a.size + b.size) / 24;
+                const f = LAYOUT.REPULSION * sb / d2;
+                fx += (dx / d) * f;
+                fy += (dy / d) * f;
+            }
+            const c = a.degree <= 1 ? LAYOUT.ORPHAN_PULL : LAYOUT.CENTERING;
+            fx -= a.x * c;
+            fy -= a.y * c;
+            a.vx = (a.vx + fx) * LAYOUT.DAMPING;
+            a.vy = (a.vy + fy) * LAYOUT.DAMPING;
+        }
+        // Springs
+        edges.forEach(e => {
+            const dx = e.target.x - e.source.x;
+            const dy = e.target.y - e.source.y;
+            const d = Math.sqrt(dx * dx + dy * dy) || 1;
+            const f = LAYOUT.SPRING_K * (d - LAYOUT.EDGE_REST);
+            const ux = dx / d, uy = dy / d;
+            e.source.vx += ux * f;
+            e.source.vy += uy * f;
+            e.target.vx -= ux * f;
+            e.target.vy -= uy * f;
+        });
+        let ke = 0;
+        nodes.forEach(n => {
+            n.x += n.vx * LAYOUT.STEP;
+            n.y += n.vy * LAYOUT.STEP;
+            ke += n.vx * n.vx + n.vy * n.vy;
+        });
+        return ke;
+    }
+
+    function recenterAndFit() {
+        if (nodes.length === 0) return;
+        let sx = 0, sy = 0;
+        nodes.forEach(n => { sx += n.x; sy += n.y; });
+        const cx = sx / nodes.length;
+        const cy = sy / nodes.length;
+        nodes.forEach(n => { n.x -= cx; n.y -= cy; });
+        // Fit
+        let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+        nodes.forEach(n => {
+            minX = Math.min(minX, n.x - n.size);
+            maxX = Math.max(maxX, n.x + n.size);
+            minY = Math.min(minY, n.y - n.size);
+            maxY = Math.max(maxY, n.y + n.size);
+        });
+        const w = maxX - minX, h = maxY - minY;
+        if (w > 0 && h > 0) {
+            zoom = Math.max(0.2, Math.min(2.5, Math.min(W * 0.85 / w, H * 0.85 / h)));
+        }
+    }
+
+    function draw() {
+        ctx.clearRect(0, 0, W, H);
+        ctx.save();
+        ctx.translate(W / 2 + pan.x, H / 2 + pan.y);
+        ctx.scale(zoom, zoom);
+        // Edges
+        ctx.strokeStyle = 'rgba(80,80,80,0.6)';
+        ctx.lineWidth = 1.4 / zoom;
+        edges.forEach(e => {
+            const dx = e.target.x - e.source.x;
+            const dy = e.target.y - e.source.y;
+            const d = Math.sqrt(dx * dx + dy * dy) || 1;
+            const ux = dx / d, uy = dy / d;
+            const sx = e.source.x + ux * e.source.size;
+            const sy = e.source.y + uy * e.source.size;
+            const tx = e.target.x - ux * e.target.size;
+            const ty = e.target.y - uy * e.target.size;
+            ctx.beginPath();
+            ctx.moveTo(sx, sy);
+            ctx.lineTo(tx, ty);
+            ctx.stroke();
+        });
+        // Nodes
+        nodes.forEach(n => {
+            ctx.beginPath();
+            ctx.arc(n.x, n.y, n.size, 0, Math.PI * 2);
+            ctx.fillStyle = n.color;
+            ctx.fill();
+            ctx.strokeStyle = '#fff';
+            ctx.lineWidth = 1.4 / zoom;
+            ctx.stroke();
+        });
+        // Labels
+        if (zoom > 0.5) {
+            ctx.font = `${11 / zoom}px 'American Typewriter', Courier, monospace`;
+            ctx.fillStyle = '#222';
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'top';
+            nodes.forEach(n => {
+                ctx.fillText(n.label, n.x, n.y + n.size + 2);
+            });
+        }
+        ctx.restore();
+    }
+
+    // Heavy warm-start, then animate the final settle.
+    for (let i = 0; i < 350; i++) step();
+    recenterAndFit();
+    draw();
+
+    let energy = 100;
+    function loop() {
+        pushRAF = null;
+        const ke = step();
+        energy = energy * 0.9 + ke * 0.1;
+        draw();
+        if (energy > ENERGY_FLOOR) {
+            pushRAF = requestAnimationFrame(loop);
+        } else {
+            recenterAndFit();
+            draw();
+        }
+    }
+    pushRAF = requestAnimationFrame(loop);
 }
 
 // ════════════════════════════════════════════
