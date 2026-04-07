@@ -390,6 +390,30 @@ fn nq_escape(s: &str) -> String {
         .replace('\r', "\\r")
 }
 
+/// True if the byte position `start` in `text` is preceded by a non-word
+/// character (or is at the start of `text`). Used to reject `@mention`
+/// matches that are actually the local-part separator of an email address
+/// (`rob@repolex.ai` should not produce a mention `@repolex.ai`).
+///
+/// "Word char" here means ASCII alphanumeric or `_`, matching the usual
+/// `\b` semantics. We walk back to the previous char boundary so this is
+/// safe on UTF-8 input.
+fn is_word_boundary_before(text: &str, start: usize) -> bool {
+    if start == 0 {
+        return true;
+    }
+    // Step back to the previous char boundary.
+    let mut i = start - 1;
+    while i > 0 && !text.is_char_boundary(i) {
+        i -= 1;
+    }
+    let prev = text[i..].chars().next();
+    match prev {
+        Some(c) => !(c.is_ascii_alphanumeric() || c == '_'),
+        None => true,
+    }
+}
+
 /// Unescape a git-quoted path.
 /// Git wraps paths with non-ASCII chars in double quotes and uses octal escapes.
 /// e.g. "message/list_messages-\342\200\224-foo.md" → message/list_messages-—-foo.md
@@ -2262,8 +2286,14 @@ fn generate_frontmatter_nquads() -> String {
         // --- @mention extraction ---
         // Strip trailing `.` and `,` that the period-tolerant regex sucks in
         // when a mention sits at the end of a sentence ("...thanks to @4rx.").
+        // Reject matches preceded by a word char so email addresses
+        // (`rob@repolex.ai`) don't capture as `@repolex.ai`.
         let mut mentions_seen = HashSet::new();
         for cap in mention_re.captures_iter(&body_text) {
+            let m = cap.get(0).unwrap();
+            if !is_word_boundary_before(&body_text, m.start()) {
+                continue;
+            }
             let mention = cap[1]
                 .trim_end_matches(|c: char| c == '.' || c == ',')
                 .to_lowercase();
@@ -2532,6 +2562,10 @@ fn generate_frontmatter_nquads() -> String {
                 let commit_uri = format!("<{}/commit/{}>", base, sha);
 
                 for cap in mention_re.captures_iter(message) {
+                    let m = cap.get(0).unwrap();
+                    if !is_word_boundary_before(message, m.start()) {
+                        continue;
+                    }
                     let mention = cap[1]
                         .trim_end_matches(|c: char| c == '.' || c == ',')
                         .to_lowercase();
