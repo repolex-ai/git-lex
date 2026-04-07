@@ -4596,9 +4596,13 @@ async fn run_viz_server(port: u16) {
     if chosen_port != port {
         println!("Port {} was taken, using {} instead", port, chosen_port);
     }
-    println!("git-lex viz server listening on http://{}", addr);
-    println!("Open http://{} in your browser", addr);
-    println!("Press Ctrl+C to stop");
+    let url = format!("http://{}", addr);
+    println!("git-lex viz server listening on {}", url);
+    println!("Press Ctrl+C to stop, or: kill {}", std::process::id());
+
+    // Open the URL in the user's default browser. Best-effort: ignore failure
+    // (headless boxes, no DISPLAY, etc) since the URL is already printed above.
+    let _ = open::that_detached(&url);
 
     if let Err(e) = axum::serve(listener, app).await {
         eprintln!("Server error: {}", e);
