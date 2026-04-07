@@ -2466,6 +2466,11 @@ fn generate_frontmatter_nquads() -> String {
 
         // Track which kit types we've seen for rdf:type emission (dedup)
         let mut emitted_types: HashSet<String> = HashSet::new();
+        // Counter for unique blank-node labels within this file's emissions.
+        // Used for lex:hasUnresolvedLink → _:unresN → { slug, predicate } grouping.
+        // Blank node IDs are file-scoped; oxigraph renames on load so globally
+        // unique suffixes aren't required.
+        let mut unresolved_counter: usize = 0;
 
         for line in &spo_lines {
             let parts: Vec<&str> = line.splitn(3, " | ").collect();
@@ -2555,9 +2560,21 @@ fn generate_frontmatter_nquads() -> String {
                             doc_uri, uri, graph
                         ));
                     } else {
+                        // Unresolved wikilink → blank node with slug + attempted
+                        // predicate (lex:linksTo, since wikilinks default to that).
+                        let bn = format!("_:unres{}", unresolved_counter);
+                        unresolved_counter += 1;
                         nq.push_str(&format!(
-                            "{} <https://repolex.ai/ontology/git-lex/lex/unresolvedLink> \"{}\" {} .\n",
-                            doc_uri, nq_escape(object), graph
+                            "{} <https://repolex.ai/ontology/git-lex/lex/hasUnresolvedLink> {} {} .\n",
+                            doc_uri, bn, graph
+                        ));
+                        nq.push_str(&format!(
+                            "{} <https://repolex.ai/ontology/git-lex/lex/unresolvedSlug> \"{}\" {} .\n",
+                            bn, nq_escape(object), graph
+                        ));
+                        nq.push_str(&format!(
+                            "{} <https://repolex.ai/ontology/git-lex/lex/unresolvedPredicate> <https://repolex.ai/ontology/git-lex/lex/linksTo> {} .\n",
+                            bn, graph
                         ));
                     }
                 } else {
@@ -2656,11 +2673,22 @@ fn generate_frontmatter_nquads() -> String {
                                         doc_uri, kit_predicate, candidate_uri, graph
                                     ));
                                 } else {
-                                    // Range mismatch → unresolvedLink with the attempted slug.
-                                    // Preserves the intent for Squadling to surface.
+                                    // Range mismatch → blank-node-grouped unresolved.
+                                    // Preserves the attempted predicate so Squadling
+                                    // can filter by intended class via rdfs:range.
+                                    let bn = format!("_:unres{}", unresolved_counter);
+                                    unresolved_counter += 1;
                                     nq.push_str(&format!(
-                                        "{} <https://repolex.ai/ontology/git-lex/lex/unresolvedLink> \"{}\" {} .\n",
-                                        doc_uri, nq_escape(stripped), graph
+                                        "{} <https://repolex.ai/ontology/git-lex/lex/hasUnresolvedLink> {} {} .\n",
+                                        doc_uri, bn, graph
+                                    ));
+                                    nq.push_str(&format!(
+                                        "{} <https://repolex.ai/ontology/git-lex/lex/unresolvedSlug> \"{}\" {} .\n",
+                                        bn, nq_escape(stripped), graph
+                                    ));
+                                    nq.push_str(&format!(
+                                        "{} <https://repolex.ai/ontology/git-lex/lex/unresolvedPredicate> {} {} .\n",
+                                        bn, kit_predicate, graph
                                     ));
                                 }
                             }

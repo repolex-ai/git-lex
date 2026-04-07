@@ -41,10 +41,18 @@ lex:linksTo a owl:ObjectProperty ;
     rdfs:label "links to" ;
     rdfs:comment "An internal reference via [[wikilink]] or [text](path.md). Resolved to an IRI when the target file exists." .
 
-lex:unresolvedLink a owl:DatatypeProperty ;
-    rdfs:label "unresolved link" ;
-    rdfs:comment "A [[wikilink]] or [text](path.md) reference that could not be resolved to an existing file. Stored as the raw link text. Useful for finding broken links." ;
+lex:hasUnresolvedLink a owl:ObjectProperty ;
+    rdfs:label "has unresolved link" ;
+    rdfs:comment "Relates a subject to a blank node describing a reference that failed to resolve. Preserves the attempted predicate alongside the slug so audits can filter by the intended class (e.g. 'show me unresolved Agent references'). Paired with lex:unresolvedSlug and lex:unresolvedPredicate." .
+
+lex:unresolvedSlug a owl:DatatypeProperty ;
+    rdfs:label "unresolved slug" ;
+    rdfs:comment "The literal string the author wrote as a reference that failed to resolve (e.g. '[[lspy]]' → 'lspy'). Paired with lex:unresolvedPredicate via blank node on lex:hasUnresolvedLink." ;
     rdfs:range xsd:string .
+
+lex:unresolvedPredicate a owl:ObjectProperty ;
+    rdfs:label "unresolved predicate" ;
+    rdfs:comment "The ObjectProperty the author attempted to use when a reference failed to resolve (e.g. squad:from). Paired with lex:unresolvedSlug via blank node on lex:hasUnresolvedLink. Squadling audit queries can chain through rdfs:range to determine the intended class." .
 
 lex:externalLink a owl:DatatypeProperty ;
     rdfs:label "external link" ;
