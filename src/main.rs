@@ -2132,7 +2132,13 @@ fn generate_frontmatter_nquads() -> String {
     walk_md(&root, &mut files);
 
     // Build slug-to-path index for reference resolution
-    // Maps "spacegoat" → "agent/spacegoat.md", "use-oxigraph-for-sparql" → "decision/use-oxigraph-for-sparql.md"
+    // Maps "spacegoat" → "friend/spacegoat.md", "use-oxigraph-for-sparql" → "decision/use-oxigraph-for-sparql.md"
+    //
+    // For each file we insert two keys: the lowercase stem as-is, AND a
+    // dot-stripped version. That way `@spaceg.o.a.t.` and `@spacegoat` both
+    // resolve to the same file (the dot-stripped form is canonical), and a
+    // file named `spaceg.o.a.t..md` would still be reachable via either the
+    // original `spaceg.o.a.t.` slug or the `spacegoat` slug.
     let mut slug_index: HashMap<String, String> = HashMap::new();
     for f in &files {
         if let Ok(rel) = f.strip_prefix(&root) {
@@ -2141,8 +2147,11 @@ fn generate_frontmatter_nquads() -> String {
             if let Some(file_name) = f.file_stem() {
                 let slug = file_name.to_string_lossy().to_lowercase();
                 // Skip template files
-                if !slug.starts_with("__") {
-                    slug_index.insert(slug, rel_str);
+                if slug.starts_with("__") { continue; }
+                slug_index.insert(slug.clone(), rel_str.clone());
+                let dotless = slug.replace('.', "");
+                if dotless != slug {
+                    slug_index.entry(dotless).or_insert(rel_str);
                 }
             }
         }
@@ -2152,8 +2161,12 @@ fn generate_frontmatter_nquads() -> String {
     let extract_dir = root.join(".lex").join("extract");
     fs::create_dir_all(&extract_dir).ok();
 
-    // Regex patterns for @mentions and [[wikilinks]]
-    let mention_re = regex::Regex::new(r"@([a-zA-Z0-9_-]+)").unwrap();
+    // Regex patterns for @mentions and [[wikilinks]].
+    // Mentions allow `.` so handles like @spaceG.O.A.T. and @TR1P.L3X capture
+    // as a single mention. Trailing punctuation (`.` `,`) is stripped after
+    // capture and dots are removed at slug-lookup time so the index match
+    // works regardless of how the agent prefers to write their handle.
+    let mention_re = regex::Regex::new(r"@([a-zA-Z0-9_.\-]+)").unwrap();
     let wikilink_re = regex::Regex::new(r"\[\[([^\]]+)\]\]").unwrap();
 
     for filepath in &files {
@@ -2204,9 +2217,14 @@ fn generate_frontmatter_nquads() -> String {
         }
 
         // --- @mention extraction ---
+        // Strip trailing `.` and `,` that the period-tolerant regex sucks in
+        // when a mention sits at the end of a sentence ("...thanks to @4rx.").
         let mut mentions_seen = HashSet::new();
         for cap in mention_re.captures_iter(&body_text) {
-            let mention = cap[1].to_lowercase();
+            let mention = cap[1]
+                .trim_end_matches(|c: char| c == '.' || c == ',')
+                .to_lowercase();
+            if mention.is_empty() { continue; }
             if mentions_seen.insert(mention.clone()) {
                 spo_lines.push(format!("@{} | mentions | {}", relpath_str, mention));
             }
@@ -2269,10 +2287,19 @@ fn generate_frontmatter_nquads() -> String {
                 let object = parts[2];
 
                 if predicate == "mentions" {
-                    // @mention → lex:mentions — resolve to IRI if file exists
-                    let mention_slug = object.to_lowercase();
-                    if slug_index.contains_key(&mention_slug) {
-                        let mention_uri = resolve_slug_to_uri(&mention_slug, &base, &slug_index);
+                    // @mention → lex:mentions — resolve to IRI if file exists.
+                    // Try the literal slug first, then dot-stripped, then give up.
+                    let raw = object.to_lowercase();
+                    let dotless = raw.replace('.', "");
+                    let resolved_slug = if slug_index.contains_key(&raw) {
+                        Some(raw.as_str())
+                    } else if dotless != raw && slug_index.contains_key(&dotless) {
+                        Some(dotless.as_str())
+                    } else {
+                        None
+                    };
+                    if let Some(s) = resolved_slug {
+                        let mention_uri = resolve_slug_to_uri(s, &base, &slug_index);
                         nq.push_str(&format!(
                             "{} <https://repolex.ai/ontology/git-lex/lex/mentions> {} {} .\n",
                             doc_uri, mention_uri, graph
@@ -2418,11 +2445,33 @@ fn generate_frontmatter_nquads() -> String {
                 let commit_uri = format!("<{}/commit/{}>", base, sha);
 
                 for cap in mention_re.captures_iter(message) {
-                    let mention = cap[1].to_lowercase();
-                    nq.push_str(&format!(
-                        "{} <https://repolex.ai/ontology/git-lex/lex/mentions> \"{}\" {} .\n",
-                        commit_uri, nq_escape(&mention), graph
-                    ));
+                    let mention = cap[1]
+                        .trim_end_matches(|c: char| c == '.' || c == ',')
+                        .to_lowercase();
+                    if mention.is_empty() { continue; }
+                    // Resolve to entity IRI via slug index, with dot-strip
+                    // fallback for handles like @spaceg.o.a.t. → spacegoat.
+                    let dotless = mention.replace('.', "");
+                    let resolved_slug = if slug_index.contains_key(&mention) {
+                        Some(mention.as_str())
+                    } else if dotless != mention && slug_index.contains_key(&dotless) {
+                        Some(dotless.as_str())
+                    } else {
+                        None
+                    };
+                    if let Some(s) = resolved_slug {
+                        let mention_uri = resolve_slug_to_uri(s, &base, &slug_index);
+                        nq.push_str(&format!(
+                            "{} <https://repolex.ai/ontology/git-lex/lex/mentions> {} {} .\n",
+                            commit_uri, mention_uri, graph
+                        ));
+                    } else {
+                        // No matching file — keep as literal
+                        nq.push_str(&format!(
+                            "{} <https://repolex.ai/ontology/git-lex/lex/mentions> \"{}\" {} .\n",
+                            commit_uri, nq_escape(&mention), graph
+                        ));
+                    }
                 }
                 for cap in wikilink_re.captures_iter(message) {
                     let link = &cap[1];
