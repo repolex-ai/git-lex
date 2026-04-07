@@ -371,6 +371,42 @@ nav.modes {
     gap: 0.4rem;
 }
 
+.graph-detail .focus-toolbar {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.3rem;
+    align-items: center;
+    margin-bottom: 0.7rem;
+    padding-bottom: 0.6rem;
+    border-bottom: 1px solid var(--rule-soft);
+}
+
+.graph-detail .focus-toolbar .focus-btn {
+    font-family: inherit;
+    font-size: 0.7rem;
+    padding: 0.25rem 0.55rem;
+    background: #fff;
+    border: 1px solid var(--rule-soft);
+    border-radius: 3px;
+    color: var(--ink-soft);
+    cursor: pointer;
+    letter-spacing: 0.02em;
+}
+
+.graph-detail .focus-toolbar .focus-btn:hover {
+    background: var(--accent, #bb2200);
+    color: #fff;
+    border-color: var(--accent, #bb2200);
+}
+
+.graph-detail .focus-toolbar .focus-status {
+    font-size: 0.65rem;
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+    color: var(--ink-faint);
+    margin-right: 0.3rem;
+}
+
 .graph-detail .edge-group-heading {
     font-size: 0.65rem;
     text-transform: uppercase;

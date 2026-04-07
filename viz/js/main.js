@@ -436,6 +436,12 @@ let graphState = {
     pan: { x: 0, y: 0 },
     zoom: 1,
     drag: null,
+    // Neighborhood-focus mode. When focusedNodeIds is non-null, only nodes
+    // whose IRI is in the set are shown — turning the whole graph into a
+    // localized k-hop view centered on the user's pick.
+    focusedNodeIds: null,
+    focusedRoot: null,
+    focusedHops: 0,
 };
 
 const CLASS_PALETTE = [
@@ -691,7 +697,10 @@ const LAYOUT = {
 // Run one physics step over the currently-visible nodes/edges.
 function stepForceLayout() {
     const enabled = new Set(graphState.classes.filter(c => c.enabled).map(c => c.uri));
-    const nodes = graphState.nodes.filter(n => enabled.has(n.type));
+    const focused = graphState.focusedNodeIds;
+    const nodes = graphState.nodes.filter(n =>
+        enabled.has(n.type) && (!focused || focused.has(n.id))
+    );
     if (nodes.length === 0) return 0;
     const visIds = new Set(nodes.map(n => n.id));
     const edges = graphState.edges.filter(e => visIds.has(e.source.id) && visIds.has(e.target.id));
@@ -850,7 +859,10 @@ function drawGraph() {
     gctx.clearRect(0, 0, GW, GH);
 
     const enabled = new Set(graphState.classes.filter(c => c.enabled).map(c => c.uri));
-    const visibleNodes = graphState.nodes.filter(n => enabled.has(n.type));
+    const focused = graphState.focusedNodeIds;
+    const visibleNodes = graphState.nodes.filter(n =>
+        enabled.has(n.type) && (!focused || focused.has(n.id))
+    );
     const visibleNodeIds = new Set(visibleNodes.map(n => n.id));
 
     gctx.save();
@@ -980,6 +992,50 @@ function focusClassInGraph(cls) {
     kickSimulation();
 }
 
+// BFS k-hop neighborhood through already-loaded edges. Returns a Set of node
+// IRIs reachable within `hops` steps from the root, including the root.
+function neighborhoodIds(rootId, hops) {
+    const found = new Set([rootId]);
+    let frontier = new Set([rootId]);
+    for (let h = 0; h < hops; h++) {
+        const next = new Set();
+        graphState.edges.forEach(e => {
+            if (frontier.has(e.source.id) && !found.has(e.target.id)) {
+                next.add(e.target.id);
+                found.add(e.target.id);
+            }
+            if (frontier.has(e.target.id) && !found.has(e.source.id)) {
+                next.add(e.source.id);
+                found.add(e.source.id);
+            }
+        });
+        if (next.size === 0) break;
+        frontier = next;
+    }
+    return found;
+}
+
+function focusNeighborhood(rootId, hops) {
+    graphState.focusedNodeIds = neighborhoodIds(rootId, hops);
+    graphState.focusedRoot = rootId;
+    graphState.focusedHops = hops;
+    // Refresh detail panel so the focus controls update.
+    const root = graphState.nodes.find(n => n.id === rootId);
+    if (root) showNodeDetail(root);
+    kickSimulation();
+}
+
+function clearFocus() {
+    graphState.focusedNodeIds = null;
+    graphState.focusedRoot = null;
+    graphState.focusedHops = 0;
+    if (graphState.selected) {
+        const root = graphState.nodes.find(n => n.id === graphState.selected);
+        if (root) showNodeDetail(root);
+    }
+    kickSimulation();
+}
+
 function showNodeDetail(node) {
     const detail = document.getElementById('graph-detail');
     detail.hidden = false;
@@ -1016,6 +1072,19 @@ function showNodeDetail(node) {
         return h;
     }
 
+    const isFocusRoot = graphState.focusedRoot === node.id;
+    const focusToolbar = `
+        <div class="focus-toolbar">
+            ${isFocusRoot
+                ? `<span class="focus-status">focused · ${graphState.focusedHops}-hop · ${graphState.focusedNodeIds.size} nodes</span>
+                   <button class="focus-btn" data-act="hop+">+1 hop</button>
+                   ${graphState.focusedHops > 1 ? `<button class="focus-btn" data-act="hop-">−1 hop</button>` : ''}
+                   <button class="focus-btn" data-act="clear">show all</button>`
+                : `<button class="focus-btn" data-act="focus1">focus 1-hop</button>
+                   <button class="focus-btn" data-act="focus2">focus 2-hop</button>`
+            }
+        </div>
+    `;
     detail.innerHTML = `
         <button class="close">×</button>
         <h3>${escapeHtml(node.label)}</h3>
@@ -1023,10 +1092,22 @@ function showNodeDetail(node) {
             <span class="node-dot" style="background:${node.color}"></span>
             ${escapeHtml(node.typeName)} · ${node.degree} connection${node.degree === 1 ? '' : 's'}
         </div>
+        ${focusToolbar}
         ${renderEdgeGroup(out, 'Outgoing')}
         ${renderEdgeGroup(inc, 'Incoming')}
         <div class="detail-uri"><code>${escapeHtml(node.id)}</code></div>
     `;
+    // Wire the focus toolbar buttons.
+    detail.querySelectorAll('.focus-btn').forEach(btn => {
+        btn.addEventListener('click', () => {
+            const act = btn.dataset.act;
+            if (act === 'focus1') focusNeighborhood(node.id, 1);
+            else if (act === 'focus2') focusNeighborhood(node.id, 2);
+            else if (act === 'hop+') focusNeighborhood(node.id, graphState.focusedHops + 1);
+            else if (act === 'hop-') focusNeighborhood(node.id, graphState.focusedHops - 1);
+            else if (act === 'clear') clearFocus();
+        });
+    });
     detail.querySelector('.close').addEventListener('click', () => {
         detail.hidden = true;
         graphState.selected = null;
