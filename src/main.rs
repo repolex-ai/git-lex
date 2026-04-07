@@ -3308,7 +3308,7 @@ fn get_object_properties(kit: &str) -> HashSet<String> {
 }
 
 /// Build a map of property name → XSD datatype from the kit ontology TTL.
-/// Only includes properties with non-string ranges (xsd:integer, xsd:date, xsd:dateTime, xsd:boolean, xsd:decimal).
+/// Only includes properties with non-string ranges (xsd:integer, xsd:date, xsd:dateTime, xsd:boolean, xsd:decimal, xsd:anyURI).
 /// Properties with xsd:string or no range are omitted (they use the default string behavior).
 fn get_property_datatypes(kit: &str) -> HashMap<String, String> {
     let root = match find_git_root() {
@@ -3375,6 +3375,7 @@ fn get_property_datatypes(kit: &str) -> HashMap<String, String> {
                     "xsd:decimal" => Some("http://www.w3.org/2001/XMLSchema#decimal"),
                     "xsd:float" => Some("http://www.w3.org/2001/XMLSchema#float"),
                     "xsd:double" => Some("http://www.w3.org/2001/XMLSchema#double"),
+                    "xsd:anyURI" => Some("http://www.w3.org/2001/XMLSchema#anyURI"),
                     _ => None, // xsd:string or unknown → default string behavior
                 };
                 if let Some(dt) = xsd_type {
