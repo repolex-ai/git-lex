@@ -1509,8 +1509,11 @@ function showNodeDetail(node) {
         graphState.selected = null;
         drawGraph();
     });
-    // Click any neighbor link in the detail panel → jump selection to it.
-    // Double-click → also open the markdown viewer pane for that neighbor.
+    // Click any neighbor link in the detail panel → jump selection to it
+    // AND open the markdown viewer pane for that neighbor. (Previously
+    // only dblclick opened the viewer, but Rob wanted single-click to be
+    // the read-the-thing gesture since the viewer is now pinned bottom-left
+    // and doesn't cover the graph.)
     detail.querySelectorAll('a[data-id]').forEach(a => {
         a.addEventListener('click', e => {
             e.preventDefault();
@@ -1520,13 +1523,8 @@ function showNodeDetail(node) {
                 graphState.selected = id;
                 showNodeDetail(target);
                 drawGraph();
+                openMarkdownViewer(target);
             }
-        });
-        a.addEventListener('dblclick', e => {
-            e.preventDefault();
-            const id = a.dataset.id;
-            const target = graphState.nodes.find(n => n.id === id);
-            if (target) openMarkdownViewer(target);
         });
     });
     // Also let users double-click the title of the currently-selected node
