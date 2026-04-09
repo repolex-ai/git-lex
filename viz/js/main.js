@@ -1533,6 +1533,17 @@ function renderPushPayload(container, triples) {
 
     // Group triples by subject. Each subject becomes a "thing".
     // Read viz: properties as rendering hints.
+    //
+    // Global hint predicates (viz:displayType, viz:title, viz:layout) apply to
+    // the scene as a whole — they are NEVER stored on subjects. A CONSTRUCT
+    // that carries only hints on a scene IRI (e.g. <urn:scene:foo> viz:title "…")
+    // produces zero data subjects from that IRI, so it won't pollute tables with
+    // a stray row or the graph view with an orphan node.
+    const GLOBAL_HINTS = new Set([
+        VIZ_NS + 'displayType',
+        VIZ_NS + 'layout',
+        VIZ_NS + 'title',
+    ]);
     const subjects = {};
     let displayType = 'graph';
     let layout = 'force';
@@ -1542,11 +1553,15 @@ function renderPushPayload(container, triples) {
         const s = t.subject;
         const p = t.predicate;
         const o = t.object;
-        if (!subjects[s]) subjects[s] = { id: s, props: {}, edges: [] };
 
-        if (p === VIZ_NS + 'displayType') displayType = (o.value || '').toLowerCase();
-        if (p === VIZ_NS + 'layout') layout = (o.value || '').toLowerCase();
-        if (p === VIZ_NS + 'title') title = o.value || '';
+        if (GLOBAL_HINTS.has(p)) {
+            if (p === VIZ_NS + 'displayType') displayType = (o.value || '').toLowerCase();
+            else if (p === VIZ_NS + 'layout') layout = (o.value || '').toLowerCase();
+            else if (p === VIZ_NS + 'title') title = o.value || '';
+            return;
+        }
+
+        if (!subjects[s]) subjects[s] = { id: s, props: {}, edges: [] };
         if (p === VIZ_NS + 'edgeTo') {
             subjects[s].edges.push(o.value);
         } else {
