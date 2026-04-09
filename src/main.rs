@@ -609,14 +609,16 @@ fn cmd_init(kit: Option<String>, force: bool, dev: bool) {
 
     // If .lex/ already exists, this is a re-initialization. In dev mode we
     // PRESERVE .lex/ entirely (including the local kit you are developing)
-    // and just regenerate derived artifacts. In normal mode we ask the user
-    // before nuking .lex/ and stash tickets across the nuke.
-    let tickets_backup: Option<PathBuf> = if lex_dir.exists() && !dev {
+    // and just regenerate derived artifacts. In normal mode we ask the user,
+    // then refresh only the kit-derived subdirs (kit/, ontology/). User
+    // data (extract/, extraction.log.spo, tickets/) is preserved.
+    if lex_dir.exists() && !dev {
         carryover = read_repo_yml_fields(&lex_dir.join("repo.yml"));
 
         eprint!(
             "This repo is already initialized at {}.\n\
-             Re-initializing will delete .lex/ and overwrite scaffold files.\n\
+             Re-initializing will refresh the kit and ontology files and overwrite scaffold files.\n\
+             Extractions, extraction log, tickets, and repo.yml fields are preserved.\n\
              Continue? [y/N] ",
             lex_dir.display()
         );
@@ -628,50 +630,22 @@ fn cmd_init(kit: Option<String>, force: bool, dev: bool) {
             return;
         }
 
-        // Auto-commit any uncommitted work before the destructive nuke.
+        // Auto-commit any uncommitted work before the destructive step.
         // Git history is the safety net — if anything in the working tree
         // would be lost, we want it in a commit first.
         auto_commit_snapshot("re-initialization");
 
-        // Stash tickets/ to a temp location before the nuke.
-        let tickets_src = lex_dir.join("tickets");
-        let stash = if tickets_src.exists() {
-            let stash_path = std::env::temp_dir()
-                .join(format!("git-lex-tickets-{}", std::process::id()));
-            let _ = fs::remove_dir_all(&stash_path);
-            if copy_dir_recursive(&tickets_src, &stash_path).is_ok() {
-                Some(stash_path)
-            } else {
-                None
-            }
-        } else {
-            None
-        };
-
-        if let Err(e) = fs::remove_dir_all(&lex_dir) {
-            eprintln!("fatal: failed to remove {}: {}", lex_dir.display(), e);
-            exit(1);
-        }
-        stash
+        // Remove only kit-derived subdirs. Everything else in .lex/ stays.
+        let _ = fs::remove_dir_all(lex_dir.join("kit"));
+        let _ = fs::remove_dir_all(lex_dir.join("ontology"));
     } else if dev && lex_dir.exists() {
         // Dev mode: read existing carryover from repo.yml, but don't nuke.
         carryover = read_repo_yml_fields(&lex_dir.join("repo.yml"));
         println!("Dev mode: preserving .lex/ and regenerating from local kit.");
-        None
-    } else {
-        None
-    };
+    }
 
     // Create .lex/ structure (idempotent — safe in dev mode too)
     fs::create_dir_all(lex_dir.join("extract")).ok();
-
-    // Restore stashed tickets/ from before the nuke, if any. In dev mode
-    // there's no stash because we never nuked.
-    if let Some(stash) = tickets_backup {
-        let tickets_dest = lex_dir.join("tickets");
-        let _ = copy_dir_recursive(&stash, &tickets_dest);
-        let _ = fs::remove_dir_all(&stash);
-    }
 
     // Install ontologies (full directory structure)
     let ont_dir = lex_dir.join("ontology");
