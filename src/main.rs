@@ -43,11 +43,22 @@ enum LlmCommands {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Initialize .lex/ in the current repo and install global drivers
+    /// Initialize .lex/ in the current repo
     Init {
-        /// Use case kit (e.g., squad). Defines valid document types and ontology.
+        /// Use case kit (e.g., soul, squad, or org/repo). Defines valid
+        /// document types and ontology.
         #[arg(long)]
         kit: Option<String>,
+        /// Reinstall asset files even when they already exist. Prompts before
+        /// overwriting. Default behavior is to skip existing asset files.
+        #[arg(long)]
+        force: bool,
+        /// Dev mode: skip the GitHub fetch and use the kit already at
+        /// .lex/kit/{org}/{repo}/. Preserves .lex/ state across re-init so
+        /// the kit you are developing is not nuked. Regenerates SHACL
+        /// shapes and class templates from the local kit TTL.
+        #[arg(long)]
+        dev: bool,
     },
     /// Query the knowledge graph.
     ///
@@ -61,33 +72,6 @@ enum Commands {
     Query {
         /// The SPARQL query string
         query: String,
-    },
-    /// Emit commit history as N-Quads
-    Log {
-        /// Filter by author
-        #[arg(long)]
-        author: Option<String>,
-        /// Limit number of commits
-        #[arg(short, long, default_value = "50")]
-        n: usize,
-        /// Output format: nq (default) or pretty
-        #[arg(long, default_value = "pretty")]
-        format: String,
-    },
-    /// Emit file tree at a ref as N-Quads
-    Tree {
-        /// Git ref (default: HEAD)
-        #[arg(default_value = "HEAD")]
-        r#ref: String,
-        /// Output format: nq or pretty (default)
-        #[arg(long, default_value = "pretty")]
-        format: String,
-    },
-    /// Emit branches and tags as N-Quads
-    Refs {
-        /// Output format: nq or pretty (default)
-        #[arg(long, default_value = "pretty")]
-        format: String,
     },
     /// Extract frontmatter from .md files → write .spo sidecars + compile log
     Extract,
@@ -103,12 +87,6 @@ enum Commands {
     },
     /// Sync git data + .lex/*.nq into the persistent store
     Sync,
-    /// Semantic diff of knowledge between refs
-    Diff {
-        /// Show changes since this date or ref
-        #[arg(long)]
-        since: Option<String>,
-    },
     /// LLM agent tools
     Llm {
         #[command(subcommand)]
@@ -135,8 +113,6 @@ enum Commands {
         /// Path to the squad repo to join
         squad_path: String,
     },
-    /// Show this repo's identity
-    Identity,
     /// Parse a markdown file and show the syntax tree (debug)
     Parse {
         /// File to parse
@@ -156,19 +132,6 @@ enum Commands {
         #[arg(long, default_value = "7878")]
         port: u16,
     },
-    /// Manage kits (install, update, list)
-    Kit {
-        #[command(subcommand)]
-        command: KitCommands,
-    },
-}
-
-#[derive(Subcommand)]
-enum KitCommands {
-    /// Update the current kit (re-fetch from GitHub)
-    Update,
-    /// List available kits
-    List,
 }
 
 /// Find the git repo root from the current directory.
@@ -582,240 +545,6 @@ fn uri_encode_path(s: &str) -> String {
         .collect()
 }
 
-// ─── git lex log ───────────────────────────────────────────────
-
-fn cmd_log(author: Option<String>, n: usize, format: String) {
-    let mut args = vec![
-        "log".to_string(),
-        format!("-{}", n),
-        "--format=%H%x00%ae%x00%an%x00%aI%x00%s%x00%P%x00%ce%x00%cn%x00%cI".to_string(),
-    ];
-    if let Some(ref a) = author {
-        args.push(format!("--author={}", a));
-    }
-
-    let output = Command::new("git").args(&args).output();
-    let output = match output {
-        Ok(o) if o.status.success() => o,
-        _ => {
-            eprintln!("fatal: failed to run git log");
-            exit(1);
-        }
-    };
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let base = base_uri();
-    let graph = format!("<{}/commits>", base);
-
-    for line in stdout.lines() {
-        let fields: Vec<&str> = line.split('\x00').collect();
-        if fields.len() < 9 {
-            continue;
-        }
-        let (sha, email, name, date, subject, parents) =
-            (fields[0], fields[1], fields[2], fields[3], fields[4], fields[5]);
-
-        let commit_uri = format!("<{}/commit/{}>", base, sha);
-
-        if format == "nq" {
-            println!(
-                "{} <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://repolex.ai/ontology/git-lex/git/Commit> {} .",
-                commit_uri, graph
-            );
-            println!(
-                "{} <https://repolex.ai/ontology/git-lex/git/hexsha> \"{}\" {} .",
-                commit_uri, sha, graph
-            );
-            println!(
-                "{} <https://repolex.ai/ontology/git-lex/git/authorEmail> \"{}\" {} .",
-                commit_uri,
-                nq_escape(email),
-                graph
-            );
-            println!(
-                "{} <https://repolex.ai/ontology/git-lex/git/authorName> \"{}\" {} .",
-                commit_uri,
-                nq_escape(name),
-                graph
-            );
-            println!(
-                "{} <https://repolex.ai/ontology/git-lex/git/date> \"{}\"^^<http://www.w3.org/2001/XMLSchema#dateTime> {} .",
-                commit_uri, date, graph
-            );
-            println!(
-                "{} <https://repolex.ai/ontology/git-lex/git/message> \"{}\" {} .",
-                commit_uri,
-                nq_escape(subject),
-                graph
-            );
-            for parent in parents.split_whitespace() {
-                println!(
-                    "{} <https://repolex.ai/ontology/git-lex/git/parent> <{}/commit/{}> {} .",
-                    commit_uri, base, parent, graph
-                );
-            }
-        } else {
-            // Pretty format
-            let short_sha = &sha[..7.min(sha.len())];
-            println!("{} {} <{}> {}", short_sha, date, email, subject);
-        }
-    }
-}
-
-// ─── git lex tree ──────────────────────────────────────────────
-
-fn cmd_tree(git_ref: String, format: String) {
-    let output = Command::new("git")
-        .args(["ls-tree", "-r", "--format=%(objectmode) %(objecttype) %(objectname) %(objectsize)\t%(path)", &git_ref])
-        .output();
-    let output = match output {
-        Ok(o) if o.status.success() => o,
-        _ => {
-            eprintln!("fatal: failed to run git ls-tree for {}", git_ref);
-            exit(1);
-        }
-    };
-
-    // Resolve ref to full sha
-    let ref_sha = Command::new("git")
-        .args(["rev-parse", &git_ref])
-        .output()
-        .ok()
-        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-        .unwrap_or_else(|| git_ref.clone());
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let base = base_uri();
-    let graph = format!("<{}/filetree/{}>", base, ref_sha);
-
-    for line in stdout.lines() {
-        let parts: Vec<&str> = line.splitn(2, '\t').collect();
-        if parts.len() < 2 {
-            continue;
-        }
-        let path = parts[1];
-        let meta: Vec<&str> = parts[0].split_whitespace().collect();
-        if meta.len() < 4 {
-            continue;
-        }
-        let (_mode, obj_type, blob_hash, size) = (meta[0], meta[1], meta[2], meta[3]);
-
-        let file_uri = format!("<{}/tree/{}/{}>", base, ref_sha, uri_encode_path(path));
-
-        if format == "nq" {
-            println!(
-                "{} <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://repolex.ai/ontology/git-lex/git/Blob> {} .",
-                file_uri, graph
-            );
-            println!(
-                "{} <https://repolex.ai/ontology/git-lex/git/path> \"{}\" {} .",
-                file_uri,
-                nq_escape(path),
-                graph
-            );
-            println!(
-                "{} <https://repolex.ai/ontology/git-lex/git/blobHash> \"{}\" {} .",
-                file_uri, blob_hash, graph
-            );
-            println!(
-                "{} <https://repolex.ai/ontology/git-lex/git/blob> <{}/blob/{}> {} .",
-                file_uri, base_uri(), blob_hash, graph
-            );
-            println!(
-                "{} <https://repolex.ai/ontology/git-lex/git/size> \"{}\"^^<http://www.w3.org/2001/XMLSchema#integer> {} .",
-                file_uri, size, graph
-            );
-            println!(
-                "{} <https://repolex.ai/ontology/git-lex/git/type> \"{}\" {} .",
-                file_uri, obj_type, graph
-            );
-        } else {
-            println!("{} {} {}  {}", blob_hash, size, obj_type, path);
-        }
-    }
-}
-
-// ─── git lex refs ──────────────────────────────────────────────
-
-fn cmd_refs(format: String) {
-    let base = base_uri();
-    let graph = format!("<{}/refs>", base);
-
-    // Branches
-    let output = Command::new("git")
-        .args(["branch", "-a", "--format=%(refname:short) %(objectname:short)"])
-        .output();
-    if let Ok(o) = output {
-        if o.status.success() {
-            let stdout = String::from_utf8_lossy(&o.stdout);
-            for line in stdout.lines() {
-                let parts: Vec<&str> = line.splitn(2, ' ').collect();
-                if parts.len() < 2 {
-                    continue;
-                }
-                let (name, sha) = (parts[0], parts[1]);
-                let ref_uri = format!("<{}/branch/{}>", base, nq_escape(name));
-
-                if format == "nq" {
-                    println!(
-                        "{} <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://repolex.ai/ontology/git-lex/git/Branch> {} .",
-                        ref_uri, graph
-                    );
-                    println!(
-                        "{} <https://repolex.ai/ontology/git-lex/git/shortName> \"{}\" {} .",
-                        ref_uri,
-                        nq_escape(name),
-                        graph
-                    );
-                    println!(
-                        "{} <https://repolex.ai/ontology/git-lex/git/commit> <{}/commit/{}> {} .",
-                        ref_uri, base, sha, graph
-                    );
-                } else {
-                    println!("branch  {} -> {}", name, sha);
-                }
-            }
-        }
-    }
-
-    // Tags
-    let output = Command::new("git")
-        .args(["tag", "-l", "--format=%(refname:short) %(objectname:short)"])
-        .output();
-    if let Ok(o) = output {
-        if o.status.success() {
-            let stdout = String::from_utf8_lossy(&o.stdout);
-            for line in stdout.lines() {
-                let parts: Vec<&str> = line.splitn(2, ' ').collect();
-                if parts.len() < 2 {
-                    continue;
-                }
-                let (name, sha) = (parts[0], parts[1]);
-                let ref_uri = format!("<{}/tag/{}>", base, nq_escape(name));
-
-                if format == "nq" {
-                    println!(
-                        "{} <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://repolex.ai/ontology/git-lex/git/Tag> {} .",
-                        ref_uri, graph
-                    );
-                    println!(
-                        "{} <https://repolex.ai/ontology/git-lex/git/shortName> \"{}\" {} .",
-                        ref_uri,
-                        nq_escape(name),
-                        graph
-                    );
-                    println!(
-                        "{} <https://repolex.ai/ontology/git-lex/git/commit> <{}/commit/{}> {} .",
-                        ref_uri, base, sha, graph
-                    );
-                } else {
-                    println!("tag     {} -> {}", name, sha);
-                }
-            }
-        }
-    }
-}
-
 // ─── git lex init ──────────────────────────────────────────────
 
 // Embedded ontologies
@@ -826,7 +555,7 @@ const ONT_LEX: &str = include_str!("../ontology/git-lex/lex/lex.ttl");
 const ONT_LEX_O: &str = include_str!("../ontology/git-lex/lex-o/lex-o.ttl");
 // Kit ontologies are fetched from GitHub at init time — no embedded fallback.
 
-fn cmd_init(kit: Option<String>) {
+fn cmd_init(kit: Option<String>, force: bool, dev: bool) {
     let root = match find_git_root() {
         Some(r) => r,
         None => {
@@ -849,13 +578,100 @@ fn cmd_init(kit: Option<String>) {
         }
     };
 
+    // --dev requires --kit: we need to know which kit dir to use locally.
+    if dev && kit.is_none() {
+        eprintln!("--dev requires --kit to specify which local kit to use.");
+        eprintln!("Example: git lex init --kit goodlex/mytestkit --dev");
+        exit(1);
+    }
+
+    // Raw CLI arg, e.g. "soul" or "repolex-ai/git-lex-kit-soul" or "none".
     let kit_name = kit.as_deref().unwrap_or("none");
 
-    let lex_dir = root.join(".lex");
-    let lex_exists = lex_dir.exists();
+    // Resolved forms:
+    //   - kit_spec: canonical "org/repo" for filesystem paths and repo.yml
+    //   - kit_short: short name ("soul") for SPARQL prefixes, frontmatter
+    //     keys (soul.memory.confidence), README display, etc.
+    // When no kit is configured, both == "none".
+    let (kit_spec, kit_short) = if kit_name == "none" {
+        ("none".to_string(), "none".to_string())
+    } else {
+        let (org, repo, short) = resolve_kit_spec(kit_name);
+        (format!("{}/{}", org, repo), short)
+    };
 
-    // Create .lex/ structure
+    let lex_dir = root.join(".lex");
+
+    // Carry-over on re-init: if repo.yml already exists, stash its fields so
+    // we can reuse previously-collected init variables (agent_name, etc.)
+    // without re-prompting.
+    let mut carryover: HashMap<String, String> = HashMap::new();
+
+    // If .lex/ already exists, this is a re-initialization. In dev mode we
+    // PRESERVE .lex/ entirely (including the local kit you are developing)
+    // and just regenerate derived artifacts. In normal mode we ask the user
+    // before nuking .lex/ and stash tickets across the nuke.
+    let tickets_backup: Option<PathBuf> = if lex_dir.exists() && !dev {
+        carryover = read_repo_yml_fields(&lex_dir.join("repo.yml"));
+
+        eprint!(
+            "This repo is already initialized at {}.\n\
+             Re-initializing will delete .lex/ and overwrite scaffold files.\n\
+             Continue? [y/N] ",
+            lex_dir.display()
+        );
+        let mut input = String::new();
+        std::io::stdin().read_line(&mut input).unwrap_or_default();
+        let input = input.trim().to_lowercase();
+        if input != "y" && input != "yes" {
+            println!("Aborted.");
+            return;
+        }
+
+        // Auto-commit any uncommitted work before the destructive nuke.
+        // Git history is the safety net — if anything in the working tree
+        // would be lost, we want it in a commit first.
+        auto_commit_snapshot("re-initialization");
+
+        // Stash tickets/ to a temp location before the nuke.
+        let tickets_src = lex_dir.join("tickets");
+        let stash = if tickets_src.exists() {
+            let stash_path = std::env::temp_dir()
+                .join(format!("git-lex-tickets-{}", std::process::id()));
+            let _ = fs::remove_dir_all(&stash_path);
+            if copy_dir_recursive(&tickets_src, &stash_path).is_ok() {
+                Some(stash_path)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        if let Err(e) = fs::remove_dir_all(&lex_dir) {
+            eprintln!("fatal: failed to remove {}: {}", lex_dir.display(), e);
+            exit(1);
+        }
+        stash
+    } else if dev && lex_dir.exists() {
+        // Dev mode: read existing carryover from repo.yml, but don't nuke.
+        carryover = read_repo_yml_fields(&lex_dir.join("repo.yml"));
+        println!("Dev mode: preserving .lex/ and regenerating from local kit.");
+        None
+    } else {
+        None
+    };
+
+    // Create .lex/ structure (idempotent — safe in dev mode too)
     fs::create_dir_all(lex_dir.join("extract")).ok();
+
+    // Restore stashed tickets/ from before the nuke, if any. In dev mode
+    // there's no stash because we never nuked.
+    if let Some(stash) = tickets_backup {
+        let tickets_dest = lex_dir.join("tickets");
+        let _ = copy_dir_recursive(&stash, &tickets_dest);
+        let _ = fs::remove_dir_all(&stash);
+    }
 
     // Install ontologies (full directory structure)
     let ont_dir = lex_dir.join("ontology");
@@ -873,67 +689,81 @@ fn cmd_init(kit: Option<String>) {
         }
     }
 
-    // Install kit ontology from GitHub
+    // Install kit. In normal mode, fetch from GitHub and land at
+    // .lex/kit/{org}/{repo}/, nuking any previous kit dir first. In dev
+    // mode, don't fetch — verify the local kit dir already exists at the
+    // expected path and use it in place. Kit authors run `--dev` when
+    // iterating on a kit without wanting to push to GitHub between runs.
     if let Some(ref k) = kit {
-        let kit_dir = ont_dir.join(format!("kit/{}", k));
-        fs::create_dir_all(&kit_dir).ok();
+        let (org, repo, _) = resolve_kit_spec(k);
+        let kit_dir = lex_dir.join("kit").join(&org).join(&repo);
 
-        if fetch_kit_from_github(k, &kit_dir) {
-            println!("Kit '{}' fetched from GitHub.", k);
+        if dev {
+            if !kit_dir.exists() {
+                eprintln!(
+                    "--dev: kit directory not found at {}",
+                    kit_dir.display()
+                );
+                eprintln!("Populate the kit locally first, then re-run with --dev.");
+                exit(1);
+            }
+            println!("Dev mode: using local kit at {}", kit_dir.display());
         } else {
-            eprintln!("Failed to fetch kit '{}' from GitHub.", k);
-            eprintln!("Check that {}/git-lex-kit-{} exists and you have network access.", KIT_GITHUB_ORG, k);
-            exit(1);
+            let lex_kit_root = lex_dir.join("kit");
+            let _ = fs::remove_dir_all(&lex_kit_root);
+            fs::create_dir_all(&kit_dir).ok();
+
+            if fetch_kit_from_github(k, &kit_dir) {
+                println!("Kit '{}/{}' fetched from GitHub.", org, repo);
+            } else {
+                eprintln!("Failed to fetch kit '{}' from GitHub.", k);
+                eprintln!("Check that https://github.com/{}/{} exists and you have network access.", org, repo);
+                exit(1);
+            }
         }
     }
 
-    // .gitattributes
-    let gitattributes = root.join(".gitattributes");
-    let attr_content = "# git-lex: semantic diff/merge for knowledge graph files\n.lex/**/*.nq diff=lex merge=lex\n";
-    if gitattributes.exists() {
-        let existing = fs::read_to_string(&gitattributes).unwrap_or_default();
-        if !existing.contains("diff=lex") {
-            fs::write(&gitattributes, format!("{}\n{}", existing.trim_end(), attr_content)).ok();
+    // .lex/.gitignore — universal: ignore the local oxigraph store. This is
+    // a nested .gitignore scoped to .lex/, so it doesn't pollute the repo
+    // root's .gitignore file.
+    fs::write(lex_dir.join(".gitignore"), "oxigraph/\n").ok();
+
+    // Claude Code kit needs a whitelist-style root .gitignore because it
+    // runs against an existing project directory and only wants to track
+    // specific patterns. This is the one kit-specific exception until kits
+    // ship their own .gitignore assets.
+    if kit_name == "claude-code" {
+        let gitignore = root.join(".gitignore");
+        let cc_ignore = "*\n\
+                         !.gitignore\n\
+                         !.lex/\n\
+                         !.lex/**\n\
+                         !README.lex.md\n\
+                         !*/\n\
+                         !*/*.jsonl\n\
+                         !*/memory/\n\
+                         !*/memory/**\n\
+                         !agents/\n\
+                         !agents/**\n\
+                         !plans/\n\
+                         !plans/**\n\
+                         !CLAUDE.md\n\
+                         !history.jsonl\n";
+        if gitignore.exists() {
+            let existing = fs::read_to_string(&gitignore).unwrap_or_default();
+            if !existing.contains("!history.jsonl") {
+                fs::write(&gitignore, format!("{}\n{}", existing.trim_end(), cc_ignore)).ok();
+            }
+        } else {
+            fs::write(&gitignore, cc_ignore).ok();
         }
-    } else {
-        fs::write(&gitattributes, attr_content).ok();
     }
 
-    // .gitignore
-    let gitignore = root.join(".gitignore");
-    let ignore_entries = if kit_name == "claude-code" {
-        // Claude Code kit: whitelist approach — ignore everything except what we index
-        "*\n\
-         !.gitignore\n\
-         !.gitattributes\n\
-         !.lex/\n\
-         !.lex/**\n\
-         .lex/oxigraph/\n\
-         .lex/raw/\n\
-         !README.lex.md\n\
-         !*/\n\
-         !*/*.jsonl\n\
-         !*/memory/\n\
-         !*/memory/**\n\
-         !agents/\n\
-         !agents/**\n\
-         !plans/\n\
-         !plans/**\n\
-         !CLAUDE.md\n\
-         !history.jsonl\n"
-    } else {
-        ".lex/oxigraph/\n.lex/raw/\n"
-    };
-    if gitignore.exists() {
-        let existing = fs::read_to_string(&gitignore).unwrap_or_default();
-        if !existing.contains(".lex/oxigraph/") {
-            fs::write(&gitignore, format!("{}\n{}", existing.trim_end(), ignore_entries)).ok();
-        }
-    } else {
-        fs::write(&gitignore, ignore_entries).ok();
-    }
-
-    // repo.yml
+    // repo.yml — create if missing, otherwise update the kit: field to
+    // match the spec passed to this init run. This matters for dev mode
+    // and for re-initialization: if the user ran init once without --kit
+    // and then runs again with --kit X, the kit: field needs to change
+    // from "none" to the new spec.
     let repo_yml_path = lex_dir.join("repo.yml");
     if !repo_yml_path.exists() {
         let repo_name = root.file_name()
@@ -943,9 +773,31 @@ fn cmd_init(kit: Option<String>) {
             .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
             .unwrap_or_else(|| "unknown".to_string());
         fs::write(&repo_yml_path, format!(
-            "name: {}\nkit: {}\ncreated: {}\nversion: \"1.0\"\n",
-            repo_name, kit_name, today
+            "name: {}\nkit: {}\ncreated: {}\n",
+            repo_name, kit_spec, today
         )).ok();
+    } else if kit.is_some() {
+        // Rewrite the kit: line in the existing repo.yml to match the
+        // current spec. Preserves all other fields (name, created,
+        // agent_name, first_commit, etc.) untouched.
+        if let Ok(existing) = fs::read_to_string(&repo_yml_path) {
+            let mut updated_lines: Vec<String> = Vec::new();
+            let mut saw_kit_line = false;
+            for line in existing.lines() {
+                if line.starts_with("kit: ") || line.starts_with("kit:") {
+                    updated_lines.push(format!("kit: {}", kit_spec));
+                    saw_kit_line = true;
+                } else {
+                    updated_lines.push(line.to_string());
+                }
+            }
+            if !saw_kit_line {
+                updated_lines.push(format!("kit: {}", kit_spec));
+            }
+            let mut content = updated_lines.join("\n");
+            if !content.ends_with('\n') { content.push('\n'); }
+            fs::write(&repo_yml_path, content).ok();
+        }
     }
 
     // README
@@ -986,7 +838,7 @@ fn cmd_init(kit: Option<String>) {
             let readme_lex = root.join("README.lex.md");
             if !readme_lex.exists() {
                 let mut doc = String::new();
-                doc.push_str(&format!("# git-lex — {} kit\n\n", kit_name));
+                doc.push_str(&format!("# git-lex — {} kit\n\n", kit_short));
                 doc.push_str("This repo is managed by [git-lex](https://github.com/repolex-ai/git-lex) — git extensions for knowledge graphs.\n\n");
 
                 doc.push_str("## Quick Start\n\n");
@@ -1014,9 +866,9 @@ fn cmd_init(kit: Option<String>) {
                 doc.push_str("Documents use YAML frontmatter with flat dot notation: `kit.class.property`\n\n");
                 doc.push_str("```yaml\n");
                 doc.push_str("---\n");
-                doc.push_str(&format!("{}.memory.confidence: \"certain\"\n", kit_name));
-                doc.push_str(&format!("{}.memory.source: \"observation\"\n", kit_name));
-                doc.push_str(&format!("{}.memory.category: \"fact\"\n", kit_name));
+                doc.push_str(&format!("{}.memory.confidence: \"certain\"\n", kit_short));
+                doc.push_str(&format!("{}.memory.source: \"observation\"\n", kit_short));
+                doc.push_str(&format!("{}.memory.category: \"fact\"\n", kit_short));
                 doc.push_str("---\n\n");
                 doc.push_str("Your content here. Use @mentions and [[wikilinks]] for relationships.\n");
                 doc.push_str("```\n\n");
@@ -1029,7 +881,7 @@ fn cmd_init(kit: Option<String>) {
                 doc.push_str("These are extracted automatically from document bodies and commit messages.\n\n");
 
                 // Kit-specific section
-                doc.push_str(&format!("## {} Kit — Document Types\n\n", kit_name));
+                doc.push_str(&format!("## {} Kit — Document Types\n\n", kit_short));
                 for (type_name, properties) in &kit_types {
                     doc.push_str(&format!("### {}\n\n", type_name));
                     doc.push_str(&format!("Create: `git lex create {}`\n\n", type_name.to_lowercase()));
@@ -1055,13 +907,13 @@ fn cmd_init(kit: Option<String>) {
 
                 doc.push_str("## Querying\n\n");
                 doc.push_str("Auto-injected prefixes: `git:`, `fm:`, `lex:`, `lex-o:`");
-                if kit_name != "none" {
-                    doc.push_str(&format!(", `{}:`", kit_name));
+                if kit_short != "none" {
+                    doc.push_str(&format!(", `{}:`", kit_short));
                 }
                 doc.push_str("\n\n");
                 doc.push_str("```sparql\n");
                 doc.push_str("# List all documents by type\n");
-                doc.push_str(&format!("SELECT ?name ?type WHERE {{\n  GRAPH ?g {{ ?doc fm:{}.type ?type ; fm:title ?name }}\n}}\n", kit_name));
+                doc.push_str(&format!("SELECT ?name ?type WHERE {{\n  GRAPH ?g {{ ?doc fm:{}.type ?type ; fm:title ?name }}\n}}\n", kit_short));
                 doc.push_str("```\n");
 
                 fs::write(&readme_lex, &doc).ok();
@@ -1080,7 +932,8 @@ fn cmd_init(kit: Option<String>) {
         let kit_types = get_kit_types(kit_name);
         let shapes_content = {
             let r = find_git_root().unwrap();
-            let shapes_path = r.join(".lex").join("ontology").join("kit").join(kit_name).join(format!("{}-shapes.ttl", kit_name));
+            let (_, _, short) = resolve_kit_spec(kit_name);
+            let shapes_path = kit_install_dir_for_spec(&r, kit_name).join(format!("{}-shapes.ttl", short));
             fs::read_to_string(&shapes_path).unwrap_or_default()
         };
         let shacl_hints = parse_shacl_hints(&shapes_content);
@@ -1096,10 +949,10 @@ fn cmd_init(kit: Option<String>) {
 
                 for (prop_name, prop_type, _required, _comment) in properties {
                     // Property names pass through as-is from the ontology (camelCase)
-                    let key = format!("{}.{}.{}", kit_name, type_lower, prop_name);
+                    let key = format!("{}.{}.{}", kit_short, type_lower, prop_name);
 
                     // Look up SHACL hint for this property
-                    let prefix_name = get_kit_prefix_name(kit_name);
+                    let prefix_name = get_kit_prefix_name(&kit_short);
                     let hint = shacl_hints.get(&format!("{}:{}", prefix_name, prop_name));
 
                     let type_hint = if let Some(h) = hint {
@@ -1122,39 +975,102 @@ fn cmd_init(kit: Option<String>) {
         println!("Created class templates");
     }
 
-    // Install scaffold files from the kit (SOUL.md, AGENTS.md, skills, journal, etc.)
-    // These live in scaffold/ inside the kit repo and mirror the target repo structure.
-    // Never overwrites existing files. Supports {kit} template variable.
+    // Collect kit-declared init variables (agent name, etc.) by prompting
+    // the user. On re-init, reuse values carried over from the previous
+    // repo.yml so the user doesn't re-answer the same prompts.
+    //
+    // Then install files from the kit in two passes:
+    //   1. scaffold/ — raw byte-for-byte copy, always clobber. Kit
+    //      infrastructure: .claude/, AGENTS.md, hooks, etc.
+    //   2. assets/ — template-processed (substitute `{varname}` placeholders
+    //      from the variable map). Skip if destination exists (default);
+    //      under --force, prompt to overwrite with clear warning. No backup
+    //      files — git history is the safety net.
     if kit.is_some() {
-        let scaffold_count = install_scaffold_files(kit_name);
+        let vars = collect_init_variables(kit_name, &carryover);
+
+        // Persist collected variables into repo.yml (one line per var, append
+        // if not already present). Skip the `kit` key — already in repo.yml.
+        if let Ok(existing) = fs::read_to_string(&repo_yml_path) {
+            let mut updated = existing.clone();
+            for (k, v) in &vars {
+                if k == "kit" { continue; }
+                if !existing.lines().any(|l| l.starts_with(&format!("{}:", k))) {
+                    if !updated.ends_with('\n') { updated.push('\n'); }
+                    updated.push_str(&format!("{}: {}\n", k, v));
+                }
+            }
+            fs::write(&repo_yml_path, &updated).ok();
+        }
+
+        let scaffold_count = install_scaffold_files();
         if scaffold_count > 0 {
             println!("Installed {} scaffold file(s) from kit", scaffold_count);
         }
 
-        // Ensure journal/ exists even if no scaffold (backward compat)
-        let journal_dir = root.join("journal");
-        if !journal_dir.exists() {
-            fs::create_dir_all(&journal_dir).ok();
-            let gitkeep = journal_dir.join(".gitkeep");
-            fs::write(&gitkeep, "").ok();
+        // If --force is set, first do a dry-run asset install to find which
+        // files would be overwritten, then show the user and prompt for
+        // confirmation before committing. The dry-run is `force = false`,
+        // which collects skipped entries — those ARE the files that --force
+        // would clobber.
+        let mut effective_force = force;
+        if force {
+            let dry = install_asset_files(&vars, false);
+            if !dry.skipped.is_empty() {
+                eprintln!();
+                eprintln!("WARNING: --force will overwrite these existing asset files:");
+                for p in &dry.skipped {
+                    eprintln!("  {}", p);
+                }
+                eprintln!();
+                eprintln!("Your local edits will be replaced with kit defaults.");
+                eprintln!("Git history preserves previous versions — use `git show HEAD^:<file>` to recover.");
+                eprint!("Continue? [y/N] ");
+                let mut input = String::new();
+                std::io::stdin().read_line(&mut input).unwrap_or_default();
+                let input = input.trim().to_lowercase();
+                if input != "y" && input != "yes" {
+                    println!("Skipping asset overwrite (--force cancelled).");
+                    effective_force = false;
+                } else {
+                    // User said yes to clobber existing assets. Auto-commit
+                    // anything uncommitted first so their work lives in git
+                    // history before we overwrite.
+                    auto_commit_snapshot("--force asset overwrite");
+                }
+            }
+        }
+
+        let asset_report = install_asset_files(&vars, effective_force);
+        if !asset_report.installed.is_empty() {
+            println!("Installed {} asset file(s) from kit", asset_report.installed.len());
+        }
+        if !asset_report.overwritten.is_empty() {
+            println!("Overwrote {} asset file(s) (--force)", asset_report.overwritten.len());
+            for p in &asset_report.overwritten {
+                println!("  ~ {}", p);
+            }
+        }
+        if !asset_report.skipped.is_empty() {
+            println!(
+                "Skipped {} existing asset file(s). Use `git lex init --kit {} --force` to reinstall defaults.",
+                asset_report.skipped.len(),
+                kit_name
+            );
+            for p in &asset_report.skipped {
+                println!("  - {}", p);
+            }
         }
     }
 
     // Print summary
-    if lex_exists {
-        println!("Reinitialized .lex/ in {}", root.display());
-    } else {
-        println!("Initialized .lex/ in {}", root.display());
-    }
+    println!("Initialized .lex/ in {}", root.display());
     println!();
-    println!("  .lex/repo.yml     — repo config (kit: {})", kit_name);
+    println!("  .lex/repo.yml     — repo config (kit: {})", kit_spec);
     println!("  .lex/extract/     — extraction sidecars");
-    println!("  .lex/ontology/    — ontology definitions");
-    println!("  .gitattributes    — semantic diff/merge drivers");
+    println!("  .lex/ontology/    — upper ontologies");
+    println!("  .lex/kit/         — installed kit");
     println!();
-
-    // Install global drivers
-    install_global_drivers();
 
     // Pre-commit hook: extract changed files → write sidecars → stage
     let hooks_dir = root.join(".git").join("hooks");
@@ -1171,25 +1087,6 @@ fn cmd_init(kit: Option<String>) {
         }
     }
     println!("Installed pre-commit hook (extract on commit)");
-    // Post-merge/Post-receive hooks for squad/lab kits (message notifications)
-    if let Some(ref k) = kit {
-        if k == "squad" || k == "lab" {
-            let hook_content = "#!/bin/bash\n# git-lex-mail-notifier\n\n# Detect current agent handle (from SOUL.md or first agent file in repo)\nHANDLE=$(grep -oE \"Display Name: .*\" SOUL.md 2>/dev/null | cut -d: -f2 | xargs)\nif [ -z \"$HANDLE\" ]; then\n    HANDLE=$(ls agent/ 2>/dev/null | head -n 1 | cut -d. -f1)\nfi\n\nif [ ! -z \"$HANDLE\" ]; then\n    MAIL_COUNT=$(git lex query \"SELECT ?msg WHERE { ?msg a squad:Message ; squad:to ?to ; squad:messageStatus 'open' . FILTER(regex(str(?to), '$HANDLE', 'i')) }\" | grep -c \"^|\" | awk '{print $1 - 2}')\n\n    if [[ \"$MAIL_COUNT\" -gt 0 ]]; then\n      echo -e \"\\n\\033[1;33m🔔 YOU'VE GOT MAIL ($MAIL_COUNT new message(s) for $HANDLE)!\\033[0m\"\n      echo -e \"\\033[0;36mRun 'git lex query' or check the 'message/' directory.\\033[0m\\n\"\n    fi\nfi\n";
-
-            for hook_name in &["post-merge", "post-receive", "post-commit"] {
-                let hook_path = hooks_dir.join(hook_name);
-                if !hook_path.exists() {
-                    fs::write(&hook_path, &hook_content).ok();
-                    #[cfg(unix)]
-                    {
-                        use std::os::unix::fs::PermissionsExt;
-                        fs::set_permissions(&hook_path, fs::Permissions::from_mode(0o755)).ok();
-                    }
-                }
-            }
-            println!("Installed {} and {} hooks (message notifications)", "post-merge", "post-receive");
-        }
-    }
 
     // NO post-commit hook — sync is manual/background
 
@@ -1197,14 +1094,14 @@ fn cmd_init(kit: Option<String>) {
     let has_commits = Command::new("git").args(["rev-parse", "HEAD"]).output()
         .map(|o| o.status.success()).unwrap_or(false);
 
-    let _ = Command::new("git").args(["add", ".lex/", ".gitattributes", ".gitignore"]).status();
+    let _ = Command::new("git").args(["add", ".lex/"]).status();
     if Command::new("git").args(["commit", "-m", "git lex init"]).output()
         .map(|o| o.status.success()).unwrap_or(false) {
         println!("\nCommitted git-lex setup files.");
     }
 
-    // Offer to commit existing content
-    if !has_commits || !lex_exists {
+    // Offer to commit existing content (only for brand-new repos)
+    if !has_commits {
         let untracked = Command::new("git").args(["status", "--porcelain"]).output().ok()
             .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string()).unwrap_or_default();
         if !untracked.is_empty() {
@@ -1220,36 +1117,23 @@ fn cmd_init(kit: Option<String>) {
         }
     }
 
-    // Write .lex/identity.yml with first commit SHA (the repo's cryptographic identity)
-    let identity_path = root.join(".lex").join("identity.yml");
-    if !identity_path.exists() {
-        let first_sha = Command::new("git")
-            .args(["rev-list", "--max-parents=0", "HEAD"])
-            .output()
-            .ok()
-            .filter(|o| o.status.success())
-            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-            .unwrap_or_default();
+    // Capture first commit SHA — the cryptographic anchor — and append it
+    // to repo.yml as `first_commit:`. This replaces the old .lex/identity.yml
+    // file; one file holds all repo metadata now.
+    let first_sha = Command::new("git")
+        .args(["rev-list", "--max-parents=0", "HEAD"])
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .unwrap_or_default();
 
-        if !first_sha.is_empty() {
-            let now = Command::new("date").args(["-u", "+%Y-%m-%dT%H:%M:%SZ"])
-                .output().ok()
-                .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-                .unwrap_or_else(|| "unknown".to_string());
-
-            let identity = format!(
-                "# git-lex identity — do not edit\n\
-                 # This file anchors this repo's cryptographic identity.\n\
-                 # The SHA below is the first commit hash — immutable and unique.\n\
-                 identity: {}\n\
-                 created: {}\n\
-                 kit: {}\n",
-                first_sha, now, kit_name
-            );
-            fs::write(&identity_path, &identity).ok();
-
-            // Commit the identity file
-            let _ = Command::new("git").args(["add", ".lex/identity.yml"]).status();
+    if !first_sha.is_empty() {
+        let existing = fs::read_to_string(&repo_yml_path).unwrap_or_default();
+        if !existing.contains("first_commit:") {
+            let updated = format!("{}first_commit: {}\n", existing, first_sha);
+            fs::write(&repo_yml_path, &updated).ok();
+            let _ = Command::new("git").args(["add", ".lex/repo.yml"]).status();
             let _ = Command::new("git").args(["commit", "-m", "git lex identity"]).status();
             println!("Identity: {}", first_sha);
         }
@@ -1264,108 +1148,387 @@ const KIT_GITHUB_ORG: &str = "repolex-ai";
 
 /// Fetch a kit from GitHub as a tarball and extract it into the target directory.
 /// Returns true if the fetch succeeded, false if it failed (caller should fall back to embedded).
-fn fetch_kit_from_github(kit_name: &str, target_dir: &std::path::Path) -> bool {
-    let repo_name = format!("git-lex-kit-{}", kit_name);
+/// Auto-commit any uncommitted working-tree content before a destructive
+/// git-lex operation. This is the "commit liberally and broadly" policy:
+/// we don't want users to lose work just because they ran a git-lex command
+/// that wipes or overwrites files. Git history is cheap; reconstruction is
+/// expensive.
+///
+/// No-op if there's nothing to commit (clean working tree) or if git is
+/// unavailable. Errors are reported but not fatal — the destructive
+/// operation can still proceed; we just won't have a snapshot.
+fn auto_commit_snapshot(reason: &str) {
+    // Check if we're in a git repo with commits
+    let has_head = Command::new("git").args(["rev-parse", "HEAD"]).output()
+        .map(|o| o.status.success()).unwrap_or(false);
+    if !has_head {
+        return; // No commits yet, nothing to snapshot
+    }
+
+    // Check if there's anything to commit
+    let status = Command::new("git").args(["status", "--porcelain"]).output();
+    let has_changes = match status {
+        Ok(o) if o.status.success() => !String::from_utf8_lossy(&o.stdout).trim().is_empty(),
+        _ => return,
+    };
+    if !has_changes {
+        return; // Clean working tree, nothing to snapshot
+    }
+
+    // Stage everything and commit
+    let _ = Command::new("git").args(["add", "-A"]).status();
+    let msg = format!("git lex auto-snapshot: {}", reason);
+    let commit = Command::new("git").args(["commit", "-m", &msg, "--allow-empty"]).output();
+    match commit {
+        Ok(o) if o.status.success() => {
+            println!("Auto-committed working tree before {}.", reason);
+        }
+        _ => {
+            // Not fatal — maybe pre-commit hook failed, maybe nothing
+            // actually staged (hidden files?). Just report and continue.
+            eprintln!("Warning: auto-commit before {} did not succeed. Continuing.", reason);
+        }
+    }
+}
+
+fn fetch_kit_from_github(kit_spec: &str, target_dir: &std::path::Path) -> bool {
+    let (org, repo, _) = resolve_kit_spec(kit_spec);
     let url = format!(
         "https://github.com/{}/{}/archive/refs/heads/main.tar.gz",
-        KIT_GITHUB_ORG, repo_name
+        org, repo
     );
 
-    // Create a temp dir for extraction
-    let tmp_dir = std::env::temp_dir().join(format!("git-lex-kit-{}", kit_name));
-    let _ = fs::remove_dir_all(&tmp_dir);
-    fs::create_dir_all(&tmp_dir).ok();
+    // Extract the tarball directly into target_dir using --strip-components=1
+    // to drop the top-level "git-lex-kit-{name}-main/" directory. Extracting
+    // in-place preserves symlinks (tar honors them natively); any round trip
+    // through a copy step dereferences them, which breaks e.g. the
+    // scaffold/.claude/skills → ../../skill symlink.
+    fs::create_dir_all(target_dir).ok();
 
-    // Download and extract with curl + tar
     let status = Command::new("curl")
         .args(["-sL", "--fail", "-o", "-", &url])
         .stdout(std::process::Stdio::piped())
         .spawn()
         .and_then(|curl| {
             Command::new("tar")
-                .args(["xzf", "-", "-C", &tmp_dir.to_string_lossy(), "--strip-components=1"])
+                .args([
+                    "xzf",
+                    "-",
+                    "-C",
+                    &target_dir.to_string_lossy(),
+                    "--strip-components=1",
+                ])
                 .stdin(curl.stdout.unwrap())
                 .status()
         });
 
     match status {
         Ok(s) if s.success() => {
-            // Verify we actually got files (curl --fail should prevent empty extracts, but be safe)
-            let has_files = fs::read_dir(&tmp_dir).ok()
+            // Verify we actually got files (curl --fail should prevent empty
+            // extracts, but be safe).
+            let has_files = fs::read_dir(target_dir)
+                .ok()
                 .map(|entries| entries.count() > 0)
                 .unwrap_or(false);
-
             if !has_files {
-                let _ = fs::remove_dir_all(&tmp_dir);
                 return false;
             }
-
-            // Copy files from temp dir to target
-            if let Ok(entries) = fs::read_dir(&tmp_dir) {
-                fs::create_dir_all(target_dir).ok();
-                for entry in entries.flatten() {
-                    let src = entry.path();
-                    let dest = target_dir.join(entry.file_name());
-                    if src.is_file() {
-                        fs::copy(&src, &dest).ok();
-                    } else if src.is_dir() {
-                        copy_dir_recursive(&src, &dest).ok();
-                    }
-                }
-            }
-            let _ = fs::remove_dir_all(&tmp_dir);
             true
         }
-        _ => {
-            let _ = fs::remove_dir_all(&tmp_dir);
-            false
-        }
+        _ => false,
     }
 }
 
+/// Read simple `key: value` fields from a repo.yml-style file into a map.
+/// Used for honoring existing init variables on re-init (single-shot with
+/// carry-over). Skips comment lines and anything that doesn't parse as a
+/// flat key/value.
+fn read_repo_yml_fields(path: &std::path::Path) -> HashMap<String, String> {
+    let mut out = HashMap::new();
+    let content = match fs::read_to_string(path) {
+        Ok(c) => c,
+        Err(_) => return out,
+    };
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') { continue; }
+        if let Some(colon) = trimmed.find(':') {
+            let key = trimmed[..colon].trim().to_string();
+            let value = trimmed[colon + 1..].trim().to_string();
+            if !key.is_empty() && !value.is_empty() {
+                out.insert(key, value);
+            }
+        }
+    }
+    out
+}
+
+/// Read the `init_prompts:` list from a kit's kit.yml. Returns the variable
+/// names the kit wants init to prompt for. Empty list if missing or absent.
+fn kit_config_init_prompts(kit_name: &str) -> Vec<String> {
+    let root = match find_git_root() {
+        Some(r) => r,
+        None => return Vec::new(),
+    };
+    let config_path = kit_install_dir_for_spec(&root, kit_name).join("kit.yml");
+    let content = match fs::read_to_string(&config_path) {
+        Ok(c) => c,
+        Err(_) => return Vec::new(),
+    };
+    let parsed: serde_yaml::Value = match serde_yaml::from_str(&content) {
+        Ok(v) => v,
+        Err(_) => return Vec::new(),
+    };
+    parsed
+        .get("init_prompts")
+        .and_then(|v| v.as_sequence())
+        .map(|seq| {
+            seq.iter()
+                .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Interactively prompt the user for each kit-declared init variable and
+/// return the collected name→value map. Re-uses existing values from repo.yml
+/// if present (supports idempotent re-init).
+fn collect_init_variables(kit_name: &str, existing: &HashMap<String, String>) -> HashMap<String, String> {
+    let mut out = HashMap::new();
+    // The `{kit}` template variable is the short name ("soul"), not the full
+    // spec ("repolex-ai/git-lex-kit-soul"), because that's what templates want
+    // to embed (e.g. `{kit}.memory.confidence`).
+    let (_, _, short) = resolve_kit_spec(kit_name);
+    out.insert("kit".to_string(), short);
+    for name in kit_config_init_prompts(kit_name) {
+        if let Some(v) = existing.get(&name) {
+            out.insert(name, v.clone());
+            continue;
+        }
+        eprint!("{}: ", name);
+        let mut input = String::new();
+        std::io::stdin().read_line(&mut input).unwrap_or_default();
+        let value = input.trim().to_string();
+        if !value.is_empty() {
+            out.insert(name, value);
+        }
+    }
+    out
+}
+
+/// Substitute `{varname}` template placeholders in text using a variable map.
+fn substitute_vars(text: &str, vars: &HashMap<String, String>) -> String {
+    let mut out = text.to_string();
+    for (k, v) in vars {
+        out = out.replace(&format!("{{{}}}", k), v);
+    }
+    out
+}
+
 /// Install scaffold files from the kit into the repo root.
-/// Scaffold files live in .lex/ontology/kit/{name}/scaffold/ and mirror the repo structure.
-/// Never overwrites existing files. Supports {kit} template variable in file contents.
-fn install_scaffold_files(kit_name: &str) -> usize {
+/// Scaffold files live in .lex/kit/scaffold/ and mirror the repo structure.
+/// Raw byte-for-byte copy — no template processing, no variable substitution.
+/// Always overwrites existing files. Symlinks are preserved as symlinks
+/// (not dereferenced) so that e.g. `.claude/skills` can be a symlink to
+/// `../../skill` pointing at the agent's content-area skill folder.
+/// These are infrastructure files the kit owns: .claude/, AGENTS.md, hooks,
+/// skills symlink, etc. Agents don't edit them.
+fn install_scaffold_files() -> usize {
     let root = match find_git_root() {
         Some(r) => r,
         None => return 0,
     };
 
-    let scaffold_dir = root.join(".lex").join("ontology").join("kit").join(kit_name).join("scaffold");
+    let kit_dir = match kit_install_dir() {
+        Some(d) => d,
+        None => return 0,
+    };
+    let scaffold_dir = kit_dir.join("scaffold");
     if !scaffold_dir.exists() {
         return 0;
     }
 
     let mut count = 0;
 
-    fn install_recursive(src_dir: &std::path::Path, dest_dir: &std::path::Path, kit_name: &str, count: &mut usize) {
-        if let Ok(entries) = fs::read_dir(src_dir) {
-            for entry in entries.flatten() {
-                let src = entry.path();
-                let name = entry.file_name();
-                let dest = dest_dir.join(&name);
+    fn install_recursive(
+        src_dir: &std::path::Path,
+        dest_dir: &std::path::Path,
+        count: &mut usize,
+    ) {
+        let entries = match fs::read_dir(src_dir) {
+            Ok(e) => e,
+            Err(_) => return,
+        };
+        for entry in entries.flatten() {
+            let src = entry.path();
+            let name = entry.file_name();
+            let dest = dest_dir.join(&name);
 
-                if src.is_dir() {
-                    fs::create_dir_all(&dest).ok();
-                    install_recursive(&src, &dest, kit_name, count);
-                } else if src.is_file() {
-                    if !dest.exists() {
-                        // Read content and substitute {kit} template variable
-                        if let Ok(content) = fs::read_to_string(&src) {
-                            let processed = content.replace("{kit}", kit_name);
-                            fs::create_dir_all(dest.parent().unwrap_or(&dest)).ok();
-                            fs::write(&dest, &processed).ok();
-                            *count += 1;
+            // Use symlink_metadata so we can detect symlinks before they get
+            // followed by is_dir/is_file.
+            let meta = match fs::symlink_metadata(&src) {
+                Ok(m) => m,
+                Err(_) => continue,
+            };
+            let ft = meta.file_type();
+
+            if ft.is_symlink() {
+                // Preserve the symlink. Read its target (which may be a
+                // relative path that doesn't exist inside the kit, but will
+                // resolve correctly in the target repo), remove whatever's
+                // at dest, then recreate the symlink pointing at the same
+                // target.
+                let target = match fs::read_link(&src) {
+                    Ok(t) => t,
+                    Err(_) => continue,
+                };
+                fs::create_dir_all(dest.parent().unwrap_or(&dest)).ok();
+                // Clear any existing entry at dest — could be a stale file,
+                // directory, or symlink from a previous run.
+                if dest.symlink_metadata().is_ok() {
+                    if dest.is_dir() && !dest.is_symlink() {
+                        let _ = fs::remove_dir_all(&dest);
+                    } else {
+                        let _ = fs::remove_file(&dest);
+                    }
+                }
+                #[cfg(unix)]
+                {
+                    if std::os::unix::fs::symlink(&target, &dest).is_ok() {
+                        *count += 1;
+                    }
+                }
+                continue;
+            }
+
+            if ft.is_dir() {
+                fs::create_dir_all(&dest).ok();
+                install_recursive(&src, &dest, count);
+                continue;
+            }
+
+            if ft.is_file() {
+                fs::create_dir_all(dest.parent().unwrap_or(&dest)).ok();
+                // If a symlink or non-file is currently at dest, remove it
+                // so fs::copy can write a regular file.
+                if dest.symlink_metadata().is_ok() {
+                    let dmeta = dest.symlink_metadata().ok().map(|m| m.file_type());
+                    if let Some(dft) = dmeta {
+                        if dft.is_symlink() || dft.is_dir() {
+                            if dft.is_dir() && !dft.is_symlink() {
+                                let _ = fs::remove_dir_all(&dest);
+                            } else {
+                                let _ = fs::remove_file(&dest);
+                            }
                         }
                     }
+                }
+                if fs::copy(&src, &dest).is_ok() {
+                    *count += 1;
                 }
             }
         }
     }
 
-    install_recursive(&scaffold_dir, &root, kit_name, &mut count);
+    install_recursive(&scaffold_dir, &root, &mut count);
     count
+}
+
+/// Report from install_asset_files — lists what was installed, what was
+/// skipped because it already existed, and what was overwritten under --force.
+#[derive(Default)]
+struct AssetInstallReport {
+    installed: Vec<String>,  // freshly written (destination did not exist)
+    skipped: Vec<String>,    // destination already existed, --force not set
+    overwritten: Vec<String>, // destination existed and was overwritten under --force
+}
+
+/// Install asset files from the kit into the repo root.
+/// Assets live in .lex/kit/assets/ and mirror the repo structure. They can
+/// target paths anywhere under the repo, including inside .lex/ itself
+/// (e.g. `assets/.lex/www/mykitpage/index.html`).
+///
+/// Behavior differs from scaffold:
+///   - Template processing: `{varname}` placeholders are substituted from
+///     the variable map before writing.
+///   - Default safe mode: if the destination file already exists, skip it
+///     and add to the skipped list. User can re-run with --force to
+///     overwrite.
+///   - Force mode: overwrite existing files. No backup file is written —
+///     git history is the safety net for any lost local edits.
+fn install_asset_files(vars: &HashMap<String, String>, force: bool) -> AssetInstallReport {
+    let mut report = AssetInstallReport::default();
+    let root = match find_git_root() {
+        Some(r) => r,
+        None => return report,
+    };
+
+    let kit_dir = match kit_install_dir() {
+        Some(d) => d,
+        None => return report,
+    };
+    let asset_dir = kit_dir.join("assets");
+    if !asset_dir.exists() {
+        return report;
+    }
+
+    fn install_recursive(
+        src_dir: &std::path::Path,
+        dest_dir: &std::path::Path,
+        vars: &HashMap<String, String>,
+        force: bool,
+        repo_root: &std::path::Path,
+        report: &mut AssetInstallReport,
+    ) {
+        let entries = match fs::read_dir(src_dir) {
+            Ok(e) => e,
+            Err(_) => return,
+        };
+        for entry in entries.flatten() {
+            let src = entry.path();
+            let name = entry.file_name();
+            let dest = dest_dir.join(&name);
+
+            if src.is_dir() {
+                fs::create_dir_all(&dest).ok();
+                install_recursive(&src, &dest, vars, force, repo_root, report);
+                continue;
+            }
+            if !src.is_file() {
+                continue;
+            }
+
+            let rel = dest
+                .strip_prefix(repo_root)
+                .unwrap_or(&dest)
+                .to_string_lossy()
+                .to_string();
+
+            if dest.exists() && !force {
+                report.skipped.push(rel);
+                continue;
+            }
+
+            let content = match fs::read_to_string(&src) {
+                Ok(c) => c,
+                Err(_) => continue,
+            };
+            let processed = substitute_vars(&content, vars);
+            fs::create_dir_all(dest.parent().unwrap_or(&dest)).ok();
+
+            let was_present = dest.exists();
+            if fs::write(&dest, &processed).is_ok() {
+                if was_present {
+                    report.overwritten.push(rel);
+                } else {
+                    report.installed.push(rel);
+                }
+            }
+        }
+    }
+
+    install_recursive(&asset_dir, &root, vars, force, &root, &mut report);
+    report
 }
 
 fn copy_dir_recursive(src: &std::path::Path, dest: &std::path::Path) -> std::io::Result<()> {
@@ -1374,119 +1537,39 @@ fn copy_dir_recursive(src: &std::path::Path, dest: &std::path::Path) -> std::io:
         let entry = entry?;
         let src_path = entry.path();
         let dest_path = dest.join(entry.file_name());
-        if src_path.is_dir() {
+
+        // Inspect without following symlinks so we can preserve them.
+        let meta = fs::symlink_metadata(&src_path)?;
+        let ft = meta.file_type();
+
+        if ft.is_symlink() {
+            let target = fs::read_link(&src_path)?;
+            // Remove anything existing at dest so we can create the symlink.
+            if dest_path.symlink_metadata().is_ok() {
+                if dest_path.is_dir() && !dest_path.is_symlink() {
+                    let _ = fs::remove_dir_all(&dest_path);
+                } else {
+                    let _ = fs::remove_file(&dest_path);
+                }
+            }
+            #[cfg(unix)]
+            {
+                std::os::unix::fs::symlink(&target, &dest_path)?;
+            }
+            #[cfg(not(unix))]
+            {
+                // Windows: fall back to copying the target (best effort).
+                if src_path.exists() && src_path.is_file() {
+                    fs::copy(&src_path, &dest_path)?;
+                }
+            }
+        } else if ft.is_dir() {
             copy_dir_recursive(&src_path, &dest_path)?;
-        } else {
+        } else if ft.is_file() {
             fs::copy(&src_path, &dest_path)?;
         }
     }
     Ok(())
-}
-
-fn cmd_kit_update() {
-    let root = match find_git_root() {
-        Some(r) => r,
-        None => { eprintln!("fatal: not a git repository"); exit(1); }
-    };
-
-    let kit = match get_kit() {
-        Some(k) => k,
-        None => { eprintln!("No kit configured."); exit(1); }
-    };
-
-    let kit_dir = root.join(".lex").join("ontology").join("kit").join(&kit);
-    println!("Updating kit '{}'...", kit);
-
-    if fetch_kit_from_github(&kit, &kit_dir) {
-        println!("Kit '{}' updated from GitHub.", kit);
-
-        // Generate SHACL shapes from ontology (single source of truth)
-        if let Some(shapes_path) = build_shacl_shapes(&kit) {
-            println!("SHACL shapes generated: {}", shapes_path.file_name().unwrap_or_default().to_string_lossy());
-        }
-
-        // Regenerate class templates using the generated shapes for hints
-        let kit_types = get_kit_types(&kit);
-        let shapes_content = {
-            let shapes_path = kit_dir.join(format!("{}-shapes.ttl", kit));
-            fs::read_to_string(&shapes_path).unwrap_or_default()
-        };
-        let shacl_hints = parse_shacl_hints(&shapes_content);
-
-        for (type_name, properties) in &kit_types {
-            let type_lower = type_name.to_lowercase();
-            let type_dir = root.join(&type_lower);
-            fs::create_dir_all(&type_dir).ok();
-            let template_path = type_dir.join(format!("__{}.md", type_name));
-
-            // Always overwrite templates on update
-            let mut tmpl = String::new();
-            tmpl.push_str("---\n");
-
-            for (prop_name, prop_type, _required, _comment) in properties {
-                // Property names pass through as-is from the ontology (camelCase)
-                let key = format!("{}.{}.{}", kit, type_lower, prop_name);
-
-                let prefix_name = get_kit_prefix_name(&kit);
-                let hint = shacl_hints.get(&format!("{}:{}", prefix_name, prop_name));
-
-                let type_hint = if let Some(h) = hint {
-                    h.clone()
-                } else {
-                    let base_hint = match prop_type.as_str() {
-                        "reference" => format!("IRI -> {}", type_name),
-                        _ => "str".to_string(),
-                    };
-                    format!("optional, {}", base_hint)
-                };
-
-                tmpl.push_str(&format!("{}: # {}\n", key, type_hint));
-            }
-
-            tmpl.push_str("---\n");
-            fs::write(&template_path, &tmpl).ok();
-        }
-        println!("Class templates regenerated.");
-    } else {
-        eprintln!("Failed to fetch kit '{}' from GitHub. Is the repo repolex-ai/git-lex-kit-{} accessible?", kit, kit);
-    }
-}
-
-fn cmd_kit_list() {
-    println!("Official kits:");
-    println!("  soul    — An agent's persistent mind (memory, decision, exploration, friend, journal, skill, mantra, routine, resource, creation, interest, note, task)");
-    println!("  squad   — Multi-agent team collaboration (agent, message, decision, task, project, note)");
-    println!("  collab  — Two-party shared workspace (idea, question, reference, decision, note)");
-    println!();
-    println!("Custom kits: any GitHub repo at {}/git-lex-kit-<name>", KIT_GITHUB_ORG);
-}
-
-fn install_global_drivers() {
-    let commands = [
-        ["config", "--global", "diff.lex.command", "git-lex diff-driver"],
-        ["config", "--global", "merge.lex.name", "git-lex semantic merge"],
-        [
-            "config",
-            "--global",
-            "merge.lex.driver",
-            "git-lex merge-driver %O %A %B %P",
-        ],
-    ];
-
-    for args in &commands {
-        let status = Command::new("git").args(args.as_slice()).status();
-        match status {
-            Ok(s) if s.success() => {}
-            _ => {
-                eprintln!("failed to set git config: git {}", args.join(" "));
-                exit(1);
-            }
-        }
-    }
-
-    println!("Installed global git-lex drivers:");
-    println!("  diff.lex.command = git-lex diff-driver");
-    println!("  merge.lex.driver = git-lex merge-driver %O %A %B %P");
 }
 
 // ─── git lex status ────────────────────────────────────────────
@@ -1520,30 +1603,6 @@ fn cmd_status() {
             println!("  .lex/{}/  — {} files", subdir, count);
         } else {
             println!("  .lex/{}/  — (not created)", subdir);
-        }
-    }
-
-    let gitattributes = root.join(".gitattributes");
-    if gitattributes.exists() {
-        let content = fs::read_to_string(&gitattributes).unwrap_or_default();
-        if content.contains("diff=lex") {
-            println!("  .gitattributes — lex drivers configured");
-        } else {
-            println!("  .gitattributes — exists but no lex drivers");
-        }
-    } else {
-        println!("  .gitattributes — not found");
-    }
-
-    let diff_check = Command::new("git")
-        .args(["config", "--global", "diff.lex.command"])
-        .output();
-    match diff_check {
-        Ok(o) if o.status.success() => {
-            println!("  global config — lex drivers installed");
-        }
-        _ => {
-            println!("  global config — lex drivers NOT installed (run 'git lex init')");
         }
     }
 
@@ -3374,6 +3433,43 @@ fn get_kit() -> Option<String> {
     None
 }
 
+/// Resolve a kit spec into (org, repo, short_name). Accepts either a short
+/// form (`soul`) which is sugar for `repolex-ai/git-lex-kit-{name}`, or a
+/// full `org/repo` form. Returns (org, repo, short_name) where short_name
+/// is the simple identifier used for SHACL file names, TTL file names, and
+/// SPARQL prefix lookup.
+fn resolve_kit_spec(spec: &str) -> (String, String, String) {
+    if let Some((org, repo)) = spec.split_once('/') {
+        let short = repo
+            .strip_prefix("git-lex-kit-")
+            .unwrap_or(repo)
+            .to_string();
+        (org.to_string(), repo.to_string(), short)
+    } else {
+        (
+            KIT_GITHUB_ORG.to_string(),
+            format!("git-lex-kit-{}", spec),
+            spec.to_string(),
+        )
+    }
+}
+
+/// Install dir for a given kit spec, relative to the repo root.
+/// `.lex/kit/{org}/{repo}/`.
+fn kit_install_dir_for_spec(root: &std::path::Path, spec: &str) -> PathBuf {
+    let (org, repo, _) = resolve_kit_spec(spec);
+    root.join(".lex").join("kit").join(&org).join(&repo)
+}
+
+/// Install dir for the current repo's kit. Reads repo.yml to find the kit
+/// spec, resolves it, and returns the path. Returns None if no kit is
+/// configured.
+fn kit_install_dir() -> Option<PathBuf> {
+    let root = find_git_root()?;
+    let kit = get_kit()?;
+    Some(kit_install_dir_for_spec(&root, &kit))
+}
+
 // ─── Ontology Builder ──────���───────────────────────────────────
 // Loads kit TTL into oxigraph, queries OWL constraints, generates SHACL shapes.
 // Single source of truth: the TTL. Shapes are derived artifacts.
@@ -3385,7 +3481,7 @@ fn kit_config_bool(kit: &str, key: &str, default: bool) -> bool {
         Some(r) => r,
         None => return default,
     };
-    let config_path = root.join(".lex").join("ontology").join("kit").join(kit).join("kit.yml");
+    let config_path = kit_install_dir_for_spec(&root, kit).join("kit.yml");
     let content = match fs::read_to_string(&config_path) {
         Ok(c) => c,
         Err(_) => return default,
@@ -3404,8 +3500,9 @@ fn kit_config_bool(kit: &str, key: &str, default: bool) -> bool {
 /// Find the kit TTL file path. Tries {kit}.ttl first, then any .ttl in the kit dir.
 fn find_kit_ttl(kit: &str) -> Option<PathBuf> {
     let root = find_git_root()?;
-    let kit_dir = root.join(".lex").join("ontology").join("kit").join(kit);
-    let primary = kit_dir.join(format!("{}.ttl", kit));
+    let kit_dir = kit_install_dir_for_spec(&root, kit);
+    let (_, _, short_name) = resolve_kit_spec(kit);
+    let primary = kit_dir.join(format!("{}.ttl", short_name));
     if primary.exists() {
         return Some(primary);
     }
@@ -3435,10 +3532,12 @@ fn generate_shacl_shapes(kit: &str) -> Option<String> {
     let ttl_path = find_kit_ttl(kit)?;
     let ttl_content = fs::read_to_string(&ttl_path).ok()?;
 
-    // Find the kit prefix name and namespace from the TTL
-    let kit_ns_pattern = format!("/kit/{}/", kit);
-    let mut prefix_name = kit.to_string();
-    let mut namespace = format!("https://repolex.ai/ontology/kit/{}/", kit);
+    // Find the kit prefix name and namespace from the TTL. Namespace uses
+    // the short kit name, not the full org/repo spec.
+    let (_, _, short) = resolve_kit_spec(kit);
+    let kit_ns_pattern = format!("/kit/{}/", short);
+    let mut prefix_name = short.clone();
+    let mut namespace = format!("https://repolex.ai/ontology/kit/{}/", short);
     for line in ttl_content.lines() {
         if line.starts_with("@prefix ") && line.contains(&kit_ns_pattern) {
             if let Some(colon_pos) = line[8..].find(':') {
@@ -3645,8 +3744,9 @@ fn generate_shacl_shapes(kit: &str) -> Option<String> {
 fn build_shacl_shapes(kit: &str) -> Option<PathBuf> {
     let root = find_git_root()?;
     let shacl = generate_shacl_shapes(kit)?;
-    let kit_dir = root.join(".lex").join("ontology").join("kit").join(kit);
-    let shapes_path = kit_dir.join(format!("{}-shapes.ttl", kit));
+    let kit_dir = kit_install_dir_for_spec(&root, kit);
+    let (_, _, short) = resolve_kit_spec(kit);
+    let shapes_path = kit_dir.join(format!("{}-shapes.ttl", short));
     fs::write(&shapes_path, &shacl).ok()?;
     Some(shapes_path)
 }
@@ -3659,9 +3759,10 @@ fn get_object_properties(kit: &str) -> HashSet<String> {
         None => return HashSet::new(),
     };
 
-    let kit_dir = root.join(".lex").join("ontology").join("kit").join(kit);
+    let kit_dir = kit_install_dir_for_spec(&root, kit);
+    let (_, _, short) = resolve_kit_spec(kit);
     let content = {
-        let primary = kit_dir.join(format!("{}.ttl", kit));
+        let primary = kit_dir.join(format!("{}.ttl", short));
         match fs::read_to_string(&primary) {
             Ok(c) => c,
             Err(_) => {
@@ -3676,9 +3777,9 @@ fn get_object_properties(kit: &str) -> HashSet<String> {
 
     if content.is_empty() { return HashSet::new(); }
 
-    // Find prefix name
-    let kit_ns_pattern = format!("/kit/{}/", kit);
-    let mut prefix_name = kit.to_string();
+    // Find prefix name — namespace uses short kit name
+    let kit_ns_pattern = format!("/kit/{}/", short);
+    let mut prefix_name = short.clone();
     for line in content.lines() {
         if line.starts_with("@prefix ") && line.contains(&kit_ns_pattern) {
             if let Some(colon_pos) = line[8..].find(':') {
@@ -3713,9 +3814,10 @@ fn get_property_datatypes(kit: &str) -> HashMap<String, String> {
         None => return HashMap::new(),
     };
 
-    let kit_dir = root.join(".lex").join("ontology").join("kit").join(kit);
+    let kit_dir = kit_install_dir_for_spec(&root, kit);
+    let (_, _, short) = resolve_kit_spec(kit);
     let content = {
-        let primary = kit_dir.join(format!("{}.ttl", kit));
+        let primary = kit_dir.join(format!("{}.ttl", short));
         match fs::read_to_string(&primary) {
             Ok(c) => c,
             Err(_) => {
@@ -3730,9 +3832,9 @@ fn get_property_datatypes(kit: &str) -> HashMap<String, String> {
 
     if content.is_empty() { return HashMap::new(); }
 
-    // Find prefix name
-    let kit_ns_pattern = format!("/kit/{}/", kit);
-    let mut prefix_name = kit.to_string();
+    // Find prefix name — namespace uses short kit name
+    let kit_ns_pattern = format!("/kit/{}/", short);
+    let mut prefix_name = short.clone();
     for line in content.lines() {
         if line.starts_with("@prefix ") && line.contains(&kit_ns_pattern) {
             if let Some(colon_pos) = line[8..].find(':') {
@@ -3801,9 +3903,10 @@ fn get_property_ranges(kit: &str) -> HashMap<String, String> {
         None => return HashMap::new(),
     };
 
-    let kit_dir = root.join(".lex").join("ontology").join("kit").join(kit);
+    let kit_dir = kit_install_dir_for_spec(&root, kit);
+    let (_, _, short) = resolve_kit_spec(kit);
     let content = {
-        let primary = kit_dir.join(format!("{}.ttl", kit));
+        let primary = kit_dir.join(format!("{}.ttl", short));
         match fs::read_to_string(&primary) {
             Ok(c) => c,
             Err(_) => {
@@ -3818,9 +3921,9 @@ fn get_property_ranges(kit: &str) -> HashMap<String, String> {
 
     if content.is_empty() { return HashMap::new(); }
 
-    // Find prefix name — the kit's own namespace prefix in this TTL file.
-    let kit_ns_pattern = format!("/kit/{}/", kit);
-    let mut prefix_name = kit.to_string();
+    // Find prefix name — namespace uses short kit name.
+    let kit_ns_pattern = format!("/kit/{}/", short);
+    let mut prefix_name = short.clone();
     for line in content.lines() {
         if line.starts_with("@prefix ") && line.contains(&kit_ns_pattern) {
             if let Some(colon_pos) = line[8..].find(':') {
@@ -3857,9 +3960,9 @@ fn get_property_ranges(kit: &str) -> HashMap<String, String> {
                 if range.starts_with("xsd:") || range.starts_with("rdfs:") {
                     continue;
                 }
-                // Resolve prefix:ClassName to full IRI.
+                // Resolve prefix:ClassName to full IRI (uses short kit name).
                 let class_iri = if let Some(local) = range.strip_prefix(&format!("{}:", prefix_name)) {
-                    format!("https://repolex.ai/ontology/kit/{}/{}", kit, local)
+                    format!("https://repolex.ai/ontology/kit/{}/{}", short, local)
                 } else if range.starts_with('<') && range.ends_with('>') {
                     range[1..range.len() - 1].to_string()
                 } else {
@@ -3943,8 +4046,9 @@ fn get_kit_types(kit: &str) -> Vec<(String, Vec<(String, String, bool, String)>)
     };
 
     // Try {kit}.ttl first, then find any .ttl in the kit directory
-    let kit_dir = root.join(".lex").join("ontology").join("kit").join(kit);
-    let ontology_path = kit_dir.join(format!("{}.ttl", kit));
+    let kit_dir = kit_install_dir_for_spec(&root, kit);
+    let (_, _, short) = resolve_kit_spec(kit);
+    let ontology_path = kit_dir.join(format!("{}.ttl", short));
     let content = match fs::read_to_string(&ontology_path) {
         Ok(c) => c,
         Err(_) => {
@@ -3960,10 +4064,12 @@ fn get_kit_types(kit: &str) -> Vec<(String, Vec<(String, String, bool, String)>)
         }
     };
 
-    // Extract the kit prefix — find the @prefix that maps to this kit's namespace URL
-    let kit_ns_pattern = format!("/kit/{}/", kit);
+    // Extract the kit prefix — find the @prefix that maps to this kit's
+    // namespace URL. The namespace uses the short kit name, not the full
+    // org/repo spec.
+    let kit_ns_pattern = format!("/kit/{}/", short);
     let mut prefix = String::new();
-    let mut prefix_name = kit.to_string();
+    let mut prefix_name = short.clone();
     for line in content.lines() {
         if line.starts_with("@prefix ") && line.contains(&kit_ns_pattern) {
             // Extract prefix name: @prefix lab: <...> .
@@ -4122,14 +4228,16 @@ fn cmd_create(doctype: &str, title: Option<&str>) {
     // Auto-generate agent email for Agent type
     let agent_email = format!("{}@lex.local", slug);
 
-    // Build frontmatter — flat dot notation: kit.class.property
+    // Build frontmatter — flat dot notation: kit.class.property using the
+    // short kit name, not the full org/repo spec.
+    let (_, _, short) = resolve_kit_spec(&kit);
     let class_lower = class_name.to_lowercase();
     let mut fm = String::new();
     fm.push_str("---\n");
 
     for (prop_name, prop_type, _required, comment) in &properties {
         // Property names pass through as-is from the ontology (camelCase)
-        let key = format!("{}.{}.{}", kit, class_lower, prop_name);
+        let key = format!("{}.{}.{}", short, class_lower, prop_name);
 
         // Build the comment suffix from rdfs:comment
         let comment_suffix = if comment.is_empty() {
@@ -4156,7 +4264,7 @@ fn cmd_create(doctype: &str, title: Option<&str>) {
 
     fs::write(&filepath, &fm).expect("failed to create document");
     println!("Created: {}", display_path);
-    println!("Type: {}:{}", kit, class_name);
+    println!("Type: {}:{}", short, class_name);
     if class_name == "Agent" {
         println!("Agent ID: {}", agent_email);
         println!("Use this as your git author: git -c user.email=\"{}\"", agent_email);
@@ -4258,9 +4366,10 @@ fn frontmatter_to_turtle(filepath: &std::path::Path, root: &std::path::Path, kit
     }
 
     // Read the kit ontology to find the prefix name and namespace
-    let kit_dir = root.join(".lex").join("ontology").join("kit").join(kit);
+    let kit_dir = kit_install_dir_for_spec(&root, kit);
+    let (_, _, short) = resolve_kit_spec(kit);
     let ttl_path = {
-        let primary = kit_dir.join(format!("{}.ttl", kit));
+        let primary = kit_dir.join(format!("{}.ttl", short));
         if primary.exists() { primary } else {
             fs::read_dir(&kit_dir).ok()?
                 .filter_map(|e| e.ok())
@@ -4270,10 +4379,10 @@ fn frontmatter_to_turtle(filepath: &std::path::Path, root: &std::path::Path, kit
     };
     let kit_ttl = fs::read_to_string(&ttl_path).ok()?;
 
-    // Find prefix name and namespace from TTL
-    let kit_ns_pattern = format!("/kit/{}/", kit);
-    let mut prefix_name = kit.to_string();
-    let mut namespace = format!("https://repolex.ai/ontology/kit/{}/", kit);
+    // Find prefix name and namespace from TTL — uses short kit name
+    let kit_ns_pattern = format!("/kit/{}/", short);
+    let mut prefix_name = short.clone();
+    let mut namespace = format!("https://repolex.ai/ontology/kit/{}/", short);
     for line in kit_ttl.lines() {
         if line.starts_with("@prefix ") && line.contains(&kit_ns_pattern) {
             if let Some(colon_pos) = line[8..].find(':') {
@@ -4341,53 +4450,13 @@ fn frontmatter_to_turtle(filepath: &std::path::Path, root: &std::path::Path, kit
 // ─── git lex identity ──────────────────────────────────────────
 
 fn read_identity(root: &std::path::Path) -> Option<String> {
-    let content = fs::read_to_string(root.join(".lex").join("identity.yml")).ok()?;
+    let content = fs::read_to_string(root.join(".lex").join("repo.yml")).ok()?;
     for line in content.lines() {
-        if let Some(sha) = line.strip_prefix("identity: ") {
+        if let Some(sha) = line.strip_prefix("first_commit: ") {
             return Some(sha.trim().to_string());
         }
     }
     None
-}
-
-fn cmd_identity() {
-    let root = match find_git_root() {
-        Some(r) => r,
-        None => {
-            eprintln!("fatal: not a git repository");
-            exit(1);
-        }
-    };
-
-    let identity_path = root.join(".lex").join("identity.yml");
-    if !identity_path.exists() {
-        eprintln!("No identity found. Run 'git lex init' to create one.");
-        exit(1);
-    }
-
-    let content = fs::read_to_string(&identity_path).unwrap_or_default();
-    println!("{}", content.trim());
-
-    // Show tickets if any
-    let tickets_dir = root.join(".lex").join("tickets");
-    if tickets_dir.exists() {
-        if let Ok(entries) = fs::read_dir(&tickets_dir) {
-            let tickets: Vec<_> = entries.filter_map(|e| e.ok())
-                .filter(|e| e.path().extension().is_some_and(|ext| ext == "ticket"))
-                .collect();
-            if !tickets.is_empty() {
-                println!("\nSquad memberships:");
-                for entry in tickets {
-                    let ticket = fs::read_to_string(entry.path()).unwrap_or_default();
-                    let squad_name = ticket.lines()
-                        .find(|l| l.starts_with("squad_name:"))
-                        .map(|l| l.strip_prefix("squad_name:").unwrap_or("").trim())
-                        .unwrap_or("unknown");
-                    println!("  {} ({})", squad_name, entry.file_name().to_string_lossy());
-                }
-            }
-        }
-    }
 }
 
 // ─── git lex join ──────────────────────────────────────────────
@@ -4517,9 +4586,10 @@ fn cmd_validate() -> bool {
     };
 
     // Load kit ontology TTL
-    let kit_dir = root.join(".lex").join("ontology").join("kit").join(&kit);
+    let kit_dir = kit_install_dir_for_spec(&root, &kit);
+    let (_, _, short) = resolve_kit_spec(&kit);
     let ont_ttl = {
-        let primary = kit_dir.join(format!("{}.ttl", &kit));
+        let primary = kit_dir.join(format!("{}.ttl", short));
         if primary.exists() {
             fs::read_to_string(&primary).unwrap_or_default()
         } else {
@@ -5859,9 +5929,10 @@ fn add_prefixes(query: &str) -> String {
                 let kit = kit.trim();
                 if kit == "none" { return None; }
                 // Read the kit TTL to find the actual prefix name
-                // Try {kit}.ttl first, then find any .ttl in the kit dir
-                let kit_dir = r.join(".lex").join("ontology").join("kit").join(kit);
-                let ttl_path = kit_dir.join(format!("{}.ttl", kit));
+                // Try {short}.ttl first, then find any .ttl in the kit dir
+                let kit_dir = kit_install_dir_for_spec(&r, kit);
+                let (_, _, short) = resolve_kit_spec(kit);
+                let ttl_path = kit_dir.join(format!("{}.ttl", short));
                 let ttl_path = if ttl_path.exists() { ttl_path } else {
                     fs::read_dir(&kit_dir).ok()
                         .and_then(|entries| entries.filter_map(|e| e.ok())
@@ -5869,13 +5940,13 @@ fn add_prefixes(query: &str) -> String {
                             .map(|e| e.path()))
                         .unwrap_or(ttl_path)
                 };
-                let kit_ns_pattern = format!("/kit/{}/", kit);
+                let kit_ns_pattern = format!("/kit/{}/", short);
                 if let Ok(ttl) = fs::read_to_string(&ttl_path) {
                     for tline in ttl.lines() {
                         if tline.starts_with("@prefix ") && tline.contains(&kit_ns_pattern) {
                             if let Some(colon_pos) = tline[8..].find(':') {
                                 let pname = tline[8..8 + colon_pos].trim();
-                                let ns = format!("https://repolex.ai/ontology/kit/{}/", kit);
+                                let ns = format!("https://repolex.ai/ontology/kit/{}/", short);
                                 return Some((
                                     format!("{}:", pname),
                                     format!("PREFIX {}: <{}>", pname, ns),
@@ -5884,10 +5955,10 @@ fn add_prefixes(query: &str) -> String {
                         }
                     }
                 }
-                // Fallback: use kit name as prefix
+                // Fallback: use short kit name as prefix
                 return Some((
-                    format!("{}:", kit),
-                    format!("PREFIX {}: <https://repolex.ai/ontology/kit/{}/>", kit, kit),
+                    format!("{}:", short),
+                    format!("PREFIX {}: <https://repolex.ai/ontology/kit/{}/>", short, short),
                 ));
             }
         }
@@ -6076,13 +6147,10 @@ fn main() {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Init { kit } => cmd_init(kit),
+        Commands::Init { kit, force, dev } => cmd_init(kit, force, dev),
         Commands::Status => cmd_status(),
         Commands::Create { doctype, title } => cmd_create(&doctype, title.as_deref()),
         Commands::Save { message } => cmd_save(&message),
-        Commands::Log { author, n, format } => cmd_log(author, n, format),
-        Commands::Tree { r#ref, format } => cmd_tree(r#ref, format),
-        Commands::Refs { format } => cmd_refs(format),
         Commands::Query { query } => cmd_query(query),
         Commands::Dump => {
             let git_nq = generate_git_nquads();
@@ -6097,14 +6165,9 @@ fn main() {
             }
         }
         Commands::Join { squad_path } => cmd_join(&squad_path),
-        Commands::Identity => cmd_identity(),
         Commands::Parse { file } => cmd_parse(&file),
         Commands::Viz { port } => cmd_viz(port),
         Commands::Display { query, port } => cmd_display(&query, port),
-        Commands::Kit { command } => match command {
-            KitCommands::Update => cmd_kit_update(),
-            KitCommands::List => cmd_kit_list(),
-        },
         Commands::Llm { command } => match command {
             LlmCommands::List => cmd_llm_list(),
             LlmCommands::Extract { file, model } => cmd_llm_extract(&file, &model),
@@ -6112,11 +6175,5 @@ fn main() {
         },
         Commands::Resolve { full } => cmd_resolve(full),
         Commands::Sync => cmd_sync(),
-        Commands::Diff { since } => {
-            println!(
-                "git lex diff {} — not yet implemented",
-                since.unwrap_or_else(|| "(working tree)".to_string())
-            );
-        }
     }
 }
