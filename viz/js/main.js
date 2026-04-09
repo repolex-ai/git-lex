@@ -1593,7 +1593,13 @@ function initGraphInput() {
 
     canvas.addEventListener('wheel', e => {
         e.preventDefault();
-        const factor = e.deltaY > 0 ? 0.9 : 1.1;
+        // Scale step by the actual wheel delta so trackpad scrolls feel
+        // smooth instead of stepped, and halve the overall sensitivity vs
+        // the old ±10%-per-tick. Clamp per-event delta so a big spin
+        // doesn't blow past the view.
+        const SENSITIVITY = 0.0025;
+        const delta = Math.max(-40, Math.min(40, e.deltaY));
+        const factor = Math.exp(-delta * SENSITIVITY);
         graphState.zoom = Math.max(0.2, Math.min(4, graphState.zoom * factor));
         graphState.userZoomed = true;
         drawGraph();
