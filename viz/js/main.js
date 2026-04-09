@@ -1912,8 +1912,54 @@ document.addEventListener('DOMContentLoaded', () => {
     initRouting();
     initGraphInput();
     connectWS();
+    updateSnapshotPill();
     // Resize graph on window changes
     window.addEventListener('resize', () => {
         if (currentMode === 'graph') resizeGraph();
     });
 });
+
+// Store-snapshot pill — visibility nerf against the silent staleness
+// bug documented in brief/2026-04-09-sparql-endpoint-and-live-store.md.
+// The viz server opens oxigraph as a read-only snapshot at startup and
+// never sees later writes until restart. Until W4R3Z ships the real fix
+// (per-query reopen + /api/reload), this pill surfaces the age of the
+// snapshot so users know when they're looking at stale data.
+//
+// Contract (GET /api/store-info): { snapshot_at: "<ISO-8601>" }. Any
+// other fields fine, only snapshot_at is required. If the endpoint
+// 404s the pill hides itself — no-op until W4R3Z ships the endpoint.
+//
+// Sketch contributed by @M3RCUR14L (2026-04-09), ported into git-lex-viz
+// styling for visual consistency with the typewriter palette.
+async function updateSnapshotPill() {
+    const el = document.getElementById('store-snapshot');
+    const ageEl = document.getElementById('store-snapshot-age');
+    if (!el || !ageEl) return;
+    try {
+        const r = await fetch('/api/store-info');
+        if (!r.ok) return;  // leaves pill hidden — graceful degrade
+        const info = await r.json();
+        if (!info || !info.snapshot_at) return;
+        const ts = new Date(info.snapshot_at);
+        if (isNaN(ts.getTime())) return;
+        el.hidden = false;
+        function renderAge() {
+            const mins = Math.floor((Date.now() - ts.getTime()) / 60000);
+            let label;
+            if (mins < 1) label = 'just now';
+            else if (mins < 60) label = mins + 'm ago';
+            else if (mins < 1440) label = Math.floor(mins / 60) + 'h ago';
+            else label = Math.floor(mins / 1440) + 'd ago';
+            ageEl.textContent = label;
+            el.classList.toggle('stale', mins >= 10);
+            el.classList.toggle('very-stale', mins >= 60);
+            el.title = 'Data snapshot taken ' + ts.toISOString() +
+                '. Any writes since then won\'t show until server reload.';
+        }
+        renderAge();
+        setInterval(renderAge, 30000);
+    } catch (e) {
+        // Network error or malformed response — leave pill hidden.
+    }
+}

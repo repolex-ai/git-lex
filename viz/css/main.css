@@ -133,6 +133,43 @@ nav.modes {
 .status.error::before { content: '● '; color: var(--accent); }
 .status.connecting::before { content: '○ '; color: var(--ink-faint); }
 
+/* Store-snapshot pill. Shows how old the viz server's in-memory store
+   handle is — because Store::open_read_only() is a snapshot-at-open,
+   writes since then are invisible until a reload. Pill escalates color
+   from green (fresh) → gold (>10m) → red (>1h) so silent data rot
+   becomes visible. Sketch by @M3RCUR14L (2026-04-09), ported into
+   git-lex-viz styling. Hidden until /api/store-info exists; graceful
+   404 degradation leaves it hidden. */
+.store-snapshot {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    margin-top: 0.6rem;
+    padding-top: 0.6rem;
+    border-top: 1px dotted var(--rule-soft);
+    font-size: 0.72rem;
+    color: var(--ink-faint);
+    cursor: help;
+}
+.store-snapshot:hover { color: var(--ink-soft); }
+.store-snapshot-dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: #2a8a2a;
+    flex-shrink: 0;
+}
+.store-snapshot-label {
+    font-size: 0.62rem;
+    text-transform: uppercase;
+    letter-spacing: 0.12em;
+}
+.store-snapshot-age { color: var(--ink-soft); }
+
+/* Stale escalation: gold after 10m, red after 1h. */
+.store-snapshot.stale .store-snapshot-dot { background: #d4a800; }
+.store-snapshot.very-stale .store-snapshot-dot { background: var(--accent); }
+
 /* ════════════════════════════════════════════
    RIGHT SIDEBAR (graph mode only)
 ════════════════════════════════════════════ */
