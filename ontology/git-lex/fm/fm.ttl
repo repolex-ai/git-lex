@@ -3,7 +3,6 @@
 @prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
 @prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
 @prefix fm: <https://repolex.ai/ontology/git-lex/fm/> .
-@prefix lex-o: <https://repolex.ai/ontology/lex-upper/> .
 
 # =============================================================================
 # GIT-LEX FRONTMATTER ONTOLOGY

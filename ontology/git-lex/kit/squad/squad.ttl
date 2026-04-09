@@ -1,4 +1,4 @@
-@prefix lex-o: <https://repolex.ai/ontology/lex-upper/> .
+@prefix lex: <https://repolex.ai/ontology/git-lex/lex/> .
 @prefix squad: <https://repolex.ai/ontology/kit/squad/> .
 @prefix owl: <http://www.w3.org/2002/07/owl#> .
 @prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
@@ -12,7 +12,7 @@
 #
 # Kit: squad
 # Namespace: squad: = https://repolex.ai/ontology/kit/squad/
-# Extends: lex-o: (upper ontology)
+# Extends: lex: (upper ontology)
 # Tags: Use fm:tags from frontmatter — no duplication.
 #
 # Document types (= valid `git lex create` commands):
@@ -38,7 +38,7 @@
 # Git author email IS the agent identity.
 
 squad:Agent a owl:Class ;
-    rdfs:subClassOf lex-o:Physical ;
+    rdfs:subClassOf lex:Physical ;
     rdfs:label "Agent" ;
     rdfs:comment "A squad member — carbon or silicon. Identity tied to git author email." .
 
@@ -77,7 +77,7 @@ squad:worksOn a owl:ObjectProperty ;
 # Replaces ephemeral chat. Git blame shows who wrote what.
 
 squad:Message a owl:Class ;
-    rdfs:subClassOf lex-o:Information ;
+    rdfs:subClassOf lex:Information ;
     rdfs:label "Message" ;
     rdfs:comment "A message from one agent to another. Persistent inter-agent communication." .
 
@@ -121,7 +121,7 @@ squad:inReplyTo a owl:ObjectProperty ;
 # The "why" behind the "what". Queryable decision history.
 
 squad:Decision a owl:Class ;
-    rdfs:subClassOf lex-o:Decision ;
+    rdfs:subClassOf lex:Decision ;
     rdfs:label "Decision" ;
     rdfs:comment "A recorded choice with context, rationale, and outcome." .
 
@@ -160,7 +160,7 @@ squad:supersededBy a owl:ObjectProperty ;
 # The squad's accumulated knowledge.
 
 squad:Discovery a owl:Class ;
-    rdfs:subClassOf lex-o:Information ;
+    rdfs:subClassOf lex:Information ;
     rdfs:label "Discovery" ;
     rdfs:comment "A finding, insight, or lesson learned." .
 
@@ -186,7 +186,7 @@ squad:confidence a owl:DatatypeProperty ;
 # A work item. Assigned, tracked, blocked/blocking.
 
 squad:Task a owl:Class ;
-    rdfs:subClassOf lex-o:Process ;
+    rdfs:subClassOf lex:Process ;
     rdfs:label "Task" ;
     rdfs:comment "A work item with assignment and status tracking." .
 
@@ -224,7 +224,7 @@ squad:relatedDecision a owl:ObjectProperty ;
 # What we're building. High-level context.
 
 squad:Project a owl:Class ;
-    rdfs:subClassOf lex-o:Concept ;
+    rdfs:subClassOf lex:Concept ;
     rdfs:label "Project" ;
     rdfs:comment "A project the squad is working on." .
 
@@ -251,7 +251,7 @@ squad:squadMembers a owl:ObjectProperty ;
 # The catch-all for things that don't fit other types.
 
 squad:Note a owl:Class ;
-    rdfs:subClassOf lex-o:Information ;
+    rdfs:subClassOf lex:Information ;
     rdfs:label "Note" ;
     rdfs:comment "Freeform knowledge capture. For things that don't fit other document types." .
 

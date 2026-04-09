@@ -1,5 +1,5 @@
 @prefix lab:     <https://repolex.ai/ontology/kit/lex-lab/> .
-@prefix lex-o:   <https://repolex.ai/ontology/lex-upper/> .
+@prefix lex:     <https://repolex.ai/ontology/git-lex/lex/> .
 @prefix prov:    <http://www.w3.org/ns/prov#> .
 @prefix dcterms: <http://purl.org/dc/terms/> .
 @prefix cito:    <http://purl.org/spar/cito/> .
@@ -16,7 +16,7 @@
 #
 # Kit: lex-lab
 # Namespace: lab: = https://repolex.ai/ontology/kit/lex-lab/
-# Extends: lex-o: (upper ontology)
+# Extends: lex: (upper ontology)
 # Aligns: PROV-O, DCTERMS, CiTO, FaBiO (SPAR ontologies)
 #
 # Document types (= valid `git lex create` commands):
@@ -50,7 +50,7 @@
 # git-native, structured, and multi-agent.
 
 lab:Investigation a owl:Class ;
-    rdfs:subClassOf lex-o:Process ;
+    rdfs:subClassOf lex:Process ;
     rdfs:subClassOf prov:Activity ;
     rdfs:label "Investigation" ;
     rdfs:comment "A named research thread: a question being investigated. Container for experiments, surveys, and the synthesis that concludes it. Aligns with OBI's 'investigation' concept." .
@@ -99,7 +99,7 @@ lab:concludedBy a owl:ObjectProperty ;
 # hypothesis itself needs detailed treatment.
 
 lab:Hypothesis a owl:Class ;
-    rdfs:subClassOf lex-o:Information ;
+    rdfs:subClassOf lex:Information ;
     rdfs:label "Hypothesis" ;
     rdfs:comment "A falsifiable claim being evaluated. Tracks its own lifecycle from proposal through support, refutation, or revision." .
 
@@ -140,7 +140,7 @@ lab:confidence a owl:DatatypeProperty ;
 # Git-native: the repo + commit IS the reproducible artifact.
 
 lab:Experiment a owl:Class ;
-    rdfs:subClassOf lex-o:Process ;
+    rdfs:subClassOf lex:Process ;
     rdfs:subClassOf prov:Activity ;
     rdfs:label "Experiment" ;
     rdfs:comment "A specific test of a hypothesis. Protocol describes what was done; result describes what was observed; conclusion interprets the result. Extends P-Plan's Plan/Step model for git-native execution." .
@@ -181,7 +181,7 @@ lab:partOf a owl:ObjectProperty ;
     rdfs:comment "The investigation this experiment contributes to." ;
     rdfs:domain lab:Experiment ;
     rdfs:range lab:Investigation ;
-    rdfs:subPropertyOf lex-o:partOf .
+    rdfs:subPropertyOf lex:partOf .
 
 lab:replicates a owl:ObjectProperty ;
     rdfs:label "replicates" ;
@@ -213,7 +213,7 @@ lab:dataset a owl:ObjectProperty ;
 # sources. What is already known. Grounds the investigation in prior art.
 
 lab:Survey a owl:Class ;
-    rdfs:subClassOf lex-o:Information ;
+    rdfs:subClassOf lex:Information ;
     rdfs:subClassOf fabio:ReviewArticle ;
     rdfs:label "Survey" ;
     rdfs:comment "Systematic review of existing work — literature, prior experiments, standards. What is already known before the investigation starts. Aligns with FaBiO's ReviewArticle." .
@@ -256,7 +256,7 @@ lab:informs a owl:ObjectProperty ;
 # This is the conclusion of an investigation. Citable. Public.
 
 lab:Synthesis a owl:Class ;
-    rdfs:subClassOf lex-o:Information ;
+    rdfs:subClassOf lex:Information ;
     rdfs:subClassOf prov:Entity ;
     rdfs:label "Synthesis" ;
     rdfs:comment "Combined insight from multiple experiments and surveys. The conclusion of an investigation — where distributed multi-agent research converges. Designed to be citable and published. Aligns with nanopublication's Assertion + Provenance + PublicationInfo structure." .
@@ -330,7 +330,7 @@ lab:authors a owl:ObjectProperty ;
 # Branch lifecycle = hypothesis lifecycle.
 
 lab:ResearchBranch a owl:Class ;
-    rdfs:subClassOf lex-o:Information ;
+    rdfs:subClassOf lex:Information ;
     rdfs:label "Research Branch" ;
     rdfs:comment "A git branch framed as a hypothesis container. The branch name is the hypothesis name. Commits on the branch are evidence accumulation. Merge = synthesis conclusion." .
 
@@ -353,7 +353,7 @@ lab:embodiesHypothesis a owl:ObjectProperty ;
 # Records the reasoning process, not just the conclusion.
 
 lab:Deliberation a owl:Class ;
-    rdfs:subClassOf lex-o:Process ;
+    rdfs:subClassOf lex:Process ;
     rdfs:subClassOf prov:Activity ;
     rdfs:label "Deliberation" ;
     rdfs:comment "Structured multi-agent debate preceding a synthesis. Records the reasoning process — arguments, counterarguments, and how consensus (or dissensus) was reached. Extends the micropublications Claim→Argument→Evidence dialectical model." .
@@ -410,6 +410,6 @@ lab:repoRef a owl:DatatypeProperty ;
 
 lab:revisedBy owl:inverseOf lab:addresses .
 lab:concludes owl:inverseOf lab:concludedBy .
-lab:supports rdfs:subPropertyOf lex-o:supports .
-lab:refutes rdfs:subPropertyOf lex-o:opposes .
-lab:supersedes rdfs:subPropertyOf lex-o:replaces .
+lab:supports rdfs:subPropertyOf lex:supports .
+lab:refutes rdfs:subPropertyOf lex:opposes .
+lab:supersedes rdfs:subPropertyOf lex:replaces .
