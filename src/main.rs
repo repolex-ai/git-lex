@@ -118,12 +118,13 @@ enum Commands {
         /// File to parse
         file: String,
     },
-    /// Start the visualization server (HTTP + WebSocket on localhost)
+    /// Start the squad messaging notification server (SSE on localhost)
     ListenServer {
         /// Port to listen on
         #[arg(long, default_value = "7879")]
         port: u16,
     },
+    /// Start the visualization server (HTTP + WebSocket on localhost)
     Viz {
         /// Port to listen on
         #[arg(long, default_value = "7878")]
