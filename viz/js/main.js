@@ -1184,7 +1184,15 @@ function openMarkdownViewer(node) {
             if (!r.ok) throw new Error('HTTP ' + r.status);
             return r.json();
         })
-        .then(data => renderMarkdownInto(viewer, data, node))
+        .then(data => {
+            // /api/file returns 200 with {error: "…"} when the IRI isn't in
+            // the store (e.g. "no fm:path for this IRI"). The !r.ok check
+            // above doesn't catch that, so we'd silently render an empty
+            // body. Surface the error via the same stub path that HTTP
+            // errors take.
+            if (data && data.error) throw new Error(data.error);
+            renderMarkdownInto(viewer, data, node);
+        })
         .catch(err => renderMarkdownStub(viewer, node, err));
 }
 
