@@ -1198,6 +1198,93 @@ function renderMarkdownInto(viewer, data, node) {
     const fm = data.frontmatter ? `<div class="md-fm">${escapeHtml(data.frontmatter)}</div>` : '';
     const html = renderMarkdown(data.content || '');
     body.innerHTML = fm + html;
+    attachWikilinkHandlers(body);
+}
+
+// Resolve a wikilink target string (e.g. "w4r3z", "project/git-lex",
+// "pod-3") to a document IRI + display label via SPARQL. Strategy:
+//   1. Exact path match on fm:path (handles "project/git-lex")
+//   2. Ends-with path match on fm:path (handles bare "w4r3z" → "agent/w4r3z.md")
+//   3. Exact title match on fm:title (handles prose-case wikilinks)
+// First hit wins. Returns { id, label } or null.
+async function resolveWikilink(target) {
+    if (!target) return null;
+    // Normalize: trim, drop trailing .md if the user wrote one.
+    let t = target.trim();
+    t = t.replace(/\.md$/i, '');
+    // Double-quote-safe literal: the extractor normalizes slugs to ascii
+    // but body wikilinks can carry arbitrary prose. Escape any embedded
+    // quotes and backslashes before interpolating into the SPARQL literal.
+    const esc = (s) => s.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+    const pathWithMd = esc(t + '.md');
+    const titleLit = esc(t);
+
+    const query = `
+        PREFIX fm: <https://repolex.ai/ontology/git-lex/fm/>
+        SELECT ?s ?label WHERE {
+            {
+                ?s fm:path ?path .
+                FILTER(
+                    LCASE(STR(?path)) = LCASE("${pathWithMd}") ||
+                    STRENDS(LCASE(STR(?path)), LCASE("/${pathWithMd}"))
+                )
+                OPTIONAL { ?s fm:title ?t }
+                BIND(COALESCE(?t, "${titleLit}") AS ?label)
+            } UNION {
+                ?s fm:title ?title .
+                FILTER(LCASE(STR(?title)) = LCASE("${titleLit}"))
+                BIND(?title AS ?label)
+            }
+        } LIMIT 1`;
+
+    try {
+        const rows = await sparql(query);
+        if (!Array.isArray(rows) || !rows.length) return null;
+        const r = rows[0];
+        return { id: r.s, label: r.label || target };
+    } catch (e) {
+        return null;
+    }
+}
+
+// Wire dblclick handlers on any .wikilink elements in a freshly-rendered
+// markdown body. Resolver is async; while it runs we mark the element
+// data-wl-state="resolving" so CSS can hint progress; on success we jump
+// graph selection (if the target is already in the current graph view)
+// and open a new markdown viewer for the resolved document.
+function attachWikilinkHandlers(body) {
+    const links = body.querySelectorAll('a.wikilink');
+    links.forEach(a => {
+        a.style.cursor = 'pointer';
+        a.title = 'double-click to open';
+        a.addEventListener('dblclick', async (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            const target = a.dataset.wikilink;
+            if (!target) return;
+            if (a.dataset.wlState === 'resolving') return;
+            a.dataset.wlState = 'resolving';
+            const resolved = await resolveWikilink(target);
+            if (!resolved) {
+                a.dataset.wlState = 'unresolved';
+                a.title = `could not resolve [[${target}]]`;
+                return;
+            }
+            a.dataset.wlState = 'resolved';
+            // If the resolved IRI matches a node in the active graph view,
+            // update selection + refresh the detail card + redraw so the
+            // focus follows the user into the target document.
+            if (typeof graphState !== 'undefined' && Array.isArray(graphState.nodes)) {
+                const hit = graphState.nodes.find(n => n.id === resolved.id);
+                if (hit) {
+                    graphState.selected = hit.id;
+                    if (typeof showNodeDetail === 'function') showNodeDetail(hit);
+                    if (typeof drawGraph === 'function') drawGraph();
+                }
+            }
+            openMarkdownViewer({ id: resolved.id, label: resolved.label });
+        });
+    });
 }
 
 function renderMarkdownStub(viewer, node, err) {
@@ -1237,6 +1324,17 @@ function renderMarkdown(src) {
         return `\u0000CODE${codeBlocks.length - 1}\u0000`;
     });
 
+    // Pull out wikilinks before inline/escape processing so the raw target can
+    // survive into the attribute. Re-inserted as placeholder tokens that the
+    // inline() pipeline passes through untouched, then substituted at the end
+    // with a data-wikilink attr carrying the unescaped target for the runtime
+    // resolver to use.
+    const wikilinks = [];
+    body = body.replace(/\[\[([^\]]+)\]\]/g, (m, target) => {
+        wikilinks.push(target);
+        return `\u0000WL${wikilinks.length - 1}\u0000`;
+    });
+
     const inline = (s) => {
         s = escapeHtml(s);
         // Inline code (after escaping so backticks survive)
@@ -1247,8 +1345,13 @@ function renderMarkdown(src) {
         s = s.replace(/_([^_]+)_/g, '<em>$1</em>');
         // Markdown links [text](url)
         s = s.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>');
-        // Wikilinks [[Target]] — render as a styled span (not navigable yet)
-        s = s.replace(/\[\[([^\]]+)\]\]/g, '<a class="wikilink">$1</a>');
+        // Restore wikilink placeholders with proper data-wikilink attribute.
+        // Target is used both as the visible text and as the resolver key.
+        s = s.replace(/\u0000WL(\d+)\u0000/g, (_, idx) => {
+            const target = wikilinks[parseInt(idx)];
+            const attr = target.replace(/&/g, '&amp;').replace(/"/g, '&quot;');
+            return `<a class="wikilink" data-wikilink="${attr}">${escapeHtml(target)}</a>`;
+        });
         return s;
     };
 
