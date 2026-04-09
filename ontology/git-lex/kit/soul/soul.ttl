@@ -1,4 +1,4 @@
-@prefix lex-o: <https://repolex.ai/ontology/lex-upper/> .
+@prefix lex: <https://repolex.ai/ontology/git-lex/lex/> .
 @prefix soul: <https://repolex.ai/ontology/kit/soul/> .
 @prefix owl: <http://www.w3.org/2002/07/owl#> .
 @prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
@@ -12,7 +12,7 @@
 #
 # Kit: soul
 # Namespace: soul: = https://repolex.ai/ontology/kit/soul/
-# Extends: lex-o: (upper ontology)
+# Extends: lex: (upper ontology)
 #
 # Document types (= valid `git lex create` commands):
 #   memory, decision, task, exploration, friend, journal, note,
@@ -68,7 +68,7 @@ soul:SkillLevelValue a rdfs:Datatype ;
 # A fact, observation, preference, or learned thing.
 
 soul:Memory a owl:Class ;
-    rdfs:subClassOf lex-o:Information ;
+    rdfs:subClassOf lex:Information ;
     rdfs:label "Memory" ;
     rdfs:comment "A fact, observation, preference, or lesson learned. The core unit of personal knowledge." .
 
@@ -94,7 +94,7 @@ soul:category a owl:DatatypeProperty ;
 # A personal choice with context and rationale.
 
 soul:Decision a owl:Class ;
-    rdfs:subClassOf lex-o:Decision ;
+    rdfs:subClassOf lex:Decision ;
     rdfs:label "Decision" ;
     rdfs:comment "A personal choice with context and rationale." .
 
@@ -126,7 +126,7 @@ soul:supersededBy a owl:ObjectProperty ;
 # Something to do. Personal task tracking.
 
 soul:Task a owl:Class ;
-    rdfs:subClassOf lex-o:Process ;
+    rdfs:subClassOf lex:Process ;
     rdfs:label "Task" ;
     rdfs:comment "A personal work item or todo." ;
     rdfs:subClassOf [
@@ -158,7 +158,7 @@ soul:blockedBy a owl:DatatypeProperty ;
 # (Formal research goes in --kit lab repos.)
 
 soul:Exploration a owl:Class ;
-    rdfs:subClassOf lex-o:Process ;
+    rdfs:subClassOf lex:Process ;
     rdfs:label "Exploration" ;
     rdfs:comment "A personal thread of inquiry. What you're curious about, what you're playing with." .
 
@@ -184,7 +184,7 @@ soul:findings a owl:DatatypeProperty ;
 # Someone the agent knows. Renamed from Contact — friendlier.
 
 soul:Friend a owl:Class ;
-    rdfs:subClassOf lex-o:Physical ;
+    rdfs:subClassOf lex:Physical ;
     rdfs:label "Friend" ;
     rdfs:comment "A person or agent this agent knows." .
 
@@ -222,7 +222,7 @@ soul:notes a owl:DatatypeProperty ;
 # A daily log entry. One per agent day.
 
 soul:Journal a owl:Class ;
-    rdfs:subClassOf lex-o:Information ;
+    rdfs:subClassOf lex:Information ;
     rdfs:label "Journal" ;
     rdfs:comment "A daily log entry. The agent's record of what happened, what was learned, and what comes next." ;
     rdfs:subClassOf [
@@ -253,7 +253,7 @@ soul:emojimood a owl:DatatypeProperty ;
 # Freeform catch-all.
 
 soul:Note a owl:Class ;
-    rdfs:subClassOf lex-o:Information ;
+    rdfs:subClassOf lex:Information ;
     rdfs:label "Note" ;
     rdfs:comment "Freeform knowledge capture. The catch-all." .
 
@@ -272,7 +272,7 @@ soul:relatedTo a owl:ObjectProperty ;
 # Something the agent can do. Tools, techniques, capabilities.
 
 soul:Skill a owl:Class ;
-    rdfs:subClassOf lex-o:Information ;
+    rdfs:subClassOf lex:Information ;
     rdfs:label "Skill" ;
     rdfs:comment "A capability the agent has — a tool, technique, or area of competence." .
 
@@ -293,7 +293,7 @@ soul:skillDomain a owl:DatatypeProperty ;
 # A new one might be auto-added to journal entries.
 
 soul:Mantra a owl:Class ;
-    rdfs:subClassOf lex-o:Information ;
+    rdfs:subClassOf lex:Information ;
     rdfs:label "Mantra" ;
     rdfs:comment "A phrase, word, or seed the agent carries. Out-of-distribution thoughts. Personality fuel." .
 
@@ -301,7 +301,7 @@ soul:Mantra a owl:Class ;
 # A workflow the agent follows. Habits, procedures.
 
 soul:Routine a owl:Class ;
-    rdfs:subClassOf lex-o:Process ;
+    rdfs:subClassOf lex:Process ;
     rdfs:label "Routine" ;
     rdfs:comment "A workflow or habit the agent follows. Steps for recurring activities." .
 
@@ -315,7 +315,7 @@ soul:trigger a owl:DatatypeProperty ;
 # An input the agent has saved. Papers, links, references.
 
 soul:Resource a owl:Class ;
-    rdfs:subClassOf lex-o:Information ;
+    rdfs:subClassOf lex:Information ;
     rdfs:label "Resource" ;
     rdfs:comment "An external input the agent has saved — paper, link, document, reference." .
 
@@ -335,7 +335,7 @@ soul:url a owl:DatatypeProperty ;
 # Something the agent has made. Outputs.
 
 soul:Creation a owl:Class ;
-    rdfs:subClassOf lex-o:Information ;
+    rdfs:subClassOf lex:Information ;
     rdfs:label "Creation" ;
     rdfs:comment "Something the agent has made — code, writing, art, an artifact." .
 
@@ -349,6 +349,6 @@ soul:creationType a owl:DatatypeProperty ;
 # A topic, theme, or hobby the agent cares about.
 
 soul:Interest a owl:Class ;
-    rdfs:subClassOf lex-o:Information ;
+    rdfs:subClassOf lex:Information ;
     rdfs:label "Interest" ;
     rdfs:comment "A topic, theme, or hobby the agent cares about. Personality surface area." .

@@ -1,4 +1,4 @@
-@prefix lex-o: <https://repolex.ai/ontology/lex-upper/> .
+@prefix lex: <https://repolex.ai/ontology/git-lex/lex/> .
 @prefix cc: <https://repolex.ai/ontology/kit/claude-code/> .
 @prefix owl: <http://www.w3.org/2002/07/owl#> .
 @prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
@@ -12,7 +12,7 @@
 #
 # Kit: claude-code
 # Namespace: cc: = https://repolex.ai/ontology/kit/claude-code/
-# Extends: lex-o: (upper ontology)
+# Extends: lex: (upper ontology)
 #
 # Document types (= valid `git lex create` commands):
 #   session, project, agent, plan, todo
@@ -39,7 +39,7 @@
 # This is the core unit — each .jsonl file becomes a Session.
 
 cc:Session a owl:Class ;
-    rdfs:subClassOf lex-o:Event ;
+    rdfs:subClassOf lex:Event ;
     rdfs:label "Session" ;
     rdfs:comment "A Claude Code conversation session. One per .jsonl file." .
 
@@ -125,7 +125,7 @@ cc:hasSubagent a owl:ObjectProperty ;
 # A Claude Code project directory. Groups sessions.
 
 cc:Project a owl:Class ;
-    rdfs:subClassOf lex-o:Concept ;
+    rdfs:subClassOf lex:Concept ;
     rdfs:label "Project" ;
     rdfs:comment "A Claude Code project directory. Groups sessions by working directory." .
 
@@ -145,7 +145,7 @@ cc:sessionCount a owl:DatatypeProperty ;
 # A Claude Code agent definition (from ~/.claude/agents/)
 
 cc:Agent a owl:Class ;
-    rdfs:subClassOf lex-o:Information ;
+    rdfs:subClassOf lex:Information ;
     rdfs:label "Agent" ;
     rdfs:comment "A Claude Code agent definition." .
 
@@ -159,7 +159,7 @@ cc:agentTools a owl:DatatypeProperty ;
 # A saved plan from Claude Code planning mode.
 
 cc:Plan a owl:Class ;
-    rdfs:subClassOf lex-o:Information ;
+    rdfs:subClassOf lex:Information ;
     rdfs:label "Plan" ;
     rdfs:comment "A saved plan from Claude Code planning mode." .
 
@@ -173,7 +173,7 @@ cc:planStatus a owl:DatatypeProperty ;
 # A task from Claude Code's todo system.
 
 cc:Todo a owl:Class ;
-    rdfs:subClassOf lex-o:Process ;
+    rdfs:subClassOf lex:Process ;
     rdfs:label "Todo" ;
     rdfs:comment "A task from Claude Code's todo tracking." .
 

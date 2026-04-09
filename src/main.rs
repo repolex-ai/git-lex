@@ -552,7 +552,6 @@ fn uri_encode_path(s: &str) -> String {
 const ONT_GIT: &str = include_str!("../ontology/git-lex/git/git.ttl");
 const ONT_FM: &str = include_str!("../ontology/git-lex/fm/fm.ttl");
 const ONT_LEX: &str = include_str!("../ontology/git-lex/lex/lex.ttl");
-const ONT_LEX_O: &str = include_str!("../ontology/git-lex/lex-o/lex-o.ttl");
 // Kit ontologies are fetched from GitHub at init time — no embedded fallback.
 
 fn cmd_init(kit: Option<String>, force: bool, dev: bool) {
@@ -653,7 +652,6 @@ fn cmd_init(kit: Option<String>, force: bool, dev: bool) {
         ("git/git.ttl", ONT_GIT),
         ("fm/fm.ttl", ONT_FM),
         ("lex/lex.ttl", ONT_LEX),
-        ("lex-o/lex-o.ttl", ONT_LEX_O),
     ];
     for (path, content) in &ontologies {
         let full_path = ont_dir.join(path);
@@ -880,7 +878,7 @@ fn cmd_init(kit: Option<String>, force: bool, dev: bool) {
                 }
 
                 doc.push_str("## Querying\n\n");
-                doc.push_str("Auto-injected prefixes: `git:`, `fm:`, `lex:`, `lex-o:`");
+                doc.push_str("Auto-injected prefixes: `git:`, `fm:`, `lex:`");
                 if kit_short != "none" {
                     doc.push_str(&format!(", `{}:`", kit_short));
                 }
@@ -2480,12 +2478,12 @@ fn generate_frontmatter_nquads() -> String {
         // from folder name guessing. Honors "ontology is the single source
         // of truth" — sync stops inventing types the schema does not declare.
         //
-        // No-kit repos get `lex-upper:Document` only (plus the git layer).
+        // No-kit repos get `lex:Document` only (plus the git layer).
         // Kit repos get classes their ontology declares, via frontmatter.
         let doc_uri = format!("<{}/{}>", base, uri_encode_path(&relpath_str));
 
         nq.push_str(&format!(
-            "{} <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://repolex.ai/ontology/lex-upper/Document> {} .\n",
+            "{} <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://repolex.ai/ontology/git-lex/lex/Document> {} .\n",
             doc_uri, graph
         ));
         nq.push_str(&format!(
@@ -3316,7 +3314,7 @@ fn cmd_resolve(full: bool) {
 
         // Write name triple for subject (if we haven't seen it yet)
         nq.push_str(&format!(
-            "{} <https://repolex.ai/ontology/lex-upper/name> \"{}\" {} .\n",
+            "{} <https://repolex.ai/ontology/git-lex/lex/name> \"{}\" {} .\n",
             subject_uri, nq_escape(subject), graph
         ));
 
@@ -5943,7 +5941,6 @@ fn add_prefixes(query: &str) -> String {
         ("git:".to_string(), "PREFIX git: <https://repolex.ai/ontology/git-lex/git/>".to_string()),
         ("lex:".to_string(), "PREFIX lex: <https://repolex.ai/ontology/git-lex/lex/>".to_string()),
         ("fm:".to_string(), "PREFIX fm: <https://repolex.ai/ontology/git-lex/fm/>".to_string()),
-        ("lex-o:".to_string(), "PREFIX lex-o: <https://repolex.ai/ontology/lex-upper/>".to_string()),
         ("o:".to_string(), o_prefix),
         ("rdf:".to_string(), "PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>".to_string()),
         ("rdfs:".to_string(), "PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>".to_string()),

@@ -183,7 +183,7 @@ git:blobHash a owl:DatatypeProperty ;
 git:blob a owl:ObjectProperty ;
     rdfs:domain git:Blob ;
     rdfs:label "blob" ;
-    rdfs:comment "Links a filetree entry to its content-addressed blob URI. Use for joins with lex-o:mentionedInBlob." .
+    rdfs:comment "Links a filetree entry to its content-addressed blob URI. Use for joins with lex:mentionedInBlob." .
 
 git:size a owl:DatatypeProperty ;
     rdfs:domain git:Blob ;
