@@ -119,6 +119,11 @@ enum Commands {
         file: String,
     },
     /// Start the visualization server (HTTP + WebSocket on localhost)
+    ListenServer {
+        /// Port to listen on
+        #[arg(long, default_value = "7879")]
+        port: u16,
+    },
     Viz {
         /// Port to listen on
         #[arg(long, default_value = "7878")]
@@ -6140,6 +6145,7 @@ fn main() {
         }
         Commands::Join { squad_path } => cmd_join(&squad_path),
         Commands::Parse { file } => cmd_parse(&file),
+        Commands::ListenServer { port } => cmd_listen_server(port),
         Commands::Viz { port } => cmd_viz(port),
         Commands::Display { query, port } => cmd_display(&query, port),
         Commands::Llm { command } => match command {
@@ -6150,4 +6156,70 @@ fn main() {
         Commands::Resolve { full } => cmd_resolve(full),
         Commands::Sync => cmd_sync(),
     }
+}
+
+fn cmd_listen_server(port: u16) {
+    let root = find_git_root().expect("not a git repo");
+    let repo_yml = root.join(".lex").join("repo.yml");
+    if !repo_yml.exists() {
+        eprintln!("No git-lex repository found. Run 'git lex init' first.");
+        exit(1);
+    }
+    let config = fs::read_to_string(repo_yml).unwrap_or_default();
+    if !config.contains("kit: squad") && !config.contains("kit: soul") && !config.contains("kit: lab") {
+        eprintln!("'listen-server' is only supported for squad, soul, or lab kits.");
+        exit(1);
+    }
+    if open_store_read_only().is_none() {
+        eprintln!("No knowledge graph store found. Run 'git lex sync' first to build the store.");
+        exit(1);
+    }
+    run_listen_server(port);
+}
+
+#[tokio::main(flavor = "multi_thread", worker_threads = 2)]
+async fn run_listen_server(port: u16) {
+    use axum::response::sse::{Event, Sse};
+    use axum::{Router, routing::{get, post}, Json};
+    use std::sync::Arc;
+    use tokio::sync::broadcast;
+    use tokio_stream::wrappers::BroadcastStream;
+    use futures_util::StreamExt;
+    use std::convert::Infallible;
+
+    let (tx, _rx) = broadcast::channel::<String>(100);
+    let tx = Arc::new(tx);
+
+    let app = Router::new()
+        .route("/events", get({
+            let tx = tx.clone();
+            move || {
+                let tx = tx.clone();
+                async move {
+                    let rx = tx.subscribe();
+                    let stream = BroadcastStream::new(rx).filter_map(|res| async move {
+                        match res {
+                            Ok(msg) => Some(Ok::<Event, Infallible>(Event::default().data(msg))),
+                            Err(_) => None,
+                        }
+                    });
+                    Sse::new(stream)
+                }
+            }
+        }))
+        .route("/notify", post({
+            let tx = tx.clone();
+            move |Json(payload): Json<serde_json::Value>| {
+                let tx = tx.clone();
+                async move {
+                    let _ = tx.send(payload.to_string());
+                    Json(serde_json::json!({"ok": true}))
+                }
+            }
+        }));
+
+    let addr = format!("127.0.0.1:{}", port);
+    let listener = tokio::net::TcpListener::bind(&addr).await.unwrap();
+    println!("git-lex listen-server started on {}", addr);
+    axum::serve(listener, app).await.unwrap();
 }
