@@ -46,36 +46,17 @@ fn main() {
 
 // ─── viz server ─────────────────────────────────────────────────
 
-// Viz UI assets — embedded at compile time
-const VIZ_INDEX_HTML: &str = include_str!("../../viz/index.html");
-const VIZ_CSS_MAIN: &str = include_str!("../../viz/css/main.css");
-const VIZ_JS_MAIN: &str = include_str!("../../viz/js/main.js");
-
-/// Path to the git-lex source's `viz/` directory at build time.
-const VIZ_BUILD_TIME_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/viz");
-
-fn resolve_viz_dev_dir() -> Option<PathBuf> {
-    let val = std::env::var("GIT_LEX_VIZ_DEV").ok()?;
-    let trimmed = val.trim();
-    if trimmed.is_empty() || trimmed == "0" || trimmed.eq_ignore_ascii_case("false") {
-        return None;
-    }
-    let path = if trimmed == "1" || trimmed.eq_ignore_ascii_case("true") {
-        PathBuf::from(VIZ_BUILD_TIME_DIR)
-    } else {
-        PathBuf::from(trimmed)
-    };
-    if path.is_dir() { Some(path) } else { None }
+/// Resolve the www directory. Reads from `.lex/www/` in the repo root
+/// (installed by the base kit). Assets are served from disk so they can
+/// be edited without rebuilding the binary.
+fn resolve_www_dir() -> PathBuf {
+    find_git_root()
+        .map(|r| r.join(".lex").join("www"))
+        .unwrap_or_else(|| PathBuf::from(".lex/www"))
 }
 
-fn read_viz_asset(dev_dir: &Option<PathBuf>, rel: &str, embedded: &'static str) -> String {
-    if let Some(dir) = dev_dir {
-        let path = dir.join(rel);
-        if let Ok(s) = fs::read_to_string(&path) {
-            return s;
-        }
-    }
-    embedded.to_string()
+fn read_viz_asset(www_dir: &PathBuf, rel: &str) -> Option<String> {
+    fs::read_to_string(www_dir.join(rel)).ok()
 }
 
 #[derive(Clone)]
@@ -232,11 +213,17 @@ fn cmd_viz(port: u16) {
         eprintln!("Run 'git lex sync' first to build the store.");
         exit(1);
     }
-    run_viz_server(port);
+    let www_dir = resolve_www_dir();
+    if !www_dir.exists() {
+        eprintln!("No www directory found at {}", www_dir.display());
+        eprintln!("Run 'git lex init' to install the base kit.");
+        exit(1);
+    }
+    run_viz_server(port, www_dir);
 }
 
 #[tokio::main(flavor = "multi_thread", worker_threads = 2)]
-async fn run_viz_server(port: u16) {
+async fn run_viz_server(port: u16, www_dir: PathBuf) {
     use axum::{
         Router,
         routing::{get, post},
@@ -253,35 +240,37 @@ async fn run_viz_server(port: u16) {
 
     let repo_root = Arc::new(find_git_root().unwrap_or_else(|| std::env::current_dir().unwrap()));
     let state = VizState { store, scene, tx, repo_root };
-    let dev_dir = Arc::new(resolve_viz_dev_dir());
+    let www_dir = Arc::new(www_dir);
 
     let app = Router::new()
         .route("/", get({
-            let dev_dir = dev_dir.clone();
+            let www_dir = www_dir.clone();
             move || {
-                let dev_dir = dev_dir.clone();
+                let www_dir = www_dir.clone();
                 async move {
-                    let body = read_viz_asset(&dev_dir, "index.html", VIZ_INDEX_HTML);
-                    Html(body)
+                    match read_viz_asset(&www_dir, "index.html") {
+                        Some(body) => Html(body),
+                        None => Html("<h1>index.html not found in .lex/www/</h1>".to_string()),
+                    }
                 }
             }
         }))
         .route("/css/main.css", get({
-            let dev_dir = dev_dir.clone();
+            let www_dir = www_dir.clone();
             move || {
-                let dev_dir = dev_dir.clone();
+                let www_dir = www_dir.clone();
                 async move {
-                    let body = read_viz_asset(&dev_dir, "css/main.css", VIZ_CSS_MAIN);
+                    let body = read_viz_asset(&www_dir, "css/main.css").unwrap_or_default();
                     ([("content-type", "text/css"), ("cache-control", "no-store")], body)
                 }
             }
         }))
         .route("/js/main.js", get({
-            let dev_dir = dev_dir.clone();
+            let www_dir = www_dir.clone();
             move || {
-                let dev_dir = dev_dir.clone();
+                let www_dir = www_dir.clone();
                 async move {
-                    let body = read_viz_asset(&dev_dir, "js/main.js", VIZ_JS_MAIN);
+                    let body = read_viz_asset(&www_dir, "js/main.js").unwrap_or_default();
                     ([("content-type", "application/javascript"), ("cache-control", "no-store")], body)
                 }
             }
@@ -399,9 +388,7 @@ async fn run_viz_server(port: u16) {
     }
     let url = format!("http://{}", addr);
     println!("git-lex-serve viz listening on {}", url);
-    if let Some(dir) = dev_dir.as_ref() {
-        println!("[dev mode] serving viz assets from {}", dir.display());
-    }
+    println!("Serving assets from {}", www_dir.display());
     println!("Press Ctrl+C to stop, or: kill {}", std::process::id());
 
     let _ = open::that_detached(&url);
