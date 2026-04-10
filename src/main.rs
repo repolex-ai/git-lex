@@ -12,6 +12,11 @@ use std::fs;
 use std::collections::{HashMap, HashSet};
 use tree_sitter;
 
+// Frontmatter ObjectProperty value resolver. The rules for what is and isn't
+// allowed in frontmatter values are codified as tests in this module — read
+// the test suite for the definitive spec.
+mod resolve;
+
 #[derive(Parser)]
 #[command(name = "git-lex", about = "Git extensions for knowledge graphs")]
 struct Cli {
@@ -2312,9 +2317,6 @@ fn generate_frontmatter_nquads() -> String {
     // Build ObjectProperty lookup from kit ontology
     let obj_props = get_kit().map(|k| get_object_properties(&k)).unwrap_or_default();
     let prop_datatypes = get_kit().map(|k| get_property_datatypes(&k)).unwrap_or_default();
-    // Range map: ObjectProperty name → class IRI. Used to filter candidate
-    // resolutions by declared type (range-aware resolver).
-    let prop_ranges = get_kit().map(|k| get_property_ranges(&k)).unwrap_or_default();
 
     // Open git repo for blob hash lookups
     let repo = git2::Repository::discover(".").ok();
@@ -2372,9 +2374,11 @@ fn generate_frontmatter_nquads() -> String {
         }
     }
 
-    // Entity → class IRI map. Used by the range-aware resolver to filter
-    // candidate resolutions. Built once per sync, O(n) in slug count.
-    let entity_classes = build_entity_class_map(&slug_index, &base);
+    // entity_classes was used by the old range-aware resolver, which has been
+    // replaced by src/resolve.rs. The range-check approach (matching class IRIs
+    // across kits) had a cross-kit identity bug (squad:Agent ≠ soul:Agent) and
+    // is deferred until cross-kit class equivalence is designed. For now the
+    // resolver trusts bare-slug + full-IRI resolution without range filtering.
 
     // Ensure extract dir exists
     let extract_dir = root.join(".lex").join("extract");
@@ -2503,11 +2507,6 @@ fn generate_frontmatter_nquads() -> String {
 
         // Track which kit types we've seen for rdf:type emission (dedup)
         let mut emitted_types: HashSet<String> = HashSet::new();
-        // Counter for unique blank-node labels within this file's emissions.
-        // Used for lex:hasUnresolvedLink → _:unresN → { slug, predicate } grouping.
-        // Blank node IDs are file-scoped; oxigraph renames on load so globally
-        // unique suffixes aren't required.
-        let mut unresolved_counter: usize = 0;
 
         for line in &spo_lines {
             let parts: Vec<&str> = line.splitn(3, " | ").collect();
@@ -2597,21 +2596,12 @@ fn generate_frontmatter_nquads() -> String {
                             doc_uri, uri, graph
                         ));
                     } else {
-                        // Unresolved wikilink → blank node with slug + attempted
-                        // predicate (lex:linksTo, since wikilinks default to that).
-                        let bn = format!("_:unres{}", unresolved_counter);
-                        unresolved_counter += 1;
+                        // Unresolved wikilink → flat literal on lex:linksTo.
+                        // No blank nodes. SHACL or downstream queries can find
+                        // these by checking for literal objects on linksTo.
                         nq.push_str(&format!(
-                            "{} <https://repolex.ai/ontology/git-lex/lex/hasUnresolvedLink> {} {} .\n",
-                            doc_uri, bn, graph
-                        ));
-                        nq.push_str(&format!(
-                            "{} <https://repolex.ai/ontology/git-lex/lex/unresolvedSlug> \"{}\" {} .\n",
-                            bn, nq_escape(object), graph
-                        ));
-                        nq.push_str(&format!(
-                            "{} <https://repolex.ai/ontology/git-lex/lex/unresolvedPredicate> <https://repolex.ai/ontology/git-lex/lex/linksTo> {} .\n",
-                            bn, graph
+                            "{} <https://repolex.ai/ontology/git-lex/lex/linksTo> \"{}\" {} .\n",
+                            doc_uri, nq_escape(object), graph
                         ));
                     }
                 } else {
@@ -2647,86 +2637,37 @@ fn generate_frontmatter_nquads() -> String {
 
                         // Check if this is an ObjectProperty (from ontology) → resolve as IRI
                         if obj_props.contains(prop_seg) {
-                            // Range-aware resolution: if the property has a declared
-                            // rdfs:range, only accept candidate entities typed as that
-                            // class. If the candidate doesn't match, emit
-                            // lex:unresolvedLink and let downstream (Squadling, viz)
-                            // surface the problem.
-                            let declared_range = prop_ranges.get(prop_seg);
-                            // ObjectProperty: split on commas, resolve each as IRI
+                            // ObjectProperty: split on commas, resolve each value
+                            // via the canonical resolver (see src/resolve.rs for the
+                            // rules and tests).
                             let values: Vec<&str> = object.split(',').map(|s| s.trim()).filter(|s| !s.is_empty()).collect();
                             for val in values {
                                 if val.is_empty() { continue; }
-                                // Strip `[[...]]` wikilink wrapper if present, plus `@`.
-                                let stripped = val
-                                    .trim_start_matches("[[")
-                                    .trim_end_matches("]]")
-                                    .trim_start_matches('@');
-                                let slug = stripped.to_lowercase()
-                                    .replace(' ', "-")
-                                    .replace(|c: char| !c.is_alphanumeric() && c != '-' && c != '/' && c != '.', "");
-                                if slug.is_empty() { continue; }
-                                let candidate_uri: String = if slug.contains('/') || slug.ends_with(".md") {
-                                    format!("<{}/{}>", base, uri_encode_path(&slug))
-                                } else if slug_index.contains_key(&slug) {
-                                    resolve_slug_to_uri(&slug, &base, &slug_index)
-                                } else {
-                                    // Dot-strip fallback: `spaceg.o.a.t.` → `spacegoat`.
-                                    // Mirrors the @mention lookup at line ~2475.
-                                    let dotless = slug.replace('.', "");
-                                    if dotless != slug && slug_index.contains_key(&dotless) {
-                                        resolve_slug_to_uri(&dotless, &base, &slug_index)
-                                    } else {
-                                        // Not found — synthesize an IRI and let the
-                                        // range check below reject it as unresolved.
-                                        format!("<{}/{}>", base, uri_encode_path(&slug))
+                                match resolve::resolve_frontmatter_value(val, &slug_index, &base) {
+                                    resolve::ResolveResult::Iri(uri) => {
+                                        nq.push_str(&format!(
+                                            "{} {} {} {} .\n",
+                                            doc_uri, kit_predicate, uri, graph
+                                        ));
                                     }
-                                };
-
-                                // If we have a declared range, verify the candidate
-                                // has that class. Strip <> to match entity_classes keys.
-                                let candidate_bare = candidate_uri
-                                    .trim_start_matches('<')
-                                    .trim_end_matches('>')
-                                    .to_string();
-                                let range_ok = match declared_range {
-                                    Some(expected_class) => {
-                                        match entity_classes.get(&candidate_bare) {
-                                            Some(actual_class) => actual_class == expected_class,
-                                            // Candidate exists but has no declared class
-                                            // (e.g. no-kit doc) — reject against a
-                                            // declared range. If the author meant to link
-                                            // to an Agent, an untyped doc isn't one.
-                                            None => false,
-                                        }
+                                    resolve::ResolveResult::Unresolved(literal) => {
+                                        // Emit as literal. SHACL shapes requiring
+                                        // sh:nodeKind sh:IRI will flag this at
+                                        // validation time.
+                                        nq.push_str(&format!(
+                                            "{} {} \"{}\" {} .\n",
+                                            doc_uri, kit_predicate, nq_escape(&literal), graph
+                                        ));
                                     }
-                                    // No declared range → accept any resolution.
-                                    None => true,
-                                };
-
-                                if range_ok {
-                                    nq.push_str(&format!(
-                                        "{} {} {} {} .\n",
-                                        doc_uri, kit_predicate, candidate_uri, graph
-                                    ));
-                                } else {
-                                    // Range mismatch → blank-node-grouped unresolved.
-                                    // Preserves the attempted predicate so Squadling
-                                    // can filter by intended class via rdfs:range.
-                                    let bn = format!("_:unres{}", unresolved_counter);
-                                    unresolved_counter += 1;
-                                    nq.push_str(&format!(
-                                        "{} <https://repolex.ai/ontology/git-lex/lex/hasUnresolvedLink> {} {} .\n",
-                                        doc_uri, bn, graph
-                                    ));
-                                    nq.push_str(&format!(
-                                        "{} <https://repolex.ai/ontology/git-lex/lex/unresolvedSlug> \"{}\" {} .\n",
-                                        bn, nq_escape(stripped), graph
-                                    ));
-                                    nq.push_str(&format!(
-                                        "{} <https://repolex.ai/ontology/git-lex/lex/unresolvedPredicate> {} {} .\n",
-                                        bn, kit_predicate, graph
-                                    ));
+                                    resolve::ResolveResult::Rejected(msg) => {
+                                        // Log the rejection so the agent knows what
+                                        // to fix. Don't emit a triple — bad syntax
+                                        // should not produce data.
+                                        eprintln!(
+                                            "warning: {}: {} — {}",
+                                            relpath_str, prop_seg, msg
+                                        );
+                                    }
                                 }
                             }
                         } else {
