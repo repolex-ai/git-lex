@@ -576,11 +576,9 @@ fn uri_encode_path(s: &str) -> String {
 
 // ─── git lex init ──────────────────────────────────────────────
 
-// Embedded ontologies
-// Base ontologies — embedded in the binary, always installed
-const ONT_GIT: &str = include_str!("../ontology/git-lex/git/git.ttl");
-const ONT_FM: &str = include_str!("../ontology/git-lex/fm/fm.ttl");
-const ONT_LEX: &str = include_str!("../ontology/git-lex/lex/lex.ttl");
+// Base ontologies (git.ttl, fm.ttl, lex.ttl) are no longer embedded in the
+// binary. They ship in the base kit scaffold at scaffold/.lex/ontology/ and
+// are installed to .lex/ontology/ by the scaffold installer during init.
 // Kit ontologies are fetched from GitHub at init time — no embedded fallback.
 
 const BASE_KIT: &str = "repolex-ai/git-lex-kit-base";
@@ -679,20 +677,8 @@ fn cmd_init(directory: Option<String>, kit: Option<String>, dev: bool) {
     // Create .lex/ structure (idempotent — safe in dev mode too)
     fs::create_dir_all(lex_dir.join("extract")).ok();
 
-    // Install ontologies (full directory structure)
-    let ont_dir = lex_dir.join("ontology");
-    let ontologies: Vec<(&str, &str)> = vec![
-        ("git/git.ttl", ONT_GIT),
-        ("fm/fm.ttl", ONT_FM),
-        ("lex/lex.ttl", ONT_LEX),
-    ];
-    for (path, content) in &ontologies {
-        let full_path = ont_dir.join(path);
-        fs::create_dir_all(full_path.parent().unwrap()).ok();
-        if !full_path.exists() {
-            fs::write(&full_path, content).expect(&format!("failed to write {}", path));
-        }
-    }
+    // Ontologies are installed from the base kit scaffold (scaffold/.lex/ontology/)
+    // by the scaffold installer below — no hardcoded ontology block needed.
 
     // Install kit(s). Every repo gets the base kit. If --kit specifies a
     // domain kit (squad, soul, etc.), that's installed alongside base in
@@ -1020,9 +1006,20 @@ fn cmd_init(directory: Option<String>, kit: Option<String>, dev: bool) {
             fs::write(&repo_yml_path, &updated).ok();
         }
 
-        let scaffold_count = install_scaffold_files();
+        // Install scaffold files from both kits. Base kit provides the
+        // core infrastructure (.lex/ontology/, .lex/www/). Domain kit
+        // provides its own scaffold (e.g. .claude/, AGENTS.md for squad).
+        // Base installs first so domain kit can overlay if needed.
+        let (base_org, base_repo, _) = resolve_kit_spec(BASE_KIT);
+        let base_kit_dir = lex_dir.join("kit").join(&base_org).join(&base_repo);
+        let mut scaffold_count = install_scaffold_files_from(&base_kit_dir);
+
+        let domain_kit_dir = lex_dir.join("kit").join(&org).join(&repo);
+        if domain_kit_dir != base_kit_dir {
+            scaffold_count += install_scaffold_files_from(&domain_kit_dir);
+        }
         if scaffold_count > 0 {
-            println!("Installed {} scaffold file(s) from kit", scaffold_count);
+            println!("Installed {} scaffold file(s) from kit(s)", scaffold_count);
         }
 
         // Install asset files (skip existing — use `git lex kit-update` to
@@ -1313,16 +1310,12 @@ fn substitute_vars(text: &str, vars: &HashMap<String, String>) -> String {
 /// `../../skill` pointing at the agent's content-area skill folder.
 /// These are infrastructure files the kit owns: .claude/, AGENTS.md, hooks,
 /// skills symlink, etc. Agents don't edit them.
-fn install_scaffold_files() -> usize {
+fn install_scaffold_files_from(kit_dir: &std::path::Path) -> usize {
     let root = match find_git_root() {
         Some(r) => r,
         None => return 0,
     };
 
-    let kit_dir = match kit_install_dir() {
-        Some(d) => d,
-        None => return 0,
-    };
     let scaffold_dir = kit_dir.join("scaffold");
     if !scaffold_dir.exists() {
         return 0;
