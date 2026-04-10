@@ -135,6 +135,18 @@ enum Commands {
         #[arg(long, default_value = "7878")]
         port: u16,
     },
+    /// Remove .lex/ entirely. Content files and git history are preserved.
+    Nuke,
+    /// Re-download and reinstall the kit without touching content or extractions
+    KitUpdate {
+        /// Kit to update (e.g., repolex-ai/git-lex-kit-squad). If omitted,
+        /// uses the kit from .lex/repo.yml.
+        kit: Option<String>,
+        /// Dev mode: use the kit already at .lex/kit/{org}/{repo}/ instead
+        /// of fetching from GitHub. Regenerates shapes and templates.
+        #[arg(long)]
+        dev: bool,
+    },
     /// Run a SPARQL CONSTRUCT query and push the result to the local viz server
     Display {
         /// SPARQL CONSTRUCT query (uses viz: namespace for rendering hints)
@@ -6079,6 +6091,8 @@ fn main() {
         }
         Commands::Join { squad_path } => cmd_join(&squad_path),
         Commands::Parse { file } => cmd_parse(&file),
+        Commands::Nuke => cmd_nuke(),
+        Commands::KitUpdate { kit, dev } => cmd_kit_update(kit, dev),
         Commands::ListenServer { port } => cmd_listen_server(port),
         Commands::Viz { port } => cmd_viz(port),
         Commands::Display { query, port } => cmd_display(&query, port),
@@ -6090,6 +6104,166 @@ fn main() {
         Commands::Resolve { full } => cmd_resolve(full),
         Commands::Sync => cmd_sync(),
     }
+}
+
+// ─── nuke ──────────────────────────────────────────────────────
+
+fn cmd_nuke() {
+    let root = find_git_root().expect("not in a git repo");
+    let lex_dir = root.join(".lex");
+
+    if !lex_dir.exists() {
+        println!("Nothing to remove — .lex/ does not exist.");
+        return;
+    }
+
+    eprintln!("╔══════════════════════════════════════════════════════════╗");
+    eprintln!("║  WARNING: This will completely remove git-lex from      ║");
+    eprintln!("║  this repo by deleting the .lex/ directory.             ║");
+    eprintln!("║                                                         ║");
+    eprintln!("║  DELETED:                                               ║");
+    eprintln!("║    • .lex/oxigraph/    (SPARQL store)                   ║");
+    eprintln!("║    • .lex/extract/     (extraction sidecars)            ║");
+    eprintln!("║    • .lex/kit/         (installed kit)                  ║");
+    eprintln!("║    • .lex/ontology/    (ontology files)                 ║");
+    eprintln!("║    • .lex/repo.yml     (configuration)                  ║");
+    eprintln!("║    • Everything else in .lex/                           ║");
+    eprintln!("║                                                         ║");
+    eprintln!("║  NOT DELETED:                                           ║");
+    eprintln!("║    • Your content files (markdown, etc.)                ║");
+    eprintln!("║    • Git history (all commits preserved)                ║");
+    eprintln!("║    • .git/ directory                                    ║");
+    eprintln!("║                                                         ║");
+    eprintln!("║  You can re-initialize with: git lex init               ║");
+    eprintln!("║  To also remove git tracking:                           ║");
+    eprintln!("║    rm -rf .git                                          ║");
+    eprintln!("╚══════════════════════════════════════════════════════════╝");
+    eprint!("\nType 'nuke' to confirm: ");
+
+    let mut input = String::new();
+    std::io::stdin().read_line(&mut input).unwrap_or_default();
+    if input.trim() != "nuke" {
+        println!("Aborted.");
+        return;
+    }
+
+    // Auto-commit any uncommitted work first so nothing is lost.
+    auto_commit_snapshot("pre-nuke");
+
+    match fs::remove_dir_all(&lex_dir) {
+        Ok(_) => println!(".lex/ removed. git-lex is no longer active in this repo."),
+        Err(e) => {
+            eprintln!("Failed to remove .lex/: {}", e);
+            exit(1);
+        }
+    }
+}
+
+// ─── kit-update ────────────────────────────────────────────────
+
+fn cmd_kit_update(kit_arg: Option<String>, dev: bool) {
+    let root = find_git_root().expect("not in a git repo");
+    let lex_dir = root.join(".lex");
+
+    if !lex_dir.exists() {
+        eprintln!("Not a git-lex repo. Run 'git lex init' first.");
+        exit(1);
+    }
+
+    // Determine which kit to update: from the argument, or from repo.yml.
+    let kit_name = match kit_arg {
+        Some(ref k) => k.clone(),
+        None => {
+            // Read kit from repo.yml
+            let repo_yml = lex_dir.join("repo.yml");
+            let content = fs::read_to_string(&repo_yml).unwrap_or_default();
+            let mut found = None;
+            for line in content.lines() {
+                if let Some(rest) = line.strip_prefix("kit:") {
+                    let val = rest.trim().trim_matches('"').to_string();
+                    if val != "none" && !val.is_empty() {
+                        found = Some(val);
+                    }
+                }
+            }
+            match found {
+                Some(k) => k,
+                None => {
+                    eprintln!("No kit configured in .lex/repo.yml. Specify one: git lex kit-update org/repo");
+                    exit(1);
+                }
+            }
+        }
+    };
+
+    let (org, repo, short) = resolve_kit_spec(&kit_name);
+    let kit_dir = lex_dir.join("kit").join(&org).join(&repo);
+
+    if dev {
+        // Dev mode: verify local kit exists, regenerate derived artifacts.
+        if !kit_dir.exists() {
+            eprintln!("--dev: kit directory not found at {}", kit_dir.display());
+            eprintln!("Populate the kit locally first, then re-run with --dev.");
+            exit(1);
+        }
+        println!("Dev mode: using local kit at {}", kit_dir.display());
+    } else {
+        // Normal mode: delete existing kit, re-download.
+        println!("Updating kit '{}/{}' from GitHub...", org, repo);
+        let _ = fs::remove_dir_all(&kit_dir);
+        fs::create_dir_all(&kit_dir).ok();
+
+        if fetch_kit_from_github(&kit_name, &kit_dir) {
+            println!("Kit '{}/{}' fetched.", org, repo);
+        } else {
+            eprintln!("Failed to fetch kit '{}' from GitHub.", kit_name);
+            exit(1);
+        }
+    }
+
+    // Regenerate SHACL shapes from the (possibly updated) kit ontology.
+    if let Some(shapes_path) = build_shacl_shapes(&kit_name) {
+        println!("SHACL shapes regenerated: {}",
+            shapes_path.file_name().unwrap_or_default().to_string_lossy());
+    }
+
+    // Regenerate class templates from the kit.
+    let kit_types = get_kit_types(&kit_name);
+    let shapes_content = {
+        let shapes_path = kit_install_dir_for_spec(&root, &kit_name)
+            .join(format!("{}-shapes.ttl", short));
+        fs::read_to_string(&shapes_path).unwrap_or_default()
+    };
+    let shacl_hints = parse_shacl_hints(&shapes_content);
+
+    let mut templates_updated = 0usize;
+    for (type_name, properties) in &kit_types {
+        let type_dir = root.join(type_name);
+        fs::create_dir_all(&type_dir).ok();
+        let template_path = type_dir.join(format!("__{}.md", type_name));
+
+        // Always overwrite templates on kit-update — they're derived artifacts.
+        let mut tmpl = String::new();
+        tmpl.push_str("---\n");
+        for (prop_name, prop_type, _required, _comment) in properties {
+            let key = format!("{}.{}.{}", short, type_name, prop_name);
+            let prefix_name = get_kit_prefix_name(&short);
+            let hint = shacl_hints.get(&format!("{}:{}", prefix_name, prop_name));
+            let comment = match hint {
+                Some(h) => format!(" # {}", h),
+                None => match prop_type.as_str() {
+                    "reference" => " # IRI — bare slug or full URI".to_string(),
+                    _ => String::new(),
+                },
+            };
+            tmpl.push_str(&format!("{}: {}\n", key, comment.trim_start()));
+        }
+        tmpl.push_str("---\n");
+        fs::write(&template_path, &tmpl).ok();
+        templates_updated += 1;
+    }
+
+    println!("Kit update complete: {} class templates regenerated.", templates_updated);
 }
 
 fn cmd_listen_server(port: u16) {
