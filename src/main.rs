@@ -6102,7 +6102,7 @@ fn main() {
 /// has an entry with our command, writes back. Never clobbers existing
 /// hooks or other settings keys.
 fn register_claude_hook(root: &std::path::Path, event: &str, command: &str) {
-    let settings_path = root.join(".claude").join("settings.json");
+    let settings_path = root.join(".claude").join("settings.local.json");
     fs::create_dir_all(settings_path.parent().unwrap()).ok();
 
     let mut settings: serde_json::Value = if settings_path.exists() {
@@ -6139,7 +6139,7 @@ fn register_claude_hook(root: &std::path::Path, event: &str, command: &str) {
 
     if !already_registered {
         event_hooks.push(hook_entry);
-        println!("Registered {} hook in .claude/settings.json", event);
+        println!("Registered {} hook in .claude/settings.local.json", event);
     }
 
     // Write back with pretty formatting.
