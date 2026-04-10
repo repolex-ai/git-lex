@@ -429,11 +429,6 @@ fn extract_ontology_iri(ttl: &str) -> Option<String> {
 /// exit non-zero. A broken TTL on disk is a user-visible state we want
 /// them to fix immediately, not silently paper over.
 fn load_ontology_tboxes(store: &Store, root: &std::path::Path) -> usize {
-    let ontology_dir = root.join(".lex").join("ontology");
-    if !ontology_dir.exists() {
-        return 0;
-    }
-
     let mut ttl_files: Vec<std::path::PathBuf> = Vec::new();
     fn collect_ttls(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
         if let Ok(entries) = fs::read_dir(dir) {
@@ -455,7 +450,18 @@ fn load_ontology_tboxes(store: &Store, root: &std::path::Path) -> usize {
             }
         }
     }
-    collect_ttls(&ontology_dir, &mut ttl_files);
+    // Load ontology TTL files from both .lex/ontology/ (built-in: git, fm,
+    // lex) and .lex/kit/ (kit-provided: squad.ttl, soul.ttl, etc.). Both
+    // directories are scanned recursively so kit TTLs in nested org/repo/
+    // paths are found automatically.
+    let ontology_dir = root.join(".lex").join("ontology");
+    if ontology_dir.exists() {
+        collect_ttls(&ontology_dir, &mut ttl_files);
+    }
+    let kit_dir = root.join(".lex").join("kit");
+    if kit_dir.exists() {
+        collect_ttls(&kit_dir, &mut ttl_files);
+    }
     ttl_files.sort();
 
     let mut loaded = 0;
