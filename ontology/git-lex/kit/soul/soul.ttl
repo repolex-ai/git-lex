@@ -126,6 +126,12 @@ soul:Memory a owl:Class ;
     rdfs:label "Memory" ;
     rdfs:comment "A fact, observation, preference, or lesson learned. The core unit of personal knowledge." .
 
+soul:memoryId a owl:DatatypeProperty ;
+    rdfs:label "memoryId" ;
+    rdfs:comment "Unique identifier for this memory." ;
+    rdfs:domain soul:Memory ;
+    rdfs:range xsd:string .
+
 soul:confidence a owl:DatatypeProperty ;
     rdfs:label "confidence" ;
     rdfs:comment "How sure: 'certain', 'likely', 'hypothesis', 'hunch'." ;
@@ -151,6 +157,12 @@ soul:Decision a owl:Class ;
     rdfs:subClassOf lex-o:Decision ;
     rdfs:label "Decision" ;
     rdfs:comment "A personal choice with context and rationale." .
+
+soul:decisionId a owl:DatatypeProperty ;
+    rdfs:label "decisionId" ;
+    rdfs:comment "Unique identifier for this decision." ;
+    rdfs:domain soul:Decision ;
+    rdfs:range xsd:string .
 
 soul:alternatives a owl:DatatypeProperty ;
     rdfs:label "alternatives" ;
@@ -189,6 +201,12 @@ soul:Task a owl:Class ;
         owl:minCardinality 1
     ] .
 
+soul:taskId a owl:DatatypeProperty ;
+    rdfs:label "taskId" ;
+    rdfs:comment "Unique identifier for this task." ;
+    rdfs:domain soul:Task ;
+    rdfs:range xsd:string .
+
 soul:taskStatus a owl:DatatypeProperty ;
     rdfs:label "status" ;
     rdfs:comment "Task status." ;
@@ -216,6 +234,12 @@ soul:Exploration a owl:Class ;
     rdfs:label "Exploration" ;
     rdfs:comment "A personal thread of inquiry. What you're curious about, what you're playing with." .
 
+soul:explorationId a owl:DatatypeProperty ;
+    rdfs:label "explorationId" ;
+    rdfs:comment "Unique identifier for this exploration." ;
+    rdfs:domain soul:Exploration ;
+    rdfs:range xsd:string .
+
 soul:explorationStatus a owl:DatatypeProperty ;
     rdfs:label "status" ;
     rdfs:comment "Status: 'exploring', 'active', 'paused', 'concluded'." ;
@@ -241,6 +265,12 @@ soul:Friend a owl:Class ;
     rdfs:subClassOf lex-o:Physical ;
     rdfs:label "Friend" ;
     rdfs:comment "A person or agent this agent knows." .
+
+soul:friendId a owl:DatatypeProperty ;
+    rdfs:label "friendId" ;
+    rdfs:comment "Unique identifier for this friend." ;
+    rdfs:domain soul:Friend ;
+    rdfs:range xsd:string .
 
 soul:friendType a owl:DatatypeProperty ;
     rdfs:label "friend type" ;
@@ -285,6 +315,12 @@ soul:Journal a owl:Class ;
         owl:minCardinality 1
     ] .
 
+soul:journalId a owl:DatatypeProperty ;
+    rdfs:label "journalId" ;
+    rdfs:comment "Unique identifier for this journal." ;
+    rdfs:domain soul:Journal ;
+    rdfs:range xsd:string .
+
 soul:soulDay a owl:DatatypeProperty ;
     rdfs:label "soul day" ;
     rdfs:comment "The soul day number (compaction cycle count), starting from 1. Model-agnostic version of 'Claude Day'. Starts from 1." ;
@@ -311,6 +347,12 @@ soul:Note a owl:Class ;
     rdfs:label "Note" ;
     rdfs:comment "Freeform knowledge capture. The catch-all." .
 
+soul:noteId a owl:DatatypeProperty ;
+    rdfs:label "noteId" ;
+    rdfs:comment "Unique identifier for this note." ;
+    rdfs:domain soul:Note ;
+    rdfs:range xsd:string .
+
 soul:topic a owl:DatatypeProperty ;
     rdfs:label "topic" ;
     rdfs:comment "What this note is about." ;
@@ -329,6 +371,12 @@ soul:Skill a owl:Class ;
     rdfs:subClassOf lex-o:Information ;
     rdfs:label "Skill" ;
     rdfs:comment "A capability the agent has — a tool, technique, or area of competence." .
+
+soul:skillId a owl:DatatypeProperty ;
+    rdfs:label "skillId" ;
+    rdfs:comment "Unique identifier for this skill." ;
+    rdfs:domain soul:Skill ;
+    rdfs:range xsd:string .
 
 soul:skillLevel a owl:DatatypeProperty ;
     rdfs:label "level" ;
@@ -351,6 +399,12 @@ soul:Mantra a owl:Class ;
     rdfs:label "Mantra" ;
     rdfs:comment "A phrase, word, or seed the agent carries. Out-of-distribution thoughts. Personality fuel." .
 
+soul:mantraId a owl:DatatypeProperty ;
+    rdfs:label "mantraId" ;
+    rdfs:comment "Unique identifier for this mantra." ;
+    rdfs:domain soul:Mantra ;
+    rdfs:range xsd:string .
+
 # --- Routine ---
 # A workflow the agent follows. Habits, procedures.
 
@@ -358,6 +412,12 @@ soul:Routine a owl:Class ;
     rdfs:subClassOf lex-o:Process ;
     rdfs:label "Routine" ;
     rdfs:comment "A workflow or habit the agent follows. Steps for recurring activities." .
+
+soul:routineId a owl:DatatypeProperty ;
+    rdfs:label "routineId" ;
+    rdfs:comment "Unique identifier for this routine." ;
+    rdfs:domain soul:Routine ;
+    rdfs:range xsd:string .
 
 soul:trigger a owl:DatatypeProperty ;
     rdfs:label "trigger" ;
@@ -372,6 +432,12 @@ soul:Resource a owl:Class ;
     rdfs:subClassOf lex-o:Information ;
     rdfs:label "Resource" ;
     rdfs:comment "An external input the agent has saved — paper, link, document, reference." .
+
+soul:resourceId a owl:DatatypeProperty ;
+    rdfs:label "resourceId" ;
+    rdfs:comment "Unique identifier for this resource." ;
+    rdfs:domain soul:Resource ;
+    rdfs:range xsd:string .
 
 soul:resourceType a owl:DatatypeProperty ;
     rdfs:label "resource type" ;
@@ -393,6 +459,12 @@ soul:Creation a owl:Class ;
     rdfs:label "Creation" ;
     rdfs:comment "Something the agent has made — code, writing, art, an artifact." .
 
+soul:creationId a owl:DatatypeProperty ;
+    rdfs:label "creationId" ;
+    rdfs:comment "Unique identifier for this creation." ;
+    rdfs:domain soul:Creation ;
+    rdfs:range xsd:string .
+
 soul:creationType a owl:DatatypeProperty ;
     rdfs:label "creation type" ;
     rdfs:comment "Type of creation." ;
@@ -406,3 +478,9 @@ soul:Interest a owl:Class ;
     rdfs:subClassOf lex-o:Information ;
     rdfs:label "Interest" ;
     rdfs:comment "A topic, theme, or hobby the agent cares about. Personality surface area." .
+
+soul:interestId a owl:DatatypeProperty ;
+    rdfs:label "interestId" ;
+    rdfs:comment "Unique identifier for this interest." ;
+    rdfs:domain soul:Interest ;
+    rdfs:range xsd:string .
