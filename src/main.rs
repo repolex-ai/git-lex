@@ -696,8 +696,9 @@ fn cmd_init(directory: Option<String>, kit: Option<String>, dev: bool) {
         let base_dir = lex_kit_root.join(&base_org).join(&base_repo);
         if !dev || !base_dir.exists() {
             fs::create_dir_all(&base_dir).ok();
+            println!("Downloading base kit {}/{}...", base_org, base_repo);
             if fetch_kit_from_github(BASE_KIT, &base_dir) {
-                println!("Base kit fetched.");
+                println!("Base kit installed.");
             } else {
                 eprintln!("Failed to fetch base kit from GitHub.");
                 eprintln!("Check network access to https://github.com/{}/{}", base_org, base_repo);
@@ -717,8 +718,9 @@ fn cmd_init(directory: Option<String>, kit: Option<String>, dev: bool) {
                 println!("Dev mode: using local kit at {}", kit_dir.display());
             } else {
                 fs::create_dir_all(&kit_dir).ok();
+                println!("Downloading additional kit {}/{}...", org, repo);
                 if fetch_kit_from_github(kit_name, &kit_dir) {
-                    println!("Kit '{}/{}' fetched.", org, repo);
+                    println!("Additional kit installed.");
                 } else {
                     eprintln!("Failed to fetch kit '{}' from GitHub.", kit_name);
                     eprintln!("Check that https://github.com/{}/{} exists and you have network access.", org, repo);
