@@ -1024,6 +1024,15 @@ fn cmd_init(directory: Option<String>, kit: Option<String>, dev: bool) {
             println!("Installed {} scaffold file(s) from kit(s)", scaffold_count);
         }
 
+        // If the scaffold installed a SessionStart hook script, register it
+        // in .claude/settings.json by MERGING — never overwrite the entire
+        // file, because that clobbers global Claude Code settings.
+        let hook_script = root.join(".claude").join("hooks").join("SessionStart.sh");
+        if hook_script.exists() {
+            register_claude_hook(&root, "SessionStart",
+                r#"bash "$CLAUDE_PROJECT_DIR/.claude/hooks/SessionStart.sh""#);
+        }
+
         // Install asset files (skip existing — use `git lex kit-update` to
         // refresh kit-derived assets, or `git lex nuke` + `git lex init` for
         // a full reset).
@@ -6087,6 +6096,56 @@ fn main() {
 }
 
 // ─── nuke ──────────────────────────────────────────────────────
+
+/// Register a Claude Code hook in .claude/settings.json by MERGING.
+/// Reads the existing file (or starts from {}), ensures the hook event
+/// has an entry with our command, writes back. Never clobbers existing
+/// hooks or other settings keys.
+fn register_claude_hook(root: &std::path::Path, event: &str, command: &str) {
+    let settings_path = root.join(".claude").join("settings.json");
+    fs::create_dir_all(settings_path.parent().unwrap()).ok();
+
+    let mut settings: serde_json::Value = if settings_path.exists() {
+        let content = fs::read_to_string(&settings_path).unwrap_or_default();
+        serde_json::from_str(&content).unwrap_or(serde_json::json!({}))
+    } else {
+        serde_json::json!({})
+    };
+
+    // Build the hook entry we want to register.
+    let hook_entry = serde_json::json!({
+        "hooks": [{"type": "command", "command": command}]
+    });
+
+    // Ensure settings.hooks exists as an object.
+    if !settings.get("hooks").is_some() {
+        settings["hooks"] = serde_json::json!({});
+    }
+
+    // Ensure settings.hooks[event] exists as an array.
+    let hooks_obj = settings["hooks"].as_object_mut().unwrap();
+    if !hooks_obj.contains_key(event) {
+        hooks_obj.insert(event.to_string(), serde_json::json!([]));
+    }
+
+    // Check if our command is already registered (avoid duplicates).
+    let event_hooks = hooks_obj.get_mut(event).unwrap().as_array_mut().unwrap();
+    let already_registered = event_hooks.iter().any(|entry| {
+        entry.get("hooks")
+            .and_then(|h| h.as_array())
+            .map(|arr| arr.iter().any(|h| h.get("command").and_then(|c| c.as_str()) == Some(command)))
+            .unwrap_or(false)
+    });
+
+    if !already_registered {
+        event_hooks.push(hook_entry);
+        println!("Registered {} hook in .claude/settings.json", event);
+    }
+
+    // Write back with pretty formatting.
+    let json_str = serde_json::to_string_pretty(&settings).unwrap();
+    fs::write(&settings_path, json_str + "\n").ok();
+}
 
 fn cmd_nuke() {
     let root = find_git_root().expect("not in a git repo");
