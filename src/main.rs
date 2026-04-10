@@ -801,7 +801,7 @@ fn cmd_init(kit: Option<String>, force: bool, dev: bool) {
         let kit_types = get_kit_types(kit_name);
         if create_folders {
             for (type_name, _) in &kit_types {
-                let type_dir = root.join(type_name.to_lowercase());
+                let type_dir = root.join(type_name);
                 fs::create_dir_all(&type_dir).ok();
                 // Add a .gitkeep so empty dirs are tracked
                 let gitkeep = type_dir.join(".gitkeep");
@@ -810,11 +810,11 @@ fn cmd_init(kit: Option<String>, force: bool, dev: bool) {
                 }
             }
             if !kit_types.is_empty() {
-                let type_names: Vec<String> = kit_types.iter().map(|(n, _)| n.to_lowercase()).collect();
+                let type_names: Vec<String> = kit_types.iter().map(|(n, _)| n.clone()).collect();
                 println!("Created type folders: {}", type_names.join(", "));
             }
         }
-        let type_names: Vec<String> = kit_types.iter().map(|(n, _)| n.to_lowercase()).collect();
+        let type_names: Vec<String> = kit_types.iter().map(|(n, _)| n.clone()).collect();
         if !kit_types.is_empty() {
 
             // Generate README.lex.md
@@ -867,7 +867,7 @@ fn cmd_init(kit: Option<String>, force: bool, dev: bool) {
                 doc.push_str(&format!("## {} Kit — Document Types\n\n", kit_short));
                 for (type_name, properties) in &kit_types {
                     doc.push_str(&format!("### {}\n\n", type_name));
-                    doc.push_str(&format!("Create: `git lex create {}`\n\n", type_name.to_lowercase()));
+                    doc.push_str(&format!("Create: `git lex create {}`\n\n", type_name));
                     if !properties.is_empty() {
                         let has_comments = properties.iter().any(|(_, _, _, c)| !c.is_empty());
                         if has_comments {
@@ -922,8 +922,7 @@ fn cmd_init(kit: Option<String>, force: bool, dev: bool) {
         let shacl_hints = parse_shacl_hints(&shapes_content);
 
         for (type_name, properties) in &kit_types {
-            let type_lower = type_name.to_lowercase();
-            let type_dir = root.join(&type_lower);
+            let type_dir = root.join(type_name);
             let template_path = type_dir.join(format!("__{}.md", type_name));
 
             if !template_path.exists() {
@@ -931,8 +930,9 @@ fn cmd_init(kit: Option<String>, force: bool, dev: bool) {
                 tmpl.push_str("---\n");
 
                 for (prop_name, prop_type, _required, _comment) in properties {
-                    // Property names pass through as-is from the ontology (camelCase)
-                    let key = format!("{}.{}.{}", kit_short, type_lower, prop_name);
+                    // Property names pass through as-is from the ontology (camelCase).
+                    // Class name is capitalized to match the ontology exactly.
+                    let key = format!("{}.{}.{}", kit_short, type_name, prop_name);
 
                     // Look up SHACL hint for this property
                     let prefix_name = get_kit_prefix_name(&kit_short);
@@ -2614,18 +2614,13 @@ fn generate_frontmatter_nquads() -> String {
                         let class_seg = segments[1];
                         let prop_seg = segments[2];
 
-                        // Emit rdf:type from class segment (once per class)
+                        // Emit rdf:type from class segment (once per class).
+                        // The class segment in dot-notation is already capitalized
+                        // (e.g. squad.Task.assignedTo) and matches the ontology class
+                        // name exactly. No case transformation needed.
                         let type_key = format!("{}.{}", kit_name, class_seg);
                         if emitted_types.insert(type_key) {
-                            // Capitalize class name: "memory" → "Memory"
-                            let class_capitalized = {
-                                let mut c = class_seg.chars();
-                                match c.next() {
-                                    None => class_seg.to_string(),
-                                    Some(f) => f.to_uppercase().to_string() + c.as_str(),
-                                }
-                            };
-                            let type_uri = format!("<https://repolex.ai/ontology/kit/{}/{}>", kit_name, class_capitalized);
+                            let type_uri = format!("<https://repolex.ai/ontology/kit/{}/{}>", kit_name, class_seg);
                             nq.push_str(&format!(
                                 "{} <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> {} {} .\n",
                                 doc_uri, type_uri, graph
@@ -4108,14 +4103,14 @@ fn cmd_create(doctype: &str, title: Option<&str>) {
 
     // Find valid types
     let kit_types = get_kit_types(&kit);
+    // Match case-insensitively so `git lex create task` and `git lex create Task` both work.
     let doctype_lower = doctype.to_lowercase();
-
     let matching_type = kit_types.iter().find(|(name, _)| name.to_lowercase() == doctype_lower);
 
     let (class_name, properties) = match matching_type {
         Some((name, props)) => (name.clone(), props.clone()),
         None => {
-            let valid: Vec<String> = kit_types.iter().map(|(n, _)| n.to_lowercase()).collect();
+            let valid: Vec<String> = kit_types.iter().map(|(n, _)| n.clone()).collect();
             eprintln!(
                 "Unknown document type '{}'. Valid types for kit '{}': {}",
                 doctype, kit, valid.join(", ")
@@ -4124,14 +4119,14 @@ fn cmd_create(doctype: &str, title: Option<&str>) {
         }
     };
 
-    // Generate filename in type-specific folder
+    // Generate filename in type-specific folder (folder name matches ontology class exactly)
     let title_str = title.unwrap_or("untitled");
     let slug = title_str
         .to_lowercase()
         .replace(' ', "-")
         .replace(|c: char| !c.is_alphanumeric() && c != '-', "");
 
-    let type_folder = class_name.to_lowercase();
+    let type_folder = class_name.clone();
     let type_dir = root.join(&type_folder);
     fs::create_dir_all(&type_dir).ok();
 
@@ -4150,13 +4145,13 @@ fn cmd_create(doctype: &str, title: Option<&str>) {
     // Build frontmatter — flat dot notation: kit.class.property using the
     // short kit name, not the full org/repo spec.
     let (_, _, short) = resolve_kit_spec(&kit);
-    let class_lower = class_name.to_lowercase();
     let mut fm = String::new();
     fm.push_str("---\n");
 
     for (prop_name, prop_type, _required, comment) in &properties {
-        // Property names pass through as-is from the ontology (camelCase)
-        let key = format!("{}.{}.{}", short, class_lower, prop_name);
+        // Property names pass through as-is from the ontology (camelCase).
+        // Class name is capitalized to match the ontology exactly.
+        let key = format!("{}.{}.{}", short, class_name, prop_name);
 
         // Build the comment suffix from rdfs:comment
         let comment_suffix = if comment.is_empty() {
