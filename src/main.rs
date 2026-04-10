@@ -48,16 +48,16 @@ enum LlmCommands {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Initialize .lex/ in the current repo
+    /// Initialize .lex/ in a repo (defaults to current directory)
     Init {
+        /// Directory to initialize. Defaults to the current directory,
+        /// following the git convention (`git init [<directory>]`).
+        directory: Option<String>,
         /// Use case kit (e.g., soul, squad, or org/repo). Defines valid
-        /// document types and ontology.
+        /// document types and ontology. The base kit is always installed;
+        /// this adds a domain-specific kit on top.
         #[arg(long)]
         kit: Option<String>,
-        /// Reinstall asset files even when they already exist. Prompts before
-        /// overwriting. Default behavior is to skip existing asset files.
-        #[arg(long)]
-        force: bool,
         /// Dev mode: skip the GitHub fetch and use the kit already at
         /// .lex/kit/{org}/{repo}/. Preserves .lex/ state across re-init so
         /// the kit you are developing is not nuked. Regenerates SHACL
@@ -577,7 +577,19 @@ const ONT_FM: &str = include_str!("../ontology/git-lex/fm/fm.ttl");
 const ONT_LEX: &str = include_str!("../ontology/git-lex/lex/lex.ttl");
 // Kit ontologies are fetched from GitHub at init time — no embedded fallback.
 
-fn cmd_init(kit: Option<String>, force: bool, dev: bool) {
+const BASE_KIT: &str = "repolex-ai/git-lex-kit-base";
+
+fn cmd_init(directory: Option<String>, kit: Option<String>, dev: bool) {
+    // Follow git convention: `git lex init [<directory>]`
+    // If a directory is given, cd into it (creating it if necessary).
+    if let Some(ref dir) = directory {
+        let path = std::path::Path::new(dir);
+        if !path.exists() {
+            fs::create_dir_all(path).expect("failed to create directory");
+        }
+        std::env::set_current_dir(path).expect("failed to cd into directory");
+    }
+
     let root = match find_git_root() {
         Some(r) => r,
         None => {
@@ -607,20 +619,12 @@ fn cmd_init(kit: Option<String>, force: bool, dev: bool) {
         exit(1);
     }
 
-    // Raw CLI arg, e.g. "soul" or "repolex-ai/git-lex-kit-soul" or "none".
-    let kit_name = kit.as_deref().unwrap_or("none");
-
-    // Resolved forms:
-    //   - kit_spec: canonical "org/repo" for filesystem paths and repo.yml
-    //   - kit_short: short name ("soul") for SPARQL prefixes, frontmatter
-    //     keys (soul.memory.confidence), README display, etc.
-    // When no kit is configured, both == "none".
-    let (kit_spec, kit_short) = if kit_name == "none" {
-        ("none".to_string(), "none".to_string())
-    } else {
-        let (org, repo, short) = resolve_kit_spec(kit_name);
-        (format!("{}/{}", org, repo), short)
-    };
+    // Every repo gets the base kit. If --kit is specified, that kit is
+    // installed alongside base (not instead of it). The kit_spec in repo.yml
+    // records the domain kit; base is implicit and always present.
+    let kit_name = kit.as_deref().unwrap_or(BASE_KIT);
+    let (org, repo, kit_short) = resolve_kit_spec(kit_name);
+    let kit_spec = format!("{}/{}", org, repo);
 
     let lex_dir = root.join(".lex");
 
@@ -684,36 +688,50 @@ fn cmd_init(kit: Option<String>, force: bool, dev: bool) {
         }
     }
 
-    // Install kit. In normal mode, fetch from GitHub and land at
-    // .lex/kit/{org}/{repo}/, nuking any previous kit dir first. In dev
-    // mode, don't fetch — verify the local kit dir already exists at the
-    // expected path and use it in place. Kit authors run `--dev` when
-    // iterating on a kit without wanting to push to GitHub between runs.
-    if let Some(ref k) = kit {
-        let (org, repo, _) = resolve_kit_spec(k);
-        let kit_dir = lex_dir.join("kit").join(&org).join(&repo);
+    // Install kit(s). Every repo gets the base kit. If --kit specifies a
+    // domain kit (squad, soul, etc.), that's installed alongside base in
+    // the same .lex/kit/ directory.
+    //
+    // In dev mode, don't fetch — verify the local kit dir already exists.
+    {
+        let lex_kit_root = lex_dir.join("kit");
+        if !dev {
+            let _ = fs::remove_dir_all(&lex_kit_root);
+        }
 
-        if dev {
-            if !kit_dir.exists() {
-                eprintln!(
-                    "--dev: kit directory not found at {}",
-                    kit_dir.display()
-                );
-                eprintln!("Populate the kit locally first, then re-run with --dev.");
+        // Always install base kit (unless dev mode where it may already exist).
+        let (base_org, base_repo, _) = resolve_kit_spec(BASE_KIT);
+        let base_dir = lex_kit_root.join(&base_org).join(&base_repo);
+        if !dev || !base_dir.exists() {
+            fs::create_dir_all(&base_dir).ok();
+            if fetch_kit_from_github(BASE_KIT, &base_dir) {
+                println!("Base kit fetched.");
+            } else {
+                eprintln!("Failed to fetch base kit from GitHub.");
+                eprintln!("Check network access to https://github.com/{}/{}", base_org, base_repo);
                 exit(1);
             }
-            println!("Dev mode: using local kit at {}", kit_dir.display());
-        } else {
-            let lex_kit_root = lex_dir.join("kit");
-            let _ = fs::remove_dir_all(&lex_kit_root);
-            fs::create_dir_all(&kit_dir).ok();
+        }
 
-            if fetch_kit_from_github(k, &kit_dir) {
-                println!("Kit '{}/{}' fetched from GitHub.", org, repo);
+        // Install the domain kit (if different from base).
+        let kit_dir = lex_kit_root.join(&org).join(&repo);
+        if kit_spec != format!("{}/{}", base_org, base_repo) {
+            if dev {
+                if !kit_dir.exists() {
+                    eprintln!("--dev: kit directory not found at {}", kit_dir.display());
+                    eprintln!("Populate the kit locally first, then re-run with --dev.");
+                    exit(1);
+                }
+                println!("Dev mode: using local kit at {}", kit_dir.display());
             } else {
-                eprintln!("Failed to fetch kit '{}' from GitHub.", k);
-                eprintln!("Check that https://github.com/{}/{} exists and you have network access.", org, repo);
-                exit(1);
+                fs::create_dir_all(&kit_dir).ok();
+                if fetch_kit_from_github(kit_name, &kit_dir) {
+                    println!("Kit '{}/{}' fetched.", org, repo);
+                } else {
+                    eprintln!("Failed to fetch kit '{}' from GitHub.", kit_name);
+                    eprintln!("Check that https://github.com/{}/{} exists and you have network access.", org, repo);
+                    exit(1);
+                }
             }
         }
     }
@@ -771,7 +789,7 @@ fn cmd_init(kit: Option<String>, force: bool, dev: bool) {
             "name: {}\nkit: {}\ncreated: {}\n",
             repo_name, kit_spec, today
         )).ok();
-    } else if kit.is_some() {
+    } else {
         // Rewrite the kit: line in the existing repo.yml to match the
         // current spec. Preserves all other fields (name, created,
         // agent_name, first_commit, etc.) untouched.
@@ -808,7 +826,7 @@ fn cmd_init(kit: Option<String>, force: bool, dev: bool) {
     }
 
     // Create type folders from kit ontology (only if kit.yml says createTypeFolders: true)
-    if kit.is_some() {
+    {
         let create_folders = kit_config_bool(kit_name, "createTypeFolders", false);
         let kit_types = get_kit_types(kit_name);
         if create_folders {
@@ -918,12 +936,10 @@ fn cmd_init(kit: Option<String>, force: bool, dev: bool) {
     }
 
     // Generate SHACL shapes from ontology, then class templates
-    if kit.is_some() {
-        if let Some(shapes_path) = build_shacl_shapes(kit_name) {
-            println!("SHACL shapes generated: {}", shapes_path.file_name().unwrap_or_default().to_string_lossy());
-        }
+    if let Some(shapes_path) = build_shacl_shapes(kit_name) {
+        println!("SHACL shapes generated: {}", shapes_path.file_name().unwrap_or_default().to_string_lossy());
     }
-    if kit.is_some() {
+    {
         let kit_types = get_kit_types(kit_name);
         let shapes_content = {
             let r = find_git_root().unwrap();
@@ -981,7 +997,7 @@ fn cmd_init(kit: Option<String>, force: bool, dev: bool) {
     //      from the variable map). Skip if destination exists (default);
     //      under --force, prompt to overwrite with clear warning. No backup
     //      files — git history is the safety net.
-    if kit.is_some() {
+    {
         let vars = collect_init_variables(kit_name, &carryover);
 
         // Persist collected variables into repo.yml (one line per var, append
@@ -1003,54 +1019,17 @@ fn cmd_init(kit: Option<String>, force: bool, dev: bool) {
             println!("Installed {} scaffold file(s) from kit", scaffold_count);
         }
 
-        // If --force is set, first do a dry-run asset install to find which
-        // files would be overwritten, then show the user and prompt for
-        // confirmation before committing. The dry-run is `force = false`,
-        // which collects skipped entries — those ARE the files that --force
-        // would clobber.
-        let mut effective_force = force;
-        if force {
-            let dry = install_asset_files(&vars, false);
-            if !dry.skipped.is_empty() {
-                eprintln!();
-                eprintln!("WARNING: --force will overwrite these existing asset files:");
-                for p in &dry.skipped {
-                    eprintln!("  {}", p);
-                }
-                eprintln!();
-                eprintln!("Your local edits will be replaced with kit defaults.");
-                eprintln!("Git history preserves previous versions — use `git show HEAD^:<file>` to recover.");
-                eprint!("Continue? [y/N] ");
-                let mut input = String::new();
-                std::io::stdin().read_line(&mut input).unwrap_or_default();
-                let input = input.trim().to_lowercase();
-                if input != "y" && input != "yes" {
-                    println!("Skipping asset overwrite (--force cancelled).");
-                    effective_force = false;
-                } else {
-                    // User said yes to clobber existing assets. Auto-commit
-                    // anything uncommitted first so their work lives in git
-                    // history before we overwrite.
-                    auto_commit_snapshot("--force asset overwrite");
-                }
-            }
-        }
-
-        let asset_report = install_asset_files(&vars, effective_force);
+        // Install asset files (skip existing — use `git lex kit-update` to
+        // refresh kit-derived assets, or `git lex nuke` + `git lex init` for
+        // a full reset).
+        let asset_report = install_asset_files(&vars, false);
         if !asset_report.installed.is_empty() {
             println!("Installed {} asset file(s) from kit", asset_report.installed.len());
         }
-        if !asset_report.overwritten.is_empty() {
-            println!("Overwrote {} asset file(s) (--force)", asset_report.overwritten.len());
-            for p in &asset_report.overwritten {
-                println!("  ~ {}", p);
-            }
-        }
         if !asset_report.skipped.is_empty() {
             println!(
-                "Skipped {} existing asset file(s). Use `git lex init --kit {} --force` to reinstall defaults.",
+                "Skipped {} existing asset file(s). Use `git lex kit-update` to refresh from kit.",
                 asset_report.skipped.len(),
-                kit_name
             );
             for p in &asset_report.skipped {
                 println!("  - {}", p);
@@ -6072,7 +6051,7 @@ fn main() {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Init { kit, force, dev } => cmd_init(kit, force, dev),
+        Commands::Init { directory, kit, dev } => cmd_init(directory, kit, dev),
         Commands::Status => cmd_status(),
         Commands::Create { doctype, title } => cmd_create(&doctype, title.as_deref()),
         Commands::Save { message } => cmd_save(&message),
