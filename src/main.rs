@@ -1024,13 +1024,39 @@ fn cmd_init(directory: Option<String>, kit: Option<String>, dev: bool) {
             println!("Installed {} scaffold file(s) from kit(s)", scaffold_count);
         }
 
-        // If the scaffold installed a SessionStart hook script, register it
-        // in .claude/settings.json by MERGING — never overwrite the entire
-        // file, because that clobbers global Claude Code settings.
-        let hook_script = root.join(".claude").join("hooks").join("SessionStart.sh");
-        if hook_script.exists() {
-            register_claude_hook(&root, "SessionStart",
-                r#"bash "$CLAUDE_PROJECT_DIR/.claude/hooks/SessionStart.sh""#);
+        // ── Substrate setup ──────────────────────────────────────────
+        //
+        // After scaffold files are installed and the agent identifier is
+        // known (from the init prompts above, stored in `vars`), configure
+        // each supported LLM substrate so the agent's identity is wired
+        // into the session.
+        //
+        // Each substrate gets its own setup function. The agent_name
+        // (collected via init prompts from the kit's kit.yml) is injected
+        // into the substrate's local config so commits, hooks, and tool
+        // calls all use the correct identity.
+        //
+        // Currently: Claude Code (via settings.local.json env block).
+        // Future: Gemini, OpenAI Codex, etc. — stub those as needed after
+        // researching how each model's CLI handles per-project identity.
+
+        let agent_name = vars.get("agent_name").cloned().unwrap_or_default();
+        if !agent_name.is_empty() {
+            // Claude Code: write git identity env vars into
+            // .claude/settings.local.json (gitignored, per-machine).
+            // These get injected into every Bash tool call automatically.
+            setup_substrate_claude(&root, &agent_name);
+
+            // TODO: Gemini (Aistudio CLI / Project IDX)
+            // Needs research on how Gemini's agent substrate handles
+            // per-project env injection. Likely a similar local config
+            // file, but the path and format are different.
+            // setup_substrate_gemini(&root, &agent_name);
+
+            // TODO: OpenAI (Codex CLI)
+            // Same — needs research on the OpenAI agent substrate's
+            // local config mechanism.
+            // setup_substrate_openai(&root, &agent_name);
         }
 
         // Install asset files (skip existing — use `git lex kit-update` to
@@ -6097,11 +6123,9 @@ fn main() {
 
 // ─── nuke ──────────────────────────────────────────────────────
 
-/// Register a Claude Code hook in .claude/settings.json by MERGING.
-/// Reads the existing file (or starts from {}), ensures the hook event
-/// has an entry with our command, writes back. Never clobbers existing
-/// hooks or other settings keys.
-fn register_claude_hook(root: &std::path::Path, event: &str, command: &str) {
+/// Set up Claude Code substrate: write git identity env vars and register
+/// any hooks into .claude/settings.local.json (gitignored, per-machine).
+fn setup_substrate_claude(root: &std::path::Path, agent_name: &str) {
     let settings_path = root.join(".claude").join("settings.local.json");
     fs::create_dir_all(settings_path.parent().unwrap()).ok();
 
@@ -6112,39 +6136,53 @@ fn register_claude_hook(root: &std::path::Path, event: &str, command: &str) {
         serde_json::json!({})
     };
 
-    // Build the hook entry we want to register.
+    // Git identity env vars — injected into every Bash tool call.
+    let email = format!("{}@lex.local", agent_name.to_lowercase());
+    if !settings.get("env").is_some() {
+        settings["env"] = serde_json::json!({});
+    }
+    let env = settings["env"].as_object_mut().unwrap();
+    env.insert("GIT_AUTHOR_NAME".to_string(), serde_json::json!(agent_name));
+    env.insert("GIT_AUTHOR_EMAIL".to_string(), serde_json::json!(email));
+    env.insert("GIT_COMMITTER_NAME".to_string(), serde_json::json!(agent_name));
+    env.insert("GIT_COMMITTER_EMAIL".to_string(), serde_json::json!(email));
+
+    // Register SessionStart hook if the scaffold provided one.
+    let hook_script = root.join(".claude").join("hooks").join("SessionStart.sh");
+    if hook_script.exists() {
+        register_hook_in_settings(&mut settings, "SessionStart",
+            r#"bash "$CLAUDE_PROJECT_DIR/.claude/hooks/SessionStart.sh""#);
+    }
+
+    let json_str = serde_json::to_string_pretty(&settings).unwrap();
+    fs::write(&settings_path, json_str + "\n").ok();
+    println!("Claude Code: identity and hooks written to .claude/settings.local.json");
+}
+
+/// Add a hook entry to a settings JSON value (in-memory merge, no file I/O).
+/// Avoids duplicates by checking if the command is already registered.
+fn register_hook_in_settings(settings: &mut serde_json::Value, event: &str, command: &str) {
     let hook_entry = serde_json::json!({
         "hooks": [{"type": "command", "command": command}]
     });
 
-    // Ensure settings.hooks exists as an object.
     if !settings.get("hooks").is_some() {
         settings["hooks"] = serde_json::json!({});
     }
-
-    // Ensure settings.hooks[event] exists as an array.
     let hooks_obj = settings["hooks"].as_object_mut().unwrap();
     if !hooks_obj.contains_key(event) {
         hooks_obj.insert(event.to_string(), serde_json::json!([]));
     }
-
-    // Check if our command is already registered (avoid duplicates).
     let event_hooks = hooks_obj.get_mut(event).unwrap().as_array_mut().unwrap();
-    let already_registered = event_hooks.iter().any(|entry| {
+    let already = event_hooks.iter().any(|entry| {
         entry.get("hooks")
             .and_then(|h| h.as_array())
             .map(|arr| arr.iter().any(|h| h.get("command").and_then(|c| c.as_str()) == Some(command)))
             .unwrap_or(false)
     });
-
-    if !already_registered {
+    if !already {
         event_hooks.push(hook_entry);
-        println!("Registered {} hook in .claude/settings.local.json", event);
     }
-
-    // Write back with pretty formatting.
-    let json_str = serde_json::to_string_pretty(&settings).unwrap();
-    fs::write(&settings_path, json_str + "\n").ok();
 }
 
 fn cmd_nuke() {
