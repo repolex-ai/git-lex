@@ -4149,7 +4149,7 @@ fn cmd_save(message: &str) {
     if let Some(kit) = get_kit() {
         if let Some(substrate) = kit_config_str(&kit, "harness") {
             if let Some(root) = find_git_root() {
-                harness::sync_skills(&root, &substrate);
+                harness::sync(&root, &substrate);
             }
         }
     }
