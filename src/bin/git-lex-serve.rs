@@ -1,0 +1,515 @@
+//! git lex-serve — HTTP + WebSocket server for git-lex knowledge graphs.
+//!
+//! Bundles the viz server (D3 graph explorer) and the listen server (SSE
+//! squad notifications) into a single binary. Runs as `git lex-serve` via
+//! git's subcommand discovery (`git <foo>` finds `git-<foo>` on PATH).
+
+use clap::{Parser, Subcommand};
+use git_lex::{add_prefixes, find_git_root, open_store_read_only};
+use oxigraph::model::Term;
+use oxigraph::store::Store;
+use std::fs;
+use std::path::PathBuf;
+use std::process::exit;
+use std::sync::Arc;
+
+#[derive(Parser)]
+#[command(name = "git-lex-serve", about = "Servers for git-lex knowledge graphs")]
+struct Cli {
+    #[command(subcommand)]
+    command: Commands,
+}
+
+#[derive(Subcommand)]
+enum Commands {
+    /// Start the visualization server (HTTP + WebSocket on localhost)
+    Viz {
+        /// Port to listen on
+        #[arg(long, default_value = "7878")]
+        port: u16,
+    },
+    /// Start the squad messaging notification server (SSE on localhost)
+    Listen {
+        /// Port to listen on
+        #[arg(long, default_value = "7879")]
+        port: u16,
+    },
+}
+
+fn main() {
+    let cli = Cli::parse();
+    match cli.command {
+        Commands::Viz { port } => cmd_viz(port),
+        Commands::Listen { port } => cmd_listen(port),
+    }
+}
+
+// ─── viz server ─────────────────────────────────────────────────
+
+// Viz UI assets — embedded at compile time
+const VIZ_INDEX_HTML: &str = include_str!("../../viz/index.html");
+const VIZ_CSS_MAIN: &str = include_str!("../../viz/css/main.css");
+const VIZ_JS_MAIN: &str = include_str!("../../viz/js/main.js");
+
+/// Path to the git-lex source's `viz/` directory at build time.
+const VIZ_BUILD_TIME_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/viz");
+
+fn resolve_viz_dev_dir() -> Option<PathBuf> {
+    let val = std::env::var("GIT_LEX_VIZ_DEV").ok()?;
+    let trimmed = val.trim();
+    if trimmed.is_empty() || trimmed == "0" || trimmed.eq_ignore_ascii_case("false") {
+        return None;
+    }
+    let path = if trimmed == "1" || trimmed.eq_ignore_ascii_case("true") {
+        PathBuf::from(VIZ_BUILD_TIME_DIR)
+    } else {
+        PathBuf::from(trimmed)
+    };
+    if path.is_dir() { Some(path) } else { None }
+}
+
+fn read_viz_asset(dev_dir: &Option<PathBuf>, rel: &str, embedded: &'static str) -> String {
+    if let Some(dir) = dev_dir {
+        let path = dir.join(rel);
+        if let Ok(s) = fs::read_to_string(&path) {
+            return s;
+        }
+    }
+    embedded.to_string()
+}
+
+#[derive(Clone)]
+struct VizState {
+    store: Arc<Store>,
+    scene: Arc<tokio::sync::Mutex<Option<serde_json::Value>>>,
+    tx: tokio::sync::broadcast::Sender<String>,
+    repo_root: Arc<PathBuf>,
+}
+
+fn run_sparql_to_json(store: &Store, query: &str) -> serde_json::Value {
+    let prefixed = add_prefixes(query);
+    let mut parsed = match oxigraph::sparql::Query::parse(&prefixed, None) {
+        Ok(p) => p,
+        Err(e) => return serde_json::json!({"error": format!("parse error: {}", e)}),
+    };
+    parsed.dataset_mut().set_default_graph_as_union();
+
+    let results = match store.query(parsed) {
+        Ok(r) => r,
+        Err(e) => return serde_json::json!({"error": format!("query error: {}", e)}),
+    };
+
+    match results {
+        oxigraph::sparql::QueryResults::Solutions(sols) => {
+            let vars: Vec<String> = sols.variables().iter().map(|v| v.as_str().to_string()).collect();
+            let mut rows = Vec::new();
+            for sol in sols.flatten() {
+                let mut row = serde_json::Map::new();
+                for var in &vars {
+                    if let Some(t) = sol.get(var.as_str()) {
+                        let val = match t {
+                            Term::NamedNode(n) => n.as_str().to_string(),
+                            Term::Literal(l) => l.value().to_string(),
+                            Term::BlankNode(b) => format!("_:{}", b.as_str()),
+                            Term::Triple(t) => format!("<<{} {} {}>>", t.subject, t.predicate, t.object),
+                        };
+                        row.insert(var.clone(), serde_json::Value::String(val));
+                    }
+                }
+                rows.push(serde_json::Value::Object(row));
+            }
+            serde_json::json!({"type": "select", "vars": vars, "results": rows})
+        }
+        oxigraph::sparql::QueryResults::Boolean(b) => {
+            serde_json::json!({"type": "ask", "boolean": b})
+        }
+        oxigraph::sparql::QueryResults::Graph(triples) => {
+            let mut emitted = Vec::new();
+            for t in triples.flatten() {
+                let s = match t.subject {
+                    oxigraph::model::NamedOrBlankNode::NamedNode(n) => n.as_str().to_string(),
+                    oxigraph::model::NamedOrBlankNode::BlankNode(b) => format!("_:{}", b.as_str()),
+                };
+                let p = t.predicate.as_str().to_string();
+                let (o_val, o_type, o_datatype) = match t.object {
+                    Term::NamedNode(n) => (n.as_str().to_string(), "iri", None),
+                    Term::Literal(l) => (l.value().to_string(), "literal", Some(l.datatype().as_str().to_string())),
+                    Term::BlankNode(b) => (format!("_:{}", b.as_str()), "bnode", None),
+                    Term::Triple(t) => (format!("<<{} {} {}>>", t.subject, t.predicate, t.object), "triple", None),
+                };
+                let mut triple = serde_json::Map::new();
+                triple.insert("subject".to_string(), serde_json::Value::String(s));
+                triple.insert("predicate".to_string(), serde_json::Value::String(p));
+                let mut obj = serde_json::Map::new();
+                obj.insert("value".to_string(), serde_json::Value::String(o_val));
+                obj.insert("type".to_string(), serde_json::Value::String(o_type.to_string()));
+                if let Some(dt) = o_datatype {
+                    obj.insert("datatype".to_string(), serde_json::Value::String(dt));
+                }
+                triple.insert("object".to_string(), serde_json::Value::Object(obj));
+                emitted.push(serde_json::Value::Object(triple));
+            }
+            serde_json::json!({"type": "construct", "triples": emitted})
+        }
+    }
+}
+
+fn api_file_for_uri(state: &VizState, uri: Option<&str>) -> serde_json::Value {
+    let uri = match uri {
+        Some(u) if !u.is_empty() => u,
+        _ => return serde_json::json!({"error": "missing 'uri' query parameter"}),
+    };
+
+    let query = format!(
+        "PREFIX fm: <https://repolex.ai/ontology/git-lex/fm/> \
+         SELECT ?path WHERE {{ <{}> fm:path ?path }} LIMIT 1",
+        uri
+    );
+    let mut parsed = match oxigraph::sparql::Query::parse(&query, None) {
+        Ok(p) => p,
+        Err(e) => return serde_json::json!({"error": format!("query parse error: {}", e)}),
+    };
+    parsed.dataset_mut().set_default_graph_as_union();
+    let results = match state.store.query(parsed) {
+        Ok(r) => r,
+        Err(e) => return serde_json::json!({"error": format!("query error: {}", e)}),
+    };
+    let mut rel_path: Option<String> = None;
+    if let oxigraph::sparql::QueryResults::Solutions(sols) = results {
+        for sol in sols.flatten() {
+            if let Some(Term::Literal(l)) = sol.get("path") {
+                rel_path = Some(l.value().to_string());
+                break;
+            }
+        }
+    }
+    let rel = match rel_path {
+        Some(p) => p,
+        None => return serde_json::json!({"error": "no fm:path for this IRI", "uri": uri}),
+    };
+
+    let abs = state.repo_root.join(&rel);
+    let canon_root = state.repo_root.canonicalize().unwrap_or_else(|_| (*state.repo_root).clone());
+    let canon_abs = match abs.canonicalize() {
+        Ok(p) => p,
+        Err(e) => return serde_json::json!({"error": format!("file not found: {}", e), "path": rel}),
+    };
+    if !canon_abs.starts_with(&canon_root) {
+        return serde_json::json!({"error": "path escapes repo root", "path": rel});
+    }
+    let raw = match std::fs::read_to_string(&canon_abs) {
+        Ok(s) => s,
+        Err(e) => return serde_json::json!({"error": format!("read failed: {}", e), "path": rel}),
+    };
+
+    let (frontmatter, body) = if raw.starts_with("---\n") {
+        if let Some(end) = raw[4..].find("\n---\n") {
+            let fm_text = &raw[4..4 + end];
+            let body_text = &raw[4 + end + 5..];
+            (Some(fm_text.to_string()), body_text.to_string())
+        } else if let Some(end) = raw[4..].find("\n---") {
+            let fm_text = &raw[4..4 + end];
+            let body_text = raw.get(4 + end + 4..).unwrap_or("");
+            (Some(fm_text.to_string()), body_text.to_string())
+        } else {
+            (None, raw.clone())
+        }
+    } else {
+        (None, raw.clone())
+    };
+
+    serde_json::json!({
+        "uri": uri,
+        "path": rel,
+        "frontmatter": frontmatter,
+        "content": body,
+    })
+}
+
+fn cmd_viz(port: u16) {
+    if open_store_read_only().is_none() {
+        eprintln!("No knowledge graph store found.");
+        eprintln!("Run 'git lex sync' first to build the store.");
+        exit(1);
+    }
+    run_viz_server(port);
+}
+
+#[tokio::main(flavor = "multi_thread", worker_threads = 2)]
+async fn run_viz_server(port: u16) {
+    use axum::{
+        Router,
+        routing::{get, post},
+        response::{Html, Json},
+        extract::ws::WebSocketUpgrade,
+    };
+    use tokio::sync::{Mutex, broadcast};
+
+    let store = Arc::new(
+        open_store_read_only().expect("failed to open store read-only — run `git lex sync` first"),
+    );
+    let scene: Arc<Mutex<Option<serde_json::Value>>> = Arc::new(Mutex::new(None));
+    let (tx, _rx) = broadcast::channel::<String>(64);
+
+    let repo_root = Arc::new(find_git_root().unwrap_or_else(|| std::env::current_dir().unwrap()));
+    let state = VizState { store, scene, tx, repo_root };
+    let dev_dir = Arc::new(resolve_viz_dev_dir());
+
+    let app = Router::new()
+        .route("/", get({
+            let dev_dir = dev_dir.clone();
+            move || {
+                let dev_dir = dev_dir.clone();
+                async move {
+                    let body = read_viz_asset(&dev_dir, "index.html", VIZ_INDEX_HTML);
+                    Html(body)
+                }
+            }
+        }))
+        .route("/css/main.css", get({
+            let dev_dir = dev_dir.clone();
+            move || {
+                let dev_dir = dev_dir.clone();
+                async move {
+                    let body = read_viz_asset(&dev_dir, "css/main.css", VIZ_CSS_MAIN);
+                    ([("content-type", "text/css"), ("cache-control", "no-store")], body)
+                }
+            }
+        }))
+        .route("/js/main.js", get({
+            let dev_dir = dev_dir.clone();
+            move || {
+                let dev_dir = dev_dir.clone();
+                async move {
+                    let body = read_viz_asset(&dev_dir, "js/main.js", VIZ_JS_MAIN);
+                    ([("content-type", "application/javascript"), ("cache-control", "no-store")], body)
+                }
+            }
+        }))
+        .route("/api/query", post({
+            let state = state.clone();
+            move |Json(payload): Json<serde_json::Value>| {
+                let state = state.clone();
+                async move {
+                    let query = payload.get("query")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("SELECT ?s ?p ?o WHERE { ?s ?p ?o } LIMIT 10");
+                    Json(run_sparql_to_json(&state.store, query))
+                }
+            }
+        }))
+        .route("/api/push", post({
+            let state = state.clone();
+            move |Json(payload): Json<serde_json::Value>| {
+                let state = state.clone();
+                async move {
+                    {
+                        let mut scene = state.scene.lock().await;
+                        *scene = Some(payload.clone());
+                    }
+                    let msg = serde_json::json!({
+                        "type": "scene",
+                        "data": payload
+                    }).to_string();
+                    let _ = state.tx.send(msg);
+                    Json(serde_json::json!({"ok": true}))
+                }
+            }
+        }))
+        .route("/api/run-and-push", post({
+            let state = state.clone();
+            move |Json(payload): Json<serde_json::Value>| {
+                let state = state.clone();
+                async move {
+                    let query = payload.get("query").and_then(|v| v.as_str()).unwrap_or("");
+                    if query.is_empty() {
+                        return Json(serde_json::json!({"error": "missing 'query' field"}));
+                    }
+                    let result = run_sparql_to_json(&state.store, query);
+                    let scene = serde_json::json!({
+                        "query": query,
+                        "result": result,
+                    });
+                    {
+                        let mut s = state.scene.lock().await;
+                        *s = Some(scene.clone());
+                    }
+                    let msg = serde_json::json!({
+                        "type": "scene",
+                        "data": scene
+                    }).to_string();
+                    let _ = state.tx.send(msg);
+                    Json(serde_json::json!({"ok": true}))
+                }
+            }
+        }))
+        .route("/api/file", get({
+            let state = state.clone();
+            move |axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>| {
+                let state = state.clone();
+                async move {
+                    Json(api_file_for_uri(&state, params.get("uri").map(|s| s.as_str())))
+                }
+            }
+        }))
+        .route("/api/scene", get({
+            let state = state.clone();
+            move || {
+                let state = state.clone();
+                async move {
+                    let scene = state.scene.lock().await;
+                    Json(scene.clone().unwrap_or(serde_json::Value::Null))
+                }
+            }
+        }))
+        .route("/ws", get({
+            let state = state.clone();
+            move |ws: WebSocketUpgrade| {
+                let state = state.clone();
+                async move {
+                    ws.on_upgrade(move |socket| handle_ws(socket, state))
+                }
+            }
+        }));
+
+    let mut chosen_port = port;
+    let mut listener = None;
+    for candidate in port..port.saturating_add(20) {
+        let addr = format!("127.0.0.1:{}", candidate);
+        match tokio::net::TcpListener::bind(&addr).await {
+            Ok(l) => {
+                chosen_port = candidate;
+                listener = Some(l);
+                break;
+            }
+            Err(_) => continue,
+        }
+    }
+    let listener = match listener {
+        Some(l) => l,
+        None => {
+            eprintln!("Failed to bind: ports {}..{} all in use", port, port.saturating_add(20));
+            return;
+        }
+    };
+
+    let addr = format!("127.0.0.1:{}", chosen_port);
+    if chosen_port != port {
+        println!("Port {} was taken, using {} instead", port, chosen_port);
+    }
+    let url = format!("http://{}", addr);
+    println!("git-lex-serve viz listening on {}", url);
+    if let Some(dir) = dev_dir.as_ref() {
+        println!("[dev mode] serving viz assets from {}", dir.display());
+    }
+    println!("Press Ctrl+C to stop, or: kill {}", std::process::id());
+
+    let _ = open::that_detached(&url);
+
+    if let Err(e) = axum::serve(listener, app).await {
+        eprintln!("Server error: {}", e);
+    }
+}
+
+async fn handle_ws(socket: axum::extract::ws::WebSocket, state: VizState) {
+    use axum::extract::ws::Message;
+    use futures_util::{SinkExt, StreamExt};
+
+    let (mut sender, mut receiver) = socket.split();
+
+    {
+        let scene = state.scene.lock().await;
+        if let Some(s) = scene.as_ref() {
+            let initial = serde_json::json!({"type": "scene", "data": s}).to_string();
+            let _ = sender.send(Message::Text(initial.into())).await;
+        } else {
+            let _ = sender.send(Message::Text("{\"type\":\"hello\"}".into())).await;
+        }
+    }
+
+    let mut rx = state.tx.subscribe();
+
+    let mut send_task = tokio::spawn(async move {
+        while let Ok(msg) = rx.recv().await {
+            if sender.send(Message::Text(msg.into())).await.is_err() {
+                break;
+            }
+        }
+    });
+
+    let mut recv_task = tokio::spawn(async move {
+        while let Some(Ok(_msg)) = receiver.next().await {}
+    });
+
+    tokio::select! {
+        _ = (&mut send_task) => recv_task.abort(),
+        _ = (&mut recv_task) => send_task.abort(),
+    }
+}
+
+// ─── listen server ──────────────────────────────────────────────
+
+fn cmd_listen(port: u16) {
+    let root = find_git_root().expect("not a git repo");
+    let repo_yml = root.join(".lex").join("repo.yml");
+    if !repo_yml.exists() {
+        eprintln!("No git-lex repository found. Run 'git lex init' first.");
+        exit(1);
+    }
+    let config = fs::read_to_string(repo_yml).unwrap_or_default();
+    if !config.contains("kit: squad") && !config.contains("kit: soul") && !config.contains("kit: lab") {
+        eprintln!("'listen' is only supported for squad, soul, or lab kits.");
+        exit(1);
+    }
+    if open_store_read_only().is_none() {
+        eprintln!("No knowledge graph store found. Run 'git lex sync' first to build the store.");
+        exit(1);
+    }
+    run_listen_server(port);
+}
+
+#[tokio::main(flavor = "multi_thread", worker_threads = 2)]
+async fn run_listen_server(port: u16) {
+    use axum::response::sse::{Event, Sse};
+    use axum::{Router, routing::{get, post}, Json};
+    use tokio::sync::broadcast;
+    use tokio_stream::wrappers::BroadcastStream;
+    use futures_util::StreamExt;
+    use std::convert::Infallible;
+
+    let (tx, _rx) = broadcast::channel::<String>(100);
+    let tx = Arc::new(tx);
+
+    let app = Router::new()
+        .route("/events", get({
+            let tx = tx.clone();
+            move || {
+                let tx = tx.clone();
+                async move {
+                    let rx = tx.subscribe();
+                    let stream = BroadcastStream::new(rx).filter_map(|res| async move {
+                        match res {
+                            Ok(msg) => Some(Ok::<Event, Infallible>(Event::default().data(msg))),
+                            Err(_) => None,
+                        }
+                    });
+                    Sse::new(stream)
+                }
+            }
+        }))
+        .route("/notify", post({
+            let tx = tx.clone();
+            move |Json(payload): Json<serde_json::Value>| {
+                let tx = tx.clone();
+                async move {
+                    let _ = tx.send(payload.to_string());
+                    Json(serde_json::json!({"ok": true}))
+                }
+            }
+        }));
+
+    let addr = format!("127.0.0.1:{}", port);
+    let listener = tokio::net::TcpListener::bind(&addr).await.unwrap();
+    println!("git-lex-serve listen started on {}", addr);
+    axum::serve(listener, app).await.unwrap();
+}

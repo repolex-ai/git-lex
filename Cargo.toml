@@ -6,9 +6,17 @@ description = "Git extensions for knowledge graphs"
 license = "Unlicense"
 repository = "https://github.com/repolex-ai/git-lex"
 
+[lib]
+name = "git_lex"
+path = "src/lib.rs"
+
 [[bin]]
 name = "git-lex"
 path = "src/main.rs"
+
+[[bin]]
+name = "git-lex-serve"
+path = "src/bin/git-lex-serve.rs"
 
 [dependencies]
 clap = { version = "4", features = ["derive"] }

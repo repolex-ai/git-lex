@@ -12,6 +12,10 @@ use std::fs;
 use std::collections::{HashMap, HashSet};
 use tree_sitter;
 
+// Shared utilities (also used by git-lex-serve)
+use git_lex::{find_git_root, store_path, get_kit,
+              resolve_kit_spec, kit_install_dir_for_spec, add_prefixes};
+
 // Frontmatter ObjectProperty value resolver. The rules for what is and isn't
 // allowed in frontmatter values are codified as tests in this module — read
 // the test suite for the definitive spec.
@@ -123,18 +127,6 @@ enum Commands {
         /// File to parse
         file: String,
     },
-    /// Start the squad messaging notification server (SSE on localhost)
-    ListenServer {
-        /// Port to listen on
-        #[arg(long, default_value = "7879")]
-        port: u16,
-    },
-    /// Start the visualization server (HTTP + WebSocket on localhost)
-    Viz {
-        /// Port to listen on
-        #[arg(long, default_value = "7878")]
-        port: u16,
-    },
     /// Remove .lex/ entirely. Content files and git history are preserved.
     Nuke,
     /// Re-download and reinstall the kit without touching content or extractions
@@ -155,21 +147,14 @@ enum Commands {
         #[arg(long, default_value = "7878")]
         port: u16,
     },
+    /// Start servers (viz, listen). Delegates to git-lex-serve.
+    Serve {
+        /// Arguments passed through to git-lex-serve
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
 }
 
-/// Find the git repo root from the current directory.
-fn find_git_root() -> Option<PathBuf> {
-    let output = Command::new("git")
-        .args(["rev-parse", "--show-toplevel"])
-        .output()
-        .ok()?;
-    if output.status.success() {
-        let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        Some(PathBuf::from(path))
-    } else {
-        None
-    }
-}
 
 /// Parse the git remote URL into (host, org, repo) components.
 /// Falls back to ("localhost", "local", directory_name) if no remote.
@@ -1059,22 +1044,6 @@ fn cmd_init(directory: Option<String>, kit: Option<String>, dev: bool) {
             // setup_substrate_openai(&root, &agent_name);
         }
 
-        // Install asset files (skip existing — use `git lex kit-update` to
-        // refresh kit-derived assets, or `git lex nuke` + `git lex init` for
-        // a full reset).
-        let asset_report = install_asset_files(&vars, false);
-        if !asset_report.installed.is_empty() {
-            println!("Installed {} asset file(s) from kit", asset_report.installed.len());
-        }
-        if !asset_report.skipped.is_empty() {
-            println!(
-                "Skipped {} existing asset file(s). Use `git lex kit-update` to refresh from kit.",
-                asset_report.skipped.len(),
-            );
-            for p in &asset_report.skipped {
-                println!("  - {}", p);
-            }
-        }
     }
 
     // Print summary
@@ -1156,9 +1125,7 @@ fn cmd_init(directory: Option<String>, kit: Option<String>, dev: bool) {
 
 // ─── Kit fetch (GitHub tarball) ─────────────────────────────────
 
-/// The GitHub org where kits are published
-const KIT_GITHUB_ORG: &str = "repolex-ai";
-// Kit repos live at: github.com/repolex-ai/git-lex-kit-{name}
+// KIT_GITHUB_ORG imported from git_lex lib
 
 /// Fetch a kit from GitHub as a tarball and extract it into the target directory.
 /// Returns true if the fetch succeeded, false if it failed (caller should fall back to embedded).
@@ -2035,9 +2002,7 @@ fn load_lex_nquads() -> String {
 }
 
 /// Get the persistent store path.
-fn store_path() -> Option<PathBuf> {
-    find_git_root().map(|r| r.join(".lex").join("oxigraph"))
-}
+// store_path and open_store_read_only imported from git_lex lib
 
 /// Open the persistent store, or None if it doesn't exist.
 fn open_store() -> Option<Store> {
@@ -2054,19 +2019,6 @@ fn open_or_create_store() -> Store {
     let path = store_path().expect("not in a git repo");
     fs::create_dir_all(&path).expect("failed to create .lex/oxigraph/");
     Store::open(&path).expect("failed to open store")
-}
-
-/// Open the persistent store in read-only mode. Does not acquire the
-/// RocksDB write lock, so writers (`git lex sync`, `git lex save`) can run
-/// concurrently. The view is a snapshot from open-time and will not reflect
-/// later writes until the store is reopened.
-fn open_store_read_only() -> Option<Store> {
-    let path = store_path()?;
-    if path.exists() {
-        Store::open_read_only(&path).ok()
-    } else {
-        None
-    }
 }
 
 /// Flatten a YAML value into .spo lines with dot-notation for nested keys.
@@ -3358,49 +3310,7 @@ fn cmd_resolve(full: bool) {
 
 // ─── git lex create ─────────────────────────────────────────────
 
-/// Read repo.yml and return the kit name.
-fn get_kit() -> Option<String> {
-    let root = find_git_root()?;
-    let repo_yml = root.join(".lex").join("repo.yml");
-    let content = fs::read_to_string(&repo_yml).ok()?;
-    for line in content.lines() {
-        if let Some(kit) = line.strip_prefix("kit: ") {
-            let kit = kit.trim();
-            if kit != "none" {
-                return Some(kit.to_string());
-            }
-        }
-    }
-    None
-}
-
-/// Resolve a kit spec into (org, repo, short_name). Accepts either a short
-/// form (`soul`) which is sugar for `repolex-ai/git-lex-kit-{name}`, or a
-/// full `org/repo` form. Returns (org, repo, short_name) where short_name
-/// is the simple identifier used for SHACL file names, TTL file names, and
-/// SPARQL prefix lookup.
-fn resolve_kit_spec(spec: &str) -> (String, String, String) {
-    if let Some((org, repo)) = spec.split_once('/') {
-        let short = repo
-            .strip_prefix("git-lex-kit-")
-            .unwrap_or(repo)
-            .to_string();
-        (org.to_string(), repo.to_string(), short)
-    } else {
-        (
-            KIT_GITHUB_ORG.to_string(),
-            format!("git-lex-kit-{}", spec),
-            spec.to_string(),
-        )
-    }
-}
-
-/// Install dir for a given kit spec, relative to the repo root.
-/// `.lex/kit/{org}/{repo}/`.
-fn kit_install_dir_for_spec(root: &std::path::Path, spec: &str) -> PathBuf {
-    let (org, repo, _) = resolve_kit_spec(spec);
-    root.join(".lex").join("kit").join(&org).join(&repo)
-}
+// get_kit, resolve_kit_spec, kit_install_dir_for_spec imported from git_lex lib
 
 /// Install dir for the current repo's kit. Reads repo.yml to find the kit
 /// spec, resolves it, and returns the path. Returns None if no kit is
@@ -4875,453 +4785,10 @@ fn cmd_parse(file: &str) {
     }
 }
 
-// ─── git lex viz ────────────────────────────────────────────────
-// HTTP + WebSocket server for visualizing the knowledge graph.
-// Embedded D3 frontend, served on localhost. Agent pushes CONSTRUCT
-// query results over WebSocket to drive the viz.
+// ─── viz/serve (moved to git-lex-serve binary) ─────────────────
 
-// Viz UI assets — embedded at compile time
-const VIZ_INDEX_HTML: &str = include_str!("../viz/index.html");
-const VIZ_CSS_MAIN: &str = include_str!("../viz/css/main.css");
-const VIZ_JS_MAIN: &str = include_str!("../viz/js/main.js");
-
-/// Path to the git-lex source's `viz/` directory at build time. Used as the
-/// default when `GIT_LEX_VIZ_DEV=1` is set without an explicit path, so the
-/// dev loop "just works" against the source tree the binary was built from.
-const VIZ_BUILD_TIME_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/viz");
-
-/// Resolve the dev-mode viz directory from the `GIT_LEX_VIZ_DEV` env var.
-/// - Unset / empty / "0" / "false" → None (use embedded assets)
-/// - "1" / "true" → use build-time CARGO_MANIFEST_DIR/viz
-/// - Any other value → use it as a path
-fn resolve_viz_dev_dir() -> Option<PathBuf> {
-    let val = std::env::var("GIT_LEX_VIZ_DEV").ok()?;
-    let trimmed = val.trim();
-    if trimmed.is_empty() || trimmed == "0" || trimmed.eq_ignore_ascii_case("false") {
-        return None;
-    }
-    let path = if trimmed == "1" || trimmed.eq_ignore_ascii_case("true") {
-        PathBuf::from(VIZ_BUILD_TIME_DIR)
-    } else {
-        PathBuf::from(trimmed)
-    };
-    if path.is_dir() { Some(path) } else { None }
-}
-
-/// Read a viz asset from the dev dir if set, otherwise return the embedded
-/// fallback. Lets the dev loop hot-reload HTML/CSS/JS without rebuilding.
-fn read_viz_asset(dev_dir: &Option<PathBuf>, rel: &str, embedded: &'static str) -> String {
-    if let Some(dir) = dev_dir {
-        let path = dir.join(rel);
-        if let Ok(s) = fs::read_to_string(&path) {
-            return s;
-        }
-    }
-    embedded.to_string()
-}
-
-#[derive(Clone)]
-struct VizState {
-    store: std::sync::Arc<Store>,
-    /// In-memory scene buffer — the most recent push from an agent
-    scene: std::sync::Arc<tokio::sync::Mutex<Option<serde_json::Value>>>,
-    /// Broadcast channel for live updates to all connected WebSocket clients
-    tx: tokio::sync::broadcast::Sender<String>,
-    /// Repo root path, captured at viz startup, used by `/api/file` to read
-    /// markdown content for the W3BL0RD viewer pane.
-    repo_root: std::sync::Arc<PathBuf>,
-}
-
-/// Run a SPARQL query and return the result as JSON.
-/// Handles SELECT (rows of bindings), CONSTRUCT/DESCRIBE (triples), and ASK (boolean).
-fn run_sparql_to_json(store: &Store, query: &str) -> serde_json::Value {
-    let prefixed = add_prefixes(query);
-    let mut parsed = match oxigraph::sparql::Query::parse(&prefixed, None) {
-        Ok(p) => p,
-        Err(e) => return serde_json::json!({"error": format!("parse error: {}", e)}),
-    };
-    parsed.dataset_mut().set_default_graph_as_union();
-
-    let results = match store.query(parsed) {
-        Ok(r) => r,
-        Err(e) => return serde_json::json!({"error": format!("query error: {}", e)}),
-    };
-
-    match results {
-        oxigraph::sparql::QueryResults::Solutions(sols) => {
-            // Backward-compatible flat shape: each row is { var: "value", ... }
-            let vars: Vec<String> = sols.variables().iter().map(|v| v.as_str().to_string()).collect();
-            let mut rows = Vec::new();
-            for sol in sols.flatten() {
-                let mut row = serde_json::Map::new();
-                for var in &vars {
-                    if let Some(t) = sol.get(var.as_str()) {
-                        let val = match t {
-                            Term::NamedNode(n) => n.as_str().to_string(),
-                            Term::Literal(l) => l.value().to_string(),
-                            Term::BlankNode(b) => format!("_:{}", b.as_str()),
-                            Term::Triple(t) => format!("<<{} {} {}>>", t.subject, t.predicate, t.object),
-                        };
-                        row.insert(var.clone(), serde_json::Value::String(val));
-                    }
-                }
-                rows.push(serde_json::Value::Object(row));
-            }
-            serde_json::json!({"type": "select", "vars": vars, "results": rows})
-        }
-        oxigraph::sparql::QueryResults::Boolean(b) => {
-            serde_json::json!({"type": "ask", "boolean": b})
-        }
-        oxigraph::sparql::QueryResults::Graph(triples) => {
-            // CONSTRUCT/DESCRIBE — emit triples as JSON
-            let mut emitted = Vec::new();
-            for t in triples.flatten() {
-                let s = match t.subject {
-                    oxigraph::model::NamedOrBlankNode::NamedNode(n) => n.as_str().to_string(),
-                    oxigraph::model::NamedOrBlankNode::BlankNode(b) => format!("_:{}", b.as_str()),
-                };
-                let p = t.predicate.as_str().to_string();
-                let (o_val, o_type, o_datatype) = match t.object {
-                    Term::NamedNode(n) => (n.as_str().to_string(), "iri", None),
-                    Term::Literal(l) => (l.value().to_string(), "literal", Some(l.datatype().as_str().to_string())),
-                    Term::BlankNode(b) => (format!("_:{}", b.as_str()), "bnode", None),
-                    Term::Triple(t) => (format!("<<{} {} {}>>", t.subject, t.predicate, t.object), "triple", None),
-                };
-                let mut triple = serde_json::Map::new();
-                triple.insert("subject".to_string(), serde_json::Value::String(s));
-                triple.insert("predicate".to_string(), serde_json::Value::String(p));
-                let mut obj = serde_json::Map::new();
-                obj.insert("value".to_string(), serde_json::Value::String(o_val));
-                obj.insert("type".to_string(), serde_json::Value::String(o_type.to_string()));
-                if let Some(dt) = o_datatype {
-                    obj.insert("datatype".to_string(), serde_json::Value::String(dt));
-                }
-                triple.insert("object".to_string(), serde_json::Value::Object(obj));
-                emitted.push(serde_json::Value::Object(triple));
-            }
-            serde_json::json!({"type": "construct", "triples": emitted})
-        }
-    }
-}
-
-/// GET /api/file?uri=<encoded-iri> — return the markdown content for the
-/// document with that IRI. Looks up `fm:path` in the store, resolves to a
-/// path under repo_root, reads the file, splits the YAML frontmatter from
-/// the body, and returns `{ content, frontmatter? }`.
-///
-/// Powers the W3BL0RD markdown viewer pane (double-click any node in the
-/// graph to read its underlying file). Refuses paths that escape repo_root
-/// via `..` traversal.
-fn api_file_for_uri(state: &VizState, uri: Option<&str>) -> serde_json::Value {
-    let uri = match uri {
-        Some(u) if !u.is_empty() => u,
-        _ => return serde_json::json!({"error": "missing 'uri' query parameter"}),
-    };
-
-    // Look up fm:path for this IRI in the store.
-    let query = format!(
-        "PREFIX fm: <https://repolex.ai/ontology/git-lex/fm/> \
-         SELECT ?path WHERE {{ <{}> fm:path ?path }} LIMIT 1",
-        uri
-    );
-    let mut parsed = match oxigraph::sparql::Query::parse(&query, None) {
-        Ok(p) => p,
-        Err(e) => return serde_json::json!({"error": format!("query parse error: {}", e)}),
-    };
-    parsed.dataset_mut().set_default_graph_as_union();
-    let results = match state.store.query(parsed) {
-        Ok(r) => r,
-        Err(e) => return serde_json::json!({"error": format!("query error: {}", e)}),
-    };
-    let mut rel_path: Option<String> = None;
-    if let oxigraph::sparql::QueryResults::Solutions(sols) = results {
-        for sol in sols.flatten() {
-            if let Some(Term::Literal(l)) = sol.get("path") {
-                rel_path = Some(l.value().to_string());
-                break;
-            }
-        }
-    }
-    let rel = match rel_path {
-        Some(p) => p,
-        None => return serde_json::json!({"error": "no fm:path for this IRI", "uri": uri}),
-    };
-
-    // Resolve under repo_root, refusing path-traversal escapes.
-    let abs = state.repo_root.join(&rel);
-    let canon_root = state.repo_root.canonicalize().unwrap_or_else(|_| (*state.repo_root).clone());
-    let canon_abs = match abs.canonicalize() {
-        Ok(p) => p,
-        Err(e) => return serde_json::json!({"error": format!("file not found: {}", e), "path": rel}),
-    };
-    if !canon_abs.starts_with(&canon_root) {
-        return serde_json::json!({"error": "path escapes repo root", "path": rel});
-    }
-    let raw = match std::fs::read_to_string(&canon_abs) {
-        Ok(s) => s,
-        Err(e) => return serde_json::json!({"error": format!("read failed: {}", e), "path": rel}),
-    };
-
-    // Split YAML frontmatter from body if present.
-    let (frontmatter, body) = if raw.starts_with("---\n") {
-        if let Some(end) = raw[4..].find("\n---\n") {
-            let fm_text = &raw[4..4 + end];
-            let body_text = &raw[4 + end + 5..];
-            (Some(fm_text.to_string()), body_text.to_string())
-        } else if let Some(end) = raw[4..].find("\n---") {
-            // EOF after closing fence (no trailing newline)
-            let fm_text = &raw[4..4 + end];
-            let body_text = raw.get(4 + end + 4..).unwrap_or("");
-            (Some(fm_text.to_string()), body_text.to_string())
-        } else {
-            (None, raw.clone())
-        }
-    } else {
-        (None, raw.clone())
-    };
-
-    serde_json::json!({
-        "uri": uri,
-        "path": rel,
-        "frontmatter": frontmatter,
-        "content": body,
-    })
-}
-
-#[tokio::main(flavor = "multi_thread", worker_threads = 2)]
-async fn run_viz_server(port: u16) {
-    use axum::{
-        Router,
-        routing::{get, post},
-        response::{Html, Json},
-        extract::ws::WebSocketUpgrade,
-    };
-    use std::sync::Arc;
-    use tokio::sync::{Mutex, broadcast};
-
-    let store = Arc::new(
-        open_store_read_only().expect("failed to open store read-only — run `git lex sync` first"),
-    );
-    let scene: Arc<Mutex<Option<serde_json::Value>>> = Arc::new(Mutex::new(None));
-    let (tx, _rx) = broadcast::channel::<String>(64);
-
-    let repo_root = Arc::new(find_git_root().unwrap_or_else(|| std::env::current_dir().unwrap()));
-    let state = VizState { store, scene, tx, repo_root };
-    let dev_dir = Arc::new(resolve_viz_dev_dir());
-
-    let app = Router::new()
-        .route("/", get({
-            let dev_dir = dev_dir.clone();
-            move || {
-                let dev_dir = dev_dir.clone();
-                async move {
-                    let body = read_viz_asset(&dev_dir, "index.html", VIZ_INDEX_HTML);
-                    Html(body)
-                }
-            }
-        }))
-        .route("/css/main.css", get({
-            let dev_dir = dev_dir.clone();
-            move || {
-                let dev_dir = dev_dir.clone();
-                async move {
-                    let body = read_viz_asset(&dev_dir, "css/main.css", VIZ_CSS_MAIN);
-                    ([("content-type", "text/css"), ("cache-control", "no-store")], body)
-                }
-            }
-        }))
-        .route("/js/main.js", get({
-            let dev_dir = dev_dir.clone();
-            move || {
-                let dev_dir = dev_dir.clone();
-                async move {
-                    let body = read_viz_asset(&dev_dir, "js/main.js", VIZ_JS_MAIN);
-                    ([("content-type", "application/javascript"), ("cache-control", "no-store")], body)
-                }
-            }
-        }))
-        .route("/api/query", post({
-            let state = state.clone();
-            move |Json(payload): Json<serde_json::Value>| {
-                let state = state.clone();
-                async move {
-                    let query = payload.get("query")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("SELECT ?s ?p ?o WHERE { ?s ?p ?o } LIMIT 10");
-                    Json(run_sparql_to_json(&state.store, query))
-                }
-            }
-        }))
-        .route("/api/push", post({
-            let state = state.clone();
-            move |Json(payload): Json<serde_json::Value>| {
-                let state = state.clone();
-                async move {
-                    // Store the new scene
-                    {
-                        let mut scene = state.scene.lock().await;
-                        *scene = Some(payload.clone());
-                    }
-                    // Broadcast to all WebSocket clients
-                    let msg = serde_json::json!({
-                        "type": "scene",
-                        "data": payload
-                    }).to_string();
-                    let _ = state.tx.send(msg);
-                    Json(serde_json::json!({"ok": true}))
-                }
-            }
-        }))
-        .route("/api/run-and-push", post({
-            let state = state.clone();
-            move |Json(payload): Json<serde_json::Value>| {
-                let state = state.clone();
-                async move {
-                    let query = payload.get("query").and_then(|v| v.as_str()).unwrap_or("");
-                    if query.is_empty() {
-                        return Json(serde_json::json!({"error": "missing 'query' field"}));
-                    }
-                    let result = run_sparql_to_json(&state.store, query);
-                    let scene = serde_json::json!({
-                        "query": query,
-                        "result": result,
-                    });
-                    {
-                        let mut s = state.scene.lock().await;
-                        *s = Some(scene.clone());
-                    }
-                    let msg = serde_json::json!({
-                        "type": "scene",
-                        "data": scene
-                    }).to_string();
-                    let _ = state.tx.send(msg);
-                    Json(serde_json::json!({"ok": true}))
-                }
-            }
-        }))
-        .route("/api/file", get({
-            let state = state.clone();
-            move |axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>| {
-                let state = state.clone();
-                async move {
-                    Json(api_file_for_uri(&state, params.get("uri").map(|s| s.as_str())))
-                }
-            }
-        }))
-        .route("/api/scene", get({
-            let state = state.clone();
-            move || {
-                let state = state.clone();
-                async move {
-                    let scene = state.scene.lock().await;
-                    Json(scene.clone().unwrap_or(serde_json::Value::Null))
-                }
-            }
-        }))
-        .route("/ws", get({
-            let state = state.clone();
-            move |ws: WebSocketUpgrade| {
-                let state = state.clone();
-                async move {
-                    ws.on_upgrade(move |socket| handle_ws(socket, state))
-                }
-            }
-        }));
-
-    // Try the requested port; if taken, walk forward up to 20 ports until one
-    // binds. Lets multiple viz instances co-exist without hand-picking ports.
-    let mut chosen_port = port;
-    let mut listener = None;
-    for candidate in port..port.saturating_add(20) {
-        let addr = format!("127.0.0.1:{}", candidate);
-        match tokio::net::TcpListener::bind(&addr).await {
-            Ok(l) => {
-                chosen_port = candidate;
-                listener = Some(l);
-                break;
-            }
-            Err(_) => continue,
-        }
-    }
-    let listener = match listener {
-        Some(l) => l,
-        None => {
-            eprintln!("Failed to bind: ports {}..{} all in use", port, port.saturating_add(20));
-            return;
-        }
-    };
-
-    let addr = format!("127.0.0.1:{}", chosen_port);
-    if chosen_port != port {
-        println!("Port {} was taken, using {} instead", port, chosen_port);
-    }
-    let url = format!("http://{}", addr);
-    println!("git-lex viz server listening on {}", url);
-    if let Some(dir) = dev_dir.as_ref() {
-        println!("[dev mode] serving viz assets from {}", dir.display());
-    }
-    println!("Press Ctrl+C to stop, or: kill {}", std::process::id());
-
-    // Open the URL in the user's default browser. Best-effort: ignore failure
-    // (headless boxes, no DISPLAY, etc) since the URL is already printed above.
-    let _ = open::that_detached(&url);
-
-    if let Err(e) = axum::serve(listener, app).await {
-        eprintln!("Server error: {}", e);
-    }
-}
-
-async fn handle_ws(socket: axum::extract::ws::WebSocket, state: VizState) {
-    use axum::extract::ws::Message;
-    use futures_util::{SinkExt, StreamExt};
-
-    let (mut sender, mut receiver) = socket.split();
-
-    // Send the current scene immediately so the client gets caught up
-    {
-        let scene = state.scene.lock().await;
-        if let Some(s) = scene.as_ref() {
-            let initial = serde_json::json!({"type": "scene", "data": s}).to_string();
-            let _ = sender.send(Message::Text(initial.into())).await;
-        } else {
-            let _ = sender.send(Message::Text("{\"type\":\"hello\"}".into())).await;
-        }
-    }
-
-    // Subscribe to broadcasts
-    let mut rx = state.tx.subscribe();
-
-    // Spawn a task to forward broadcasts to this client
-    let mut send_task = tokio::spawn(async move {
-        while let Ok(msg) = rx.recv().await {
-            if sender.send(Message::Text(msg.into())).await.is_err() {
-                break;
-            }
-        }
-    });
-
-    // Read incoming messages (mostly ignored for now, but keeps the connection alive)
-    let mut recv_task = tokio::spawn(async move {
-        while let Some(Ok(_msg)) = receiver.next().await {
-            // Future: clients could send commands here
-        }
-    });
-
-    // If either task ends, abort the other
-    tokio::select! {
-        _ = (&mut send_task) => recv_task.abort(),
-        _ = (&mut recv_task) => send_task.abort(),
-    }
-}
-
-fn cmd_viz(port: u16) {
-    if open_store_read_only().is_none() {
-        eprintln!("No knowledge graph store found.");
-        eprintln!("Run 'git lex sync' first to build the store.");
-        exit(1);
-    }
-    run_viz_server(port);
-}
+// Viz server, SPARQL endpoint, WebSocket handler, and listen server
+// have all moved to src/bin/git-lex-serve.rs
 
 #[tokio::main(flavor = "current_thread")]
 async fn cmd_display(query: &str, port: u16) {
@@ -5345,7 +4812,7 @@ async fn cmd_display(query: &str, port: u16) {
         }
         Err(e) => {
             eprintln!("Push failed: {}", e);
-            eprintln!("Is the viz server running? Try: git lex viz --port {}", port);
+            eprintln!("Is the viz server running? Try: git lex-serve viz --port {}", port);
             exit(1);
         }
     }
@@ -5850,94 +5317,7 @@ fn cmd_sync() {
     println!("Store: {}", store_path().unwrap().display());
 }
 
-/// Add default prefixes to a query. Injects any standard prefixes not already declared.
-fn add_prefixes(query: &str) -> String {
-    // Get first commit SHA for content ontology prefix
-    let first_commit = Command::new("git")
-        .args(["rev-list", "--max-parents=0", "HEAD"])
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|o| String::from_utf8_lossy(&o.stdout).trim()[..8].to_string())
-        .unwrap_or_default();
-    let o_prefix = format!("PREFIX o: <https://repolex.ai/ont/{}/>", first_commit);
-
-    // Also read kit from repo.yml and get the actual prefix from the TTL
-    let kit_prefix = find_git_root().and_then(|r| {
-        let content = fs::read_to_string(r.join(".lex").join("repo.yml")).ok()?;
-        for line in content.lines() {
-            if let Some(kit) = line.strip_prefix("kit: ") {
-                let kit = kit.trim();
-                if kit == "none" { return None; }
-                // Read the kit TTL to find the actual prefix name
-                // Try {short}.ttl first, then find any .ttl in the kit dir
-                let kit_dir = kit_install_dir_for_spec(&r, kit);
-                let (_, _, short) = resolve_kit_spec(kit);
-                let ttl_path = kit_dir.join(format!("{}.ttl", short));
-                let ttl_path = if ttl_path.exists() { ttl_path } else {
-                    fs::read_dir(&kit_dir).ok()
-                        .and_then(|entries| entries.filter_map(|e| e.ok())
-                            .find(|e| e.path().extension().is_some_and(|ext| ext == "ttl"))
-                            .map(|e| e.path()))
-                        .unwrap_or(ttl_path)
-                };
-                let kit_ns_pattern = format!("/kit/{}/", short);
-                if let Ok(ttl) = fs::read_to_string(&ttl_path) {
-                    for tline in ttl.lines() {
-                        if tline.starts_with("@prefix ") && tline.contains(&kit_ns_pattern) {
-                            if let Some(colon_pos) = tline[8..].find(':') {
-                                let pname = tline[8..8 + colon_pos].trim();
-                                let ns = format!("https://repolex.ai/ontology/kit/{}/", short);
-                                return Some((
-                                    format!("{}:", pname),
-                                    format!("PREFIX {}: <{}>", pname, ns),
-                                ));
-                            }
-                        }
-                    }
-                }
-                // Fallback: use short kit name as prefix
-                return Some((
-                    format!("{}:", short),
-                    format!("PREFIX {}: <https://repolex.ai/ontology/kit/{}/>", short, short),
-                ));
-            }
-        }
-        None
-    });
-
-    let mut defaults = vec![
-        ("git:".to_string(), "PREFIX git: <https://repolex.ai/ontology/git-lex/git/>".to_string()),
-        ("lex:".to_string(), "PREFIX lex: <https://repolex.ai/ontology/git-lex/lex/>".to_string()),
-        ("fm:".to_string(), "PREFIX fm: <https://repolex.ai/ontology/git-lex/fm/>".to_string()),
-        ("o:".to_string(), o_prefix),
-        ("rdf:".to_string(), "PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>".to_string()),
-        ("rdfs:".to_string(), "PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>".to_string()),
-        ("owl:".to_string(), "PREFIX owl: <http://www.w3.org/2002/07/owl#>".to_string()),
-        ("xsd:".to_string(), "PREFIX xsd: <http://www.w3.org/2001/XMLSchema#>".to_string()),
-    ];
-    if let Some((short, full)) = kit_prefix {
-        defaults.push((short, full));
-    }
-    let defaults = defaults;
-    let upper = query.to_uppercase();
-    let mut prefix_block = String::new();
-    for (short, full) in &defaults {
-        // Add if the prefix is used in the query but not declared
-        if query.contains(short) && !upper.contains(&format!("PREFIX {}", short.to_uppercase())) {
-            prefix_block.push_str(full);
-            prefix_block.push('\n');
-        }
-    }
-    // If no user prefixes at all, add everything
-    if !upper.contains("PREFIX") {
-        for (_, full) in &defaults {
-            prefix_block.push_str(full);
-            prefix_block.push('\n');
-        }
-    }
-    format!("{}{}", prefix_block, query)
-}
+// add_prefixes imported from git_lex lib
 
 #[allow(deprecated)]
 fn run_query(store: &Store, query: &str, store_type: &str) {
@@ -6108,9 +5488,21 @@ fn main() {
         Commands::Parse { file } => cmd_parse(&file),
         Commands::Nuke => cmd_nuke(),
         Commands::KitUpdate { kit, dev } => cmd_kit_update(kit, dev),
-        Commands::ListenServer { port } => cmd_listen_server(port),
-        Commands::Viz { port } => cmd_viz(port),
         Commands::Display { query, port } => cmd_display(&query, port),
+        Commands::Serve { args } => {
+            let status = Command::new("git-lex-serve")
+                .args(&args)
+                .status();
+            match status {
+                Ok(s) if !s.success() => exit(s.code().unwrap_or(1)),
+                Err(e) => {
+                    eprintln!("Failed to run git-lex-serve: {}", e);
+                    eprintln!("Is it installed? Try: cargo install --path <git-lex-dir>");
+                    exit(1);
+                }
+                _ => {}
+            }
+        }
         Commands::Llm { command } => match command {
             LlmCommands::List => cmd_llm_list(),
             LlmCommands::Extract { file, model } => cmd_llm_extract(&file, &model),
@@ -6343,68 +5735,4 @@ fn cmd_kit_update(kit_arg: Option<String>, dev: bool) {
     println!("Kit update complete: {} class templates regenerated.", templates_updated);
 }
 
-fn cmd_listen_server(port: u16) {
-    let root = find_git_root().expect("not a git repo");
-    let repo_yml = root.join(".lex").join("repo.yml");
-    if !repo_yml.exists() {
-        eprintln!("No git-lex repository found. Run 'git lex init' first.");
-        exit(1);
-    }
-    let config = fs::read_to_string(repo_yml).unwrap_or_default();
-    if !config.contains("kit: squad") && !config.contains("kit: soul") && !config.contains("kit: lab") {
-        eprintln!("'listen-server' is only supported for squad, soul, or lab kits.");
-        exit(1);
-    }
-    if open_store_read_only().is_none() {
-        eprintln!("No knowledge graph store found. Run 'git lex sync' first to build the store.");
-        exit(1);
-    }
-    run_listen_server(port);
-}
 
-#[tokio::main(flavor = "multi_thread", worker_threads = 2)]
-async fn run_listen_server(port: u16) {
-    use axum::response::sse::{Event, Sse};
-    use axum::{Router, routing::{get, post}, Json};
-    use std::sync::Arc;
-    use tokio::sync::broadcast;
-    use tokio_stream::wrappers::BroadcastStream;
-    use futures_util::StreamExt;
-    use std::convert::Infallible;
-
-    let (tx, _rx) = broadcast::channel::<String>(100);
-    let tx = Arc::new(tx);
-
-    let app = Router::new()
-        .route("/events", get({
-            let tx = tx.clone();
-            move || {
-                let tx = tx.clone();
-                async move {
-                    let rx = tx.subscribe();
-                    let stream = BroadcastStream::new(rx).filter_map(|res| async move {
-                        match res {
-                            Ok(msg) => Some(Ok::<Event, Infallible>(Event::default().data(msg))),
-                            Err(_) => None,
-                        }
-                    });
-                    Sse::new(stream)
-                }
-            }
-        }))
-        .route("/notify", post({
-            let tx = tx.clone();
-            move |Json(payload): Json<serde_json::Value>| {
-                let tx = tx.clone();
-                async move {
-                    let _ = tx.send(payload.to_string());
-                    Json(serde_json::json!({"ok": true}))
-                }
-            }
-        }));
-
-    let addr = format!("127.0.0.1:{}", port);
-    let listener = tokio::net::TcpListener::bind(&addr).await.unwrap();
-    println!("git-lex listen-server started on {}", addr);
-    axum::serve(listener, app).await.unwrap();
-}
