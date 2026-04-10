@@ -20,6 +20,7 @@ use git_lex::{find_git_root, store_path, get_kit,
 // allowed in frontmatter values are codified as tests in this module — read
 // the test suite for the definitive spec.
 mod resolve;
+mod harness;
 
 #[derive(Parser)]
 #[command(name = "git-lex", about = "Git extensions for knowledge graphs")]
@@ -3348,6 +3349,24 @@ fn kit_config_bool(kit: &str, key: &str, default: bool) -> bool {
     default
 }
 
+/// Read a string config value from the kit's kit.yml file.
+fn kit_config_str(kit: &str, key: &str) -> Option<String> {
+    let root = find_git_root()?;
+    let config_path = kit_install_dir_for_spec(&root, kit).join("kit.yml");
+    let content = fs::read_to_string(&config_path).ok()?;
+    for line in content.lines() {
+        let line = line.trim();
+        if line.starts_with('#') { continue; }
+        if let Some(val) = line.strip_prefix(&format!("{}:", key)) {
+            let val = val.trim();
+            if !val.is_empty() {
+                return Some(val.to_string());
+            }
+        }
+    }
+    None
+}
+
 /// Find the kit TTL file path. Tries {kit}.ttl first, then any .ttl in the kit dir.
 fn find_kit_ttl(kit: &str) -> Option<PathBuf> {
     let root = find_git_root()?;
@@ -4126,6 +4145,15 @@ fn cmd_create(doctype: &str, title: Option<&str>) {
 // ─── git lex save ──────────────────────────────────────────────
 
 fn cmd_save(message: &str) {
+    // Sync skills into harness if configured
+    if let Some(kit) = get_kit() {
+        if let Some(substrate) = kit_config_str(&kit, "harness") {
+            if let Some(root) = find_git_root() {
+                harness::sync_skills(&root, &substrate);
+            }
+        }
+    }
+
     // Add everything, commit, let hooks handle extract + sync
     let status = Command::new("git")
         .args(["add", "-A"])
