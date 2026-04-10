@@ -32,44 +32,44 @@
 # DOCUMENT TYPES (each = a `git lex create` command)
 # =============================================================================
 
-# --- Agent ---
+# --- Squaddie ---
 # Who's on the squad. Carbon (humans) and silicon (AI).
 # Created once per member. Updated as roles change.
-# Git author email IS the agent identity.
+# soulId is the primary identifier, linking to the soul kit.
 
-squad:Agent a owl:Class ;
+squad:Squaddie a owl:Class ;
     rdfs:subClassOf lex:Physical ;
-    rdfs:label "Agent" ;
-    rdfs:comment "A squad member — carbon or silicon. Identity tied to git author email." .
+    rdfs:label "Squaddie" ;
+    rdfs:comment "A squad member — carbon or silicon. Identity tied to soulId from the soul kit." .
 
 squad:substrate a owl:DatatypeProperty ;
     rdfs:label "substrate" ;
     rdfs:comment "What the agent runs on: 'carbon' (human) or 'silicon' (AI)." ;
-    rdfs:domain squad:Agent ;
+    rdfs:domain squad:Squaddie ;
     rdfs:range xsd:string .
 
 squad:role a owl:DatatypeProperty ;
     rdfs:label "role" ;
     rdfs:comment "The agent's role on the squad (e.g., 'ontologist', 'coder', 'boss')." ;
-    rdfs:domain squad:Agent ;
+    rdfs:domain squad:Squaddie ;
     rdfs:range xsd:string .
 
 squad:expertise a owl:DatatypeProperty ;
     rdfs:label "expertise" ;
     rdfs:comment "Areas of expertise (e.g., 'rust', 'sparql', 'vibes')." ;
-    rdfs:domain squad:Agent ;
+    rdfs:domain squad:Squaddie ;
     rdfs:range xsd:string .
 
-squad:agentEmail a owl:DatatypeProperty ;
-    rdfs:label "agent email" ;
-    rdfs:comment "Git author email — the agent's unique identity. Matches git:authorEmail." ;
-    rdfs:domain squad:Agent ;
+squad:soulEmail a owl:DatatypeProperty ;
+    rdfs:label "soul email" ;
+    rdfs:comment "Soul email — the agent's unique identity. Matches git:authorEmail." ;
+    rdfs:domain squad:Squaddie ;
     rdfs:range xsd:string .
 
 squad:worksOn a owl:ObjectProperty ;
     rdfs:label "works on" ;
     rdfs:comment "Projects this agent is actively working on." ;
-    rdfs:domain squad:Agent ;
+    rdfs:domain squad:Squaddie ;
     rdfs:range squad:Project .
 
 # --- Message ---
@@ -85,13 +85,13 @@ squad:from a owl:ObjectProperty ;
     rdfs:label "from" ;
     rdfs:comment "The agent who sent this message." ;
     rdfs:domain squad:Message ;
-    rdfs:range squad:Agent .
+    rdfs:range squad:Squaddie .
 
 squad:to a owl:ObjectProperty ;
     rdfs:label "to" ;
     rdfs:comment "The agent(s) this message is addressed to." ;
     rdfs:domain squad:Message ;
-    rdfs:range squad:Agent .
+    rdfs:range squad:Squaddie .
 
 squad:messageStatus a owl:DatatypeProperty ;
     rdfs:label "message status" ;
@@ -129,7 +129,7 @@ squad:decidedBy a owl:ObjectProperty ;
     rdfs:label "decided by" ;
     rdfs:comment "The agent(s) who made this decision." ;
     rdfs:domain squad:Decision ;
-    rdfs:range squad:Agent .
+    rdfs:range squad:Squaddie .
 
 squad:alternatives a owl:DatatypeProperty ;
     rdfs:label "alternatives" ;
@@ -168,7 +168,7 @@ squad:foundBy a owl:ObjectProperty ;
     rdfs:label "found by" ;
     rdfs:comment "The agent who made this discovery." ;
     rdfs:domain squad:Discovery ;
-    rdfs:range squad:Agent .
+    rdfs:range squad:Squaddie .
 
 squad:implications a owl:DatatypeProperty ;
     rdfs:label "implications" ;
@@ -194,7 +194,7 @@ squad:assignedTo a owl:ObjectProperty ;
     rdfs:label "assigned to" ;
     rdfs:comment "The agent responsible for this task." ;
     rdfs:domain squad:Task ;
-    rdfs:range squad:Agent .
+    rdfs:range squad:Squaddie .
 
 squad:taskStatus a owl:DatatypeProperty ;
     rdfs:label "task status" ;
@@ -244,7 +244,7 @@ squad:squadMembers a owl:ObjectProperty ;
     rdfs:label "squad members" ;
     rdfs:comment "Agents working on this project." ;
     rdfs:domain squad:Project ;
-    rdfs:range squad:Agent .
+    rdfs:range squad:Squaddie .
 
 # --- Note ---
 # Freeform knowledge. Tagged but unstructured.
