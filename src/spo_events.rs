@@ -101,10 +101,11 @@ pub fn run(opts: Options) {
             c.events.iter().collect()
         };
 
-        if opts.only_changes && displayed.is_empty() {
+        let has_renames = !c.renames.is_empty();
+        if opts.only_changes && displayed.is_empty() && !has_renames {
             continue;
         }
-        if displayed.is_empty() {
+        if displayed.is_empty() && !has_renames {
             println!("{}  {}  {}  (no .spo changes)", c.short_sha, c.date, c.subject);
             continue;
         }
@@ -126,14 +127,27 @@ pub fn run(opts: Options) {
         );
         if opts.dedup {
             println!(
-                "  {} raw event(s) → {} after dedup (+{} -{})",
+                "  {} raw event(s) → {} after dedup (+{} -{}), {} rename(s)",
                 c.events.len(),
                 displayed.len(),
                 dd_added,
-                dd_removed
+                dd_removed,
+                c.renames.len(),
             );
         } else {
-            println!("  {} event(s): +{} -{}", c.events.len(), raw_added, raw_removed);
+            println!(
+                "  {} event(s): +{} -{}, {} rename(s)",
+                c.events.len(),
+                raw_added,
+                raw_removed,
+                c.renames.len(),
+            );
+        }
+        for r in &c.renames {
+            println!(
+                "  R{}%  {} → {}",
+                r.similarity, r.old_path, r.new_path
+            );
         }
         for ev in displayed {
             if opts.canonical {
@@ -205,6 +219,24 @@ pub struct SpikeEvent {
     pub line: String,
 }
 
+/// A file-level rename event detected by git when `-M` is passed to
+/// `diff-tree`. Renames are semantically different from line adds/removes —
+/// they're file-level facts, not triple-level facts — so they live in a
+/// parallel vector on `SpikeCommit`, not in the `events` stream.
+///
+/// Phase 2 (2026-04-11): added by w4r3z to support orphan cleanup via
+/// `git mv` of .spo mirrors when an .md file is renamed, and to support
+/// history-graph ingest correctly annotating introducedInFile as a triple
+/// migrates from one file URI to another.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Rename {
+    pub old_path: String,
+    pub new_path: String,
+    /// Git's similarity index (0-100). Set by git based on the `-M<n>%`
+    /// threshold we pass — by construction, always >= the threshold.
+    pub similarity: u8,
+}
+
 /// All the events in a single commit, plus enough metadata to label the
 /// output readably.
 #[allow(dead_code)] // `sha` kept for future debug use during the spike
@@ -215,6 +247,11 @@ pub struct SpikeCommit {
     pub date: String,
     pub subject: String,
     pub events: Vec<SpikeEvent>,
+    /// File-level renames detected by git with `-M50%`. One entry per
+    /// renamed file in this commit. These are NOT included in `events` —
+    /// when git reports a rename it suppresses the add/remove pair that
+    /// would otherwise describe the same content move.
+    pub renames: Vec<Rename>,
 }
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -315,7 +352,8 @@ fn build_commit(sha: &str) -> SpikeCommit {
         EMPTY_TREE_SHA.to_string()
     };
 
-    // Zero-context unified diff over extraction sidecar files only.
+    // Zero-context unified diff over extraction sidecar files only, with
+    // rename detection at 50% similarity (Phase 2, 2026-04-11).
     //
     // Scope narrowed from `*.spo` to `.lex/extract/*.spo` (lux: 2026-04-09) —
     // the old `.lex/extraction.log.spo` file was a leftover from an earlier
@@ -324,9 +362,17 @@ fn build_commit(sha: &str) -> SpikeCommit {
     // like `foo.md.fm.spo`, `foo.md.md.spo`, `foo.md.cc.spo`, and future
     // extractors (`gliner.spo`, `haiku.spo`) will follow the same shape.
     //
-    // `--no-renames` is the default for `diff-tree` (renames require `-M`),
-    // which is what we want for the spike — see §9.2 of the history-graph
-    // Situation doc for the rename handling discussion.
+    // `-M50%` turns on rename detection at 50% similarity. This is needed
+    // for the orphan cleanup case (folder renames during the lowercase →
+    // capital class proclamation will rename every .md under friend/ to
+    // Friend/ etc., content unchanged — similarity is 100%, easily above
+    // threshold). Without this flag, git reports those as delete+create
+    // pairs and the walker can't distinguish rename from real deletion.
+    //
+    // Renames come through the diff output as `rename from <old>` and
+    // `rename to <new>` header lines, which `parse_diff_output` below
+    // collects into a separate `renames` vector — NOT into the events
+    // stream, because renames are file-level facts, not triple-level.
     let diff_out = Command::new("git")
         .args([
             "diff-tree",
@@ -334,6 +380,7 @@ fn build_commit(sha: &str) -> SpikeCommit {
             "--no-color",
             "--no-ext-diff",
             "--unified=0",
+            "-M50%",
             "-r",
             &base,
             sha,
@@ -344,7 +391,7 @@ fn build_commit(sha: &str) -> SpikeCommit {
         .expect("git diff-tree failed");
 
     let diff_text = String::from_utf8_lossy(&diff_out.stdout).to_string();
-    let events = parse_unified_diff(&diff_text);
+    let (events, renames) = parse_diff_output(&diff_text);
 
     SpikeCommit {
         sha: sha.to_string(),
@@ -353,12 +400,85 @@ fn build_commit(sha: &str) -> SpikeCommit {
         date,
         subject,
         events,
+        renames,
     }
 }
 
 // ════════════════════════════════════════════════════════════════════════════
 // Layer 2: unified-diff parser (pure)
 // ════════════════════════════════════════════════════════════════════════════
+
+/// Parse a unified diff as produced by `git diff-tree --unified=0 -M50%`
+/// into both the flat event stream AND a separate list of file-level
+/// renames. Renames are semantically distinct — they describe a file
+/// moving to a new path, not a triple being added or removed — so they
+/// don't go into the event list.
+///
+/// When git reports a rename, it suppresses the add/remove pair that
+/// would otherwise describe the content move (since by definition a
+/// rename at >=50% similarity has mostly-identical content on both
+/// sides). If the content changed slightly during the rename, git emits
+/// the rename headers followed by a small normal diff body; this parser
+/// handles that case by letting `parse_unified_diff` process the body
+/// in its entirety, so changed lines still show up as events at the
+/// new path.
+///
+/// Returns `(events, renames)`. Pure function, unit-tested below.
+///
+/// Phase 2 (2026-04-11): introduced by w4r3z for orphan cleanup + history
+/// ingest. Also fixes the quoted-path blind spot the spike sweeper found —
+/// git quotes non-ASCII paths in `diff --git` header lines and the old
+/// parser was recording the escaped bytes. `decode_git_quoted_path` below
+/// handles the C-style escape syntax git uses.
+pub fn parse_diff_output(diff: &str) -> (Vec<SpikeEvent>, Vec<Rename>) {
+    let mut renames: Vec<Rename> = Vec::new();
+
+    // First pass: scan for rename blocks. A rename block looks like:
+    //     diff --git a/old/path b/new/path
+    //     similarity index 100%
+    //     rename from old/path
+    //     rename to new/path
+    // It may or may not have a diff body after that (if the content
+    // changed slightly during the rename). We collect the rename metadata
+    // and let `parse_unified_diff` consume the whole thing for events.
+    let mut pending_similarity: Option<u8> = None;
+    let mut pending_from: Option<String> = None;
+    for line in diff.lines() {
+        if line.starts_with("diff --git ") {
+            // New file — reset per-file pending state.
+            pending_similarity = None;
+            pending_from = None;
+            continue;
+        }
+        if let Some(rest) = line.strip_prefix("similarity index ") {
+            let pct = rest.trim_end_matches('%').trim();
+            if let Ok(n) = pct.parse::<u8>() {
+                pending_similarity = Some(n);
+            }
+            continue;
+        }
+        if let Some(from) = line.strip_prefix("rename from ") {
+            pending_from = Some(decode_git_quoted_path(from.trim()));
+            continue;
+        }
+        if let Some(to) = line.strip_prefix("rename to ") {
+            let new_path = decode_git_quoted_path(to.trim());
+            if let Some(old_path) = pending_from.take() {
+                renames.push(Rename {
+                    old_path,
+                    new_path,
+                    similarity: pending_similarity.unwrap_or(0),
+                });
+            }
+            // Don't clear pending_similarity — some git outputs put the
+            // similarity line after the rename pair. Defensive.
+            continue;
+        }
+    }
+
+    let events = parse_unified_diff(diff);
+    (events, renames)
+}
 
 /// Parse a unified diff as produced by `git diff-tree --unified=0` into a
 /// flat list of add/remove events, each tagged with its file path.
@@ -369,8 +489,12 @@ fn build_commit(sha: &str) -> SpikeCommit {
 /// - `-<content>`                    → removal
 ///
 /// Everything else (`@@` hunk headers, `---`/`+++` file-marker lines, `index`
-/// lines, empty lines) is skipped. With `--unified=0` there are no context
-/// lines so we don't have to filter space-prefixed content.
+/// lines, rename headers, similarity headers, empty lines) is skipped.
+/// With `--unified=0` there are no context lines so we don't have to filter
+/// space-prefixed content.
+///
+/// Handles git's C-style path quoting (for non-ASCII filenames) in the
+/// `diff --git` header — see `decode_git_quoted_path` for the decode rules.
 ///
 /// Pure function, unit-tested below.
 pub fn parse_unified_diff(diff: &str) -> Vec<SpikeEvent> {
@@ -379,11 +503,12 @@ pub fn parse_unified_diff(diff: &str) -> Vec<SpikeEvent> {
     for line in diff.lines() {
         if let Some(rest) = line.strip_prefix("diff --git ") {
             // "a/path b/path" — we want the b-path (post-change). For paths
-            // with spaces this format uses quoting, which the squad repo
-            // doesn't need today. Sanity checker flags quoted paths if they
-            // ever appear.
-            if let Some((_a, b)) = rest.split_once(' ') {
-                current_path = b.trim_start_matches("b/").to_string();
+            // with spaces or non-ASCII chars, git wraps the path in double
+            // quotes and octal-escapes the unsafe bytes. Handle both cases
+            // via `split_git_diff_header_paths` + `decode_git_quoted_path`.
+            if let Some((_a, b)) = split_git_diff_header_paths(rest) {
+                let decoded = decode_git_quoted_path(&b);
+                current_path = decoded.trim_start_matches("b/").to_string();
             }
             continue;
         }
@@ -391,6 +516,13 @@ pub fn parse_unified_diff(diff: &str) -> Vec<SpikeEvent> {
             || line.starts_with("---")
             || line.starts_with("@@")
             || line.starts_with("index ")
+            || line.starts_with("similarity index ")
+            || line.starts_with("rename from ")
+            || line.starts_with("rename to ")
+            || line.starts_with("new file mode ")
+            || line.starts_with("deleted file mode ")
+            || line.starts_with("old mode ")
+            || line.starts_with("new mode ")
         {
             continue;
         }
@@ -409,6 +541,124 @@ pub fn parse_unified_diff(diff: &str) -> Vec<SpikeEvent> {
         }
     }
     events
+}
+
+/// Split the `rest` of a `diff --git ` line into (a-path, b-path), handling
+/// both unquoted and quoted forms. Examples:
+///   `a/foo.md b/foo.md`                       → ("a/foo.md", "b/foo.md")
+///   `"a/foo\342\200\224bar.md" "b/foo\342\200\224bar.md"`
+///                                              → (quoted a, quoted b)
+/// Returns None if the line doesn't have both halves.
+fn split_git_diff_header_paths(rest: &str) -> Option<(String, String)> {
+    // If the first character is `"`, both paths are quoted. Walk until
+    // the closing quote of the first path (unescaped), then take the rest
+    // as the second path.
+    if rest.starts_with('"') {
+        // Find the closing quote of the first quoted path. Git escapes `"`
+        // inside paths as `\"`, so we need to honor backslash escaping.
+        let bytes = rest.as_bytes();
+        let mut i = 1;
+        while i < bytes.len() {
+            if bytes[i] == b'\\' {
+                i += 2; // skip the escaped char
+                continue;
+            }
+            if bytes[i] == b'"' {
+                // Found the end of the first path. Anything after the
+                // following space is the second path.
+                let a = &rest[..=i];
+                let after = rest[i + 1..].trim_start();
+                return Some((a.to_string(), after.to_string()));
+            }
+            i += 1;
+        }
+        return None;
+    }
+    // Unquoted: paths are separated by a single space, and path components
+    // can't contain spaces in the unquoted form (git would have quoted).
+    rest.split_once(' ').map(|(a, b)| (a.to_string(), b.to_string()))
+}
+
+/// Decode a path from git's C-style quoted form into UTF-8 bytes. Git
+/// quotes non-ASCII and special characters when they appear in paths in
+/// diff headers. The quoted form looks like `"foo\342\200\224bar.md"`
+/// where `\342\200\224` is the octal byte sequence for U+2014 (em dash).
+///
+/// Rules (per git's `quote_c_style`):
+/// - Wrapped in double quotes.
+/// - `\a`, `\b`, `\t`, `\n`, `\v`, `\f`, `\r`      → single ASCII char
+/// - `\"`, `\\`                                      → literal
+/// - `\<three octal digits>`                         → byte value
+/// - Any other character                             → literal
+///
+/// If the input isn't quoted (no surrounding double quotes), it's returned
+/// as-is — this makes the function safe to call unconditionally.
+///
+/// Pure function, unit-tested below. Fixes the QuotedDiffPath blind spot
+/// the spike sweeper flagged: 179 findings in the squad repo history from
+/// message files with em-dashes in filenames.
+fn decode_git_quoted_path(raw: &str) -> String {
+    if !(raw.starts_with('"') && raw.ends_with('"') && raw.len() >= 2) {
+        return raw.to_string();
+    }
+    let inner = &raw[1..raw.len() - 1];
+    let bytes = inner.as_bytes();
+    let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] != b'\\' {
+            out.push(bytes[i]);
+            i += 1;
+            continue;
+        }
+        // Escape sequence starting at `bytes[i]`.
+        i += 1;
+        if i >= bytes.len() {
+            // Trailing backslash — shouldn't happen on well-formed git output.
+            out.push(b'\\');
+            break;
+        }
+        match bytes[i] {
+            b'a' => { out.push(0x07); i += 1; }
+            b'b' => { out.push(0x08); i += 1; }
+            b't' => { out.push(b'\t'); i += 1; }
+            b'n' => { out.push(b'\n'); i += 1; }
+            b'v' => { out.push(0x0b); i += 1; }
+            b'f' => { out.push(0x0c); i += 1; }
+            b'r' => { out.push(b'\r'); i += 1; }
+            b'"' => { out.push(b'"'); i += 1; }
+            b'\\' => { out.push(b'\\'); i += 1; }
+            c if (b'0'..=b'7').contains(&c) => {
+                // Octal escape: up to 3 digits.
+                let mut val: u32 = 0;
+                let mut n = 0;
+                while n < 3 && i + n < bytes.len() {
+                    let d = bytes[i + n];
+                    if !(b'0'..=b'7').contains(&d) {
+                        break;
+                    }
+                    val = val * 8 + (d - b'0') as u32;
+                    n += 1;
+                }
+                if val > 0xff {
+                    // Not a valid single-byte octal; fall back to literal.
+                    out.push(b'\\');
+                    out.push(bytes[i]);
+                    i += 1;
+                } else {
+                    out.push(val as u8);
+                    i += n;
+                }
+            }
+            other => {
+                // Unknown escape — preserve as literal.
+                out.push(b'\\');
+                out.push(other);
+                i += 1;
+            }
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
 }
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -972,6 +1222,147 @@ mod tests {
         assert_eq!(events[1].path, "b.fm.spo");
     }
 
+    // ─── rename detection (Phase 2, 2026-04-11) ────────────────────────────
+
+    #[test]
+    fn parse_diff_output_detects_simple_rename() {
+        // The canonical rename block git emits for a pure rename at 100%
+        // similarity (folder rename, content unchanged).
+        let diff = concat!(
+            "diff --git a/friend/1ux.md.fm.spo b/Friend/1ux.md.fm.spo\n",
+            "similarity index 100%\n",
+            "rename from friend/1ux.md.fm.spo\n",
+            "rename to Friend/1ux.md.fm.spo\n",
+        );
+        let (events, renames) = parse_diff_output(diff);
+        assert_eq!(events.len(), 0, "pure rename should have no line events");
+        assert_eq!(renames.len(), 1);
+        assert_eq!(renames[0].old_path, "friend/1ux.md.fm.spo");
+        assert_eq!(renames[0].new_path, "Friend/1ux.md.fm.spo");
+        assert_eq!(renames[0].similarity, 100);
+    }
+
+    #[test]
+    fn parse_diff_output_detects_rename_with_modification() {
+        // A rename at less than 100% similarity still emits a body diff
+        // showing the changed lines at the NEW path. Both the rename and
+        // the events should land.
+        let diff = concat!(
+            "diff --git a/friend/1ux.md.fm.spo b/Friend/1ux.md.fm.spo\n",
+            "similarity index 85%\n",
+            "rename from friend/1ux.md.fm.spo\n",
+            "rename to Friend/1ux.md.fm.spo\n",
+            "index aaaa..bbbb 100644\n",
+            "--- a/friend/1ux.md.fm.spo\n",
+            "+++ b/Friend/1ux.md.fm.spo\n",
+            "@@ -5 +5 @@\n",
+            "-soul.friend.relationship | hasValue | boss\n",
+            "+soul.friend.relationship | hasValue | captain\n",
+        );
+        let (events, renames) = parse_diff_output(diff);
+        assert_eq!(renames.len(), 1);
+        assert_eq!(renames[0].similarity, 85);
+        assert_eq!(events.len(), 2, "body diff should produce 2 line events");
+        // Both events land at the b-path (new path).
+        assert!(events.iter().all(|e| e.path == "Friend/1ux.md.fm.spo"));
+    }
+
+    #[test]
+    fn parse_diff_output_mixes_rename_and_unrelated_file_changes() {
+        // One rename + one regular add in the same diff. Both should land.
+        let diff = concat!(
+            "diff --git a/friend/x.md.fm.spo b/Friend/x.md.fm.spo\n",
+            "similarity index 100%\n",
+            "rename from friend/x.md.fm.spo\n",
+            "rename to Friend/x.md.fm.spo\n",
+            "diff --git a/new-memory.md.fm.spo b/new-memory.md.fm.spo\n",
+            "new file mode 100644\n",
+            "index 0000000..aaa\n",
+            "--- /dev/null\n",
+            "+++ b/new-memory.md.fm.spo\n",
+            "@@ -0,0 +1,1 @@\n",
+            "+tags | hasValue | new\n",
+        );
+        let (events, renames) = parse_diff_output(diff);
+        assert_eq!(renames.len(), 1);
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].path, "new-memory.md.fm.spo");
+        assert_eq!(events[0].line, "tags | hasValue | new");
+    }
+
+    #[test]
+    fn parse_diff_output_skips_rename_headers_in_events() {
+        // The old parser would have picked up `rename from` and `rename to`
+        // as no-op lines, but with the Phase 2 parser they're in the
+        // stop-list. Confirm no stray events get emitted from a rename
+        // block.
+        let diff = concat!(
+            "diff --git a/a.fm.spo b/b.fm.spo\n",
+            "similarity index 100%\n",
+            "rename from a.fm.spo\n",
+            "rename to b.fm.spo\n",
+        );
+        let events = parse_unified_diff(diff);
+        assert_eq!(events.len(), 0);
+    }
+
+    // ─── git quoted path decoding (fixes QuotedDiffPath blind spot) ────────
+
+    #[test]
+    fn decode_unquoted_path_is_identity() {
+        assert_eq!(decode_git_quoted_path("a/foo.md"), "a/foo.md");
+        assert_eq!(decode_git_quoted_path(""), "");
+    }
+
+    #[test]
+    fn decode_em_dash_path() {
+        // U+2014 (em dash) encoded as UTF-8 bytes 0xE2 0x80 0x94, which
+        // git renders as octal \342\200\224.
+        let raw = r#""Message/channel\342\200\224test.md.fm.spo""#;
+        assert_eq!(
+            decode_git_quoted_path(raw),
+            "Message/channel—test.md.fm.spo"
+        );
+    }
+
+    #[test]
+    fn decode_escaped_quote_and_backslash() {
+        assert_eq!(decode_git_quoted_path(r#""a\"b""#), "a\"b");
+        assert_eq!(decode_git_quoted_path(r#""a\\b""#), "a\\b");
+    }
+
+    #[test]
+    fn decode_standard_c_escapes() {
+        assert_eq!(decode_git_quoted_path(r#""tab\there""#), "tab\there");
+        assert_eq!(decode_git_quoted_path(r#""line\nbreak""#), "line\nbreak");
+    }
+
+    #[test]
+    fn split_header_paths_unquoted() {
+        let (a, b) = split_git_diff_header_paths("a/foo.md b/foo.md").unwrap();
+        assert_eq!(a, "a/foo.md");
+        assert_eq!(b, "b/foo.md");
+    }
+
+    #[test]
+    fn split_header_paths_quoted() {
+        let raw = r#""a/f\342\200\224o.md" "b/f\342\200\224o.md""#;
+        let (a, b) = split_git_diff_header_paths(raw).unwrap();
+        assert_eq!(a, r#""a/f\342\200\224o.md""#);
+        assert_eq!(b, r#""b/f\342\200\224o.md""#);
+    }
+
+    #[test]
+    fn parser_resolves_quoted_path_in_diff_header() {
+        let diff = concat!(
+            r#"diff --git "a/Message/channel\342\200\224test.md.fm.spo" "b/Message/channel\342\200\224test.md.fm.spo""#,
+            "\n+tags | hasValue | channel\n",
+        );
+        let events = parse_unified_diff(diff);
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].path, "Message/channel—test.md.fm.spo");
+    }
+
     // ─── canonical_log_key ─────────────────────────────────────────────────
 
     #[test]
@@ -1105,6 +1496,7 @@ mod tests {
             date: "2026-04-09".into(),
             subject: "test commit".into(),
             events,
+            renames: Vec::new(),
         }
     }
 
