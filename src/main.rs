@@ -139,6 +139,13 @@ enum Commands {
         /// of fetching from GitHub. Regenerates shapes and templates.
         #[arg(long)]
         dev: bool,
+        /// Force reinstall scaffold files even if they already exist in the
+        /// repo. Without this, kit-update only installs scaffold files that
+        /// are missing — preserving any local customizations. Use this when
+        /// developing a kit and you want the latest shipped files to
+        /// overwrite whatever is currently in the repo.
+        #[arg(long)]
+        force: bool,
     },
     /// Run a SPARQL CONSTRUCT query and push the result to the local viz server
     Display {
@@ -1410,6 +1417,121 @@ fn install_scaffold_files_from(kit_dir: &std::path::Path) -> usize {
 
     install_recursive(&scaffold_dir, &root, &mut count);
     count
+}
+
+/// Like `install_scaffold_files_from`, but safe for `kit-update` against a
+/// live repo. If `force` is false, files that already exist in the repo are
+/// left alone (preserving any local customizations an agent has made). If
+/// `force` is true, behaves exactly like `install_scaffold_files_from` —
+/// clobbers everything. Used by `kit-update` to refresh base-kit scaffold
+/// pieces like `.lex/www/` without blowing away an agent's `.claude/`
+/// customizations.
+///
+/// Returns `(installed, skipped)` counts.
+fn install_scaffold_files_from_skip_existing(
+    kit_dir: &std::path::Path,
+    force: bool,
+) -> (usize, usize) {
+    let root = match find_git_root() {
+        Some(r) => r,
+        None => return (0, 0),
+    };
+
+    let scaffold_dir = kit_dir.join("scaffold");
+    if !scaffold_dir.exists() {
+        return (0, 0);
+    }
+
+    let mut installed = 0usize;
+    let mut skipped = 0usize;
+
+    fn install_recursive(
+        src_dir: &std::path::Path,
+        dest_dir: &std::path::Path,
+        force: bool,
+        installed: &mut usize,
+        skipped: &mut usize,
+    ) {
+        let entries = match fs::read_dir(src_dir) {
+            Ok(e) => e,
+            Err(_) => return,
+        };
+        for entry in entries.flatten() {
+            let src = entry.path();
+            let name = entry.file_name();
+            let dest = dest_dir.join(&name);
+
+            let meta = match fs::symlink_metadata(&src) {
+                Ok(m) => m,
+                Err(_) => continue,
+            };
+            let ft = meta.file_type();
+
+            if ft.is_symlink() {
+                // Symlinks: skip if destination already exists (any kind) and
+                // not forcing. Otherwise preserve the symlink from the kit.
+                if !force && dest.symlink_metadata().is_ok() {
+                    *skipped += 1;
+                    continue;
+                }
+                let target = match fs::read_link(&src) {
+                    Ok(t) => t,
+                    Err(_) => continue,
+                };
+                fs::create_dir_all(dest.parent().unwrap_or(&dest)).ok();
+                if dest.symlink_metadata().is_ok() {
+                    if dest.is_dir() && !dest.is_symlink() {
+                        let _ = fs::remove_dir_all(&dest);
+                    } else {
+                        let _ = fs::remove_file(&dest);
+                    }
+                }
+                #[cfg(unix)]
+                {
+                    if std::os::unix::fs::symlink(&target, &dest).is_ok() {
+                        *installed += 1;
+                    }
+                }
+                continue;
+            }
+
+            if ft.is_dir() {
+                // Always recurse into directories — existing dirs don't block
+                // installation of new files underneath. Per-file skip logic
+                // handles the rest.
+                fs::create_dir_all(&dest).ok();
+                install_recursive(&src, &dest, force, installed, skipped);
+                continue;
+            }
+
+            if ft.is_file() {
+                if !force && dest.symlink_metadata().is_ok() {
+                    // Destination already exists — preserve whatever is there.
+                    *skipped += 1;
+                    continue;
+                }
+                fs::create_dir_all(dest.parent().unwrap_or(&dest)).ok();
+                if dest.symlink_metadata().is_ok() {
+                    let dft = dest.symlink_metadata().ok().map(|m| m.file_type());
+                    if let Some(dft) = dft {
+                        if dft.is_symlink() || (dft.is_dir() && !dft.is_symlink()) {
+                            if dft.is_dir() && !dft.is_symlink() {
+                                let _ = fs::remove_dir_all(&dest);
+                            } else {
+                                let _ = fs::remove_file(&dest);
+                            }
+                        }
+                    }
+                }
+                if fs::copy(&src, &dest).is_ok() {
+                    *installed += 1;
+                }
+            }
+        }
+    }
+
+    install_recursive(&scaffold_dir, &root, force, &mut installed, &mut skipped);
+    (installed, skipped)
 }
 
 /// Report from install_asset_files — lists what was installed, what was
@@ -5515,7 +5637,7 @@ fn main() {
         Commands::Join { squad_path } => cmd_join(&squad_path),
         Commands::Parse { file } => cmd_parse(&file),
         Commands::Nuke => cmd_nuke(),
-        Commands::KitUpdate { kit, dev } => cmd_kit_update(kit, dev),
+        Commands::KitUpdate { kit, dev, force } => cmd_kit_update(kit, dev, force),
         Commands::Display { query, port } => cmd_display(&query, port),
         Commands::Serve { args } => {
             let status = Command::new("git-lex-serve")
@@ -5658,7 +5780,7 @@ fn cmd_nuke() {
 
 // ─── kit-update ────────────────────────────────────────────────
 
-fn cmd_kit_update(kit_arg: Option<String>, dev: bool) {
+fn cmd_kit_update(kit_arg: Option<String>, dev: bool, force: bool) {
     let root = find_git_root().expect("not in a git repo");
     let lex_dir = root.join(".lex");
 
@@ -5668,6 +5790,8 @@ fn cmd_kit_update(kit_arg: Option<String>, dev: bool) {
     }
 
     // Determine which kit to update: from the argument, or from repo.yml.
+    // This is the *domain* kit (soul, squad, lab, etc.). The base kit is
+    // implicit and always refreshed alongside it, mirroring init's behavior.
     let kit_name = match kit_arg {
         Some(ref k) => k.clone(),
         None => {
@@ -5696,8 +5820,17 @@ fn cmd_kit_update(kit_arg: Option<String>, dev: bool) {
     let (org, repo, short) = resolve_kit_spec(&kit_name);
     let kit_dir = lex_dir.join("kit").join(&org).join(&repo);
 
+    // Resolve the base kit too — we fetch and install its scaffold (which
+    // ships core infrastructure like .lex/www/ and .lex/ontology/) on every
+    // kit-update, matching init's base+domain pattern.
+    let (base_org, base_repo, _) = resolve_kit_spec(BASE_KIT);
+    let base_kit_dir = lex_dir.join("kit").join(&base_org).join(&base_repo);
+    let base_is_same_as_domain = kit_name == BASE_KIT
+        || (org == base_org && repo == base_repo);
+
     if dev {
         // Dev mode: verify local kit exists, regenerate derived artifacts.
+        // Don't refetch base kit either — agent is iterating locally.
         if !kit_dir.exists() {
             eprintln!("--dev: kit directory not found at {}", kit_dir.display());
             eprintln!("Populate the kit locally first, then re-run with --dev.");
@@ -5705,16 +5838,59 @@ fn cmd_kit_update(kit_arg: Option<String>, dev: bool) {
         }
         println!("Dev mode: using local kit at {}", kit_dir.display());
     } else {
-        // Normal mode: delete existing kit, re-download.
-        println!("Updating kit '{}/{}' from GitHub...", org, repo);
-        let _ = fs::remove_dir_all(&kit_dir);
-        fs::create_dir_all(&kit_dir).ok();
+        // Normal mode: refresh the base kit first (always), then the domain kit.
 
-        if fetch_kit_from_github(&kit_name, &kit_dir) {
-            println!("Kit '{}/{}' fetched.", org, repo);
+        // Base kit.
+        println!("Updating base kit '{}/{}' from GitHub...", base_org, base_repo);
+        let _ = fs::remove_dir_all(&base_kit_dir);
+        fs::create_dir_all(&base_kit_dir).ok();
+        if fetch_kit_from_github(BASE_KIT, &base_kit_dir) {
+            println!("Base kit '{}/{}' fetched.", base_org, base_repo);
         } else {
-            eprintln!("Failed to fetch kit '{}' from GitHub.", kit_name);
+            eprintln!("Failed to fetch base kit '{}' from GitHub.", BASE_KIT);
+            eprintln!("Check network access to https://github.com/{}/{}", base_org, base_repo);
             exit(1);
+        }
+
+        // Domain kit (if different from base).
+        if !base_is_same_as_domain {
+            println!("Updating kit '{}/{}' from GitHub...", org, repo);
+            let _ = fs::remove_dir_all(&kit_dir);
+            fs::create_dir_all(&kit_dir).ok();
+            if fetch_kit_from_github(&kit_name, &kit_dir) {
+                println!("Kit '{}/{}' fetched.", org, repo);
+            } else {
+                eprintln!("Failed to fetch kit '{}' from GitHub.", kit_name);
+                exit(1);
+            }
+        }
+    }
+
+    // Install scaffold files from both kits. This is the new behavior that
+    // mirrors init: base kit ships .lex/www/, .lex/ontology/, and domain kit
+    // ships its own scaffold (.claude/, AGENTS.md, etc.). Without --force,
+    // existing files in the repo are preserved — only missing files are
+    // installed. With --force, everything is clobbered (kit-development mode).
+    let (base_installed, base_skipped) =
+        install_scaffold_files_from_skip_existing(&base_kit_dir, force);
+    let (domain_installed, domain_skipped) = if !base_is_same_as_domain {
+        install_scaffold_files_from_skip_existing(&kit_dir, force)
+    } else {
+        (0, 0)
+    };
+    let total_installed = base_installed + domain_installed;
+    let total_skipped = base_skipped + domain_skipped;
+    if total_installed > 0 || total_skipped > 0 {
+        if force {
+            println!(
+                "Scaffold: {} file(s) installed (--force: overwrote existing)",
+                total_installed
+            );
+        } else {
+            println!(
+                "Scaffold: {} file(s) installed, {} preserved (already existed — use --force to overwrite)",
+                total_installed, total_skipped
+            );
         }
     }
 
