@@ -405,6 +405,368 @@ fn build_commit(sha: &str) -> SpikeCommit {
 }
 
 // ════════════════════════════════════════════════════════════════════════════
+// Orphan cleanup — git-aware, used by the pre-commit hook
+// ════════════════════════════════════════════════════════════════════════════
+//
+// Phase 3 (2026-04-11): replaces the old `cleanup_orphaned_sidecars()` that
+// lived in main.rs. The old version walked .lex/extract/ and called
+// `Path::exists()` on the reconstructed source path, which broke on macOS
+// APFS because it's case-insensitive by default: after a rename like
+// `friend/ → Friend/`, `Path::new("friend/1ux.md").exists()` returns TRUE
+// even when the actual file is at `Friend/1ux.md`. Orphans silently
+// survived. On the lowercase → capital class proclamation, every agent
+// would have generated ghost triples fleet-wide.
+//
+// The new approach asks git, not the filesystem, via `git diff --cached
+// --name-status -M50%`. Git gives us exact casing and a structured change
+// set that distinguishes deletes from renames — so we can:
+//
+//   - delete stale .spo mirrors when an .md is deleted
+//   - `git mv` stale .spo mirrors to the new path when an .md is renamed,
+//     preserving their content (important for future `haiku.spo` subagent
+//     output that is expensive to regenerate)
+//
+// Cleanup runs from the pre-commit hook (via `cmd_extract`) so that the
+// .spo mirror moves/deletes land in the same commit as the .md change
+// itself. The commit is atomic from git's perspective: source file and
+// sidecar stay in lockstep across the whole history.
+
+/// A record of what cleanup did in one invocation. Kept as counts + a
+/// details field so the reporter in `cmd_extract` can print a one-line
+/// summary and verbose logs when needed.
+#[derive(Debug, Default)]
+pub struct CleanupReport {
+    /// .spo mirror files deleted because their source .md was deleted.
+    pub deleted: Vec<String>,
+    /// .spo mirror files moved because their source .md was renamed.
+    /// Each entry is (old_spo_path, new_spo_path).
+    pub renamed: Vec<(String, String)>,
+    /// Non-fatal errors encountered — things that didn't stop the walk but
+    /// should be visible to the agent. E.g. a stale .spo that couldn't be
+    /// removed because git rm returned an error.
+    pub errors: Vec<String>,
+}
+
+impl CleanupReport {
+    pub fn is_empty(&self) -> bool {
+        self.deleted.is_empty() && self.renamed.is_empty() && self.errors.is_empty()
+    }
+
+    pub fn summary(&self) -> String {
+        format!(
+            "{} deleted, {} renamed, {} errors",
+            self.deleted.len(),
+            self.renamed.len(),
+            self.errors.len()
+        )
+    }
+}
+
+/// Known extractor suffixes on `.spo` sidecar files. Each source `.md`
+/// document may have multiple sidecars — one per extractor — all living
+/// under `.lex/extract/<relpath>.<extractor>.spo`. When cleanup handles
+/// a deleted or renamed .md, it must handle every sidecar for that file,
+/// regardless of which extractor wrote it.
+///
+/// Current extractors:
+///   - `fm`   : frontmatter (YAML header → triples, mainline)
+///   - `md`   : markdown links (tree-sitter walker, mentions + wikilinks)
+///   - `cc`   : claude-code JSONL sessions (claude-export kit)
+///
+/// Future extractors (not yet implemented but named in the spec):
+///   - `gliner` : entity mentions via the gliner2 Rust crate
+///   - `haiku`  : LLM-generated haiku annotations, subagent-driven
+///
+/// Add new suffixes here when new extractors ship. Cleanup will glob them
+/// automatically.
+const SPO_EXTRACTOR_SUFFIXES: &[&str] = &["fm", "md", "cc", "gliner", "haiku"];
+
+/// Ask git for the staged-but-not-yet-committed change set on `.md` files,
+/// filtered to the tracked content tree (no `.lex/**`). Returns the raw
+/// diff status output, which `parse_staged_md_changes` then parses.
+///
+/// Uses `diff --cached` (index vs HEAD) because this function is called
+/// from the pre-commit hook, where changes have been staged by the hook
+/// caller (via `git add` or `git lex save`'s explicit `git add -A`) but
+/// not yet committed.
+///
+/// `-M50%` turns on rename detection at 50% similarity — same threshold
+/// the diff-tree walker uses, for consistency.
+fn git_staged_md_changes() -> Option<String> {
+    let out = Command::new("git")
+        .args([
+            "diff",
+            "--cached",
+            "--name-status",
+            "-M50%",
+            "-z",
+            "--",
+            "*.md",
+            ":!.lex/",
+        ])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    // `-z` gives NUL-separated records; we want lossy UTF-8 because paths
+    // might not be strict UTF-8 but we'll still see them correctly.
+    Some(String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
+/// Parse the `git diff --cached --name-status -M -z` output into a pair
+/// of lists: deleted .md paths and (old, new) rename pairs.
+///
+/// The `-z` NUL-separated format for `--name-status` is irregular:
+///   - For `A`, `M`, `D`, `T` (single-path statuses): `<status>\0<path>\0`
+///   - For `R<score>`, `C<score>` (two-path statuses): `<status>\0<old>\0<new>\0`
+///
+/// So we can't just split on NUL — we need to read the status and decide
+/// how many subsequent fields to consume. Pure function, unit-tested below.
+pub fn parse_staged_md_changes(raw: &str) -> (Vec<String>, Vec<(String, String)>) {
+    let mut deleted = Vec::new();
+    let mut renamed = Vec::new();
+
+    // Split on NUL. `-z` separates every field with NUL; the trailing
+    // NUL on the last record produces an empty string we filter out.
+    let fields: Vec<&str> = raw.split('\0').filter(|s| !s.is_empty()).collect();
+    let mut i = 0;
+    while i < fields.len() {
+        let status = fields[i];
+        let first_char = status.chars().next().unwrap_or(' ');
+        match first_char {
+            'R' | 'C' => {
+                // Two-path status: status, old, new
+                if i + 2 < fields.len() {
+                    let old = fields[i + 1].to_string();
+                    let new = fields[i + 2].to_string();
+                    if first_char == 'R' {
+                        renamed.push((old, new));
+                    }
+                    // Copies (C) are not treated as renames — the source
+                    // file still exists, so its .spo doesn't need moving.
+                    i += 3;
+                } else {
+                    break;
+                }
+            }
+            'D' => {
+                // Deletion: status, path
+                if i + 1 < fields.len() {
+                    deleted.push(fields[i + 1].to_string());
+                    i += 2;
+                } else {
+                    break;
+                }
+            }
+            _ => {
+                // A, M, T, U: single-path statuses we don't care about for
+                // cleanup. Advance past the path.
+                if i + 1 < fields.len() {
+                    i += 2;
+                } else {
+                    break;
+                }
+            }
+        }
+    }
+
+    (deleted, renamed)
+}
+
+/// For a source .md path like `friend/1ux.md`, return all the sidecar
+/// paths under `.lex/extract/` that correspond to it. Checks every known
+/// extractor suffix and returns the ones that are currently TRACKED BY
+/// GIT (in the index).
+///
+/// Uses the git index rather than `Path::exists()` to handle macOS APFS
+/// case-insensitivity correctly — on APFS, `Path::new("foo/bar")` and
+/// `Path::new("Foo/bar")` can resolve to the same inode, but git's index
+/// tracks each path with exact casing.
+///
+/// Returns paths relative to the repo root, suitable for passing to
+/// `git rm` / `git mv` (both of which accept repo-relative paths when
+/// run from the repo root).
+fn sidecar_paths_for_md(md_path: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    for suffix in SPO_EXTRACTOR_SUFFIXES {
+        let rel = format!(".lex/extract/{}.{}.spo", md_path, suffix);
+        if git_path_is_tracked(&rel) {
+            out.push(rel);
+        }
+    }
+    out
+}
+
+/// Ask git whether a given path is currently tracked in the index,
+/// with exact case sensitivity. Runs `git ls-files --error-unmatch -- <path>`
+/// and treats a successful exit as "tracked".
+///
+/// Why not `Path::exists()`? Because on macOS APFS (case-insensitive by
+/// default), the filesystem answer is wrong for case-only rename cases.
+/// Git's index is always case-exact, so asking git gives us the truth.
+fn git_path_is_tracked(path: &str) -> bool {
+    Command::new("git")
+        .args(["ls-files", "--error-unmatch", "--", path])
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
+/// Run `git rm -f <path>` — used to stage the deletion of a stale .spo
+/// mirror. We use `-f` because the file may already be deleted from the
+/// working tree (if the agent manually cleaned it up) but still tracked
+/// in the index; `git rm -f` handles both cases.
+fn git_rm(path: &str) -> Result<(), String> {
+    let out = Command::new("git")
+        .args(["rm", "-f", "--", path])
+        .output()
+        .map_err(|e| format!("git rm failed to spawn: {}", e))?;
+    if !out.status.success() {
+        return Err(format!(
+            "git rm {} failed: {}",
+            path,
+            String::from_utf8_lossy(&out.stderr).trim()
+        ));
+    }
+    Ok(())
+}
+
+/// Run `git mv <old> <new>`, creating the destination directory if needed.
+/// Used to move a .spo mirror from its old path to the new one when the
+/// source .md is renamed.
+fn git_mv(old: &str, new: &str) -> Result<(), String> {
+    // Ensure the destination parent directory exists — git mv doesn't
+    // auto-create intermediate dirs.
+    if let Some(parent) = std::path::Path::new(new).parent() {
+        if !parent.as_os_str().is_empty() {
+            fs::create_dir_all(parent).ok();
+        }
+    }
+    let out = Command::new("git")
+        .args(["mv", "--", old, new])
+        .output()
+        .map_err(|e| format!("git mv failed to spawn: {}", e))?;
+    if !out.status.success() {
+        return Err(format!(
+            "git mv {} -> {} failed: {}",
+            old,
+            new,
+            String::from_utf8_lossy(&out.stderr).trim()
+        ));
+    }
+    Ok(())
+}
+
+/// Clean up .spo sidecars for .md files that are being deleted or renamed
+/// in the currently-staged commit. This is the Phase 3 replacement for
+/// `cleanup_orphaned_sidecars()` — it asks git for the change set instead
+/// of walking the filesystem, which fixes the APFS case-insensitivity
+/// bug and adds rename-as-move support.
+///
+/// Called from the pre-commit hook (via `cmd_extract`) so the .spo moves
+/// and deletes are staged into the same commit as the .md change itself.
+/// The commit is atomic: source and sidecars stay in lockstep.
+///
+/// Returns a `CleanupReport` the caller can use for user-facing logging.
+/// Non-fatal errors (e.g. a `git mv` that fails because the destination
+/// already exists) are recorded in `report.errors` but don't abort the
+/// walk — cleanup is best-effort and the sanity check for "did this do
+/// anything weird?" happens at the CleanupReport level.
+pub fn cleanup_sidecars_for_staged_changes() -> CleanupReport {
+    let mut report = CleanupReport::default();
+
+    let root = match find_git_root() {
+        Some(r) => r,
+        None => {
+            report.errors.push("not in a git repo".to_string());
+            return report;
+        }
+    };
+
+    // Must run `git` commands from the repo root so relative paths resolve
+    // correctly. Save and restore cwd so we don't surprise the caller.
+    let prev_cwd = std::env::current_dir().ok();
+    if std::env::set_current_dir(&root).is_err() {
+        report.errors.push(format!(
+            "failed to cd to repo root at {}",
+            root.display()
+        ));
+        return report;
+    }
+
+    let raw = match git_staged_md_changes() {
+        Some(r) => r,
+        None => {
+            // No staged .md changes, or git command failed. Either way
+            // nothing to clean up — this is the common case when commits
+            // don't touch the content tree.
+            if let Some(p) = prev_cwd {
+                let _ = std::env::set_current_dir(p);
+            }
+            return report;
+        }
+    };
+
+    let (deleted_mds, renamed_mds) = parse_staged_md_changes(&raw);
+
+    for md_path in &deleted_mds {
+        for sidecar in sidecar_paths_for_md(md_path) {
+            match git_rm(&sidecar) {
+                Ok(()) => report.deleted.push(sidecar),
+                Err(e) => report.errors.push(e),
+            }
+        }
+    }
+
+    for (old_md, new_md) in &renamed_mds {
+        // For each extractor, compute the old sidecar path (derived from
+        // the OLD md path) and the new sidecar path (derived from the
+        // NEW md path). If the old sidecar is tracked in the index, git
+        // mv it. Otherwise skip — the next extract pass will regenerate
+        // sidecars under the new path naturally.
+        //
+        // We check "is this path in the index?" via `git ls-files`
+        // instead of `Path::exists()` because on macOS APFS (case-
+        // insensitive default), a case-only rename like friend/ → Friend/
+        // produces a situation where the old sidecar at
+        // `.lex/extract/friend/1ux.md.fm.spo` and the proposed new path
+        // `.lex/extract/Friend/1ux.md.fm.spo` resolve to the same inode.
+        // `Path::exists()` returns true for both. Git's index always
+        // tracks paths with exact casing, so asking git gives us the
+        // correct answer.
+        for suffix in SPO_EXTRACTOR_SUFFIXES {
+            let old_sidecar = format!(".lex/extract/{}.{}.spo", old_md, suffix);
+            let new_sidecar = format!(".lex/extract/{}.{}.spo", new_md, suffix);
+            if !git_path_is_tracked(&old_sidecar) {
+                continue;
+            }
+            // Skip only if the destination is ALREADY TRACKED IN THE
+            // INDEX (separately from old_sidecar). A case-only rename
+            // where old and new paths resolve to the same inode on APFS
+            // is still a legitimate rename we want to do.
+            if git_path_is_tracked(&new_sidecar) && new_sidecar != old_sidecar {
+                report.errors.push(format!(
+                    "skipping rename of {}: destination {} is already tracked",
+                    old_sidecar, new_sidecar
+                ));
+                continue;
+            }
+            match git_mv(&old_sidecar, &new_sidecar) {
+                Ok(()) => report.renamed.push((old_sidecar, new_sidecar)),
+                Err(e) => report.errors.push(e),
+            }
+        }
+    }
+
+    if let Some(p) = prev_cwd {
+        let _ = std::env::set_current_dir(p);
+    }
+
+    report
+}
+
+// ════════════════════════════════════════════════════════════════════════════
 // Layer 2: unified-diff parser (pure)
 // ════════════════════════════════════════════════════════════════════════════
 
@@ -1361,6 +1723,108 @@ mod tests {
         let events = parse_unified_diff(diff);
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].path, "Message/channel—test.md.fm.spo");
+    }
+
+    // ─── staged .md change parser (Phase 3 orphan cleanup) ────────────────
+
+    #[test]
+    fn parse_staged_empty_is_empty() {
+        let (del, ren) = parse_staged_md_changes("");
+        assert_eq!(del.len(), 0);
+        assert_eq!(ren.len(), 0);
+    }
+
+    #[test]
+    fn parse_staged_single_delete() {
+        // `git diff --cached --name-status -z` output for one deleted file:
+        //   D\0friend/old.md\0
+        let raw = "D\0friend/old.md\0";
+        let (del, ren) = parse_staged_md_changes(raw);
+        assert_eq!(del, vec!["friend/old.md".to_string()]);
+        assert_eq!(ren.len(), 0);
+    }
+
+    #[test]
+    fn parse_staged_single_rename() {
+        // Rename format: R<score>\0<old>\0<new>\0
+        let raw = "R100\0friend/1ux.md\0Friend/1ux.md\0";
+        let (del, ren) = parse_staged_md_changes(raw);
+        assert_eq!(del.len(), 0);
+        assert_eq!(
+            ren,
+            vec![("friend/1ux.md".to_string(), "Friend/1ux.md".to_string())]
+        );
+    }
+
+    #[test]
+    fn parse_staged_mixed_operations() {
+        // A common pre-commit snapshot: one add, one modify, one delete,
+        // one rename. Only delete + rename should end up in the cleanup
+        // change set — A and M don't require sidecar cleanup.
+        let raw = concat!(
+            "A\0memory/new-thing.md\0",
+            "M\0memory/updated.md\0",
+            "D\0memory/obsolete.md\0",
+            "R95\0friend/1ux.md\0Friend/1ux.md\0",
+        );
+        let (del, ren) = parse_staged_md_changes(raw);
+        assert_eq!(del, vec!["memory/obsolete.md".to_string()]);
+        assert_eq!(
+            ren,
+            vec![("friend/1ux.md".to_string(), "Friend/1ux.md".to_string())]
+        );
+    }
+
+    #[test]
+    fn parse_staged_bulk_folder_rename() {
+        // Simulate the lowercase → capital proclamation rename wave:
+        // every friend/*.md becomes Friend/*.md. The parser must emit
+        // one Renamed entry per file, never collapse them.
+        let raw = concat!(
+            "R100\0friend/1ux.md\0Friend/1ux.md\0",
+            "R100\0friend/kira.md\0Friend/kira.md\0",
+            "R100\0friend/m4rq.md\0Friend/m4rq.md\0",
+            "R100\0friend/tr1pl3x.md\0Friend/tr1pl3x.md\0",
+        );
+        let (del, ren) = parse_staged_md_changes(raw);
+        assert_eq!(del.len(), 0);
+        assert_eq!(ren.len(), 4);
+        assert_eq!(ren[0].0, "friend/1ux.md");
+        assert_eq!(ren[0].1, "Friend/1ux.md");
+        assert_eq!(ren[3].0, "friend/tr1pl3x.md");
+    }
+
+    #[test]
+    fn parse_staged_copy_is_not_treated_as_rename() {
+        // C (copy) is semantically different from R (rename): the source
+        // file still exists, so its .spo doesn't need moving. Cleanup
+        // must skip copies.
+        let raw = "C85\0original.md\0duplicate.md\0";
+        let (del, ren) = parse_staged_md_changes(raw);
+        assert_eq!(del.len(), 0);
+        assert_eq!(ren.len(), 0, "copies should NOT be treated as renames");
+    }
+
+    #[test]
+    fn parse_staged_ignores_modifications_and_additions() {
+        let raw = concat!(
+            "M\0a.md\0",
+            "A\0b.md\0",
+            "T\0c.md\0",
+        );
+        let (del, ren) = parse_staged_md_changes(raw);
+        assert_eq!(del.len(), 0);
+        assert_eq!(ren.len(), 0);
+    }
+
+    #[test]
+    fn parse_staged_handles_truncated_input() {
+        // Defensive: if the input is malformed and ends mid-record,
+        // the parser should stop cleanly rather than panicking.
+        let raw = "R100\0only-one-field";
+        let (del, ren) = parse_staged_md_changes(raw);
+        assert_eq!(del.len(), 0);
+        assert_eq!(ren.len(), 0);
     }
 
     // ─── canonical_log_key ─────────────────────────────────────────────────

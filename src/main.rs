@@ -4994,66 +4994,38 @@ async fn cmd_display(query: &str, port: u16) {
     }
 }
 
-/// Walk .lex/extract/ and remove any .spo sidecar whose source markdown file
-/// no longer exists in the working tree. Handles deletes and renames.
-fn cleanup_orphaned_sidecars() -> usize {
-    let root = match find_git_root() {
-        Some(r) => r,
-        None => return 0,
-    };
-    let extract_dir = root.join(".lex").join("extract");
-    if !extract_dir.exists() {
-        return 0;
-    }
-
-    let mut removed = 0;
-    fn walk(dir: &std::path::Path, extract_root: &std::path::Path, repo_root: &std::path::Path, removed: &mut usize) {
-        if let Ok(entries) = fs::read_dir(dir) {
-            for entry in entries.flatten() {
-                let path = entry.path();
-                if path.is_dir() {
-                    walk(&path, extract_root, repo_root, removed);
-                    // Try to remove the dir if it's now empty
-                    let _ = fs::remove_dir(&path);
-                } else if path.extension().is_some_and(|e| e == "spo") {
-                    // Derive source markdown from sidecar path:
-                    // .lex/extract/contact/m4rq.md.fm.spo → contact/m4rq.md
-                    let rel = match path.strip_prefix(extract_root) {
-                        Ok(r) => r,
-                        Err(_) => continue,
-                    };
-                    let rel_str = rel.to_string_lossy().to_string();
-                    // Strip .{extractor}.spo suffix
-                    let source = if let Some(s) = rel_str.strip_suffix(".fm.spo") {
-                        s.to_string()
-                    } else if let Some(s) = rel_str.strip_suffix(".md.spo") {
-                        s.to_string()
-                    } else if let Some(s) = rel_str.strip_suffix(".cc.spo") {
-                        s.to_string()
-                    } else {
-                        continue; // unknown extractor
-                    };
-                    let source_path = repo_root.join(&source);
-                    if !source_path.exists() {
-                        if fs::remove_file(&path).is_ok() {
-                            *removed += 1;
-                        }
-                    }
-                }
-            }
-        }
-    }
-    walk(&extract_dir, &extract_dir, &root, &mut removed);
-    removed
-}
+// `cleanup_orphaned_sidecars` was deleted in Phase 3 of the history-graph
+// work (2026-04-11). Its replacement is `spo_events::cleanup_sidecars_for_
+// staged_changes()` which asks git for the staged change set instead of
+// walking the filesystem — fixes the macOS APFS case-insensitivity bug
+// and adds rename-as-move support so expensive-to-regenerate sidecars
+// (future `.haiku.spo` subagent output) survive folder renames without
+// re-running extractors.
 
 fn cmd_extract() {
     let start = Instant::now();
 
-    // Clean up orphaned sidecars (source .md files that no longer exist)
-    let cleaned = cleanup_orphaned_sidecars();
-    if cleaned > 0 {
-        eprintln!("Cleaned up {} orphaned sidecar(s)", cleaned);
+    // Clean up .spo sidecars for .md files that are being deleted or
+    // renamed in the currently-staged commit. Uses git to detect the
+    // change set — exact-case, handles rename-as-move so future subagent-
+    // driven `.haiku.spo` content survives folder renames without
+    // regeneration. Replaces the old cleanup_orphaned_sidecars walker that
+    // was buggy on macOS APFS (case-insensitive `Path::exists()`).
+    //
+    // See src/spo_events.rs and Situation/2026-04-09-history-graph-
+    // temporal-ledger.md §11 for the design.
+    let cleanup = spo_events::cleanup_sidecars_for_staged_changes();
+    if !cleanup.is_empty() {
+        eprintln!("Cleanup: {}", cleanup.summary());
+        for p in &cleanup.deleted {
+            eprintln!("  removed  {}", p);
+        }
+        for (old, new) in &cleanup.renamed {
+            eprintln!("  moved    {} → {}", old, new);
+        }
+        for err in &cleanup.errors {
+            eprintln!("  error    {}", err);
+        }
     }
 
     // Run frontmatter extraction (writes .spo sidecars as a side effect)
