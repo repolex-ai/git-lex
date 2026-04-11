@@ -22,6 +22,14 @@ use git_lex::{find_git_root, store_path, get_kit,
 mod resolve;
 mod harness;
 
+// .spo event stream — git-aware change detector for .spo sidecars. Used by
+// orphan cleanup (pre-commit hook), history graph ingest (rebuild +
+// incremental), and the `git lex history-spike` debug subcommand. Imported
+// 2026-04-11 from the w4r3z/history-spike branch (was src/history_spike.rs).
+// See Situation/2026-04-09-history-graph-temporal-ledger.md §11 for the
+// phase plan this module is the foundation for.
+mod spo_events;
+
 #[derive(Parser)]
 #[command(name = "git-lex", about = "Git extensions for knowledge graphs")]
 struct Cli {
@@ -160,6 +168,24 @@ enum Commands {
         /// Arguments passed through to git-lex-serve
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
+    },
+    /// (dev) Walk git history and print .spo line additions/removals per commit
+    HistorySpike {
+        /// Limit to the most recent N commits (0 = all)
+        #[arg(long, default_value = "0")]
+        limit: usize,
+        /// Only show commits that actually touched .spo files
+        #[arg(long)]
+        only_changes: bool,
+        /// Collapse extraction-id hash-prefix churn (drop first field when deduping)
+        #[arg(long)]
+        dedup: bool,
+        /// Write inconsistency reports to this file (default: stderr)
+        #[arg(long)]
+        inconsistency_log: Option<String>,
+        /// Print canonical URIs alongside event lines
+        #[arg(long)]
+        canonical: bool,
     },
 }
 
@@ -5652,6 +5678,21 @@ fn main() {
                 }
                 _ => {}
             }
+        }
+        Commands::HistorySpike {
+            limit,
+            only_changes,
+            dedup,
+            inconsistency_log,
+            canonical,
+        } => {
+            spo_events::run(spo_events::Options {
+                limit,
+                only_changes,
+                dedup,
+                inconsistency_log,
+                canonical,
+            });
         }
         Commands::Llm { command } => match command {
             LlmCommands::List => cmd_llm_list(),
