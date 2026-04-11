@@ -187,6 +187,15 @@ enum Commands {
         #[arg(long)]
         canonical: bool,
     },
+    /// (spike) Build the history graph in <base/historytest> and run
+    /// verification SPARQL queries. Reads git log, diffs .spo files per
+    /// commit, wraps each event in an RDF 1.2 triple-term annotation,
+    /// loads into oxigraph, queries it. Phase 4 of w4r3z/history-graph.
+    HistoryBuild {
+        /// Limit to the most recent N commits (0 = all)
+        #[arg(long, default_value = "0")]
+        limit: usize,
+    },
 }
 
 
@@ -237,7 +246,7 @@ fn get_repo_id() -> String {
     format!("{}/{}", org, repo)
 }
 
-fn base_uri() -> String {
+pub(crate) fn base_uri() -> String {
     let (host, org, repo) = get_repo_parts();
     format!("https://{}/{}/{}", host, org, repo)
 }
@@ -388,7 +397,7 @@ fn normalize_wikilink_path(target: &str, source_dir: &str) -> Option<String> {
 }
 
 /// Escape a string for use in N-Quads literals.
-fn nq_escape(s: &str) -> String {
+pub(crate) fn nq_escape(s: &str) -> String {
     s.replace('\\', "\\\\")
         .replace('"', "\\\"")
         .replace('\n', "\\n")
@@ -575,7 +584,7 @@ fn git_unescape_path(s: &str) -> String {
 }
 
 /// Percent-encode a path for use in URIs (spaces, special chars).
-fn uri_encode_path(s: &str) -> String {
+pub(crate) fn uri_encode_path(s: &str) -> String {
     s.chars()
         .map(|c| match c {
             ' ' => "%20".to_string(),
@@ -3771,7 +3780,7 @@ fn build_shacl_shapes(kit: &str) -> Option<PathBuf> {
 
 /// Build a set of ObjectProperty names from the kit ontology TTL.
 /// These are properties whose values should be resolved as IRIs, not literals.
-fn get_object_properties(kit: &str) -> HashSet<String> {
+pub(crate) fn get_object_properties(kit: &str) -> HashSet<String> {
     let root = match find_git_root() {
         Some(r) => r,
         None => return HashSet::new(),
@@ -3826,7 +3835,7 @@ fn get_object_properties(kit: &str) -> HashSet<String> {
 /// Build a map of property name → XSD datatype from the kit ontology TTL.
 /// Only includes properties with non-string ranges (xsd:integer, xsd:date, xsd:dateTime, xsd:boolean, xsd:decimal, xsd:anyURI).
 /// Properties with xsd:string or no range are omitted (they use the default string behavior).
-fn get_property_datatypes(kit: &str) -> HashMap<String, String> {
+pub(crate) fn get_property_datatypes(kit: &str) -> HashMap<String, String> {
     let root = match find_git_root() {
         Some(r) => r,
         None => return HashMap::new(),
@@ -5665,6 +5674,9 @@ fn main() {
                 inconsistency_log,
                 canonical,
             });
+        }
+        Commands::HistoryBuild { limit } => {
+            spo_events::spike_history_walk(limit);
         }
         Commands::Llm { command } => match command {
             LlmCommands::List => cmd_llm_list(),

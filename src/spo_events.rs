@@ -41,6 +41,9 @@ use std::io::Write;
 use std::path::PathBuf;
 use std::process::{Command, exit};
 
+// spike: history-graph walker imports
+use oxigraph::sparql::SparqlEvaluator;
+
 // ════════════════════════════════════════════════════════════════════════════
 // Public surface
 // ════════════════════════════════════════════════════════════════════════════
@@ -1512,6 +1515,555 @@ fn sha256_prefix(input: &str, hex_chars: usize) -> String {
     hasher.update(input.as_bytes());
     let full = hex::encode(hasher.finalize());
     full[..hex_chars.min(full.len())].to_string()
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// SPIKE: history graph triple maker + walker (Phase 4, 2026-04-11)
+// ════════════════════════════════════════════════════════════════════════════
+//
+// Everything in this section is intentionally a SPIKE — focused, deliberately
+// scoped down, error-tolerant, and meant to prove out the data shape before
+// committing the binary to a final design. Code in here is tagged `spike:`
+// in comments. Errors are logged to stderr (non-fatal) so a single
+// problematic .spo line doesn't kill a 200-commit walk.
+//
+// The goal: walk git history, for each commit diff `.lex/extract/*.spo`
+// against the parent, run each added/removed line through a focused
+// "spike triple maker", wrap the resulting (s, p, o) in an RDF 1.2 triple
+// term via `rdf:reifies`, attach `spo:addedIn` / `spo:removedIn`
+// annotations pointing at the commit URI, and write into a scratch named
+// graph `<base/historytest>` so we can SPARQL-query it without disturbing
+// the production `<base/now>` graph.
+//
+// What this spike does NOT do:
+//   - Reuse the production spo→nquad logic in `generate_frontmatter_nquads`
+//     (main.rs:2429). That code is tangled with frontmatter extraction; the
+//     spike rewrites a smaller version focused only on what the walker needs.
+//   - Handle every legacy frontmatter shape. If a line doesn't match the
+//     spike's known patterns, it goes to the error log and the walker
+//     keeps going.
+//   - Migrate historical triples to current ontology. Old commits may
+//     reference predicates that no longer exist. The spike emits them
+//     anyway with whatever predicate URI the dot-notation expands to,
+//     and downstream queries will see the dead predicate. Acceptable for
+//     v1; lux's "triple sidecar" idea is the long-term fix if needed.
+//
+// Path forward: once the spike validates the shape and queries work, the
+// real implementation will either (a) extract the production logic into a
+// shared helper that both `generate_frontmatter_nquads` and the history
+// walker call, or (b) ship the spike code as-is and accept the duplication
+// as a known stale-pair. lux's call after seeing the demo.
+
+/// SPIKE: produce RDF N-Quad strings for one .spo line, in one named graph.
+/// Returns Vec because some lines (the dot-notation kit.Class.property form)
+/// emit two quads — the property assertion plus an `rdf:type` for the class.
+///
+/// `doc_uri` should be the IRI of the source markdown file (e.g.
+/// `<https://github.com/7R1PL3F0RC3/W4R3Z/friend/1ux.md>`), built by the
+/// caller using the same `base_uri()` + path-encoding rules as the
+/// production extractor.
+///
+/// `graph` is the named-graph URI to embed in each quad (e.g.
+/// `<https://repolex.ai/.../historytest>`).
+///
+/// On unparseable input, returns `Err(reason)` so the walker can log and
+/// continue. Never panics.
+pub fn spike_triple_maker(
+    spo_line: &str,
+    doc_uri: &str,
+    graph: &str,
+    obj_props: &std::collections::HashSet<String>,
+    prop_datatypes: &std::collections::HashMap<String, String>,
+) -> Result<Vec<String>, String> {
+    let parts: Vec<&str> = spo_line.splitn(3, " | ").collect();
+    if parts.len() != 3 {
+        return Err(format!("expected 3 fields, got {}: {}", parts.len(), spo_line));
+    }
+    let subject = parts[0];
+    let predicate = parts[1];
+    let object = parts[2];
+
+    let mut out: Vec<String> = Vec::new();
+
+    // spike: handle the three-segment dot notation (kit.Class.property),
+    // which is the modern shape we care about most. Older legacy shapes
+    // (bare title, tags, mentions, linksTo) get a simpler fallback.
+    let segments: Vec<&str> = subject.splitn(3, '.').collect();
+    if segments.len() == 3 && predicate == "hasValue" {
+        let kit_name = segments[0];
+        let class_seg = segments[1];
+        let prop_seg = segments[2];
+
+        // Always emit rdf:type for the class. The walker dedups idempotent
+        // re-inserts via RDF set semantics, so we don't bother with the
+        // emitted_types HashSet the production extractor uses.
+        let type_uri = format!(
+            "<https://repolex.ai/ontology/kit/{}/{}>",
+            kit_name, class_seg
+        );
+        out.push(format!(
+            "{} <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> {} {} .",
+            doc_uri, type_uri, graph
+        ));
+
+        let kit_predicate = format!(
+            "<https://repolex.ai/ontology/kit/{}/{}>",
+            kit_name, prop_seg
+        );
+
+        // spike: for ObjectProperties, the value SHOULD be an IRI, but the
+        // spike doesn't run the full resolver chain. We do a minimal best-
+        // effort: if the value looks like a path or has slashes/dots that
+        // suggest a doc reference, emit it as an IRI under base; otherwise
+        // emit a plain literal. Production code uses src/resolve.rs for
+        // this, which the spike intentionally does not depend on.
+        if obj_props.contains(prop_seg) {
+            // Multi-value: ObjectProperty values may be comma-separated.
+            for raw_val in object.split(',').map(|s| s.trim()).filter(|s| !s.is_empty()) {
+                // spike: bare slug → IRI under the same base as doc_uri.
+                // We extract base from doc_uri by stripping the path part.
+                // doc_uri looks like `<https://host/org/repo/path>` so the
+                // base is everything up to the last `/`. Crude but works
+                // for the common case.
+                let base = extract_base_from_doc_uri(doc_uri);
+                let iri = format!("<{}/{}>", base, sanitize_for_iri(raw_val));
+                out.push(format!(
+                    "{} {} {} {} .",
+                    doc_uri, kit_predicate, iri, graph
+                ));
+            }
+        } else if let Some(datatype) = prop_datatypes.get(prop_seg) {
+            // DatatypeProperty with non-string range → typed literal.
+            out.push(format!(
+                "{} {} \"{}\"^^<{}> {} .",
+                doc_uri, kit_predicate, crate::nq_escape(object), datatype, graph
+            ));
+        } else {
+            // DatatypeProperty defaulting to string.
+            out.push(format!(
+                "{} {} \"{}\" {} .",
+                doc_uri, kit_predicate, crate::nq_escape(object), graph
+            ));
+        }
+        return Ok(out);
+    }
+
+    // spike: legacy / non-kit forms — title, tags, plain key | hasValue | x
+    if predicate == "hasValue" {
+        let fm_predicate = format!(
+            "<https://repolex.ai/ontology/git-lex/fm/{}>",
+            crate::uri_encode_path(subject)
+        );
+        out.push(format!(
+            "{} {} \"{}\" {} .",
+            doc_uri, fm_predicate, crate::nq_escape(object), graph
+        ));
+        return Ok(out);
+    }
+
+    // spike: mentions edge. The subject usually starts with `@` to mark a
+    // doc reference. We strip the @ and emit a lex:mentions triple with a
+    // string object — the spike doesn't try to resolve mention objects to
+    // IRIs (production does, via slug_index, which is too heavy here).
+    if predicate == "mentions" {
+        out.push(format!(
+            "{} <https://repolex.ai/ontology/git-lex/lex/mentions> \"{}\" {} .",
+            doc_uri, crate::nq_escape(object), graph
+        ));
+        return Ok(out);
+    }
+
+    // spike: linksTo edge.
+    if predicate == "linksTo" {
+        out.push(format!(
+            "{} <https://repolex.ai/ontology/git-lex/lex/linksTo> \"{}\" {} .",
+            doc_uri, crate::nq_escape(object), graph
+        ));
+        return Ok(out);
+    }
+
+    Err(format!("unrecognized predicate {:?} in line: {}", predicate, spo_line))
+}
+
+/// spike: extract `https://host/org/repo` from a doc URI like
+/// `<https://host/org/repo/path/to/file.md>`. Drops the angle brackets and
+/// the trailing path. Returns the base without trailing slash.
+fn extract_base_from_doc_uri(doc_uri: &str) -> String {
+    let trimmed = doc_uri.trim_start_matches('<').trim_end_matches('>');
+    // The base is the first 5 path segments: scheme://host/org/repo
+    // (scheme://, host, org, repo). We approximate by finding the 4th `/`
+    // after the scheme.
+    if let Some(scheme_end) = trimmed.find("://") {
+        let after_scheme = &trimmed[scheme_end + 3..];
+        // Find the third `/` in `host/org/repo/...`
+        let mut count = 0;
+        for (i, c) in after_scheme.char_indices() {
+            if c == '/' {
+                count += 1;
+                if count == 3 {
+                    return trimmed[..scheme_end + 3 + i].to_string();
+                }
+            }
+        }
+        // Fewer than 3 path segments — return everything we have.
+        return trimmed.to_string();
+    }
+    trimmed.to_string()
+}
+
+/// spike: very crude IRI sanitization. Real production uses
+/// `uri_encode_path` for path-style IRIs and a separate sanitizer for
+/// entity-style IRIs. The spike doesn't need the precision; we just need
+/// the result to parse as an IRI when oxigraph loads it.
+fn sanitize_for_iri(s: &str) -> String {
+    s.trim()
+        .trim_start_matches('@')
+        .replace(' ', "-")
+}
+
+/// spike: derive a doc URI for a sidecar path. The sidecar path is the
+/// `.spo` file path relative to the repo root, e.g.
+/// `.lex/extract/friend/1ux.md.fm.spo`. The corresponding doc is
+/// `friend/1ux.md`. We strip the `.lex/extract/` prefix and the
+/// `.{extractor}.spo` suffix.
+///
+/// Returns the doc URI in `<...>` form, ready to embed in N-Quads.
+pub fn doc_uri_from_sidecar(sidecar_path: &str, base: &str) -> Option<String> {
+    let after_extract = sidecar_path.strip_prefix(".lex/extract/")?;
+    let doc_path = if let Some(s) = after_extract.strip_suffix(".fm.spo") {
+        s
+    } else if let Some(s) = after_extract.strip_suffix(".md.spo") {
+        s
+    } else if let Some(s) = after_extract.strip_suffix(".cc.spo") {
+        s
+    } else {
+        return None;
+    };
+    Some(format!("<{}/{}>", base, crate::uri_encode_path(doc_path)))
+}
+
+/// spike: build the N-Quad lines for the history-graph annotation of a
+/// single (s, p, o, op) event. The annotation pattern is:
+///
+///     <ann-uri> rdf:reifies <<( s p o )>> .
+///     <ann-uri> spo:addedIn   <commit/sha> .   (or spo:removedIn)
+///     <ann-uri> spo:inFile    "path/to/file.md.fm.spo" .
+///
+/// The annotation URI is content-addressed: SHA256 of the canonical
+/// `commit|op|s|p|o|file` tuple, truncated to 8 hex chars, in a `<base/spo-ann/HASH>`
+/// scheme. Idempotent on re-insert (same content → same URI → set semantics
+/// dedupe).
+///
+/// `triple_nq` is one assertion line as already produced by
+/// `spike_triple_maker`, in N-Quad form: `S P O G .`. We parse out S/P/O
+/// to build the triple term.
+pub fn spike_history_annotation(
+    triple_nq: &str,
+    op: char,
+    commit_sha: &str,
+    sidecar_path: &str,
+    base: &str,
+    history_graph: &str,
+) -> Option<Vec<String>> {
+    // The triple_nq looks like: `<S> <P> O <G> .`
+    // where O may be `<iri>` or `"literal"^^<datatype>` or `"literal"`.
+    // We strip the trailing graph + period to isolate the (S, P, O) trio.
+    let trimmed = triple_nq.trim_end_matches('.').trim();
+    let trimmed = trimmed.rsplit_once(' ').map(|(rest, _)| rest)?.trim();
+    // Now `trimmed` is `<S> <P> O`. Parse three terms by walking.
+    let (s, rest) = take_term(trimmed)?;
+    let (p, rest) = take_term(rest.trim())?;
+    let o = rest.trim().to_string();
+    if s.is_empty() || p.is_empty() || o.is_empty() {
+        return None;
+    }
+
+    // spike: hash the canonical key for the annotation URI.
+    let key = format!("{}|{}|{}|{}|{}|{}", commit_sha, op, s, p, o, sidecar_path);
+    let mut hasher = Sha256::new();
+    hasher.update(key.as_bytes());
+    let hash = format!("{:x}", hasher.finalize());
+    let ann_uri = format!("<{}/spo-ann/{}>", base, &hash[..16]);
+
+    let added_or_removed = if op == '+' {
+        "<https://repolex.ai/ontology/spo/addedIn>"
+    } else {
+        "<https://repolex.ai/ontology/spo/removedIn>"
+    };
+    let commit_uri = format!("<{}/commit/{}>", base, commit_sha);
+
+    Some(vec![
+        // The triple term annotation: <ann-uri> rdf:reifies <<( s p o )>>
+        format!(
+            "{} <http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies> <<( {} {} {} )>> {} .",
+            ann_uri, s, p, o, history_graph
+        ),
+        // Which commit added/removed it
+        format!(
+            "{} {} {} {} .",
+            ann_uri, added_or_removed, commit_uri, history_graph
+        ),
+        // Which file the assertion was in
+        format!(
+            "{} <https://repolex.ai/ontology/spo/inFile> \"{}\" {} .",
+            ann_uri, crate::nq_escape(sidecar_path), history_graph
+        ),
+    ])
+}
+
+/// spike: take one whitespace-separated term from the start of `s`. A term
+/// is either `<...>` (an IRI), or `"..."` possibly with `^^<...>` datatype
+/// suffix, or a bare token. Returns (term, rest).
+fn take_term(s: &str) -> Option<(String, &str)> {
+    let s = s.trim_start();
+    if s.starts_with('<') {
+        let end = s.find('>')?;
+        Some((s[..=end].to_string(), &s[end + 1..]))
+    } else if s.starts_with('"') {
+        // Find the closing quote, honoring backslash escapes.
+        let bytes = s.as_bytes();
+        let mut i = 1;
+        while i < bytes.len() {
+            if bytes[i] == b'\\' {
+                i += 2;
+                continue;
+            }
+            if bytes[i] == b'"' {
+                let mut end = i + 1;
+                // Check for `^^<datatype>` suffix.
+                if s[end..].starts_with("^^<") {
+                    if let Some(dt_end) = s[end + 2..].find('>') {
+                        end = end + 2 + dt_end + 1;
+                    }
+                }
+                return Some((s[..end].to_string(), &s[end..]));
+            }
+            i += 1;
+        }
+        None
+    } else {
+        let end = s.find(char::is_whitespace).unwrap_or(s.len());
+        Some((s[..end].to_string(), &s[end..]))
+    }
+}
+
+/// SPIKE: walk git history, build the history graph in `<base/historytest>`,
+/// load it into oxigraph, run a verification SPARQL query.
+///
+/// This is the entry point a new CLI subcommand will eventually call. For
+/// the spike, we wire it up as a function and let main.rs add a subcommand.
+/// Errors during walk are logged to stderr but never fatal.
+pub fn spike_history_walk(commit_limit: usize) {
+    let root = match find_git_root() {
+        Some(r) => r,
+        None => {
+            eprintln!("spike: not in a git repo");
+            return;
+        }
+    };
+    if std::env::set_current_dir(&root).is_err() {
+        eprintln!("spike: failed to cd to {}", root.display());
+        return;
+    }
+
+    // Read repo base URI the same way the production code does.
+    let base = crate::base_uri();
+    let history_graph = format!("<{}/historytest>", base);
+
+    // Load ontology helpers from the kit, same as production extract.
+    let kit = match git_lex::get_kit() {
+        Some(k) => k,
+        None => {
+            eprintln!("spike: no kit configured in .lex/repo.yml — aborting");
+            return;
+        }
+    };
+    let obj_props = crate::get_object_properties(&kit);
+    let prop_datatypes = crate::get_property_datatypes(&kit);
+
+    eprintln!("spike: walking history → <historytest>");
+    eprintln!("spike: kit = {}", kit);
+    eprintln!("spike: base = {}", base);
+    eprintln!("spike: history_graph = {}", history_graph);
+
+    let commits = collect_commits(commit_limit);
+    let total = commits.len();
+    eprintln!("spike: {} commit(s) to walk", total);
+
+    let mut nq_buffer = String::new();
+    let mut events_seen = 0usize;
+    let mut events_emitted = 0usize;
+    let mut events_skipped = 0usize;
+    let mut errors: Vec<String> = Vec::new();
+
+    for c in &commits {
+        for ev in &c.events {
+            events_seen += 1;
+
+            let doc_uri = match doc_uri_from_sidecar(&ev.path, &base) {
+                Some(u) => u,
+                None => {
+                    events_skipped += 1;
+                    errors.push(format!(
+                        "{}: could not derive doc URI from sidecar path {}",
+                        c.short_sha, ev.path
+                    ));
+                    continue;
+                }
+            };
+
+            // Use a SCRATCH graph for the per-event triple — it's not the
+            // real assertion graph, it's the annotation target.
+            let scratch_graph = history_graph.clone();
+            let triple_nqs = match spike_triple_maker(
+                &ev.line,
+                &doc_uri,
+                &scratch_graph,
+                &obj_props,
+                &prop_datatypes,
+            ) {
+                Ok(v) => v,
+                Err(e) => {
+                    events_skipped += 1;
+                    errors.push(format!("{}: {}", c.short_sha, e));
+                    continue;
+                }
+            };
+
+            // Each triple_nq is "S P O G ." — we want to wrap the
+            // (S, P, O) of each in a triple term and emit annotations.
+            // The rdf:type quad emitted by spike_triple_maker is also
+            // wrapped, so the history graph records "this commit added a
+            // type assertion" alongside "this commit added a property".
+            for triple_nq in &triple_nqs {
+                if let Some(ann_quads) = spike_history_annotation(
+                    triple_nq,
+                    ev.op,
+                    &c.sha,
+                    &ev.path,
+                    &base,
+                    &history_graph,
+                ) {
+                    for q in ann_quads {
+                        nq_buffer.push_str(&q);
+                        nq_buffer.push('\n');
+                    }
+                    events_emitted += 1;
+                } else {
+                    errors.push(format!(
+                        "{}: failed to build annotation for {}",
+                        c.short_sha, triple_nq
+                    ));
+                    events_skipped += 1;
+                }
+            }
+        }
+    }
+
+    eprintln!("spike: events seen={}, emitted={}, skipped={}", events_seen, events_emitted, events_skipped);
+    eprintln!("spike: nquad buffer size = {} bytes", nq_buffer.len());
+    eprintln!("spike: error count = {}", errors.len());
+    if !errors.is_empty() {
+        let err_log = root.join(".lex").join("history-spike.errors.log");
+        if let Ok(mut f) = fs::File::create(&err_log) {
+            for e in &errors {
+                let _ = writeln!(f, "{}", e);
+            }
+            eprintln!("spike: errors written to {}", err_log.display());
+        } else {
+            for e in errors.iter().take(20) {
+                eprintln!("spike error: {}", e);
+            }
+            if errors.len() > 20 {
+                eprintln!("spike: ... {} more errors", errors.len() - 20);
+            }
+        }
+    }
+
+    // Load into oxigraph
+    eprintln!("spike: loading {} bytes into oxigraph store", nq_buffer.len());
+    let store_path = root.join(".lex").join("oxigraph");
+    let store = match oxigraph::store::Store::open(&store_path) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("spike: failed to open store at {}: {}", store_path.display(), e);
+            return;
+        }
+    };
+
+    // Clear the historytest graph first so re-runs are idempotent.
+    if let Ok(graph_node) = oxigraph::model::NamedNode::new(
+        history_graph.trim_start_matches('<').trim_end_matches('>'),
+    ) {
+        let _ = store.clear_graph(&graph_node);
+    }
+
+    let parser = oxigraph::io::RdfParser::from_format(oxigraph::io::RdfFormat::NQuads);
+    match store.load_from_reader(parser, std::io::Cursor::new(nq_buffer.as_bytes())) {
+        Ok(_) => eprintln!("spike: load OK"),
+        Err(e) => {
+            eprintln!("spike: load FAILED: {}", e);
+            // Dump first few lines of buffer to help debug
+            for (i, line) in nq_buffer.lines().take(5).enumerate() {
+                eprintln!("spike:   nq[{}]: {}", i, line);
+            }
+            return;
+        }
+    }
+
+    // Verification queries
+    eprintln!("spike: ────────────────────────────────────────────");
+    eprintln!("spike: verification queries");
+    eprintln!("spike: ────────────────────────────────────────────");
+
+    let queries = [
+        ("triple count in historytest",
+         format!("SELECT (COUNT(*) AS ?c) WHERE {{ GRAPH {} {{ ?s ?p ?o }} }}", history_graph)),
+        ("annotation subject count",
+         format!("SELECT (COUNT(DISTINCT ?ann) AS ?c) WHERE {{ GRAPH {} {{ ?ann <http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies> ?tt }} }}", history_graph)),
+        ("addedIn vs removedIn count",
+         format!("SELECT ?op (COUNT(?ann) AS ?c) WHERE {{ GRAPH {} {{ ?ann ?op ?commit . FILTER(?op IN (<https://repolex.ai/ontology/spo/addedIn>, <https://repolex.ai/ontology/spo/removedIn>)) }} }} GROUP BY ?op", history_graph)),
+    ];
+
+    for (label, q) in &queries {
+        eprintln!("\nspike Q: {}", label);
+        eprintln!("spike:   {}", q.replace('\n', " "));
+        let result = SparqlEvaluator::new()
+            .parse_query(q.as_str())
+            .ok()
+            .and_then(|prepared| prepared.on_store(&store).execute().ok());
+        match result {
+            Some(oxigraph::sparql::QueryResults::Solutions(sols)) => {
+                let vars: Vec<String> = sols.variables().iter().map(|v| v.as_str().to_string()).collect();
+                let mut row_count = 0;
+                for sol in sols.flatten() {
+                    let mut parts: Vec<String> = Vec::new();
+                    for v in &vars {
+                        if let Some(t) = sol.get(v.as_str()) {
+                            parts.push(format!("{}={}", v, term_short(t)));
+                        }
+                    }
+                    eprintln!("spike:     {}", parts.join("  "));
+                    row_count += 1;
+                }
+                eprintln!("spike:   ({} row(s))", row_count);
+            }
+            Some(_) => eprintln!("spike:   non-SELECT result"),
+            None => eprintln!("spike:   query error or no results"),
+        }
+    }
+}
+
+/// spike: short string repr of an oxigraph Term for debug output.
+fn term_short(t: &oxigraph::model::Term) -> String {
+    match t {
+        oxigraph::model::Term::NamedNode(n) => format!("<{}>", n.as_str()),
+        oxigraph::model::Term::Literal(l) => format!("\"{}\"", l.value()),
+        oxigraph::model::Term::BlankNode(b) => format!("_:{}", b.as_str()),
+        oxigraph::model::Term::Triple(t) => {
+            format!("<<{} {} {}>>", t.subject, t.predicate, t.object)
+        }
+    }
 }
 
 // ════════════════════════════════════════════════════════════════════════════
