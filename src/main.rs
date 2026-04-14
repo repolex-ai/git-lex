@@ -22,8 +22,10 @@ use git_lex::{find_git_root, store_path, get_kit,
 mod resolve;
 mod harness;
 mod git;
+mod nquad;
 
 use crate::git::{auto_commit_snapshot, base_uri, get_repo_id, git_unescape_path};
+use crate::nquad::{nq_escape, uri_encode_path};
 
 // .spo event stream — git-aware change detector for .spo sidecars. Used by
 // orphan cleanup (pre-commit hook), history graph ingest (rebuild +
@@ -347,14 +349,6 @@ fn normalize_wikilink_path(target: &str, source_dir: &str) -> Option<String> {
     Some(joined)
 }
 
-/// Escape a string for use in N-Quads literals.
-pub(crate) fn nq_escape(s: &str) -> String {
-    s.replace('\\', "\\\\")
-        .replace('"', "\\\"")
-        .replace('\n', "\\n")
-        .replace('\r', "\\r")
-}
-
 /// True if the byte position `start` in `text` is preceded by a non-word
 /// character (or is at the start of `text`). Used to reject `@mention`
 /// matches that are actually the local-part separator of an email address
@@ -491,25 +485,6 @@ fn load_ontology_tboxes(store: &Store, root: &std::path::Path) -> usize {
         loaded += 1;
     }
     loaded
-}
-
-/// Percent-encode a path for use in URIs (spaces, special chars).
-pub(crate) fn uri_encode_path(s: &str) -> String {
-    s.chars()
-        .map(|c| match c {
-            ' ' => "%20".to_string(),
-            '<' => "%3C".to_string(),
-            '>' => "%3E".to_string(),
-            '{' => "%7B".to_string(),
-            '}' => "%7D".to_string(),
-            '|' => "%7C".to_string(),
-            '^' => "%5E".to_string(),
-            '`' => "%60".to_string(),
-            '[' => "%5B".to_string(),
-            ']' => "%5D".to_string(),
-            _ => c.to_string(),
-        })
-        .collect()
 }
 
 // ─── git lex init ──────────────────────────────────────────────

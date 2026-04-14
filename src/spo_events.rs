@@ -1635,13 +1635,13 @@ pub fn spike_triple_maker(
             // DatatypeProperty with non-string range → typed literal.
             out.push(format!(
                 "{} {} \"{}\"^^<{}> {} .",
-                doc_uri, kit_predicate, crate::nq_escape(object), datatype, graph
+                doc_uri, kit_predicate, crate::nquad::nq_escape(object), datatype, graph
             ));
         } else {
             // DatatypeProperty defaulting to string.
             out.push(format!(
                 "{} {} \"{}\" {} .",
-                doc_uri, kit_predicate, crate::nq_escape(object), graph
+                doc_uri, kit_predicate, crate::nquad::nq_escape(object), graph
             ));
         }
         return Ok(out);
@@ -1651,11 +1651,11 @@ pub fn spike_triple_maker(
     if predicate == "hasValue" {
         let fm_predicate = format!(
             "<https://repolex.ai/ontology/git-lex/fm/{}>",
-            crate::uri_encode_path(subject)
+            crate::nquad::uri_encode_path(subject)
         );
         out.push(format!(
             "{} {} \"{}\" {} .",
-            doc_uri, fm_predicate, crate::nq_escape(object), graph
+            doc_uri, fm_predicate, crate::nquad::nq_escape(object), graph
         ));
         return Ok(out);
     }
@@ -1667,7 +1667,7 @@ pub fn spike_triple_maker(
     if predicate == "mentions" {
         out.push(format!(
             "{} <https://repolex.ai/ontology/git-lex/lex/mentions> \"{}\" {} .",
-            doc_uri, crate::nq_escape(object), graph
+            doc_uri, crate::nquad::nq_escape(object), graph
         ));
         return Ok(out);
     }
@@ -1676,7 +1676,7 @@ pub fn spike_triple_maker(
     if predicate == "linksTo" {
         out.push(format!(
             "{} <https://repolex.ai/ontology/git-lex/lex/linksTo> \"{}\" {} .",
-            doc_uri, crate::nq_escape(object), graph
+            doc_uri, crate::nquad::nq_escape(object), graph
         ));
         return Ok(out);
     }
@@ -1738,7 +1738,7 @@ pub fn doc_uri_from_sidecar(sidecar_path: &str, base: &str) -> Option<String> {
     } else {
         return None;
     };
-    Some(format!("<{}/{}>", base, crate::uri_encode_path(doc_path)))
+    Some(format!("<{}/{}>", base, crate::nquad::uri_encode_path(doc_path)))
 }
 
 /// spike: build the N-Quad lines for the history-graph annotation of a
@@ -1805,7 +1805,7 @@ pub fn spike_history_annotation(
         // Which file the assertion was in
         format!(
             "{} <https://repolex.ai/ontology/spo/inFile> \"{}\" {} .",
-            ann_uri, crate::nq_escape(sidecar_path), history_graph
+            ann_uri, crate::nquad::nq_escape(sidecar_path), history_graph
         ),
     ])
 }
