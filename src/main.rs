@@ -22,6 +22,14 @@ use git_lex::{find_git_root, store_path, get_kit,
 mod resolve;
 mod harness;
 
+// .spo event stream — git-aware change detector for .spo sidecars. Used by
+// orphan cleanup (pre-commit hook), history graph ingest (rebuild +
+// incremental), and the `git lex history-spike` debug subcommand. Imported
+// 2026-04-11 from the w4r3z/history-spike branch (was src/history_spike.rs).
+// See Situation/2026-04-09-history-graph-temporal-ledger.md §11 for the
+// phase plan this module is the foundation for.
+mod spo_events;
+
 #[derive(Parser)]
 #[command(name = "git-lex", about = "Git extensions for knowledge graphs")]
 struct Cli {
@@ -161,6 +169,33 @@ enum Commands {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
+    /// (dev) Walk git history and print .spo line additions/removals per commit
+    HistorySpike {
+        /// Limit to the most recent N commits (0 = all)
+        #[arg(long, default_value = "0")]
+        limit: usize,
+        /// Only show commits that actually touched .spo files
+        #[arg(long)]
+        only_changes: bool,
+        /// Collapse extraction-id hash-prefix churn (drop first field when deduping)
+        #[arg(long)]
+        dedup: bool,
+        /// Write inconsistency reports to this file (default: stderr)
+        #[arg(long)]
+        inconsistency_log: Option<String>,
+        /// Print canonical URIs alongside event lines
+        #[arg(long)]
+        canonical: bool,
+    },
+    /// (spike) Build the history graph in <base/historytest> and run
+    /// verification SPARQL queries. Reads git log, diffs .spo files per
+    /// commit, wraps each event in an RDF 1.2 triple-term annotation,
+    /// loads into oxigraph, queries it. Phase 4 of w4r3z/history-graph.
+    HistoryBuild {
+        /// Limit to the most recent N commits (0 = all)
+        #[arg(long, default_value = "0")]
+        limit: usize,
+    },
 }
 
 
@@ -211,7 +246,7 @@ fn get_repo_id() -> String {
     format!("{}/{}", org, repo)
 }
 
-fn base_uri() -> String {
+pub(crate) fn base_uri() -> String {
     let (host, org, repo) = get_repo_parts();
     format!("https://{}/{}/{}", host, org, repo)
 }
@@ -362,7 +397,7 @@ fn normalize_wikilink_path(target: &str, source_dir: &str) -> Option<String> {
 }
 
 /// Escape a string for use in N-Quads literals.
-fn nq_escape(s: &str) -> String {
+pub(crate) fn nq_escape(s: &str) -> String {
     s.replace('\\', "\\\\")
         .replace('"', "\\\"")
         .replace('\n', "\\n")
@@ -549,7 +584,7 @@ fn git_unescape_path(s: &str) -> String {
 }
 
 /// Percent-encode a path for use in URIs (spaces, special chars).
-fn uri_encode_path(s: &str) -> String {
+pub(crate) fn uri_encode_path(s: &str) -> String {
     s.chars()
         .map(|c| match c {
             ' ' => "%20".to_string(),
@@ -3745,7 +3780,7 @@ fn build_shacl_shapes(kit: &str) -> Option<PathBuf> {
 
 /// Build a set of ObjectProperty names from the kit ontology TTL.
 /// These are properties whose values should be resolved as IRIs, not literals.
-fn get_object_properties(kit: &str) -> HashSet<String> {
+pub(crate) fn get_object_properties(kit: &str) -> HashSet<String> {
     let root = match find_git_root() {
         Some(r) => r,
         None => return HashSet::new(),
@@ -3800,7 +3835,7 @@ fn get_object_properties(kit: &str) -> HashSet<String> {
 /// Build a map of property name → XSD datatype from the kit ontology TTL.
 /// Only includes properties with non-string ranges (xsd:integer, xsd:date, xsd:dateTime, xsd:boolean, xsd:decimal, xsd:anyURI).
 /// Properties with xsd:string or no range are omitted (they use the default string behavior).
-fn get_property_datatypes(kit: &str) -> HashMap<String, String> {
+pub(crate) fn get_property_datatypes(kit: &str) -> HashMap<String, String> {
     let root = match find_git_root() {
         Some(r) => r,
         None => return HashMap::new(),
@@ -4968,66 +5003,38 @@ async fn cmd_display(query: &str, port: u16) {
     }
 }
 
-/// Walk .lex/extract/ and remove any .spo sidecar whose source markdown file
-/// no longer exists in the working tree. Handles deletes and renames.
-fn cleanup_orphaned_sidecars() -> usize {
-    let root = match find_git_root() {
-        Some(r) => r,
-        None => return 0,
-    };
-    let extract_dir = root.join(".lex").join("extract");
-    if !extract_dir.exists() {
-        return 0;
-    }
-
-    let mut removed = 0;
-    fn walk(dir: &std::path::Path, extract_root: &std::path::Path, repo_root: &std::path::Path, removed: &mut usize) {
-        if let Ok(entries) = fs::read_dir(dir) {
-            for entry in entries.flatten() {
-                let path = entry.path();
-                if path.is_dir() {
-                    walk(&path, extract_root, repo_root, removed);
-                    // Try to remove the dir if it's now empty
-                    let _ = fs::remove_dir(&path);
-                } else if path.extension().is_some_and(|e| e == "spo") {
-                    // Derive source markdown from sidecar path:
-                    // .lex/extract/contact/m4rq.md.fm.spo → contact/m4rq.md
-                    let rel = match path.strip_prefix(extract_root) {
-                        Ok(r) => r,
-                        Err(_) => continue,
-                    };
-                    let rel_str = rel.to_string_lossy().to_string();
-                    // Strip .{extractor}.spo suffix
-                    let source = if let Some(s) = rel_str.strip_suffix(".fm.spo") {
-                        s.to_string()
-                    } else if let Some(s) = rel_str.strip_suffix(".md.spo") {
-                        s.to_string()
-                    } else if let Some(s) = rel_str.strip_suffix(".cc.spo") {
-                        s.to_string()
-                    } else {
-                        continue; // unknown extractor
-                    };
-                    let source_path = repo_root.join(&source);
-                    if !source_path.exists() {
-                        if fs::remove_file(&path).is_ok() {
-                            *removed += 1;
-                        }
-                    }
-                }
-            }
-        }
-    }
-    walk(&extract_dir, &extract_dir, &root, &mut removed);
-    removed
-}
+// `cleanup_orphaned_sidecars` was deleted in Phase 3 of the history-graph
+// work (2026-04-11). Its replacement is `spo_events::cleanup_sidecars_for_
+// staged_changes()` which asks git for the staged change set instead of
+// walking the filesystem — fixes the macOS APFS case-insensitivity bug
+// and adds rename-as-move support so expensive-to-regenerate sidecars
+// (future `.haiku.spo` subagent output) survive folder renames without
+// re-running extractors.
 
 fn cmd_extract() {
     let start = Instant::now();
 
-    // Clean up orphaned sidecars (source .md files that no longer exist)
-    let cleaned = cleanup_orphaned_sidecars();
-    if cleaned > 0 {
-        eprintln!("Cleaned up {} orphaned sidecar(s)", cleaned);
+    // Clean up .spo sidecars for .md files that are being deleted or
+    // renamed in the currently-staged commit. Uses git to detect the
+    // change set — exact-case, handles rename-as-move so future subagent-
+    // driven `.haiku.spo` content survives folder renames without
+    // regeneration. Replaces the old cleanup_orphaned_sidecars walker that
+    // was buggy on macOS APFS (case-insensitive `Path::exists()`).
+    //
+    // See src/spo_events.rs and Situation/2026-04-09-history-graph-
+    // temporal-ledger.md §11 for the design.
+    let cleanup = spo_events::cleanup_sidecars_for_staged_changes();
+    if !cleanup.is_empty() {
+        eprintln!("Cleanup: {}", cleanup.summary());
+        for p in &cleanup.deleted {
+            eprintln!("  removed  {}", p);
+        }
+        for (old, new) in &cleanup.renamed {
+            eprintln!("  moved    {} → {}", old, new);
+        }
+        for err in &cleanup.errors {
+            eprintln!("  error    {}", err);
+        }
     }
 
     // Run frontmatter extraction (writes .spo sidecars as a side effect)
@@ -5652,6 +5659,24 @@ fn main() {
                 }
                 _ => {}
             }
+        }
+        Commands::HistorySpike {
+            limit,
+            only_changes,
+            dedup,
+            inconsistency_log,
+            canonical,
+        } => {
+            spo_events::run(spo_events::Options {
+                limit,
+                only_changes,
+                dedup,
+                inconsistency_log,
+                canonical,
+            });
+        }
+        Commands::HistoryBuild { limit } => {
+            spo_events::spike_history_walk(limit);
         }
         Commands::Llm { command } => match command {
             LlmCommands::List => cmd_llm_list(),
