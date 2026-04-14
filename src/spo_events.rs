@@ -1866,7 +1866,7 @@ pub fn spike_history_walk(commit_limit: usize) {
     }
 
     // Read repo base URI the same way the production code does.
-    let base = crate::base_uri();
+    let base = crate::git::base_uri();
     let history_graph = format!("<{}/history>", base);
     let meta_graph = format!("<{}/meta>", base);
 
