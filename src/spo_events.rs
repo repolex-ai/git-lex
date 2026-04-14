@@ -1867,7 +1867,18 @@ pub fn spike_history_walk(commit_limit: usize) {
 
     // Read repo base URI the same way the production code does.
     let base = crate::base_uri();
-    let history_graph = format!("<{}/historytest>", base);
+    let history_graph = format!("<{}/history>", base);
+    let meta_graph = format!("<{}/meta>", base);
+
+    // Capture HEAD SHA at the start of the walk so the marker triple
+    // records exactly which commit was the tip when this rebuild ran.
+    let head_sha = match Command::new("git").args(["rev-parse", "HEAD"]).output() {
+        Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).trim().to_string(),
+        _ => {
+            eprintln!("spike: failed to resolve HEAD — aborting");
+            return;
+        }
+    };
 
     // Load ontology helpers from the kit, same as production extract.
     let kit = match git_lex::get_kit() {
@@ -2010,13 +2021,32 @@ pub fn spike_history_walk(commit_limit: usize) {
         }
     }
 
+    // Write marker triple: <base/meta> spo:lastHistorySync <commit/HEAD>.
+    // Phase 6 (incremental sync) reads this to know where to pick up.
+    // Lives in its own <base/meta> graph so it doesn't leak into history
+    // graph queries.
+    let marker_nq = format!(
+        "<{}/meta> <https://repolex.ai/ontology/spo/lastHistorySync> <{}/commit/{}> {} .\n",
+        base, base, head_sha, meta_graph
+    );
+    if let Ok(meta_node) = oxigraph::model::NamedNode::new(
+        meta_graph.trim_start_matches('<').trim_end_matches('>'),
+    ) {
+        let _ = store.clear_graph(&meta_node);
+    }
+    let parser = oxigraph::io::RdfParser::from_format(oxigraph::io::RdfFormat::NQuads);
+    match store.load_from_reader(parser, std::io::Cursor::new(marker_nq.as_bytes())) {
+        Ok(_) => eprintln!("spike: marker written — lastHistorySync = {}", head_sha),
+        Err(e) => eprintln!("spike: marker write FAILED: {}", e),
+    }
+
     // Verification queries
     eprintln!("spike: ────────────────────────────────────────────");
     eprintln!("spike: verification queries");
     eprintln!("spike: ────────────────────────────────────────────");
 
     let queries = [
-        ("triple count in historytest",
+        ("triple count in history",
          format!("SELECT (COUNT(*) AS ?c) WHERE {{ GRAPH {} {{ ?s ?p ?o }} }}", history_graph)),
         ("annotation subject count",
          format!("SELECT (COUNT(DISTINCT ?ann) AS ?c) WHERE {{ GRAPH {} {{ ?ann <http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies> ?tt }} }}", history_graph)),
@@ -2873,5 +2903,182 @@ mod tests {
             .copied()
             .unwrap_or(0)
             == 0);
+    }
+
+    // ─── spike_triple_maker ────────────────────────────────────────────────
+
+    use std::collections::{HashMap, HashSet};
+
+    fn obj_props_with(names: &[&str]) -> HashSet<String> {
+        names.iter().map(|s| s.to_string()).collect()
+    }
+
+    fn dt_map_with(pairs: &[(&str, &str)]) -> HashMap<String, String> {
+        pairs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect()
+    }
+
+    const DOC_URI: &str = "<https://github.com/acme/repo/Task/fix-bug.md>";
+    const GRAPH: &str = "<https://github.com/acme/repo/history>";
+
+    #[test]
+    fn tm_rejects_line_with_wrong_field_count() {
+        let r = spike_triple_maker("only-one-field", DOC_URI, GRAPH,
+            &HashSet::new(), &HashMap::new());
+        assert!(r.is_err());
+    }
+
+    #[test]
+    fn tm_datatype_property_default_string_literal() {
+        let r = spike_triple_maker(
+            "squad.Task.title | hasValue | Fix bug",
+            DOC_URI, GRAPH,
+            &HashSet::new(), &HashMap::new(),
+        ).expect("ok");
+        // Two quads: rdf:type + title literal
+        assert_eq!(r.len(), 2);
+        assert!(r[0].contains("rdf-syntax-ns#type"));
+        assert!(r[0].contains("kit/squad/Task"));
+        assert!(r[1].contains("kit/squad/title"));
+        assert!(r[1].contains("\"Fix bug\""));
+    }
+
+    #[test]
+    fn tm_datatype_property_with_typed_range() {
+        let r = spike_triple_maker(
+            "squad.Task.dueDate | hasValue | 2026-04-14",
+            DOC_URI, GRAPH,
+            &HashSet::new(),
+            &dt_map_with(&[("dueDate", "http://www.w3.org/2001/XMLSchema#date")]),
+        ).expect("ok");
+        assert_eq!(r.len(), 2);
+        assert!(r[1].contains("\"2026-04-14\"^^<http://www.w3.org/2001/XMLSchema#date>"));
+    }
+
+    #[test]
+    fn tm_object_property_emits_iri() {
+        let r = spike_triple_maker(
+            "squad.Task.assignee | hasValue | w4r3z",
+            DOC_URI, GRAPH,
+            &obj_props_with(&["assignee"]),
+            &HashMap::new(),
+        ).expect("ok");
+        assert_eq!(r.len(), 2);
+        assert!(r[1].contains("kit/squad/assignee"));
+        // w4r3z should be rendered as an IRI, not a literal
+        assert!(r[1].contains("<https://github.com/acme/repo/w4r3z>"));
+        assert!(!r[1].contains("\"w4r3z\""));
+    }
+
+    #[test]
+    fn tm_object_property_comma_splits_multivalue() {
+        let r = spike_triple_maker(
+            "squad.Task.assignee | hasValue | w4r3z, m4rq, kira",
+            DOC_URI, GRAPH,
+            &obj_props_with(&["assignee"]),
+            &HashMap::new(),
+        ).expect("ok");
+        // rdf:type + 3 assignee triples
+        assert_eq!(r.len(), 4);
+        assert!(r[1].contains("/w4r3z"));
+        assert!(r[2].contains("/m4rq"));
+        assert!(r[3].contains("/kira"));
+    }
+
+    #[test]
+    fn tm_object_property_skips_wikilink_brackets() {
+        // The log-and-skip path for bad historical data — [[m4rq]] should
+        // not produce any triple (bracket values are IRI-illegal and we
+        // refuse to paper over them).
+        let r = spike_triple_maker(
+            "squad.Task.assignee | hasValue | [[m4rq]]",
+            DOC_URI, GRAPH,
+            &obj_props_with(&["assignee"]),
+            &HashMap::new(),
+        ).expect("ok");
+        // Only the rdf:type should remain; the skipped value yields no quad.
+        assert_eq!(r.len(), 1);
+        assert!(r[0].contains("rdf-syntax-ns#type"));
+    }
+
+    #[test]
+    fn tm_object_property_mixed_valid_and_bracketed_values() {
+        let r = spike_triple_maker(
+            "squad.Task.assignee | hasValue | w4r3z, [[m4rq]], kira",
+            DOC_URI, GRAPH,
+            &obj_props_with(&["assignee"]),
+            &HashMap::new(),
+        ).expect("ok");
+        // rdf:type + 2 valid assignees (bracketed one skipped)
+        assert_eq!(r.len(), 3);
+        assert!(r[1].contains("/w4r3z"));
+        assert!(r[2].contains("/kira"));
+    }
+
+    #[test]
+    fn tm_legacy_hasvalue_without_dot_notation() {
+        let r = spike_triple_maker(
+            "title | hasValue | Fix bug",
+            DOC_URI, GRAPH,
+            &HashSet::new(), &HashMap::new(),
+        ).expect("ok");
+        // Legacy path: fm: predicate, string literal. No rdf:type emitted.
+        assert_eq!(r.len(), 1);
+        assert!(r[0].contains("ontology/git-lex/fm/title"));
+        assert!(r[0].contains("\"Fix bug\""));
+    }
+
+    #[test]
+    fn tm_mentions_edge_emits_lex_mentions() {
+        let r = spike_triple_maker(
+            "@w4r3z | mentions | w4r3z",
+            DOC_URI, GRAPH,
+            &HashSet::new(), &HashMap::new(),
+        ).expect("ok");
+        assert_eq!(r.len(), 1);
+        assert!(r[0].contains("ontology/git-lex/lex/mentions"));
+        assert!(r[0].contains("\"w4r3z\""));
+    }
+
+    #[test]
+    fn tm_linksto_edge_emits_lex_linksto() {
+        let r = spike_triple_maker(
+            "[[foo.md]] | linksTo | foo.md",
+            DOC_URI, GRAPH,
+            &HashSet::new(), &HashMap::new(),
+        ).expect("ok");
+        assert_eq!(r.len(), 1);
+        assert!(r[0].contains("ontology/git-lex/lex/linksTo"));
+    }
+
+    #[test]
+    fn tm_rejects_unknown_predicate() {
+        let r = spike_triple_maker(
+            "subject | nonsense | object",
+            DOC_URI, GRAPH,
+            &HashSet::new(), &HashMap::new(),
+        );
+        assert!(r.is_err());
+    }
+
+    #[test]
+    fn tm_escapes_quote_in_literal() {
+        let r = spike_triple_maker(
+            r#"squad.Note.body | hasValue | He said "hi""#,
+            DOC_URI, GRAPH,
+            &HashSet::new(), &HashMap::new(),
+        ).expect("ok");
+        assert_eq!(r.len(), 2);
+        assert!(r[1].contains(r#"\"hi\""#));
+    }
+
+    #[test]
+    fn tm_emoji_literal_roundtrips() {
+        let r = spike_triple_maker(
+            "squad.Journal.emojimood | hasValue | 🔥🧠⚡",
+            DOC_URI, GRAPH,
+            &HashSet::new(), &HashMap::new(),
+        ).expect("ok");
+        assert_eq!(r.len(), 2);
+        assert!(r[1].contains("🔥🧠⚡"));
     }
 }
