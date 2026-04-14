@@ -1,13 +1,23 @@
-//! Kit configuration and TTL-loading helpers.
+//! Kit configuration, TTL-loading, and install pipeline.
 //!
-//! Read-only access to `.lex/kit/**/kit.yml` (init-prompts, feature flags,
-//! arbitrary string config) and to the kit's primary TTL file (loaded into
-//! an ephemeral oxigraph store for SHACL-shape generation, etc).
+//! Three concerns bundled because they are all "things we do with a kit":
 //!
-//! The install/fetch pipeline (fetch_kit_from_github, install_scaffold_*,
-//! install_asset_files) stays in main.rs for now — those are tangled with
-//! cmd_init and the AssetInstallReport struct. They will move here in a
-//! follow-up phase.
+//! 1. **Config readers** — `kit_config_init_prompts`, `kit_config_bool`,
+//!    `kit_config_str`, `read_repo_yml_fields`: read-only access to
+//!    `.lex/kit/**/kit.yml` and repo.yml.
+//! 2. **TTL loader** — `find_kit_ttl`, `load_kit_into_store`: find and
+//!    parse the kit's primary Turtle file into an ephemeral oxigraph
+//!    store (used by SHACL-shape generation).
+//! 3. **Install pipeline** — `fetch_kit_from_github`,
+//!    `collect_init_variables`, `install_scaffold_files_from`,
+//!    `install_scaffold_files_from_skip_existing`, `install_asset_files`,
+//!    `substitute_vars`, `copy_dir_recursive`, `kit_install_dir`,
+//!    `AssetInstallReport`: everything that turns a kit spec into
+//!    on-disk scaffolded files.
+//!
+//! Whether kit management ultimately stays in git-lex is an open question
+//! (see product notes in Day 8 handoff). Bundling it here makes an
+//! eventual eviction to a separate binary/crate straightforward.
 
 use oxigraph::io::RdfFormat;
 use oxigraph::store::Store;
@@ -15,8 +25,9 @@ use std::collections::HashMap;
 use std::fs;
 use std::io::Cursor;
 use std::path::PathBuf;
+use std::process::Command;
 
-use git_lex::{find_git_root, kit_install_dir_for_spec, resolve_kit_spec};
+use git_lex::{find_git_root, get_kit, kit_install_dir_for_spec, resolve_kit_spec};
 
 /// Read simple `key: value` fields from a repo.yml-style file into a map.
 /// Used for honoring existing init variables on re-init (single-shot with
@@ -135,4 +146,465 @@ pub(crate) fn load_kit_into_store(kit: &str) -> Option<Store> {
     let store = Store::new().ok()?;
     store.load_from_reader(RdfFormat::Turtle, Cursor::new(content.as_bytes())).ok()?;
     Some(store)
+}
+
+// ─── install pipeline ──────────────────────────────────────────
+
+/// Install dir for the current repo's kit. Reads repo.yml to find the kit
+/// spec, resolves it, and returns the path. Returns None if no kit is
+/// configured.
+pub(crate) fn kit_install_dir() -> Option<PathBuf> {
+    let root = find_git_root()?;
+    let kit = get_kit()?;
+    Some(kit_install_dir_for_spec(&root, &kit))
+}
+
+/// Fetch a kit tarball from GitHub and extract it into `target_dir`.
+///
+/// Uses `curl | tar --strip-components=1` so the extract goes straight
+/// to `target_dir` without a nested `{repo}-main/` directory. Preserves
+/// symlinks natively (a copy step would dereference them and break the
+/// `scaffold/.claude/skills` → `../../skill` link).
+///
+/// Returns true on success (and if at least one file was extracted).
+pub(crate) fn fetch_kit_from_github(kit_spec: &str, target_dir: &std::path::Path) -> bool {
+    let (org, repo, _) = resolve_kit_spec(kit_spec);
+    let url = format!(
+        "https://github.com/{}/{}/archive/refs/heads/main.tar.gz",
+        org, repo
+    );
+
+    // Extract the tarball directly into target_dir using --strip-components=1
+    // to drop the top-level "git-lex-kit-{name}-main/" directory. Extracting
+    // in-place preserves symlinks (tar honors them natively); any round trip
+    // through a copy step dereferences them, which breaks e.g. the
+    // scaffold/.claude/skills → ../../skill symlink.
+    fs::create_dir_all(target_dir).ok();
+
+    let status = Command::new("curl")
+        .args(["-sL", "--fail", "-o", "-", &url])
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .and_then(|curl| {
+            Command::new("tar")
+                .args([
+                    "xzf",
+                    "-",
+                    "-C",
+                    &target_dir.to_string_lossy(),
+                    "--strip-components=1",
+                ])
+                .stdin(curl.stdout.unwrap())
+                .status()
+        });
+
+    match status {
+        Ok(s) if s.success() => {
+            // Verify we actually got files (curl --fail should prevent empty
+            // extracts, but be safe).
+            let has_files = fs::read_dir(target_dir)
+                .ok()
+                .map(|entries| entries.count() > 0)
+                .unwrap_or(false);
+            if !has_files {
+                return false;
+            }
+            true
+        }
+        _ => false,
+    }
+}
+
+/// Interactively prompt the user for each kit-declared init variable and
+/// return the collected name→value map. Re-uses existing values from repo.yml
+/// if present (supports idempotent re-init).
+pub(crate) fn collect_init_variables(kit_name: &str, existing: &HashMap<String, String>) -> HashMap<String, String> {
+    let mut out = HashMap::new();
+    // The `{kit}` template variable is the short name ("soul"), not the full
+    // spec ("repolex-ai/git-lex-kit-soul"), because that's what templates want
+    // to embed (e.g. `{kit}.memory.confidence`).
+    let (_, _, short) = resolve_kit_spec(kit_name);
+    out.insert("kit".to_string(), short);
+    for name in kit_config_init_prompts(kit_name) {
+        if let Some(v) = existing.get(&name) {
+            out.insert(name, v.clone());
+            continue;
+        }
+        eprint!("{}: ", name);
+        let mut input = String::new();
+        std::io::stdin().read_line(&mut input).unwrap_or_default();
+        let value = input.trim().to_string();
+        if !value.is_empty() {
+            out.insert(name, value);
+        }
+    }
+    out
+}
+
+/// Substitute `{varname}` template placeholders in text using a variable map.
+pub(crate) fn substitute_vars(text: &str, vars: &HashMap<String, String>) -> String {
+    let mut out = text.to_string();
+    for (k, v) in vars {
+        out = out.replace(&format!("{{{}}}", k), v);
+    }
+    out
+}
+
+/// Install scaffold files from the kit into the repo root.
+/// Scaffold files live in .lex/kit/scaffold/ and mirror the repo structure.
+/// Raw byte-for-byte copy — no template processing, no variable substitution.
+/// Always overwrites existing files. Symlinks are preserved as symlinks
+/// (not dereferenced) so that e.g. `.claude/skills` can be a symlink to
+/// `../../skill` pointing at the agent's content-area skill folder.
+/// These are infrastructure files the kit owns: .claude/, AGENTS.md, hooks,
+/// skills symlink, etc. Agents don't edit them.
+pub(crate) fn install_scaffold_files_from(kit_dir: &std::path::Path) -> usize {
+    let root = match find_git_root() {
+        Some(r) => r,
+        None => return 0,
+    };
+
+    let scaffold_dir = kit_dir.join("scaffold");
+    if !scaffold_dir.exists() {
+        return 0;
+    }
+
+    let mut count = 0;
+
+    fn install_recursive(
+        src_dir: &std::path::Path,
+        dest_dir: &std::path::Path,
+        count: &mut usize,
+    ) {
+        let entries = match fs::read_dir(src_dir) {
+            Ok(e) => e,
+            Err(_) => return,
+        };
+        for entry in entries.flatten() {
+            let src = entry.path();
+            let name = entry.file_name();
+            let dest = dest_dir.join(&name);
+
+            // Use symlink_metadata so we can detect symlinks before they get
+            // followed by is_dir/is_file.
+            let meta = match fs::symlink_metadata(&src) {
+                Ok(m) => m,
+                Err(_) => continue,
+            };
+            let ft = meta.file_type();
+
+            if ft.is_symlink() {
+                // Preserve the symlink. Read its target (which may be a
+                // relative path that doesn't exist inside the kit, but will
+                // resolve correctly in the target repo), remove whatever's
+                // at dest, then recreate the symlink pointing at the same
+                // target.
+                let target = match fs::read_link(&src) {
+                    Ok(t) => t,
+                    Err(_) => continue,
+                };
+                fs::create_dir_all(dest.parent().unwrap_or(&dest)).ok();
+                // Clear any existing entry at dest — could be a stale file,
+                // directory, or symlink from a previous run.
+                if dest.symlink_metadata().is_ok() {
+                    if dest.is_dir() && !dest.is_symlink() {
+                        let _ = fs::remove_dir_all(&dest);
+                    } else {
+                        let _ = fs::remove_file(&dest);
+                    }
+                }
+                #[cfg(unix)]
+                {
+                    if std::os::unix::fs::symlink(&target, &dest).is_ok() {
+                        *count += 1;
+                    }
+                }
+                continue;
+            }
+
+            if ft.is_dir() {
+                fs::create_dir_all(&dest).ok();
+                install_recursive(&src, &dest, count);
+                continue;
+            }
+
+            if ft.is_file() {
+                fs::create_dir_all(dest.parent().unwrap_or(&dest)).ok();
+                // If a symlink or non-file is currently at dest, remove it
+                // so fs::copy can write a regular file.
+                if dest.symlink_metadata().is_ok() {
+                    let dmeta = dest.symlink_metadata().ok().map(|m| m.file_type());
+                    if let Some(dft) = dmeta {
+                        if dft.is_symlink() || dft.is_dir() {
+                            if dft.is_dir() && !dft.is_symlink() {
+                                let _ = fs::remove_dir_all(&dest);
+                            } else {
+                                let _ = fs::remove_file(&dest);
+                            }
+                        }
+                    }
+                }
+                if fs::copy(&src, &dest).is_ok() {
+                    *count += 1;
+                }
+            }
+        }
+    }
+
+    install_recursive(&scaffold_dir, &root, &mut count);
+    count
+}
+
+/// Like `install_scaffold_files_from`, but safe for `kit-update` against a
+/// live repo. If `force` is false, files that already exist in the repo are
+/// left alone (preserving any local customizations an agent has made). If
+/// `force` is true, behaves exactly like `install_scaffold_files_from` —
+/// clobbers everything. Used by `kit-update` to refresh base-kit scaffold
+/// pieces like `.lex/www/` without blowing away an agent's `.claude/`
+/// customizations.
+///
+/// Returns `(installed, skipped)` counts.
+pub(crate) fn install_scaffold_files_from_skip_existing(
+    kit_dir: &std::path::Path,
+    force: bool,
+) -> (usize, usize) {
+    let root = match find_git_root() {
+        Some(r) => r,
+        None => return (0, 0),
+    };
+
+    let scaffold_dir = kit_dir.join("scaffold");
+    if !scaffold_dir.exists() {
+        return (0, 0);
+    }
+
+    let mut installed = 0usize;
+    let mut skipped = 0usize;
+
+    fn install_recursive(
+        src_dir: &std::path::Path,
+        dest_dir: &std::path::Path,
+        force: bool,
+        installed: &mut usize,
+        skipped: &mut usize,
+    ) {
+        let entries = match fs::read_dir(src_dir) {
+            Ok(e) => e,
+            Err(_) => return,
+        };
+        for entry in entries.flatten() {
+            let src = entry.path();
+            let name = entry.file_name();
+            let dest = dest_dir.join(&name);
+
+            let meta = match fs::symlink_metadata(&src) {
+                Ok(m) => m,
+                Err(_) => continue,
+            };
+            let ft = meta.file_type();
+
+            if ft.is_symlink() {
+                // Symlinks: skip if destination already exists (any kind) and
+                // not forcing. Otherwise preserve the symlink from the kit.
+                if !force && dest.symlink_metadata().is_ok() {
+                    *skipped += 1;
+                    continue;
+                }
+                let target = match fs::read_link(&src) {
+                    Ok(t) => t,
+                    Err(_) => continue,
+                };
+                fs::create_dir_all(dest.parent().unwrap_or(&dest)).ok();
+                if dest.symlink_metadata().is_ok() {
+                    if dest.is_dir() && !dest.is_symlink() {
+                        let _ = fs::remove_dir_all(&dest);
+                    } else {
+                        let _ = fs::remove_file(&dest);
+                    }
+                }
+                #[cfg(unix)]
+                {
+                    if std::os::unix::fs::symlink(&target, &dest).is_ok() {
+                        *installed += 1;
+                    }
+                }
+                continue;
+            }
+
+            if ft.is_dir() {
+                // Always recurse into directories — existing dirs don't block
+                // installation of new files underneath. Per-file skip logic
+                // handles the rest.
+                fs::create_dir_all(&dest).ok();
+                install_recursive(&src, &dest, force, installed, skipped);
+                continue;
+            }
+
+            if ft.is_file() {
+                if !force && dest.symlink_metadata().is_ok() {
+                    // Destination already exists — preserve whatever is there.
+                    *skipped += 1;
+                    continue;
+                }
+                fs::create_dir_all(dest.parent().unwrap_or(&dest)).ok();
+                if dest.symlink_metadata().is_ok() {
+                    let dft = dest.symlink_metadata().ok().map(|m| m.file_type());
+                    if let Some(dft) = dft {
+                        if dft.is_symlink() || (dft.is_dir() && !dft.is_symlink()) {
+                            if dft.is_dir() && !dft.is_symlink() {
+                                let _ = fs::remove_dir_all(&dest);
+                            } else {
+                                let _ = fs::remove_file(&dest);
+                            }
+                        }
+                    }
+                }
+                if fs::copy(&src, &dest).is_ok() {
+                    *installed += 1;
+                }
+            }
+        }
+    }
+
+    install_recursive(&scaffold_dir, &root, force, &mut installed, &mut skipped);
+    (installed, skipped)
+}
+
+/// Report from install_asset_files — lists what was installed, what was
+/// skipped because it already existed, and what was overwritten under --force.
+#[derive(Default)]
+pub(crate) struct AssetInstallReport {
+    pub installed: Vec<String>,  // freshly written (destination did not exist)
+    pub skipped: Vec<String>,    // destination already existed, --force not set
+    pub overwritten: Vec<String>, // destination existed and was overwritten under --force
+}
+
+/// Install asset files from the kit into the repo root.
+/// Assets live in .lex/kit/assets/ and mirror the repo structure. They can
+/// target paths anywhere under the repo, including inside .lex/ itself
+/// (e.g. `assets/.lex/www/mykitpage/index.html`).
+///
+/// Behavior differs from scaffold:
+///   - Template processing: `{varname}` placeholders are substituted from
+///     the variable map before writing.
+///   - Default safe mode: if the destination file already exists, skip it
+///     and add to the skipped list. User can re-run with --force to
+///     overwrite.
+///   - Force mode: overwrite existing files. No backup file is written —
+///     git history is the safety net for any lost local edits.
+pub(crate) fn install_asset_files(vars: &HashMap<String, String>, force: bool) -> AssetInstallReport {
+    let mut report = AssetInstallReport::default();
+    let root = match find_git_root() {
+        Some(r) => r,
+        None => return report,
+    };
+
+    let kit_dir = match kit_install_dir() {
+        Some(d) => d,
+        None => return report,
+    };
+    let asset_dir = kit_dir.join("assets");
+    if !asset_dir.exists() {
+        return report;
+    }
+
+    fn install_recursive(
+        src_dir: &std::path::Path,
+        dest_dir: &std::path::Path,
+        vars: &HashMap<String, String>,
+        force: bool,
+        repo_root: &std::path::Path,
+        report: &mut AssetInstallReport,
+    ) {
+        let entries = match fs::read_dir(src_dir) {
+            Ok(e) => e,
+            Err(_) => return,
+        };
+        for entry in entries.flatten() {
+            let src = entry.path();
+            let name = entry.file_name();
+            let dest = dest_dir.join(&name);
+
+            if src.is_dir() {
+                fs::create_dir_all(&dest).ok();
+                install_recursive(&src, &dest, vars, force, repo_root, report);
+                continue;
+            }
+            if !src.is_file() {
+                continue;
+            }
+
+            let rel = dest
+                .strip_prefix(repo_root)
+                .unwrap_or(&dest)
+                .to_string_lossy()
+                .to_string();
+
+            if dest.exists() && !force {
+                report.skipped.push(rel);
+                continue;
+            }
+
+            let content = match fs::read_to_string(&src) {
+                Ok(c) => c,
+                Err(_) => continue,
+            };
+            let processed = substitute_vars(&content, vars);
+            fs::create_dir_all(dest.parent().unwrap_or(&dest)).ok();
+
+            let was_present = dest.exists();
+            if fs::write(&dest, &processed).is_ok() {
+                if was_present {
+                    report.overwritten.push(rel);
+                } else {
+                    report.installed.push(rel);
+                }
+            }
+        }
+    }
+
+    install_recursive(&asset_dir, &root, vars, force, &root, &mut report);
+    report
+}
+
+/// Recursively copy a directory tree, preserving symlinks.
+pub(crate) fn copy_dir_recursive(src: &std::path::Path, dest: &std::path::Path) -> std::io::Result<()> {
+    fs::create_dir_all(dest)?;
+    for entry in fs::read_dir(src)? {
+        let entry = entry?;
+        let src_path = entry.path();
+        let dest_path = dest.join(entry.file_name());
+
+        // Inspect without following symlinks so we can preserve them.
+        let meta = fs::symlink_metadata(&src_path)?;
+        let ft = meta.file_type();
+
+        if ft.is_symlink() {
+            let target = fs::read_link(&src_path)?;
+            // Remove anything existing at dest so we can create the symlink.
+            if dest_path.symlink_metadata().is_ok() {
+                if dest_path.is_dir() && !dest_path.is_symlink() {
+                    let _ = fs::remove_dir_all(&dest_path);
+                } else {
+                    let _ = fs::remove_file(&dest_path);
+                }
+            }
+            #[cfg(unix)]
+            {
+                std::os::unix::fs::symlink(&target, &dest_path)?;
+            }
+            #[cfg(not(unix))]
+            {
+                // Windows: fall back to copying the target (best effort).
+                if src_path.exists() && src_path.is_file() {
+                    fs::copy(&src_path, &dest_path)?;
+                }
+            }
+        } else if ft.is_dir() {
+            copy_dir_recursive(&src_path, &dest_path)?;
+        } else if ft.is_file() {
+            fs::copy(&src_path, &dest_path)?;
+        }
+    }
+    Ok(())
 }
