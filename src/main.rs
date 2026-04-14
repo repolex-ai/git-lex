@@ -25,6 +25,7 @@ mod git;
 mod nquad;
 mod ontology;
 mod shacl;
+mod kit;
 
 use crate::git::{auto_commit_snapshot, base_uri, get_repo_id, git_unescape_path};
 use crate::nquad::{nq_escape, uri_encode_path};
@@ -32,6 +33,8 @@ use crate::ontology::{extract_ontology_iri, get_kit_prefix_name, get_kit_types,
                       get_object_properties, get_property_datatypes,
                       get_property_ranges, load_ontology_tboxes};
 use crate::shacl::{build_shacl_shapes, parse_shacl_hints};
+use crate::kit::{find_kit_ttl, kit_config_bool, kit_config_init_prompts,
+                 kit_config_str, load_kit_into_store, read_repo_yml_fields};
 
 // .spo event stream — git-aware change detector for .spo sidecars. Used by
 // orphan cleanup (pre-commit hook), history graph ingest (rebuild +
@@ -914,56 +917,6 @@ fn fetch_kit_from_github(kit_spec: &str, target_dir: &std::path::Path) -> bool {
     }
 }
 
-/// Read simple `key: value` fields from a repo.yml-style file into a map.
-/// Used for honoring existing init variables on re-init (single-shot with
-/// carry-over). Skips comment lines and anything that doesn't parse as a
-/// flat key/value.
-fn read_repo_yml_fields(path: &std::path::Path) -> HashMap<String, String> {
-    let mut out = HashMap::new();
-    let content = match fs::read_to_string(path) {
-        Ok(c) => c,
-        Err(_) => return out,
-    };
-    for line in content.lines() {
-        let trimmed = line.trim();
-        if trimmed.is_empty() || trimmed.starts_with('#') { continue; }
-        if let Some(colon) = trimmed.find(':') {
-            let key = trimmed[..colon].trim().to_string();
-            let value = trimmed[colon + 1..].trim().to_string();
-            if !key.is_empty() && !value.is_empty() {
-                out.insert(key, value);
-            }
-        }
-    }
-    out
-}
-
-/// Read the `init_prompts:` list from a kit's kit.yml. Returns the variable
-/// names the kit wants init to prompt for. Empty list if missing or absent.
-fn kit_config_init_prompts(kit_name: &str) -> Vec<String> {
-    let root = match find_git_root() {
-        Some(r) => r,
-        None => return Vec::new(),
-    };
-    let config_path = kit_install_dir_for_spec(&root, kit_name).join("kit.yml");
-    let content = match fs::read_to_string(&config_path) {
-        Ok(c) => c,
-        Err(_) => return Vec::new(),
-    };
-    let parsed: serde_yaml::Value = match serde_yaml::from_str(&content) {
-        Ok(v) => v,
-        Err(_) => return Vec::new(),
-    };
-    parsed
-        .get("init_prompts")
-        .and_then(|v| v.as_sequence())
-        .map(|seq| {
-            seq.iter()
-                .filter_map(|v| v.as_str().map(|s| s.to_string()))
-                .collect()
-        })
-        .unwrap_or_default()
-}
 
 /// Interactively prompt the user for each kit-declared init variable and
 /// return the collected name→value map. Re-uses existing values from repo.yml
@@ -3134,73 +3087,6 @@ fn kit_install_dir() -> Option<PathBuf> {
 // Loads kit TTL into oxigraph, queries OWL constraints, generates SHACL shapes.
 // Single source of truth: the TTL. Shapes are derived artifacts.
 
-/// Read a boolean config value from the kit's kit.yml file.
-/// Returns the default if the file doesn't exist or the key isn't found.
-fn kit_config_bool(kit: &str, key: &str, default: bool) -> bool {
-    let root = match find_git_root() {
-        Some(r) => r,
-        None => return default,
-    };
-    let config_path = kit_install_dir_for_spec(&root, kit).join("kit.yml");
-    let content = match fs::read_to_string(&config_path) {
-        Ok(c) => c,
-        Err(_) => return default,
-    };
-    for line in content.lines() {
-        let line = line.trim();
-        if line.starts_with('#') { continue; }
-        if let Some(val) = line.strip_prefix(&format!("{}:", key)) {
-            let val = val.trim();
-            return val == "true" || val == "yes";
-        }
-    }
-    default
-}
-
-/// Read a string config value from the kit's kit.yml file.
-fn kit_config_str(kit: &str, key: &str) -> Option<String> {
-    let root = find_git_root()?;
-    let config_path = kit_install_dir_for_spec(&root, kit).join("kit.yml");
-    let content = fs::read_to_string(&config_path).ok()?;
-    for line in content.lines() {
-        let line = line.trim();
-        if line.starts_with('#') { continue; }
-        if let Some(val) = line.strip_prefix(&format!("{}:", key)) {
-            let val = val.trim();
-            if !val.is_empty() {
-                return Some(val.to_string());
-            }
-        }
-    }
-    None
-}
-
-/// Find the kit TTL file path. Tries {kit}.ttl first, then any .ttl in the kit dir.
-pub(crate) fn find_kit_ttl(kit: &str) -> Option<PathBuf> {
-    let root = find_git_root()?;
-    let kit_dir = kit_install_dir_for_spec(&root, kit);
-    let (_, _, short_name) = resolve_kit_spec(kit);
-    let primary = kit_dir.join(format!("{}.ttl", short_name));
-    if primary.exists() {
-        return Some(primary);
-    }
-    fs::read_dir(&kit_dir).ok()
-        .and_then(|entries| entries.filter_map(|e| e.ok())
-            .find(|e| {
-                let name = e.file_name().to_string_lossy().to_string();
-                name.ends_with(".ttl") && !name.contains("shapes")
-            })
-            .map(|e| e.path()))
-}
-
-/// Load a kit TTL into an in-memory oxigraph store for SPARQL querying.
-pub(crate) fn load_kit_into_store(kit: &str) -> Option<Store> {
-    let ttl_path = find_kit_ttl(kit)?;
-    let content = fs::read_to_string(&ttl_path).ok()?;
-    let store = Store::new().ok()?;
-    store.load_from_reader(RdfFormat::Turtle, Cursor::new(content.as_bytes())).ok()?;
-    Some(store)
-}
 
 
 fn cmd_create(doctype: &str, title: Option<&str>) {

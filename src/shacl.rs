@@ -105,8 +105,8 @@ fn build_shacl_hint(in_values: &[String], node_kind: &str, min_count: Option<u32
 /// Reads OWL constraints (owl:oneOf, owl:Restriction, owl:ObjectProperty, rdfs:range)
 /// and emits equivalent SHACL shapes.
 pub(crate) fn generate_shacl_shapes(kit: &str) -> Option<String> {
-    let store = crate::load_kit_into_store(kit)?;
-    let ttl_path = crate::find_kit_ttl(kit)?;
+    let store = crate::kit::load_kit_into_store(kit)?;
+    let ttl_path = crate::kit::find_kit_ttl(kit)?;
     let ttl_content = fs::read_to_string(&ttl_path).ok()?;
 
     // Find the kit prefix name and namespace from the TTL. Namespace uses
