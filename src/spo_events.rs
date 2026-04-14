@@ -1620,11 +1620,10 @@ pub fn spike_triple_maker(
         if obj_props.contains(prop_seg) {
             // Multi-value: ObjectProperty values may be comma-separated.
             for raw_val in object.split(',').map(|s| s.trim()).filter(|s| !s.is_empty()) {
-                // spike: bare slug → IRI under the same base as doc_uri.
-                // We extract base from doc_uri by stripping the path part.
-                // doc_uri looks like `<https://host/org/repo/path>` so the
-                // base is everything up to the last `/`. Crude but works
-                // for the common case.
+                if raw_val.contains('[') || raw_val.contains(']') {
+                    eprintln!("  [skip] IRI-illegal chars in ObjectProperty value: {:?} (line: {})", raw_val, spo_line);
+                    continue;
+                }
                 let base = extract_base_from_doc_uri(doc_uri);
                 let iri = format!("<{}/{}>", base, sanitize_for_iri(raw_val));
                 out.push(format!(
