@@ -35,7 +35,7 @@
 //! come later if this spike graduates into a real feature.
 
 use sha2::{Digest, Sha256};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::Write;
 use std::path::PathBuf;
@@ -1891,10 +1891,37 @@ pub fn spike_history_walk(commit_limit: usize) {
     let obj_props = crate::get_object_properties(&kit);
     let prop_datatypes = crate::get_property_datatypes(&kit);
 
+    // Build slug/path indexes against today's filesystem, exactly like the
+    // now-graph builder does. This keeps the history walker's output
+    // byte-compatible with generate_frontmatter_nquads — the precondition
+    // for the history==now equivalence invariant to hold.
+    //
+    // Walk .md/.txt files in the working tree (skip hidden dirs like .lex,
+    // .git, .claude). Same rules as the now-graph builder.
+    fn walk_md(dir: &std::path::Path, files: &mut Vec<PathBuf>) {
+        if let Ok(entries) = fs::read_dir(dir) {
+            for entry in entries.filter_map(|e| e.ok()) {
+                let path = entry.path();
+                let name = entry.file_name().to_string_lossy().to_string();
+                if name.starts_with('.') { continue; }
+                if path.is_dir() {
+                    walk_md(&path, files);
+                } else if name.ends_with(".md") || name.ends_with(".txt") {
+                    files.push(path);
+                }
+            }
+        }
+    }
+    let mut md_files = Vec::new();
+    walk_md(&root, &mut md_files);
+    let (slug_index, path_index) = crate::nquad::build_slug_path_indexes(&root, &md_files);
+
     eprintln!("spike: walking history → <historytest>");
     eprintln!("spike: kit = {}", kit);
     eprintln!("spike: base = {}", base);
     eprintln!("spike: history_graph = {}", history_graph);
+    eprintln!("spike: slug_index = {} entries, path_index = {} entries",
+              slug_index.len(), path_index.len());
 
     let commits = collect_commits(commit_limit);
     let total = commits.len();
@@ -1922,23 +1949,47 @@ pub fn spike_history_walk(commit_limit: usize) {
                 }
             };
 
-            // Use a SCRATCH graph for the per-event triple — it's not the
-            // real assertion graph, it's the annotation target.
+            // Derive the source document relpath from the sidecar path:
+            // .lex/extract/journal/day-7.md.fm.spo → journal/day-7.md
+            // (needed by emit_spo_line_nquads for wikilink source_dir logic).
+            let relpath_str = derive_source_document(&ev.path).unwrap_or_default();
+
+            // Use the SHARED production emitter — same function the now-graph
+            // builder uses. Byte-identical triples modulo slug_index churn.
+            // Each event gets a fresh emitted_types set: the history graph
+            // annotates every rdf:type event a commit produced, but RDF set
+            // semantics dedupe the reified triples down to the same cardinality
+            // the now-graph produces.
             let scratch_graph = history_graph.clone();
-            let triple_nqs = match spike_triple_maker(
+            let mut emit_buf = String::new();
+            let mut emitted_types: HashSet<String> = HashSet::new();
+            crate::nquad::emit_spo_line_nquads(
                 &ev.line,
                 &doc_uri,
                 &scratch_graph,
+                &base,
+                &relpath_str,
+                &slug_index,
+                &path_index,
                 &obj_props,
                 &prop_datatypes,
-            ) {
-                Ok(v) => v,
-                Err(e) => {
-                    events_skipped += 1;
-                    errors.push(format!("{}: {}", c.short_sha, e));
-                    continue;
-                }
-            };
+                &mut emitted_types,
+                &mut emit_buf,
+            );
+            // Split buffer into individual N-Quad lines for annotation.
+            let triple_nqs: Vec<String> = emit_buf
+                .lines()
+                .filter(|l| !l.trim().is_empty())
+                .map(|l| l.to_string())
+                .collect();
+            if triple_nqs.is_empty() {
+                events_skipped += 1;
+                errors.push(format!(
+                    "{}: emit_spo_line_nquads produced no triples for: {}",
+                    c.short_sha, ev.line
+                ));
+                continue;
+            }
 
             // Each triple_nq is "S P O G ." — we want to wrap the
             // (S, P, O) of each in a triple term and emit annotations.
