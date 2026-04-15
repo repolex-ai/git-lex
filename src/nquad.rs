@@ -619,211 +619,19 @@ pub(crate) fn generate_frontmatter_nquads() -> String {
         let mut emitted_types: HashSet<String> = HashSet::new();
 
         for line in &spo_lines {
-            let parts: Vec<&str> = line.splitn(3, " | ").collect();
-            if parts.len() == 3 {
-                let subject = parts[0];
-                let predicate = parts[1];
-                let object = parts[2];
-
-                if predicate == "mentions" {
-                    // @mention → lex:mentions — resolve to IRI if file exists.
-                    // Try the literal slug first, then dot-stripped, then give up.
-                    let raw = object.to_lowercase();
-                    let dotless = raw.replace('.', "");
-                    let resolved_slug = if slug_index.contains_key(&raw) {
-                        Some(raw.as_str())
-                    } else if dotless != raw && slug_index.contains_key(&dotless) {
-                        Some(dotless.as_str())
-                    } else {
-                        None
-                    };
-                    if let Some(s) = resolved_slug {
-                        let mention_uri = resolve_slug_to_uri(s, &base, &slug_index);
-                        nq.push_str(&format!(
-                            "{} <https://repolex.ai/ontology/git-lex/lex/mentions> {} {} .\n",
-                            doc_uri, mention_uri, graph
-                        ));
-                    } else {
-                        // No matching file — keep as literal
-                        nq.push_str(&format!(
-                            "{} <https://repolex.ai/ontology/git-lex/lex/mentions> \"{}\" {} .\n",
-                            doc_uri, nq_escape(object), graph
-                        ));
-                    }
-                } else if predicate == "linksTo" {
-                    // [[wikilink]] → lex:linksTo (resolved) or lex:unresolvedLink (broken).
-                    //
-                    // Three resolution strategies, tried in order:
-                    //   1. Path-style — if the target contains `/`, treat it as a path
-                    //      relative to the source file's directory. Normalize `..`, look
-                    //      up against the path index. Handles `[[../people/dara]]`,
-                    //      `[[notes/foo]]`, `[[/repo-root/file.md]]`, etc.
-                    //   2. Trailing-segment fallback — if path resolution fails, take the
-                    //      last segment of the target and try the bare-wikilink path.
-                    //      Handles "I typed a path because I had to disambiguate but the
-                    //      path is wrong / the file moved".
-                    //   3. Bare wikilink — slugify (lowercase, hyphens, alnum-only) and
-                    //      look up in the slug index keyed by file stem. Original behavior.
-                    //
-                    // Falls through to lex:unresolvedLink only when all three miss.
-                    let source_dir = std::path::Path::new(&relpath_str)
-                        .parent()
-                        .map(|p| p.to_string_lossy().to_string())
-                        .unwrap_or_default();
-
-                    let resolved_path: Option<String> = if object.contains('/') {
-                        normalize_wikilink_path(object, &source_dir)
-                            .filter(|p| path_index.contains(p))
-                    } else {
-                        None
-                    };
-
-                    let link_uri: Option<String> = if let Some(p) = resolved_path {
-                        Some(format!("<{}/{}>", base, uri_encode_path(&p)))
-                    } else {
-                        // Strategy 2: trailing-segment fallback if the target had a `/`.
-                        let candidate = if let Some(idx) = object.rfind('/') {
-                            &object[idx + 1..]
-                        } else {
-                            object
-                        };
-                        // Strip trailing .md if present so the stem matches the index.
-                        let stem = candidate.strip_suffix(".md").unwrap_or(candidate);
-                        // Strategy 3: slugify and look up in slug_index.
-                        let link_slug = stem.to_lowercase()
-                            .replace(' ', "-")
-                            .replace(|c: char| !c.is_alphanumeric() && c != '-', "");
-                        if !link_slug.is_empty() && slug_index.contains_key(&link_slug) {
-                            Some(resolve_slug_to_uri(&link_slug, &base, &slug_index))
-                        } else {
-                            None
-                        }
-                    };
-
-                    if let Some(uri) = link_uri {
-                        nq.push_str(&format!(
-                            "{} <https://repolex.ai/ontology/git-lex/lex/linksTo> {} {} .\n",
-                            doc_uri, uri, graph
-                        ));
-                    } else {
-                        // Unresolved wikilink → flat literal on lex:linksTo.
-                        // No blank nodes. SHACL or downstream queries can find
-                        // these by checking for literal objects on linksTo.
-                        nq.push_str(&format!(
-                            "{} <https://repolex.ai/ontology/git-lex/lex/linksTo> \"{}\" {} .\n",
-                            doc_uri, nq_escape(object), graph
-                        ));
-                    }
-                } else {
-                    // Check for three-segment dot notation: kit.class.property
-                    let segments: Vec<&str> = subject.splitn(3, '.').collect();
-
-                    if segments.len() == 3 {
-                        // New dot notation: kit.class.property
-                        let kit_name = segments[0];
-                        let class_seg = segments[1];
-                        let prop_seg = segments[2];
-
-                        // Emit rdf:type from class segment (once per class).
-                        // The class segment in dot-notation is already capitalized
-                        // (e.g. squad.Task.assignedTo) and matches the ontology class
-                        // name exactly. No case transformation needed.
-                        let type_key = format!("{}.{}", kit_name, class_seg);
-                        if emitted_types.insert(type_key) {
-                            let type_uri = format!("<https://repolex.ai/ontology/kit/{}/{}>", kit_name, class_seg);
-                            nq.push_str(&format!(
-                                "{} <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> {} {} .\n",
-                                doc_uri, type_uri, graph
-                            ));
-                        }
-
-                        // Property name passes through as-is (camelCase from ontology)
-                        let kit_predicate = format!("<https://repolex.ai/ontology/kit/{}/{}>", kit_name, prop_seg);
-
-                        // Check if this is an ObjectProperty (from ontology) → resolve as IRI
-                        if obj_props.contains(prop_seg) {
-                            // ObjectProperty: split on commas, resolve each value
-                            // via the canonical resolver (see src/resolve.rs for the
-                            // rules and tests).
-                            let values: Vec<&str> = object.split(',').map(|s| s.trim()).filter(|s| !s.is_empty()).collect();
-                            for val in values {
-                                if val.is_empty() { continue; }
-                                match resolve::resolve_frontmatter_value(val, &slug_index, &base) {
-                                    resolve::ResolveResult::Iri(uri) => {
-                                        nq.push_str(&format!(
-                                            "{} {} {} {} .\n",
-                                            doc_uri, kit_predicate, uri, graph
-                                        ));
-                                    }
-                                    resolve::ResolveResult::Unresolved(literal) => {
-                                        // Emit as literal. SHACL shapes requiring
-                                        // sh:nodeKind sh:IRI will flag this at
-                                        // validation time.
-                                        nq.push_str(&format!(
-                                            "{} {} \"{}\" {} .\n",
-                                            doc_uri, kit_predicate, nq_escape(&literal), graph
-                                        ));
-                                    }
-                                    resolve::ResolveResult::Rejected(msg) => {
-                                        // Log the rejection so the agent knows what
-                                        // to fix. Don't emit a triple — bad syntax
-                                        // should not produce data.
-                                        eprintln!(
-                                            "warning: {}: {} — {}",
-                                            relpath_str, prop_seg, msg
-                                        );
-                                    }
-                                }
-                            }
-                        } else {
-                            // DatatypeProperty: emit as typed literal if ontology specifies a non-string range
-                            if let Some(datatype) = prop_datatypes.get(prop_seg) {
-                                nq.push_str(&format!(
-                                    "{} {} \"{}\"^^<{}> {} .\n",
-                                    doc_uri, kit_predicate, nq_escape(object), datatype, graph
-                                ));
-                            } else {
-                                nq.push_str(&format!(
-                                    "{} {} \"{}\" {} .\n",
-                                    doc_uri, kit_predicate, nq_escape(object), graph
-                                ));
-                            }
-                        }
-                    } else {
-                        // Legacy or non-kit frontmatter (title, tags, etc.) — use fm: namespace
-                        let fm_predicate = format!("<https://repolex.ai/ontology/git-lex/fm/{}>", uri_encode_path(subject));
-
-                        if subject.ends_with("-link") || subject.ends_with("-links") {
-                            let values: Vec<&str> = if subject.ends_with("-links") {
-                                object.split(',').map(|s| s.trim()).filter(|s| !s.is_empty()).collect()
-                            } else {
-                                vec![object.trim()]
-                            };
-                            for val in values {
-                                if val.is_empty() { continue; }
-                                let slug = val.trim_start_matches('@').to_lowercase()
-                                    .replace(' ', "-")
-                                    .replace(|c: char| !c.is_alphanumeric() && c != '-' && c != '/' && c != '.', "");
-                                if slug.is_empty() { continue; }
-                                let object_uri = if slug.contains('/') || slug.ends_with(".md") {
-                                    format!("<{}/{}>", base, uri_encode_path(&slug))
-                                } else {
-                                    resolve_slug_to_uri(&slug, &base, &slug_index)
-                                };
-                                nq.push_str(&format!(
-                                    "{} {} {} {} .\n",
-                                    doc_uri, fm_predicate, object_uri, graph
-                                ));
-                            }
-                        } else {
-                            nq.push_str(&format!(
-                                "{} {} \"{}\" {} .\n",
-                                doc_uri, fm_predicate, nq_escape(object), graph
-                            ));
-                        }
-                    }
-                }
-            }
+            emit_spo_line_nquads(
+                line,
+                &doc_uri,
+                &graph,
+                &base,
+                &relpath_str,
+                &slug_index,
+                &path_index,
+                &obj_props,
+                &prop_datatypes,
+                &mut emitted_types,
+                &mut nq,
+            );
         }
     }
 
@@ -885,6 +693,233 @@ pub(crate) fn generate_frontmatter_nquads() -> String {
     }
 
     nq
+}
+
+/// Emit N-Quads for a single `.spo` line (`subject | predicate | object`).
+///
+/// This is the shared triple-emitter used by both `generate_frontmatter_nquads`
+/// (the "now" graph builder) and the history-graph walker — so byte-identical
+/// triples come out of both paths. Extracted from `generate_frontmatter_nquads`
+/// as a behavior-preserving refactor; no logic changes.
+///
+/// Arguments:
+/// - `line`: raw `.spo` line in `subject | predicate | object` form
+/// - `doc_uri`: IRI of the containing document (with angle brackets)
+/// - `graph`: target graph IRI (with angle brackets)
+/// - `base`: base URI for the repo (no trailing slash)
+/// - `relpath_str`: source document path relative to repo root (for warnings)
+/// - `slug_index` / `path_index`: doc lookup tables
+/// - `obj_props` / `prop_datatypes`: ontology-derived property metadata
+/// - `emitted_types`: in/out dedup set — the caller must zero this per doc
+///   so each document emits its `rdf:type` assertions at most once
+/// - `out`: the N-Quad buffer being appended to
+pub(crate) fn emit_spo_line_nquads(
+    line: &str,
+    doc_uri: &str,
+    graph: &str,
+    base: &str,
+    relpath_str: &str,
+    slug_index: &HashMap<String, String>,
+    path_index: &HashSet<String>,
+    obj_props: &HashSet<String>,
+    prop_datatypes: &HashMap<String, String>,
+    emitted_types: &mut HashSet<String>,
+    out: &mut String,
+) {
+    let parts: Vec<&str> = line.splitn(3, " | ").collect();
+    if parts.len() != 3 {
+        return;
+    }
+    let subject = parts[0];
+    let predicate = parts[1];
+    let object = parts[2];
+
+    if predicate == "mentions" {
+        // @mention → lex:mentions — resolve to IRI if file exists.
+        // Try the literal slug first, then dot-stripped, then give up.
+        let raw = object.to_lowercase();
+        let dotless = raw.replace('.', "");
+        let resolved_slug = if slug_index.contains_key(&raw) {
+            Some(raw.as_str())
+        } else if dotless != raw && slug_index.contains_key(&dotless) {
+            Some(dotless.as_str())
+        } else {
+            None
+        };
+        if let Some(s) = resolved_slug {
+            let mention_uri = resolve_slug_to_uri(s, base, slug_index);
+            out.push_str(&format!(
+                "{} <https://repolex.ai/ontology/git-lex/lex/mentions> {} {} .\n",
+                doc_uri, mention_uri, graph
+            ));
+        } else {
+            // No matching file — keep as literal
+            out.push_str(&format!(
+                "{} <https://repolex.ai/ontology/git-lex/lex/mentions> \"{}\" {} .\n",
+                doc_uri, nq_escape(object), graph
+            ));
+        }
+    } else if predicate == "linksTo" {
+        // [[wikilink]] → lex:linksTo (resolved) or literal fallback (broken).
+        //
+        // Three resolution strategies, tried in order:
+        //   1. Path-style — if the target contains `/`, treat it as a path
+        //      relative to the source file's directory. Normalize `..`, look
+        //      up against the path index.
+        //   2. Trailing-segment fallback — if path resolution fails, take the
+        //      last segment of the target and try the bare-wikilink path.
+        //   3. Bare wikilink — slugify (lowercase, hyphens, alnum-only) and
+        //      look up in the slug index keyed by file stem.
+        //
+        // Falls through to a literal linksTo only when all three miss.
+        let source_dir = std::path::Path::new(relpath_str)
+            .parent()
+            .map(|p| p.to_string_lossy().to_string())
+            .unwrap_or_default();
+
+        let resolved_path: Option<String> = if object.contains('/') {
+            normalize_wikilink_path(object, &source_dir)
+                .filter(|p| path_index.contains(p))
+        } else {
+            None
+        };
+
+        let link_uri: Option<String> = if let Some(p) = resolved_path {
+            Some(format!("<{}/{}>", base, uri_encode_path(&p)))
+        } else {
+            // Strategy 2: trailing-segment fallback if the target had a `/`.
+            let candidate = if let Some(idx) = object.rfind('/') {
+                &object[idx + 1..]
+            } else {
+                object
+            };
+            // Strip trailing .md if present so the stem matches the index.
+            let stem = candidate.strip_suffix(".md").unwrap_or(candidate);
+            // Strategy 3: slugify and look up in slug_index.
+            let link_slug = stem.to_lowercase()
+                .replace(' ', "-")
+                .replace(|c: char| !c.is_alphanumeric() && c != '-', "");
+            if !link_slug.is_empty() && slug_index.contains_key(&link_slug) {
+                Some(resolve_slug_to_uri(&link_slug, base, slug_index))
+            } else {
+                None
+            }
+        };
+
+        if let Some(uri) = link_uri {
+            out.push_str(&format!(
+                "{} <https://repolex.ai/ontology/git-lex/lex/linksTo> {} {} .\n",
+                doc_uri, uri, graph
+            ));
+        } else {
+            // Unresolved wikilink → flat literal on lex:linksTo.
+            out.push_str(&format!(
+                "{} <https://repolex.ai/ontology/git-lex/lex/linksTo> \"{}\" {} .\n",
+                doc_uri, nq_escape(object), graph
+            ));
+        }
+    } else {
+        // Check for three-segment dot notation: kit.class.property
+        let segments: Vec<&str> = subject.splitn(3, '.').collect();
+
+        if segments.len() == 3 {
+            // New dot notation: kit.class.property
+            let kit_name = segments[0];
+            let class_seg = segments[1];
+            let prop_seg = segments[2];
+
+            // Emit rdf:type from class segment (once per class).
+            // The class segment in dot-notation is already capitalized
+            // (e.g. squad.Task.assignedTo) and matches the ontology class
+            // name exactly. No case transformation needed.
+            let type_key = format!("{}.{}", kit_name, class_seg);
+            if emitted_types.insert(type_key) {
+                let type_uri = format!("<https://repolex.ai/ontology/kit/{}/{}>", kit_name, class_seg);
+                out.push_str(&format!(
+                    "{} <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> {} {} .\n",
+                    doc_uri, type_uri, graph
+                ));
+            }
+
+            // Property name passes through as-is (camelCase from ontology)
+            let kit_predicate = format!("<https://repolex.ai/ontology/kit/{}/{}>", kit_name, prop_seg);
+
+            // Check if this is an ObjectProperty (from ontology) → resolve as IRI
+            if obj_props.contains(prop_seg) {
+                // ObjectProperty: split on commas, resolve each value
+                // via the canonical resolver (see src/resolve.rs).
+                let values: Vec<&str> = object.split(',').map(|s| s.trim()).filter(|s| !s.is_empty()).collect();
+                for val in values {
+                    if val.is_empty() { continue; }
+                    match resolve::resolve_frontmatter_value(val, slug_index, base) {
+                        resolve::ResolveResult::Iri(uri) => {
+                            out.push_str(&format!(
+                                "{} {} {} {} .\n",
+                                doc_uri, kit_predicate, uri, graph
+                            ));
+                        }
+                        resolve::ResolveResult::Unresolved(literal) => {
+                            out.push_str(&format!(
+                                "{} {} \"{}\" {} .\n",
+                                doc_uri, kit_predicate, nq_escape(&literal), graph
+                            ));
+                        }
+                        resolve::ResolveResult::Rejected(msg) => {
+                            eprintln!(
+                                "warning: {}: {} — {}",
+                                relpath_str, prop_seg, msg
+                            );
+                        }
+                    }
+                }
+            } else {
+                // DatatypeProperty: typed literal if ontology specifies a non-string range.
+                if let Some(datatype) = prop_datatypes.get(prop_seg) {
+                    out.push_str(&format!(
+                        "{} {} \"{}\"^^<{}> {} .\n",
+                        doc_uri, kit_predicate, nq_escape(object), datatype, graph
+                    ));
+                } else {
+                    out.push_str(&format!(
+                        "{} {} \"{}\" {} .\n",
+                        doc_uri, kit_predicate, nq_escape(object), graph
+                    ));
+                }
+            }
+        } else {
+            // Legacy or non-kit frontmatter (title, tags, etc.) — use fm: namespace
+            let fm_predicate = format!("<https://repolex.ai/ontology/git-lex/fm/{}>", uri_encode_path(subject));
+
+            if subject.ends_with("-link") || subject.ends_with("-links") {
+                let values: Vec<&str> = if subject.ends_with("-links") {
+                    object.split(',').map(|s| s.trim()).filter(|s| !s.is_empty()).collect()
+                } else {
+                    vec![object.trim()]
+                };
+                for val in values {
+                    if val.is_empty() { continue; }
+                    let slug = val.trim_start_matches('@').to_lowercase()
+                        .replace(' ', "-")
+                        .replace(|c: char| !c.is_alphanumeric() && c != '-' && c != '/' && c != '.', "");
+                    if slug.is_empty() { continue; }
+                    let object_uri = if slug.contains('/') || slug.ends_with(".md") {
+                        format!("<{}/{}>", base, uri_encode_path(&slug))
+                    } else {
+                        resolve_slug_to_uri(&slug, base, slug_index)
+                    };
+                    out.push_str(&format!(
+                        "{} {} {} {} .\n",
+                        doc_uri, fm_predicate, object_uri, graph
+                    ));
+                }
+            } else {
+                out.push_str(&format!(
+                    "{} {} \"{}\" {} .\n",
+                    doc_uri, fm_predicate, nq_escape(object), graph
+                ));
+            }
+        }
+    }
 }
 
 /// Compile extraction log from all .spo sidecar files.
