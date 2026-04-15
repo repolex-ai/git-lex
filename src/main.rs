@@ -27,7 +27,8 @@ mod kit;
 mod extraction;
 
 use crate::git::{auto_commit_snapshot, base_uri, get_repo_id};
-use crate::nquad::{compile_extraction_log, generate_frontmatter_nquads, generate_git_nquads,
+use crate::nquad::{build_slug_path_indexes, compile_extraction_log, emit_spo_line_nquads,
+                   generate_frontmatter_nquads, generate_git_nquads,
                    load_lex_nquads, nq_escape, uri_encode_path};
 use crate::ontology::{get_kit_prefix_name, get_kit_types,
                       get_object_properties, get_property_datatypes,
@@ -204,14 +205,27 @@ enum Commands {
         #[arg(long)]
         canonical: bool,
     },
-    /// (spike) Build the history graph in <base/historytest> and run
-    /// verification SPARQL queries. Reads git log, diffs .spo files per
-    /// commit, wraps each event in an RDF 1.2 triple-term annotation,
-    /// loads into oxigraph, queries it. Phase 4 of w4r3z/history-graph.
+    /// Build the history graph: walk git history, diff .spo files per
+    /// commit, wrap each change in an RDF 1.2 triple-term annotation,
+    /// load into oxigraph. Writes to <base/history> and records the
+    /// lastHistorySync marker in <base/meta>.
     HistoryBuild {
         /// Limit to the most recent N commits (0 = all)
         #[arg(long, default_value = "0")]
         limit: usize,
+    },
+    /// Verify the history==now equivalence invariant.
+    ///
+    /// Reconstructs the set of "live at HEAD" triples from the history
+    /// graph (addedIn minus removedIn per reified triple term) and compares
+    /// it against the set produced by evaluating the current .spo files
+    /// through the same emitter. Reports symmetric difference. A clean run
+    /// means the history walker is a faithful mirror of the now-graph
+    /// emission pipeline.
+    HistoryVerify {
+        /// Print the first N mismatched triples on each side
+        #[arg(long, default_value = "10")]
+        show: usize,
     },
 }
 
@@ -2546,6 +2560,9 @@ fn main() {
         Commands::HistoryBuild { limit } => {
             spo_events::spike_history_walk(limit);
         }
+        Commands::HistoryVerify { show } => {
+            cmd_history_verify(show);
+        }
         Commands::Llm { command } => match command {
             LlmCommands::List => cmd_llm_list(),
             LlmCommands::Extract { file, model } => cmd_llm_extract(&file, &model),
@@ -2617,6 +2634,266 @@ fn register_hook_in_settings(settings: &mut serde_json::Value, event: &str, comm
     });
     if !already {
         event_hooks.push(hook_entry);
+    }
+}
+
+/// Verify the history==now equivalence invariant.
+///
+/// Reconstructs "live at HEAD" from the history graph by counting addedIn
+/// minus removedIn per reified triple term, then compares that set against
+/// the triples produced by running the current `.spo` sidecars through
+/// `emit_spo_line_nquads` (the same function the now-graph builder uses).
+///
+/// The fair-comparison trick: we don't compare against the full now-graph,
+/// which includes extras like `fm:path` / `git:blobHash` / unconditional
+/// `rdf:type <lex:Document>` that the history walker never sees. Instead we
+/// regenerate the "pure .spo emission" set live and compare against that.
+/// Both sides go through the same emitter → symmetric difference should be
+/// empty if the history walker is faithful.
+fn cmd_history_verify(show: usize) {
+    let start = Instant::now();
+
+    let root = find_git_root().expect("not in a git repo");
+    let base = base_uri();
+    let history_graph = format!("<{}/history>", base);
+
+    let store_path_buf = root.join(".lex").join("oxigraph");
+    let store = match Store::open(&store_path_buf) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("history-verify: failed to open store at {}: {}", store_path_buf.display(), e);
+            exit(1);
+        }
+    };
+
+    // ─── Step 1: Reconstruct "live at HEAD" from history graph ───
+    //
+    // Each reified triple (S,P,O) may have multiple annotations across commits:
+    // `addedIn` events put it into the working set, `removedIn` events take it
+    // back out. A triple is live at HEAD if (count of addedIn) > (count of
+    // removedIn). We aggregate per (S,P,O) and keep the net-positive ones.
+    //
+    // The SPARQL: iterate annotations, pull the triple-term's S/P/O out, plus
+    // the addedIn/removedIn predicate. GROUP BY (S,P,O) and sum.
+    let reconstruct_query = format!(r#"
+        SELECT ?s ?p ?o
+               (SUM(IF(?op = <https://repolex.ai/ontology/spo/addedIn>, 1, 0)) AS ?added)
+               (SUM(IF(?op = <https://repolex.ai/ontology/spo/removedIn>, 1, 0)) AS ?removed)
+        WHERE {{
+            GRAPH {} {{
+                ?ann <http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies> <<( ?s ?p ?o )>> .
+                ?ann ?op ?commit .
+                FILTER(?op IN (<https://repolex.ai/ontology/spo/addedIn>,
+                              <https://repolex.ai/ontology/spo/removedIn>))
+            }}
+        }}
+        GROUP BY ?s ?p ?o
+    "#, history_graph);
+
+    let mut history_live: HashSet<String> = HashSet::new();
+    let results = oxigraph::sparql::SparqlEvaluator::new()
+        .parse_query(&reconstruct_query)
+        .ok()
+        .and_then(|q| q.on_store(&store).execute().ok());
+    match results {
+        Some(oxigraph::sparql::QueryResults::Solutions(sols)) => {
+            for sol in sols.flatten() {
+                let s = sol.get("s").map(term_to_nq).unwrap_or_default();
+                let p = sol.get("p").map(term_to_nq).unwrap_or_default();
+                let o = sol.get("o").map(term_to_nq).unwrap_or_default();
+                let added = sol.get("added").and_then(term_int).unwrap_or(0);
+                let removed = sol.get("removed").and_then(term_int).unwrap_or(0);
+                if added > removed {
+                    history_live.insert(format!("{} {} {}", s, p, o));
+                }
+            }
+        }
+        _ => {
+            eprintln!("history-verify: reconstruct query failed (is the history graph populated? try `git lex history-build` first)");
+            exit(1);
+        }
+    }
+
+    // ─── Step 2: Regenerate the "pure .spo emission" set ───
+    //
+    // Walk all .md/.txt files like generate_frontmatter_nquads does, build the
+    // slug/path indexes, then for each current `.spo` sidecar run each line
+    // through emit_spo_line_nquads and collect the resulting triples.
+    fn walk_md(dir: &std::path::Path, files: &mut Vec<PathBuf>) {
+        if let Ok(entries) = fs::read_dir(dir) {
+            for entry in entries.filter_map(|e| e.ok()) {
+                let path = entry.path();
+                let name = entry.file_name().to_string_lossy().to_string();
+                if name.starts_with('.') { continue; }
+                if path.is_dir() {
+                    walk_md(&path, files);
+                } else if name.ends_with(".md") || name.ends_with(".txt") {
+                    files.push(path);
+                }
+            }
+        }
+    }
+    let mut md_files = Vec::new();
+    walk_md(&root, &mut md_files);
+    let (slug_index, path_index) = build_slug_path_indexes(&root, &md_files);
+
+    let kit = match get_kit() {
+        Some(k) => k,
+        None => {
+            eprintln!("history-verify: no kit configured in .lex/repo.yml");
+            exit(1);
+        }
+    };
+    let obj_props = get_object_properties(&kit);
+    let prop_datatypes = get_property_datatypes(&kit);
+
+    // Graph tag used when emitting — must match what the walker uses so the
+    // triple-term contents compare byte-for-byte. The walker uses history_graph
+    // as the scratch graph, and the reified triple-term drops the graph name
+    // when it reifies (triple terms are 3-tuples, not 4). So the graph tag
+    // here is irrelevant to set membership; we just need SOMETHING syntactically
+    // valid. Use history_graph for consistency.
+    let emit_graph = history_graph.clone();
+
+    let extract_dir = root.join(".lex").join("extract");
+    let mut current_spo_triples: HashSet<String> = HashSet::new();
+    fn walk_spo(dir: &std::path::Path, found: &mut Vec<PathBuf>) {
+        if let Ok(entries) = fs::read_dir(dir) {
+            for entry in entries.filter_map(|e| e.ok()) {
+                let p = entry.path();
+                if p.is_dir() {
+                    walk_spo(&p, found);
+                } else if p.extension().is_some_and(|e| e == "spo") {
+                    found.push(p);
+                }
+            }
+        }
+    }
+    let mut spo_files: Vec<PathBuf> = Vec::new();
+    if extract_dir.exists() {
+        walk_spo(&extract_dir, &mut spo_files);
+    }
+
+    for spo_path in &spo_files {
+        // Derive sidecar relpath (from repo root) and doc URI.
+        let sidecar_rel = match spo_path.strip_prefix(&root) {
+            Ok(p) => p.to_string_lossy().to_string(),
+            Err(_) => continue,
+        };
+        // Reuse the same derivation the walker uses (via spo_events).
+        let doc_uri = match spo_events::doc_uri_from_sidecar(&sidecar_rel, &base) {
+            Some(u) => u,
+            None => continue,
+        };
+        // Derive the source document relpath for the emitter (for source_dir
+        // in wikilink resolution).
+        let source_rel = spo_events::derive_source_document(&sidecar_rel).unwrap_or_default();
+
+        let content = match fs::read_to_string(spo_path) {
+            Ok(c) => c,
+            Err(_) => continue,
+        };
+        let mut emitted_types: HashSet<String> = HashSet::new();
+        for line in content.lines() {
+            // Do NOT trim — `.spo` lines with empty object values end in
+            // " | " (trailing space), and trimming would chop that to " |"
+            // which fails the 3-field split inside emit_spo_line_nquads.
+            // Blank/comment filtering uses the trimmed view only for the check.
+            let check = line.trim_start();
+            if check.is_empty() || check.starts_with('#') { continue; }
+            let mut buf = String::new();
+            emit_spo_line_nquads(
+                line,
+                &doc_uri,
+                &emit_graph,
+                &base,
+                &source_rel,
+                &slug_index,
+                &path_index,
+                &obj_props,
+                &prop_datatypes,
+                &mut emitted_types,
+                &mut buf,
+            );
+            for out_line in buf.lines() {
+                let out_line = out_line.trim();
+                if out_line.is_empty() { continue; }
+                // Drop the graph tag and trailing period to get "S P O".
+                // N-Quad shape is "S P O G ." — we want the first three terms.
+                let trimmed = out_line.trim_end_matches('.').trim();
+                let without_graph = match trimmed.rsplit_once(' ') {
+                    Some((rest, _g)) => rest.trim().to_string(),
+                    None => continue,
+                };
+                current_spo_triples.insert(without_graph);
+            }
+        }
+    }
+
+    // ─── Step 3: Symmetric difference ───
+    let only_history: Vec<&String> = history_live.difference(&current_spo_triples).collect();
+    let only_current: Vec<&String> = current_spo_triples.difference(&history_live).collect();
+    let matched = history_live.intersection(&current_spo_triples).count();
+
+    let elapsed = start.elapsed();
+    println!("history-verify — equivalence report");
+    println!("───────────────────────────────────");
+    println!("history graph:     {} triples reconstructed as live at HEAD", history_live.len());
+    println!("current .spo:      {} triples emitted from sidecars", current_spo_triples.len());
+    println!("matched:           {}", matched);
+    println!("only in history:   {}", only_history.len());
+    println!("only in current:   {}", only_current.len());
+    println!("elapsed:           {:?}", elapsed);
+
+    if !only_history.is_empty() {
+        println!("\nonly-in-history (first {}):", show.min(only_history.len()));
+        for t in only_history.iter().take(show) {
+            println!("  - {}", t);
+        }
+    }
+    if !only_current.is_empty() {
+        println!("\nonly-in-current (first {}):", show.min(only_current.len()));
+        for t in only_current.iter().take(show) {
+            println!("  + {}", t);
+        }
+    }
+
+    if only_history.is_empty() && only_current.is_empty() {
+        println!("\n✓ history == now. the equivalence invariant holds.");
+    } else {
+        println!("\n✗ history and current differ by {} triple(s).",
+                 only_history.len() + only_current.len());
+    }
+}
+
+/// Serialize an oxigraph Term to its canonical N-Quad form.
+fn term_to_nq(t: &Term) -> String {
+    match t {
+        Term::NamedNode(n) => format!("<{}>", n.as_str()),
+        Term::BlankNode(b) => format!("_:{}", b.as_str()),
+        Term::Literal(l) => {
+            let value = l.value();
+            let escaped = nq_escape(value);
+            if let Some(lang) = l.language() {
+                format!("\"{}\"@{}", escaped, lang)
+            } else {
+                let dt = l.datatype();
+                if dt.as_str() == "http://www.w3.org/2001/XMLSchema#string" {
+                    format!("\"{}\"", escaped)
+                } else {
+                    format!("\"{}\"^^<{}>", escaped, dt.as_str())
+                }
+            }
+        }
+        Term::Triple(t) => format!("<< {} {} {} >>", t.subject, t.predicate, t.object),
+    }
+}
+
+/// Parse a Literal Term as an integer (for SPARQL SUM results).
+fn term_int(t: &Term) -> Option<i64> {
+    match t {
+        Term::Literal(l) => l.value().parse().ok(),
+        _ => None,
     }
 }
 

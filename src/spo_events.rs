@@ -1422,7 +1422,7 @@ fn parse_sidecar_line(line: &str) -> Option<SidecarLine> {
 ///
 /// Unknown `.spo` suffixes return `None` rather than producing a garbage
 /// source path.
-fn derive_source_document(sidecar_rel_path: &str) -> Option<String> {
+pub(crate) fn derive_source_document(sidecar_rel_path: &str) -> Option<String> {
     // Strip the `.lex/extract/` prefix first so the returned path is relative
     // to the repo root.
     let after_extract = sidecar_rel_path
