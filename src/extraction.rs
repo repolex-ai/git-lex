@@ -291,3 +291,366 @@ pub(crate) fn frontmatter_to_turtle(filepath: &std::path::Path, root: &std::path
 
     Some(ttl)
 }
+
+// ─── JSONL session extractor (for claude-code kit) ─────────────
+
+/// Extract structural metadata from .jsonl conversation files.
+/// Only runs for the `claude-code` kit. Writes `.cc.spo` sidecars with
+/// session-level metadata (sessionId, timestamps, message counts, tool
+/// usage) and a `.meta` file tracking the last-processed line for
+/// incremental runs.
+pub(crate) fn extract_jsonl_sessions() {
+    use std::collections::HashMap;
+    use std::path::PathBuf;
+    use git_lex::{find_git_root, get_kit};
+
+    let root = match find_git_root() {
+        Some(r) => r,
+        None => return,
+    };
+
+    // Only run for claude-code kit
+    let kit = get_kit();
+    if kit.as_deref() != Some("claude-code") {
+        return;
+    }
+
+    let extract_dir = root.join(".lex").join("extract");
+    fs::create_dir_all(&extract_dir).ok();
+
+    // Find all .jsonl files (not in .lex/)
+    let mut jsonl_files = Vec::new();
+    fn walk_jsonl(dir: &std::path::Path, files: &mut Vec<PathBuf>) {
+        if let Ok(entries) = fs::read_dir(dir) {
+            for entry in entries.filter_map(|e| e.ok()) {
+                let path = entry.path();
+                let name = entry.file_name().to_string_lossy().to_string();
+                if name.starts_with('.') { continue; }
+                if path.is_dir() {
+                    walk_jsonl(&path, files);
+                } else if name.ends_with(".jsonl") {
+                    files.push(path);
+                }
+            }
+        }
+    }
+    walk_jsonl(&root, &mut jsonl_files);
+
+    for filepath in &jsonl_files {
+        let relpath = filepath.strip_prefix(&root).unwrap_or(filepath);
+        let relpath_str = relpath.to_string_lossy().to_string();
+
+        // Check for incremental: read meta file for last processed line
+        let meta_path = extract_dir.join(format!("{}.meta", relpath_str));
+        let last_line: usize = fs::read_to_string(&meta_path)
+            .ok()
+            .and_then(|s| {
+                for line in s.lines() {
+                    if let Some(n) = line.strip_prefix("last_line: ") {
+                        return n.trim().parse().ok();
+                    }
+                }
+                None
+            })
+            .unwrap_or(0);
+
+        // Read the file
+        let content = match fs::read_to_string(filepath) {
+            Ok(c) => c,
+            Err(_) => continue,
+        };
+
+        let lines: Vec<&str> = content.lines().collect();
+        let total_lines = lines.len();
+
+        // Skip if no new lines
+        if last_line >= total_lines {
+            continue;
+        }
+
+        // Parse all lines (or just new ones for incremental)
+        let mut session_id = String::new();
+        let mut project_path = String::new();
+        let mut first_timestamp = String::new();
+        let mut last_timestamp = String::new();
+        let mut cwd = String::new();
+        let mut version = String::new();
+        let mut git_branch = String::new();
+        let mut user_count: usize = 0;
+        let mut assistant_count: usize = 0;
+        let mut system_count: usize = 0;
+        let mut channel_count: usize = 0;
+        let mut tool_counts: HashMap<String, usize> = HashMap::new();
+
+        for (_i, line) in lines.iter().enumerate() {
+            let line = line.trim();
+            if line.is_empty() { continue; }
+
+            let obj: serde_json::Value = match serde_json::from_str(line) {
+                Ok(v) => v,
+                Err(_) => continue,
+            };
+
+            let msg_type = obj.get("type").and_then(|v| v.as_str()).unwrap_or("");
+
+            // Extract session metadata from first valid message
+            if session_id.is_empty() {
+                if let Some(sid) = obj.get("sessionId").and_then(|v| v.as_str()) {
+                    session_id = sid.to_string();
+                }
+            }
+            if cwd.is_empty() {
+                if let Some(c) = obj.get("cwd").and_then(|v| v.as_str()) {
+                    cwd = c.to_string();
+                }
+            }
+            if version.is_empty() {
+                if let Some(v) = obj.get("version").and_then(|v| v.as_str()) {
+                    version = v.to_string();
+                }
+            }
+            if git_branch.is_empty() {
+                if let Some(b) = obj.get("gitBranch").and_then(|v| v.as_str()) {
+                    git_branch = b.to_string();
+                }
+            }
+
+            // Track timestamps
+            if let Some(ts) = obj.get("timestamp").and_then(|v| v.as_str()) {
+                if first_timestamp.is_empty() {
+                    first_timestamp = ts.to_string();
+                }
+                last_timestamp = ts.to_string();
+            }
+
+            // Count message types
+            match msg_type {
+                "user" => user_count += 1,
+                "assistant" => {
+                    assistant_count += 1;
+                    // Count tool usage
+                    if let Some(content) = obj.get("message")
+                        .and_then(|m| m.get("content"))
+                        .and_then(|c| c.as_array())
+                    {
+                        for item in content {
+                            if item.get("type").and_then(|t| t.as_str()) == Some("tool_use") {
+                                if let Some(name) = item.get("name").and_then(|n| n.as_str()) {
+                                    *tool_counts.entry(name.to_string()).or_insert(0) += 1;
+                                }
+                            }
+                        }
+                    }
+                }
+                "system" => system_count += 1,
+                "queue-operation" => channel_count += 1,
+                _ => {}
+            }
+        }
+        let _ = system_count; // parsed but not emitted; keep for future use
+
+        // Derive project from parent directory name
+        if project_path.is_empty() {
+            if let Some(parent) = relpath.parent() {
+                project_path = parent.to_string_lossy().to_string();
+            }
+        }
+
+        // Generate .spo
+        let session_name = if !session_id.is_empty() {
+            format!("session-{}", &session_id[..8.min(session_id.len())])
+        } else {
+            let stem = filepath.file_stem().unwrap_or_default().to_string_lossy();
+            format!("session-{}", &stem[..8.min(stem.len())])
+        };
+
+        let mut spo_lines = Vec::new();
+        spo_lines.push(format!("{} | isA | session", session_name));
+
+        if !session_id.is_empty() {
+            spo_lines.push(format!("{} | sessionId | {}", session_name, session_id));
+        }
+        if !project_path.is_empty() {
+            spo_lines.push(format!("{} | project | {}", session_name, project_path));
+        }
+        if !first_timestamp.is_empty() {
+            spo_lines.push(format!("{} | startTime | {}", session_name, first_timestamp));
+        }
+        if !last_timestamp.is_empty() {
+            spo_lines.push(format!("{} | endTime | {}", session_name, last_timestamp));
+        }
+        if !cwd.is_empty() {
+            spo_lines.push(format!("{} | cwd | {}", session_name, cwd));
+        }
+        if !version.is_empty() {
+            spo_lines.push(format!("{} | ccVersion | {}", session_name, version));
+        }
+        if !git_branch.is_empty() {
+            spo_lines.push(format!("{} | gitBranch | {}", session_name, git_branch));
+        }
+
+        spo_lines.push(format!("{} | messageCount | {}", session_name, total_lines));
+        spo_lines.push(format!("{} | userMessageCount | {}", session_name, user_count));
+        spo_lines.push(format!("{} | assistantMessageCount | {}", session_name, assistant_count));
+
+        if channel_count > 0 {
+            spo_lines.push(format!("{} | channelMessageCount | {}", session_name, channel_count));
+        }
+
+        // Tool usage
+        let mut tools: Vec<(&String, &usize)> = tool_counts.iter().collect();
+        tools.sort_by(|a, b| b.1.cmp(a.1));
+        for (tool, count) in &tools {
+            spo_lines.push(format!("{} | toolUsage | {}:{}", session_name, tool, count));
+        }
+
+        // Sort and write sidecar
+        spo_lines.sort();
+        spo_lines.dedup();
+
+        let spo_path = extract_dir.join(format!("{}.cc.spo", relpath_str));
+        fs::create_dir_all(spo_path.parent().unwrap()).ok();
+        fs::write(&spo_path, spo_lines.join("\n") + "\n").ok();
+
+        // Write meta for incremental
+        fs::create_dir_all(meta_path.parent().unwrap()).ok();
+        fs::write(&meta_path, format!("last_line: {}\nlast_sync: {}\n", total_lines, last_timestamp)).ok();
+    }
+}
+
+// ─── Tree-sitter markdown link extractor ───────────────────────
+
+/// Extract markdown links from body text using tree-sitter.
+/// Writes `.md.spo` sidecars with link type (internal/external/unresolved)
+/// and destination.
+pub(crate) fn extract_markdown_links() {
+    use std::collections::HashSet;
+    use std::path::PathBuf;
+    use git_lex::find_git_root;
+
+    let root = match find_git_root() {
+        Some(r) => r,
+        None => return,
+    };
+
+    let extract_dir = root.join(".lex").join("extract");
+    fs::create_dir_all(&extract_dir).ok();
+
+    let mut parser = tree_sitter_md::MarkdownParser::default();
+
+    // Walk all .md files
+    fn walk_md(dir: &std::path::Path, files: &mut Vec<PathBuf>) {
+        if let Ok(entries) = fs::read_dir(dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                let name = entry.file_name().to_string_lossy().to_string();
+                if name.starts_with('.') { continue; }
+                if path.is_dir() { walk_md(&path, files); }
+                else if name.ends_with(".md") && !name.starts_with("__") { files.push(path); }
+            }
+        }
+    }
+
+    let mut files = Vec::new();
+    walk_md(&root, &mut files);
+
+    // Build file index for resolving internal links
+    let mut file_index: HashSet<String> = HashSet::new();
+    for f in &files {
+        if let Ok(rel) = f.strip_prefix(&root) {
+            file_index.insert(rel.to_string_lossy().to_string());
+        }
+    }
+
+    let mut total_links = 0;
+
+    for filepath in &files {
+        let content = match fs::read_to_string(filepath) {
+            Ok(c) => c,
+            Err(_) => continue,
+        };
+
+        let relpath = filepath.strip_prefix(&root).unwrap_or(filepath);
+        let relpath_str = relpath.to_string_lossy().to_string();
+
+        let tree = match parser.parse(content.as_bytes(), None) {
+            Some(t) => t,
+            None => continue,
+        };
+
+        let mut spo_lines: Vec<String> = Vec::new();
+
+        // Walk inline trees for links
+        for inline_tree in tree.inline_trees() {
+            let inline_root = inline_tree.root_node();
+
+            fn extract_links(node: tree_sitter::Node, source: &str, lines: &mut Vec<String>, file_index: &HashSet<String>, doc_dir: &str) {
+                if node.kind() == "inline_link" {
+                    let dest = node.children(&mut node.walk())
+                        .find(|c| c.kind() == "link_destination")
+                        .map(|c| source[c.start_byte()..c.end_byte()].to_string())
+                        .unwrap_or_default();
+
+                    if !dest.is_empty() {
+                        if dest.starts_with("http://") || dest.starts_with("https://") {
+                            // External link
+                            lines.push(format!("md.externalLink | hasValue | {}", dest));
+                        } else {
+                            // Internal link — resolve relative to doc's directory
+                            let resolved = if dest.starts_with('/') {
+                                dest[1..].to_string()
+                            } else if !doc_dir.is_empty() {
+                                format!("{}/{}", doc_dir, dest)
+                            } else {
+                                dest.clone()
+                            };
+
+                            if file_index.contains(&resolved) {
+                                lines.push(format!("md.internalLink | hasValue | {}", resolved));
+                            } else {
+                                lines.push(format!("md.unresolvedLink | hasValue | {}", dest));
+                            }
+                        }
+                    }
+                }
+
+                // Also catch bare autolinks
+                if node.kind() == "uri_autolink" {
+                    let text = &source[node.start_byte()..node.end_byte()];
+                    let url = text.trim_matches(|c| c == '<' || c == '>');
+                    if !url.is_empty() {
+                        lines.push(format!("md.externalLink | hasValue | {}", url));
+                    }
+                }
+
+                let mut cursor = node.walk();
+                if cursor.goto_first_child() {
+                    loop {
+                        extract_links(cursor.node(), source, lines, file_index, doc_dir);
+                        if !cursor.goto_next_sibling() { break; }
+                    }
+                }
+            }
+
+            let doc_dir = relpath.parent()
+                .map(|p| p.to_string_lossy().to_string())
+                .unwrap_or_default();
+
+            extract_links(inline_root, &content, &mut spo_lines, &file_index, &doc_dir);
+        }
+
+        // Write .md.spo sidecar
+        if !spo_lines.is_empty() {
+            spo_lines.sort();
+            spo_lines.dedup();
+            let spo_path = extract_dir.join(format!("{}.md.spo", relpath_str));
+            fs::create_dir_all(spo_path.parent().unwrap()).ok();
+            fs::write(&spo_path, spo_lines.join("\n") + "\n").ok();
+            total_links += spo_lines.len();
+        }
+    }
+
+    if total_links > 0 {
+        eprintln!("Markdown links: {} from {} files", total_links, files.len());
+    }
+}
