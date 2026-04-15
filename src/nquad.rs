@@ -452,37 +452,7 @@ pub(crate) fn generate_frontmatter_nquads() -> String {
     let mut files = Vec::new();
     walk_md(&root, &mut files);
 
-    // Build slug-to-path index for reference resolution
-    // Maps "spacegoat" → "friend/spacegoat.md", "use-oxigraph-for-sparql" → "decision/use-oxigraph-for-sparql.md"
-    //
-    // For each file we insert two keys: the lowercase stem as-is, AND a
-    // dot-stripped version. That way `@spaceg.o.a.t.` and `@spacegoat` both
-    // resolve to the same file (the dot-stripped form is canonical), and a
-    // file named `spaceg.o.a.t..md` would still be reachable via either the
-    // original `spaceg.o.a.t.` slug or the `spacegoat` slug.
-    //
-    // The path_index is a sibling lookup keyed by the full relpath, used by
-    // path-style wikilinks like `[[../people/dara]]` that resolve relative
-    // to their source file's directory.
-    let mut slug_index: HashMap<String, String> = HashMap::new();
-    let mut path_index: HashSet<String> = HashSet::new();
-    for f in &files {
-        if let Ok(rel) = f.strip_prefix(&root) {
-            let rel_str = rel.to_string_lossy().to_string();
-            path_index.insert(rel_str.clone());
-            // Extract slug from filename (without .md extension)
-            if let Some(file_name) = f.file_stem() {
-                let slug = file_name.to_string_lossy().to_lowercase();
-                // Skip template files
-                if slug.starts_with("__") { continue; }
-                slug_index.insert(slug.clone(), rel_str.clone());
-                let dotless = slug.replace('.', "");
-                if dotless != slug {
-                    slug_index.entry(dotless).or_insert(rel_str);
-                }
-            }
-        }
-    }
+    let (slug_index, path_index) = build_slug_path_indexes(&root, &files);
 
     // entity_classes was used by the old range-aware resolver, which has been
     // replaced by src/resolve.rs. The range-check approach (matching class IRIs
@@ -920,6 +890,47 @@ pub(crate) fn emit_spo_line_nquads(
             }
         }
     }
+}
+
+/// Build the slug→path and path indexes used for @mention / [[wikilink]]
+/// resolution.
+///
+/// Takes the repo root and a list of `.md` / `.txt` file paths, returns:
+/// - `slug_index`: lowercase filename stem → relative path (with a dot-stripped
+///   alias key for handles like `@spaceg.o.a.t.` → `spacegoat`). Template files
+///   (prefix `__`) are excluded.
+/// - `path_index`: set of relative paths, for path-style wikilink resolution.
+///
+/// Extracted from `generate_frontmatter_nquads` so the history-graph walker
+/// can build the same indexes and produce byte-identical triples when replaying
+/// historical `.spo` line events through `emit_spo_line_nquads`.
+///
+/// Known fragility: slug_index is inherently collision-prone (two files with
+/// the same stem in different folders). The canonical direction is to prefer
+/// full-path wikilinks `[[Class/id]]` going forward and retain slug_index only
+/// as a shim for legacy `@mention`-style content.
+pub(crate) fn build_slug_path_indexes(
+    root: &std::path::Path,
+    files: &[PathBuf],
+) -> (HashMap<String, String>, HashSet<String>) {
+    let mut slug_index: HashMap<String, String> = HashMap::new();
+    let mut path_index: HashSet<String> = HashSet::new();
+    for f in files {
+        if let Ok(rel) = f.strip_prefix(root) {
+            let rel_str = rel.to_string_lossy().to_string();
+            path_index.insert(rel_str.clone());
+            if let Some(file_name) = f.file_stem() {
+                let slug = file_name.to_string_lossy().to_lowercase();
+                if slug.starts_with("__") { continue; }
+                slug_index.insert(slug.clone(), rel_str.clone());
+                let dotless = slug.replace('.', "");
+                if dotless != slug {
+                    slug_index.entry(dotless).or_insert(rel_str);
+                }
+            }
+        }
+    }
+    (slug_index, path_index)
 }
 
 /// Compile extraction log from all .spo sidecar files.
