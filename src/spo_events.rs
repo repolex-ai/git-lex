@@ -317,6 +317,30 @@ fn collect_commits(limit: usize) -> Vec<SpikeCommit> {
     shas.iter().map(|sha| build_commit(sha)).collect()
 }
 
+/// List commits in the range `since..HEAD` (exclusive of `since`, inclusive of
+/// HEAD). Used by incremental history sync to walk only new commits.
+pub(crate) fn rev_list_range(since: &str) -> Vec<String> {
+    let range = format!("{}..HEAD", since);
+    let out = Command::new("git")
+        .args(["rev-list", "--topo-order", "--reverse", &range])
+        .output()
+        .expect("git rev-list failed");
+    if !out.status.success() {
+        eprintln!("git rev-list range failed: {}", String::from_utf8_lossy(&out.stderr));
+        return Vec::new();
+    }
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect()
+}
+
+/// Collect commit metadata + diff events for a list of SHAs.
+pub(crate) fn collect_commits_from_shas(shas: &[String]) -> Vec<SpikeCommit> {
+    shas.iter().map(|sha| build_commit(sha)).collect()
+}
+
 /// Well-known magic SHA for the empty git tree. Used as the diff baseline
 /// for root commits (commits with no parents) so the walker sees every
 /// initial `.spo` line as an addition.
@@ -1641,6 +1665,161 @@ fn take_term(s: &str) -> Option<(String, &str)> {
     } else {
         let end = s.find(char::is_whitespace).unwrap_or(s.len());
         Some((s[..end].to_string(), &s[end..]))
+    }
+}
+
+/// Stats returned by the history walk engine.
+pub(crate) struct HistoryWalkStats {
+    pub events_seen: usize,
+    pub events_emitted: usize,
+    pub events_skipped: usize,
+    pub nq_bytes: usize,
+}
+
+/// Core history-walk engine. Takes pre-collected commits and walks their .spo
+/// diffs through the shared emitter, building annotated triple-term N-Quads.
+///
+/// If `clear_first` is true, clears the history graph before loading (full
+/// rebuild). If false, appends (incremental sync).
+///
+/// Returns stats and writes the `lastHistorySync` marker into `<base/meta>`.
+pub(crate) fn history_walk_engine(
+    commits: &[SpikeCommit],
+    store: &oxigraph::store::Store,
+    base: &str,
+    history_graph: &str,
+    meta_graph: &str,
+    head_sha: &str,
+    slug_index: &HashMap<String, String>,
+    path_index: &HashSet<String>,
+    obj_props: &HashSet<String>,
+    prop_datatypes: &HashMap<String, String>,
+    clear_first: bool,
+    show_progress: bool,
+) -> HistoryWalkStats {
+    let total = commits.len();
+
+    let mut nq_buffer = String::new();
+    let mut events_seen = 0usize;
+    let mut events_emitted = 0usize;
+    let mut events_skipped = 0usize;
+
+    for (ci, c) in commits.iter().enumerate() {
+        if show_progress && total > 0 {
+            // Print a dot every 10 commits for progress
+            if ci == 0 {
+                eprint!("  History: walking {} commit(s) ", total);
+            }
+            if (ci + 1) % 10 == 0 || ci == total - 1 {
+                eprint!(".");
+                let _ = std::io::stderr().flush();
+            }
+        }
+
+        for ev in &c.events {
+            events_seen += 1;
+
+            let doc_uri = match doc_uri_from_sidecar(&ev.path, base) {
+                Some(u) => u,
+                None => {
+                    events_skipped += 1;
+                    continue;
+                }
+            };
+
+            let relpath_str = derive_source_document(&ev.path).unwrap_or_default();
+
+            let scratch_graph = history_graph.to_string();
+            let mut emit_buf = String::new();
+            let mut emitted_types: HashSet<String> = HashSet::new();
+            crate::nquad::emit_spo_line_nquads(
+                &ev.line,
+                &doc_uri,
+                &scratch_graph,
+                base,
+                &relpath_str,
+                slug_index,
+                path_index,
+                obj_props,
+                prop_datatypes,
+                &mut emitted_types,
+                &mut emit_buf,
+            );
+
+            let triple_nqs: Vec<String> = emit_buf
+                .lines()
+                .filter(|l| !l.trim().is_empty())
+                .map(|l| l.to_string())
+                .collect();
+            if triple_nqs.is_empty() {
+                events_skipped += 1;
+                continue;
+            }
+
+            for triple_nq in &triple_nqs {
+                if let Some(ann_quads) = spike_history_annotation(
+                    triple_nq,
+                    ev.op,
+                    &c.sha,
+                    &ev.path,
+                    base,
+                    history_graph,
+                ) {
+                    for q in ann_quads {
+                        nq_buffer.push_str(&q);
+                        nq_buffer.push('\n');
+                    }
+                    events_emitted += 1;
+                } else {
+                    events_skipped += 1;
+                }
+            }
+        }
+    }
+
+    if show_progress && total > 0 {
+        eprintln!(" done");
+    }
+
+    let nq_bytes = nq_buffer.len();
+
+    // Optionally clear the history graph (full rebuild) before loading.
+    if clear_first {
+        if let Ok(graph_node) = oxigraph::model::NamedNode::new(
+            history_graph.trim_start_matches('<').trim_end_matches('>'),
+        ) {
+            let _ = store.clear_graph(&graph_node);
+        }
+    }
+
+    // Load N-Quads into oxigraph
+    if !nq_buffer.is_empty() {
+        let parser = oxigraph::io::RdfParser::from_format(oxigraph::io::RdfFormat::NQuads);
+        if let Err(e) = store.load_from_reader(parser, std::io::Cursor::new(nq_buffer.as_bytes())) {
+            eprintln!("  History: load failed: {}", e);
+        }
+    }
+
+    // Write/update the lastHistorySync marker
+    if let Ok(meta_node) = oxigraph::model::NamedNode::new(
+        meta_graph.trim_start_matches('<').trim_end_matches('>'),
+    ) {
+        let _ = store.clear_graph(&meta_node);
+    }
+    let marker_nq = format!(
+        "<{}/meta> <https://repolex.ai/ontology/spo/lastHistorySync> <{}/commit/{}> {} .\n",
+        base, base, head_sha, meta_graph
+    );
+    let parser = oxigraph::io::RdfParser::from_format(oxigraph::io::RdfFormat::NQuads);
+    if let Err(e) = store.load_from_reader(parser, std::io::Cursor::new(marker_nq.as_bytes())) {
+        eprintln!("  History: marker write failed: {}", e);
+    }
+
+    HistoryWalkStats {
+        events_seen,
+        events_emitted,
+        events_skipped,
+        nq_bytes,
     }
 }
 

@@ -1984,9 +1984,13 @@ fn cmd_sync() {
         }
     };
 
-    // Clear non-sync graphs (virtual graphs get regenerated)
+    // Clear non-sync, non-history graphs (virtual graphs get regenerated).
+    // History and meta graphs are persistent — managed by Phase 4.
     for graph_uri in &existing_graphs {
-        if !graph_uri.contains("/sync/") {
+        if !graph_uri.contains("/sync/")
+            && !graph_uri.ends_with("/history")
+            && !graph_uri.ends_with("/meta")
+        {
             if let Ok(graph) = oxigraph::model::NamedNode::new(graph_uri) {
                 store.clear_graph(&oxigraph::model::GraphName::from(graph)).ok();
             }
@@ -2325,6 +2329,145 @@ fn cmd_sync() {
         }
     }
 
+    // ─── Phase 4: History graph — incremental update ───
+    //
+    // Read the lastHistorySync marker from <base/meta>. If it exists and
+    // is an ancestor of HEAD, walk only commits since the marker (append).
+    // Otherwise fall back to a full rebuild (clear + walk all).
+
+    let history_graph_uri = format!("<{}/history>", base);
+    let meta_graph_uri = format!("<{}/meta>", base);
+
+    // Query the marker
+    let marker_query = format!(
+        "SELECT ?commit WHERE {{ GRAPH {} {{ <{}/meta> <https://repolex.ai/ontology/spo/lastHistorySync> ?commit }} }}",
+        meta_graph_uri, base
+    );
+    let marker_sha: Option<String> = {
+        match oxigraph::sparql::Query::parse(&marker_query, None) {
+            Ok(parsed) => match store.query(parsed) {
+                Ok(oxigraph::sparql::QueryResults::Solutions(solutions)) => {
+                    solutions.flatten().filter_map(|s| {
+                        s.get("commit").and_then(|t| match t {
+                            Term::NamedNode(n) => {
+                                // URI is <base/commit/SHA> — extract the SHA
+                                let uri = n.as_str();
+                                uri.rfind("/commit/").map(|pos| uri[pos + 8..].to_string())
+                            }
+                            _ => None,
+                        })
+                    }).next()
+                }
+                _ => None,
+            },
+            _ => None,
+        }
+    };
+
+    // Decide full rebuild vs incremental
+    let (history_commits, history_clear) = if let Some(ref marker) = marker_sha {
+        // Check if marker is an ancestor of HEAD
+        let is_ancestor = Command::new("git")
+            .args(["merge-base", "--is-ancestor", marker, "HEAD"])
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false);
+
+        if marker == &head_sha {
+            // Already up to date
+            (Vec::new(), false)
+        } else if is_ancestor {
+            // Incremental: walk only new commits
+            let new_shas = spo_events::rev_list_range(marker);
+            if new_shas.is_empty() {
+                (Vec::new(), false)
+            } else {
+                eprintln!("  History: incremental — {} new commit(s) since {}", new_shas.len(), &marker[..8.min(marker.len())]);
+                let commits = spo_events::collect_commits_from_shas(&new_shas);
+                (commits, false) // append, do not clear
+            }
+        } else {
+            // Marker not reachable from HEAD (rebase/amend) — full rebuild
+            eprintln!("  History: lastHistorySync marker {} is not an ancestor of HEAD — falling back to full rebuild. This may take a moment.", &marker[..8.min(marker.len())]);
+            let all_shas = {
+                let out = Command::new("git")
+                    .args(["rev-list", "--topo-order", "--reverse", "HEAD"])
+                    .output()
+                    .expect("git rev-list failed");
+                String::from_utf8_lossy(&out.stdout)
+                    .lines()
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect::<Vec<_>>()
+            };
+            let commits = spo_events::collect_commits_from_shas(&all_shas);
+            (commits, true) // clear first
+        }
+    } else {
+        // No marker — first-time history build
+        eprintln!("  History: no lastHistorySync marker found — falling back to full rebuild. This may take a moment.");
+        let all_shas = {
+            let out = Command::new("git")
+                .args(["rev-list", "--topo-order", "--reverse", "HEAD"])
+                .output()
+                .expect("git rev-list failed");
+            String::from_utf8_lossy(&out.stdout)
+                .lines()
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect::<Vec<_>>()
+        };
+        let commits = spo_events::collect_commits_from_shas(&all_shas);
+        (commits, true) // clear first
+    };
+
+    // Load ontology helpers for the history emitter
+    let kit_name = get_kit().unwrap_or_default();
+    let hist_obj_props = get_object_properties(&kit_name);
+    let hist_prop_datatypes = get_property_datatypes(&kit_name);
+
+    // Build slug/path indexes (same as now-graph builder)
+    fn walk_md_for_history(dir: &std::path::Path, files: &mut Vec<PathBuf>) {
+        if let Ok(entries) = fs::read_dir(dir) {
+            for entry in entries.filter_map(|e| e.ok()) {
+                let path = entry.path();
+                let name = entry.file_name().to_string_lossy().to_string();
+                if name.starts_with('.') { continue; }
+                if path.is_dir() {
+                    walk_md_for_history(&path, files);
+                } else if name.ends_with(".md") || name.ends_with(".txt") {
+                    files.push(path);
+                }
+            }
+        }
+    }
+    let mut md_files = Vec::new();
+    walk_md_for_history(&root, &mut md_files);
+    let (hist_slug_index, hist_path_index) = build_slug_path_indexes(&root, &md_files);
+
+    let history_summary = if history_commits.is_empty() {
+        "up to date".to_string()
+    } else {
+        let stats = spo_events::history_walk_engine(
+            &history_commits,
+            &store,
+            &base,
+            &history_graph_uri,
+            &meta_graph_uri,
+            &head_sha,
+            &hist_slug_index,
+            &hist_path_index,
+            &hist_obj_props,
+            &hist_prop_datatypes,
+            history_clear,
+            true, // show_progress
+        );
+        format!(
+            "{} commit(s), {} events, {} annotations",
+            history_commits.len(), stats.events_seen, stats.events_emitted,
+        )
+    };
+
     store.flush().expect("failed to flush store");
 
     let elapsed = start.elapsed();
@@ -2349,6 +2492,7 @@ fn cmd_sync() {
     } else {
         println!("  First sync — no previous state");
     }
+    println!("  History: {}", history_summary);
     println!("  Total sync graphs: {}", total_sync + if sync_count > 0 { 1 } else { 0 });
     if !stale_graphs.is_empty() {
         println!("  Cleaned up {} stale graph(s)", stale_graphs.len());
