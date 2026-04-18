@@ -1737,8 +1737,22 @@ pub(crate) fn history_walk_engine(
             }
         }
 
+        // Build set of renamed paths so we skip their events — the rename
+        // handler below processes the full old→new transition. Events for
+        // renamed files would double-count with wrong path attribution
+        // (events are tagged with the new path but - lines describe old content).
+        let renamed_paths: HashSet<&str> = c.renames.iter()
+            .map(|r| r.new_path.as_str())
+            .collect();
+
         for ev in &c.events {
             events_seen += 1;
+
+            // Skip events for renamed files — handled by rename block below.
+            if renamed_paths.contains(ev.path.as_str()) {
+                events_skipped += 1;
+                continue;
+            }
 
             let doc_uri = match doc_uri_from_sidecar(&ev.path, base) {
                 Some(u) => u,
