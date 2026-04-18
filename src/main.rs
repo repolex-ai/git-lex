@@ -475,13 +475,38 @@ fn cmd_init(directory: Option<String>, kit: Option<String>, dev: bool) {
         )).ok();
     }
 
-    // Create type folders from kit ontology (only if kit.yml says createTypeFolders: true)
+    // ─── Install scaffold files BEFORE type folders ───
+    // Scaffold copy puts kit ontologies into .lex/ontology/ which
+    // get_kit_types() needs to read for folder/template creation.
     {
-        let create_folders = kit_config_bool(kit_name, "createTypeFolders", false);
+        let (base_org, base_repo, _) = resolve_kit_spec(BASE_KIT);
+        let base_kit_dir = lex_dir.join("kit").join(&base_org).join(&base_repo);
+        let mut scaffold_count = install_scaffold_files_from(&base_kit_dir);
+
+        let domain_kit_dir = lex_dir.join("kit").join(&org).join(&repo);
+        if domain_kit_dir != base_kit_dir {
+            scaffold_count += install_scaffold_files_from(&domain_kit_dir);
+        }
+        if scaffold_count > 0 {
+            println!("Installed {} scaffold file(s) from kit(s)", scaffold_count);
+        }
+    }
+
+    // Create type folders from kit ontology.
+    // Reads from kit.yml: "install folders", "folder base", "folder ontology".
+    // Falls back to legacy "createTypeFolders" for pre-migration kits.
+    {
+        let create_folders = kit_config_bool(kit_name, "install folders", false)
+            || kit_config_bool(kit_name, "createTypeFolders", false);
+        let folder_base = kit_config_str(kit_name, "folder base");
         let kit_types = get_kit_types(kit_name);
         if create_folders {
             for (type_name, _) in &kit_types {
-                let type_dir = root.join(type_name);
+                let type_dir = if let Some(ref base) = folder_base {
+                    root.join(base).join(type_name)
+                } else {
+                    root.join(type_name)
+                };
                 fs::create_dir_all(&type_dir).ok();
                 // Add a .gitkeep so empty dirs are tracked
                 let gitkeep = type_dir.join(".gitkeep");
@@ -491,7 +516,12 @@ fn cmd_init(directory: Option<String>, kit: Option<String>, dev: bool) {
             }
             if !kit_types.is_empty() {
                 let type_names: Vec<String> = kit_types.iter().map(|(n, _)| n.clone()).collect();
-                println!("Created type folders: {}", type_names.join(", "));
+                let prefix = folder_base.as_deref().unwrap_or("");
+                if prefix.is_empty() {
+                    println!("Created type folders: {}", type_names.join(", "));
+                } else {
+                    println!("Created type folders: {}/{{{}}}", prefix, type_names.join(", "));
+                }
             }
         }
         let type_names: Vec<String> = kit_types.iter().map(|(n, _)| n.clone()).collect();
@@ -599,8 +629,13 @@ fn cmd_init(directory: Option<String>, kit: Option<String>, dev: bool) {
         };
         let shacl_hints = parse_shacl_hints(&shapes_content);
 
+        let tmpl_folder_base = kit_config_str(kit_name, "folder base");
         for (type_name, properties) in &kit_types {
-            let type_dir = root.join(type_name);
+            let type_dir = if let Some(ref base) = tmpl_folder_base {
+                root.join(base).join(type_name)
+            } else {
+                root.join(type_name)
+            };
             let template_path = type_dir.join(format!("__{}.md", type_name));
 
             if !template_path.exists() {
@@ -664,21 +699,7 @@ fn cmd_init(directory: Option<String>, kit: Option<String>, dev: bool) {
             fs::write(&repo_yml_path, &updated).ok();
         }
 
-        // Install scaffold files from both kits. Base kit provides the
-        // core infrastructure (.lex/ontology/, .lex/www/). Domain kit
-        // provides its own scaffold (e.g. .claude/, AGENTS.md for squad).
-        // Base installs first so domain kit can overlay if needed.
-        let (base_org, base_repo, _) = resolve_kit_spec(BASE_KIT);
-        let base_kit_dir = lex_dir.join("kit").join(&base_org).join(&base_repo);
-        let mut scaffold_count = install_scaffold_files_from(&base_kit_dir);
-
-        let domain_kit_dir = lex_dir.join("kit").join(&org).join(&repo);
-        if domain_kit_dir != base_kit_dir {
-            scaffold_count += install_scaffold_files_from(&domain_kit_dir);
-        }
-        if scaffold_count > 0 {
-            println!("Installed {} scaffold file(s) from kit(s)", scaffold_count);
-        }
+        // Scaffold files already installed above (before type folder creation).
 
         // ── Substrate setup ──────────────────────────────────────────
         //
@@ -1389,13 +1410,21 @@ fn cmd_create(doctype: &str, title: Option<&str>) {
         .replace(' ', "-")
         .replace(|c: char| !c.is_alphanumeric() && c != '-', "");
 
-    let type_folder = class_name.clone();
-    let type_dir = root.join(&type_folder);
+    let folder_base = kit_config_str(&kit, "folder base");
+    let type_dir = if let Some(ref base) = folder_base {
+        root.join(base).join(&class_name)
+    } else {
+        root.join(&class_name)
+    };
     fs::create_dir_all(&type_dir).ok();
 
     let filename = format!("{}.md", slug);
     let filepath = type_dir.join(&filename);
-    let display_path = format!("{}/{}", type_folder, filename);
+    let display_path = if let Some(ref base) = folder_base {
+        format!("{}/{}/{}", base, class_name, filename)
+    } else {
+        format!("{}/{}", class_name, filename)
+    };
 
     if filepath.exists() {
         eprintln!("File already exists: {}", display_path);
@@ -3225,8 +3254,13 @@ fn cmd_kit_update(kit_arg: Option<String>, dev: bool, force: bool) {
     let shacl_hints = parse_shacl_hints(&shapes_content);
 
     let mut templates_updated = 0usize;
+    let update_folder_base = kit_config_str(&kit_name, "folder base");
     for (type_name, properties) in &kit_types {
-        let type_dir = root.join(type_name);
+        let type_dir = if let Some(ref base) = update_folder_base {
+            root.join(base).join(type_name)
+        } else {
+            root.join(type_name)
+        };
         fs::create_dir_all(&type_dir).ok();
         let template_path = type_dir.join(format!("__{}.md", type_name));
 
