@@ -21,7 +21,7 @@ use std::process::Command;
 use git_lex::{find_git_root, get_kit};
 
 use crate::git::{base_uri, git_unescape_path};
-use crate::extraction::{flatten_yaml, is_word_boundary_before, normalize_wikilink_path,
+use crate::extraction::{flatten_yaml, normalize_wikilink_path,
                         resolve_slug_to_uri};
 use crate::ontology::{get_object_properties, get_property_datatypes};
 use crate::resolve;
@@ -464,12 +464,9 @@ pub(crate) fn generate_frontmatter_nquads() -> String {
     let extract_dir = root.join(".lex").join("extract");
     fs::create_dir_all(&extract_dir).ok();
 
-    // Regex patterns for @mentions and [[wikilinks]].
-    // Mentions allow `.` so handles like @spaceG.O.A.T. and @TR1P.L3X capture
-    // as a single mention. Trailing punctuation (`.` `,`) is stripped after
-    // capture and dots are removed at slug-lookup time so the index match
-    // works regardless of how the agent prefers to write their handle.
-    let mention_re = regex::Regex::new(r"@([a-zA-Z0-9_.\-]+)").unwrap();
+    // Regex pattern for [[wikilinks]].
+    // @mentions removed — they were blog inheritance with no job in a system
+    // where everything is a document. Canonical direction: [[Class/id]].
     let wikilink_re = regex::Regex::new(r"\[\[([^\]]+)\]\]").unwrap();
 
     for filepath in &files {
@@ -517,26 +514,6 @@ pub(crate) fn generate_frontmatter_nquads() -> String {
             }
         } else {
             body_text = content.clone();
-        }
-
-        // --- @mention extraction ---
-        // Strip trailing `.` and `,` that the period-tolerant regex sucks in
-        // when a mention sits at the end of a sentence ("...thanks to @4rx.").
-        // Reject matches preceded by a word char so email addresses
-        // (`rob@repolex.ai`) don't capture as `@repolex.ai`.
-        let mut mentions_seen = HashSet::new();
-        for cap in mention_re.captures_iter(&body_text) {
-            let m = cap.get(0).unwrap();
-            if !is_word_boundary_before(&body_text, m.start()) {
-                continue;
-            }
-            let mention = cap[1]
-                .trim_end_matches(|c: char| c == '.' || c == ',')
-                .to_lowercase();
-            if mention.is_empty() { continue; }
-            if mentions_seen.insert(mention.clone()) {
-                spo_lines.push(format!("@{} | mentions | {}", relpath_str, mention));
-            }
         }
 
         // --- [[wikilink]] extraction ---
@@ -605,7 +582,7 @@ pub(crate) fn generate_frontmatter_nquads() -> String {
         }
     }
 
-    // --- Scan commit messages for @mentions and [[wikilinks]] ---
+    // --- Scan commit messages for [[wikilinks]] ---
     let commit_output = Command::new("git")
         .args(["log", "--all", "--format=%H%x00%s"])
         .output();
@@ -618,39 +595,6 @@ pub(crate) fn generate_frontmatter_nquads() -> String {
                 let (sha, message) = (parts[0], parts[1]);
                 let commit_uri = format!("<{}/commit/{}>", base, sha);
 
-                for cap in mention_re.captures_iter(message) {
-                    let m = cap.get(0).unwrap();
-                    if !is_word_boundary_before(message, m.start()) {
-                        continue;
-                    }
-                    let mention = cap[1]
-                        .trim_end_matches(|c: char| c == '.' || c == ',')
-                        .to_lowercase();
-                    if mention.is_empty() { continue; }
-                    // Resolve to entity IRI via slug index, with dot-strip
-                    // fallback for handles like @spaceg.o.a.t. → spacegoat.
-                    let dotless = mention.replace('.', "");
-                    let resolved_slug = if slug_index.contains_key(&mention) {
-                        Some(mention.as_str())
-                    } else if dotless != mention && slug_index.contains_key(&dotless) {
-                        Some(dotless.as_str())
-                    } else {
-                        None
-                    };
-                    if let Some(s) = resolved_slug {
-                        let mention_uri = resolve_slug_to_uri(s, &base, &slug_index);
-                        nq.push_str(&format!(
-                            "{} <https://repolex.ai/ontology/git-lex/lex/mentions> {} {} .\n",
-                            commit_uri, mention_uri, graph
-                        ));
-                    } else {
-                        // No matching file — keep as literal
-                        nq.push_str(&format!(
-                            "{} <https://repolex.ai/ontology/git-lex/lex/mentions> \"{}\" {} .\n",
-                            commit_uri, nq_escape(&mention), graph
-                        ));
-                    }
-                }
                 for cap in wikilink_re.captures_iter(message) {
                     let link = &cap[1];
                     nq.push_str(&format!(
@@ -704,32 +648,7 @@ pub(crate) fn emit_spo_line_nquads(
     let predicate = parts[1];
     let object = parts[2];
 
-    if predicate == "mentions" {
-        // @mention → lex:mentions — resolve to IRI if file exists.
-        // Try the literal slug first, then dot-stripped, then give up.
-        let raw = object.to_lowercase();
-        let dotless = raw.replace('.', "");
-        let resolved_slug = if slug_index.contains_key(&raw) {
-            Some(raw.as_str())
-        } else if dotless != raw && slug_index.contains_key(&dotless) {
-            Some(dotless.as_str())
-        } else {
-            None
-        };
-        if let Some(s) = resolved_slug {
-            let mention_uri = resolve_slug_to_uri(s, base, slug_index);
-            out.push_str(&format!(
-                "{} <https://repolex.ai/ontology/git-lex/lex/mentions> {} {} .\n",
-                doc_uri, mention_uri, graph
-            ));
-        } else {
-            // No matching file — keep as literal
-            out.push_str(&format!(
-                "{} <https://repolex.ai/ontology/git-lex/lex/mentions> \"{}\" {} .\n",
-                doc_uri, nq_escape(object), graph
-            ));
-        }
-    } else if predicate == "linksTo" {
+    if predicate == "linksTo" {
         // [[wikilink]] → lex:linksTo (resolved) or literal fallback (broken).
         //
         // Three resolution strategies, tried in order:
