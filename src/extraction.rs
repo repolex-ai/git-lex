@@ -171,7 +171,11 @@ pub(crate) fn frontmatter_to_turtle(filepath: &std::path::Path, root: &std::path
     let yaml: HashMap<String, serde_yaml::Value> = serde_yaml::from_str(yaml_str).ok()?;
 
     // Find dot notation keys matching this kit: kit.class.property
-    let kit_prefix = format!("{}.", kit);
+    // Use the short kit name (e.g., "soul") not the full spec
+    // (e.g., "repolex-ai/git-lex-kit-soul") — frontmatter keys are
+    // written as soul.Journal.journalId, not repolex-ai/git-lex-kit-soul.Journal.journalId.
+    let (_, _, short) = git_lex::resolve_kit_spec(kit);
+    let kit_prefix = format!("{}.", short);
     let mut doc_type: Option<String> = None;
     let mut kit_props: Vec<(String, String)> = Vec::new(); // (property_name, value)
 
