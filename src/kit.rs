@@ -124,19 +124,36 @@ pub(crate) fn kit_config_str(kit: &str, key: &str) -> Option<String> {
 /// Find the kit TTL file path. Tries {kit}.ttl first, then any .ttl in the kit dir.
 pub(crate) fn find_kit_ttl(kit: &str) -> Option<PathBuf> {
     let root = find_git_root()?;
-    let kit_dir = kit_install_dir_for_spec(&root, kit);
     let (_, _, short_name) = resolve_kit_spec(kit);
-    let primary = kit_dir.join(format!("{}.ttl", short_name));
+
+    // Primary: .lex/ontology/{short}/{short}.ttl
+    let ontology_dir = root.join(".lex").join("ontology").join(&short_name);
+    let primary = ontology_dir.join(format!("{}.ttl", short_name));
     if primary.exists() {
         return Some(primary);
     }
-    fs::read_dir(&kit_dir).ok()
-        .and_then(|entries| entries.filter_map(|e| e.ok())
-            .find(|e| {
-                let name = e.file_name().to_string_lossy().to_string();
-                name.ends_with(".ttl") && !name.contains("shapes")
-            })
-            .map(|e| e.path()))
+
+    // Fallback: any non-shapes .ttl in .lex/ontology/{short}/
+    if ontology_dir.exists() {
+        if let Some(p) = fs::read_dir(&ontology_dir).ok()
+            .and_then(|entries| entries.filter_map(|e| e.ok())
+                .find(|e| {
+                    let name = e.file_name().to_string_lossy().to_string();
+                    name.ends_with(".ttl") && !name.contains("shapes")
+                })
+                .map(|e| e.path()))
+        {
+            return Some(p);
+        }
+    }
+
+    // Legacy fallback: .lex/kit/{org}/{repo}/{short}.ttl
+    let kit_dir = kit_install_dir_for_spec(&root, kit);
+    let legacy = kit_dir.join(format!("{}.ttl", short_name));
+    if legacy.exists() {
+        return Some(legacy);
+    }
+    None
 }
 
 /// Load a kit TTL into an in-memory oxigraph store for SPARQL querying.
