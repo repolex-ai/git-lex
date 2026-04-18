@@ -145,18 +145,36 @@ fn read_kit_ttl(kit: &str) -> String {
         Some(r) => r,
         None => return String::new(),
     };
-    let kit_dir = kit_install_dir_for_spec(&root, kit);
     let (_, _, short) = resolve_kit_spec(kit);
-    let primary = kit_dir.join(format!("{}.ttl", short));
+
+    // Primary: read from .lex/ontology/{short}/{short}.ttl
+    // This is where scaffold copy installs kit ontologies at init/update time.
+    let ontology_dir = root.join(".lex").join("ontology").join(&short);
+    let primary = ontology_dir.join(format!("{}.ttl", short));
     if let Ok(c) = fs::read_to_string(&primary) {
         return c;
     }
-    fs::read_dir(&kit_dir).ok()
-        .and_then(|entries| entries.filter_map(|e| e.ok())
-            .find(|e| e.path().extension().is_some_and(|ext| ext == "ttl")
-                && !e.file_name().to_string_lossy().contains("shapes"))
-            .and_then(|e| fs::read_to_string(e.path()).ok()))
-        .unwrap_or_default()
+
+    // Fallback: any .ttl in .lex/ontology/{short}/ (excluding shapes)
+    if ontology_dir.exists() {
+        if let Some(c) = fs::read_dir(&ontology_dir).ok()
+            .and_then(|entries| entries.filter_map(|e| e.ok())
+                .find(|e| e.path().extension().is_some_and(|ext| ext == "ttl")
+                    && !e.file_name().to_string_lossy().contains("shapes"))
+                .and_then(|e| fs::read_to_string(e.path()).ok()))
+        {
+            return c;
+        }
+    }
+
+    // Legacy fallback: read from .lex/kit/ (pre-scaffold-migration repos)
+    let kit_dir = kit_install_dir_for_spec(&root, kit);
+    let legacy = kit_dir.join(format!("{}.ttl", short));
+    if let Ok(c) = fs::read_to_string(&legacy) {
+        return c;
+    }
+
+    String::new()
 }
 
 /// Find the prefix name declared for the kit's namespace in TTL content.
