@@ -246,6 +246,7 @@ pub struct Rename {
 pub struct SpikeCommit {
     pub sha: String,
     pub short_sha: String,
+    pub parent_sha: String,
     pub author: String,
     pub date: String,
     pub subject: String,
@@ -423,6 +424,7 @@ fn build_commit(sha: &str) -> SpikeCommit {
     SpikeCommit {
         sha: sha.to_string(),
         short_sha,
+        parent_sha: base,
         author,
         date,
         subject,
@@ -1545,6 +1547,25 @@ fn sha256_prefix(input: &str, hex_chars: usize) -> String {
 /// spike: derive a doc URI for a sidecar path. The sidecar path is the
 /// `.spo` file path relative to the repo root, e.g.
 /// `.lex/extract/friend/1ux.md.fm.spo`. The corresponding doc is
+/// Read a sidecar file's content at a specific git commit.
+/// Returns the non-empty, non-comment lines (the SPO lines).
+fn read_sidecar_at_commit(sha: &str, sidecar_path: &str) -> Vec<String> {
+    let spec = format!("{}:{}", sha, sidecar_path);
+    let out = Command::new("git")
+        .args(["show", &spec])
+        .output();
+    match out {
+        Ok(o) if o.status.success() => {
+            String::from_utf8_lossy(&o.stdout)
+                .lines()
+                .filter(|l| !l.is_empty() && !l.starts_with('#'))
+                .map(|l| l.to_string())
+                .collect()
+        }
+        _ => Vec::new(),
+    }
+}
+
 /// `friend/1ux.md`. We strip the `.lex/extract/` prefix and the
 /// `.{extractor}.spo` suffix.
 ///
@@ -1775,6 +1796,58 @@ pub(crate) fn history_walk_engine(
                 }
             }
         }
+
+        // ─── Rename handling ───
+        // For each renamed sidecar, emit removedIn for old-path triples and
+        // addedIn for new-path triples. Git suppresses the normal add/remove
+        // events for renamed files, so we handle them explicitly here.
+        for rename in &c.renames {
+            // Helper closure: read sidecar lines, emit through the shared
+            // emitter, annotate each triple with addedIn or removedIn.
+            let mut emit_rename_side = |sidecar_path: &str, commit_sha: &str, op: char, lines: &[String]| {
+                let doc_uri = match doc_uri_from_sidecar(sidecar_path, base) {
+                    Some(u) => u,
+                    None => return,
+                };
+                let relpath_str = derive_source_document(sidecar_path).unwrap_or_default();
+                for line in lines {
+                    let scratch_graph = history_graph.to_string();
+                    let mut emit_buf = String::new();
+                    let mut emitted_types: HashSet<String> = HashSet::new();
+                    crate::nquad::emit_spo_line_nquads(
+                        line, &doc_uri, &scratch_graph, base, &relpath_str,
+                        slug_index, path_index, obj_props, prop_datatypes,
+                        &mut emitted_types, &mut emit_buf,
+                    );
+                    let triple_nqs: Vec<String> = emit_buf
+                        .lines()
+                        .filter(|l| !l.trim().is_empty())
+                        .map(|l| l.to_string())
+                        .collect();
+                    for triple_nq in &triple_nqs {
+                        if let Some(ann_quads) = spike_history_annotation(
+                            triple_nq, op, commit_sha, sidecar_path, base, history_graph,
+                        ) {
+                            for q in ann_quads {
+                                nq_buffer.push_str(&q);
+                                nq_buffer.push('\n');
+                            }
+                            events_emitted += 1;
+                        }
+                    }
+                }
+            };
+
+            // Old path: read at parent commit, emit removedIn
+            let old_lines = read_sidecar_at_commit(&c.parent_sha, &rename.old_path);
+            emit_rename_side(&rename.old_path, &c.sha, '-', &old_lines);
+
+            // New path: read at this commit, emit addedIn
+            let new_lines = read_sidecar_at_commit(&c.sha, &rename.new_path);
+            emit_rename_side(&rename.new_path, &c.sha, '+', &new_lines);
+
+            events_seen += old_lines.len() + new_lines.len();
+        }
     }
 
     if show_progress && total > 0 {
@@ -1904,122 +1977,8 @@ pub fn spike_history_walk(commit_limit: usize) {
     let total = commits.len();
     eprintln!("spike: {} commit(s) to walk", total);
 
-    let mut nq_buffer = String::new();
-    let mut events_seen = 0usize;
-    let mut events_emitted = 0usize;
-    let mut events_skipped = 0usize;
-    let mut errors: Vec<String> = Vec::new();
-
-    for c in &commits {
-        for ev in &c.events {
-            events_seen += 1;
-
-            let doc_uri = match doc_uri_from_sidecar(&ev.path, &base) {
-                Some(u) => u,
-                None => {
-                    events_skipped += 1;
-                    errors.push(format!(
-                        "{}: could not derive doc URI from sidecar path {}",
-                        c.short_sha, ev.path
-                    ));
-                    continue;
-                }
-            };
-
-            // Derive the source document relpath from the sidecar path:
-            // .lex/extract/journal/day-7.md.fm.spo → journal/day-7.md
-            // (needed by emit_spo_line_nquads for wikilink source_dir logic).
-            let relpath_str = derive_source_document(&ev.path).unwrap_or_default();
-
-            // Use the SHARED production emitter — same function the now-graph
-            // builder uses. Byte-identical triples modulo slug_index churn.
-            // Each event gets a fresh emitted_types set: the history graph
-            // annotates every rdf:type event a commit produced, but RDF set
-            // semantics dedupe the reified triples down to the same cardinality
-            // the now-graph produces.
-            let scratch_graph = history_graph.clone();
-            let mut emit_buf = String::new();
-            let mut emitted_types: HashSet<String> = HashSet::new();
-            crate::nquad::emit_spo_line_nquads(
-                &ev.line,
-                &doc_uri,
-                &scratch_graph,
-                &base,
-                &relpath_str,
-                &slug_index,
-                &path_index,
-                &obj_props,
-                &prop_datatypes,
-                &mut emitted_types,
-                &mut emit_buf,
-            );
-            // Split buffer into individual N-Quad lines for annotation.
-            let triple_nqs: Vec<String> = emit_buf
-                .lines()
-                .filter(|l| !l.trim().is_empty())
-                .map(|l| l.to_string())
-                .collect();
-            if triple_nqs.is_empty() {
-                events_skipped += 1;
-                errors.push(format!(
-                    "{}: emit_spo_line_nquads produced no triples for: {}",
-                    c.short_sha, ev.line
-                ));
-                continue;
-            }
-
-            // Each triple_nq is "S P O G ." — we want to wrap the
-            // (S, P, O) of each in a triple term and emit annotations.
-            // The rdf:type quad emitted by spike_triple_maker is also
-            // wrapped, so the history graph records "this commit added a
-            // type assertion" alongside "this commit added a property".
-            for triple_nq in &triple_nqs {
-                if let Some(ann_quads) = spike_history_annotation(
-                    triple_nq,
-                    ev.op,
-                    &c.sha,
-                    &ev.path,
-                    &base,
-                    &history_graph,
-                ) {
-                    for q in ann_quads {
-                        nq_buffer.push_str(&q);
-                        nq_buffer.push('\n');
-                    }
-                    events_emitted += 1;
-                } else {
-                    errors.push(format!(
-                        "{}: failed to build annotation for {}",
-                        c.short_sha, triple_nq
-                    ));
-                    events_skipped += 1;
-                }
-            }
-        }
-    }
-
-    eprintln!("spike: events seen={}, emitted={}, skipped={}", events_seen, events_emitted, events_skipped);
-    eprintln!("spike: nquad buffer size = {} bytes", nq_buffer.len());
-    eprintln!("spike: error count = {}", errors.len());
-    if !errors.is_empty() {
-        let err_log = root.join(".lex").join("history-spike.errors.log");
-        if let Ok(mut f) = fs::File::create(&err_log) {
-            for e in &errors {
-                let _ = writeln!(f, "{}", e);
-            }
-            eprintln!("spike: errors written to {}", err_log.display());
-        } else {
-            for e in errors.iter().take(20) {
-                eprintln!("spike error: {}", e);
-            }
-            if errors.len() > 20 {
-                eprintln!("spike: ... {} more errors", errors.len() - 20);
-            }
-        }
-    }
-
-    // Load into oxigraph
-    eprintln!("spike: loading {} bytes into oxigraph store", nq_buffer.len());
+    // Open the store and delegate to the shared engine (which handles
+    // events, renames, loading, and marker writing).
     let store_path = root.join(".lex").join("oxigraph");
     let store = match oxigraph::store::Store::open(&store_path) {
         Ok(s) => s,
@@ -2029,44 +1988,16 @@ pub fn spike_history_walk(commit_limit: usize) {
         }
     };
 
-    // Clear the historytest graph first so re-runs are idempotent.
-    if let Ok(graph_node) = oxigraph::model::NamedNode::new(
-        history_graph.trim_start_matches('<').trim_end_matches('>'),
-    ) {
-        let _ = store.clear_graph(&graph_node);
-    }
-
-    let parser = oxigraph::io::RdfParser::from_format(oxigraph::io::RdfFormat::NQuads);
-    match store.load_from_reader(parser, std::io::Cursor::new(nq_buffer.as_bytes())) {
-        Ok(_) => eprintln!("spike: load OK"),
-        Err(e) => {
-            eprintln!("spike: load FAILED: {}", e);
-            // Dump first few lines of buffer to help debug
-            for (i, line) in nq_buffer.lines().take(5).enumerate() {
-                eprintln!("spike:   nq[{}]: {}", i, line);
-            }
-            return;
-        }
-    }
-
-    // Write marker triple: <base/meta> spo:lastHistorySync <commit/HEAD>.
-    // Phase 6 (incremental sync) reads this to know where to pick up.
-    // Lives in its own <base/meta> graph so it doesn't leak into history
-    // graph queries.
-    let marker_nq = format!(
-        "<{}/meta> <https://repolex.ai/ontology/spo/lastHistorySync> <{}/commit/{}> {} .\n",
-        base, base, head_sha, meta_graph
+    let stats = history_walk_engine(
+        &commits, &store, &base, &history_graph, &meta_graph, &head_sha,
+        &slug_index, &path_index, &obj_props, &prop_datatypes,
+        true,  // clear_first (full rebuild)
+        true,  // show_progress
     );
-    if let Ok(meta_node) = oxigraph::model::NamedNode::new(
-        meta_graph.trim_start_matches('<').trim_end_matches('>'),
-    ) {
-        let _ = store.clear_graph(&meta_node);
-    }
-    let parser = oxigraph::io::RdfParser::from_format(oxigraph::io::RdfFormat::NQuads);
-    match store.load_from_reader(parser, std::io::Cursor::new(marker_nq.as_bytes())) {
-        Ok(_) => eprintln!("spike: marker written — lastHistorySync = {}", head_sha),
-        Err(e) => eprintln!("spike: marker write FAILED: {}", e),
-    }
+
+    eprintln!("spike: events seen={}, emitted={}, skipped={}",
+        stats.events_seen, stats.events_emitted, stats.events_skipped);
+    eprintln!("spike: nquad buffer size = {} bytes", stats.nq_bytes);
 
     // Verification queries
     eprintln!("spike: ────────────────────────────────────────────");
@@ -2565,6 +2496,7 @@ mod tests {
         SpikeCommit {
             sha: "deadbeef".into(),
             short_sha: "deadbee".into(),
+            parent_sha: "00000000".into(),
             author: "test".into(),
             date: "2026-04-09".into(),
             subject: "test commit".into(),
