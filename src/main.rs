@@ -3285,6 +3285,42 @@ fn cmd_kit_update(kit_arg: Option<String>, dev: bool, force: bool) {
         templates_updated += 1;
     }
 
+    // ─── Folder audit: check disk matches ontology ───
+    if let Some(ref base) = update_folder_base {
+        let expected: std::collections::HashSet<String> =
+            kit_types.iter().map(|(name, _)| name.clone()).collect();
+        let base_dir = root.join(base);
+
+        // Check for missing folders (in ontology but not on disk)
+        let mut missing = Vec::new();
+        for name in &expected {
+            if !base_dir.join(name).exists() {
+                missing.push(name.clone());
+            }
+        }
+
+        // Check for extra folders (on disk but not in ontology)
+        let mut extra = Vec::new();
+        if let Ok(entries) = fs::read_dir(&base_dir) {
+            for entry in entries.filter_map(|e| e.ok()) {
+                let name = entry.file_name().to_string_lossy().to_string();
+                if entry.path().is_dir() && !expected.contains(&name) {
+                    extra.push(name);
+                }
+            }
+        }
+
+        if !missing.is_empty() {
+            eprintln!("  ⚠ Missing folders (in ontology but not on disk): {}", missing.join(", "));
+        }
+        if !extra.is_empty() {
+            eprintln!("  ⚠ Extra folders (on disk but not in ontology): {}", extra.join(", "));
+        }
+        if missing.is_empty() && extra.is_empty() {
+            println!("  Folders: {}/{} match ontology ✓", expected.len(), expected.len());
+        }
+    }
+
     println!("Kit update complete: {} class templates regenerated.", templates_updated);
 }
 
