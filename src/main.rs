@@ -594,7 +594,7 @@ fn cmd_init(directory: Option<String>, kit: Option<String>, dev: bool) {
         let shapes_content = {
             let r = find_git_root().unwrap();
             let (_, _, short) = resolve_kit_spec(kit_name);
-            let shapes_path = kit_install_dir_for_spec(&r, kit_name).join(format!("{}-shapes.ttl", short));
+            let shapes_path = r.join(".lex").join("ontology").join(&short).join(format!("{}-shapes.ttl", short));
             fs::read_to_string(&shapes_path).unwrap_or_default()
         };
         let shacl_hints = parse_shacl_hints(&shapes_content);
@@ -1634,27 +1634,28 @@ fn cmd_validate() -> bool {
         }
     };
 
-    // Load kit ontology TTL
-    let kit_dir = kit_install_dir_for_spec(&root, &kit);
+    // Load kit ontology TTL from .lex/ontology/{short}/
     let (_, _, short) = resolve_kit_spec(&kit);
+    let ontology_dir = root.join(".lex").join("ontology").join(&short);
     let ont_ttl = {
-        let primary = kit_dir.join(format!("{}.ttl", short));
+        let primary = ontology_dir.join(format!("{}.ttl", short));
         if primary.exists() {
             fs::read_to_string(&primary).unwrap_or_default()
         } else {
-            fs::read_dir(&kit_dir).ok()
+            fs::read_dir(&ontology_dir).ok()
                 .and_then(|entries| entries.filter_map(|e| e.ok())
-                    .find(|e| e.path().extension().is_some_and(|ext| ext == "ttl"))
+                    .find(|e| e.path().extension().is_some_and(|ext| ext == "ttl")
+                        && !e.file_name().to_string_lossy().contains("shapes"))
                     .and_then(|e| fs::read_to_string(e.path()).ok()))
                 .unwrap_or_default()
         }
     };
 
-    // Load SHACL shapes TTL
-    let shapes_ttl = fs::read_dir(&kit_dir).ok()
-        .and_then(|entries| entries.filter_map(|e| e.ok())
-            .find(|e| e.file_name().to_string_lossy().contains("shapes"))
-            .and_then(|e| fs::read_to_string(e.path()).ok()));
+    // Load SHACL shapes TTL from .lex/ontology/{short}/
+    let shapes_ttl = {
+        let shapes_path = ontology_dir.join(format!("{}-shapes.ttl", short));
+        fs::read_to_string(&shapes_path).ok()
+    };
 
     let shapes_ttl = match shapes_ttl {
         Some(s) => s,
@@ -3217,7 +3218,7 @@ fn cmd_kit_update(kit_arg: Option<String>, dev: bool, force: bool) {
     // Regenerate class templates from the kit.
     let kit_types = get_kit_types(&kit_name);
     let shapes_content = {
-        let shapes_path = kit_install_dir_for_spec(&root, &kit_name)
+        let shapes_path = root.join(".lex").join("ontology").join(&short)
             .join(format!("{}-shapes.ttl", short));
         fs::read_to_string(&shapes_path).unwrap_or_default()
     };
