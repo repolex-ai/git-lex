@@ -1481,12 +1481,11 @@ fn cmd_create(doctype: &str, title: Option<&str>) {
 // ─── git lex save ──────────────────────────────────────────────
 
 fn cmd_save(message: &str) {
-    // Sync skills into harness if configured
-    if let Some(kit) = get_kit() {
-        if let Some(substrate) = kit_config_str(&kit, "harness") {
-            if let Some(root) = find_git_root() {
-                harness::sync(&root, &substrate);
-            }
+    // Sync skills/subagents into substrate harness.
+    // Detect substrate from what's on disk — no config needed.
+    if let Some(root) = find_git_root() {
+        if root.join(".claude").exists() {
+            harness::sync(&root, "claude");
         }
     }
 
