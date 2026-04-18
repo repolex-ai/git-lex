@@ -1482,11 +1482,9 @@ fn cmd_create(doctype: &str, title: Option<&str>) {
 
 fn cmd_save(message: &str) {
     // Sync skills/subagents into substrate harness.
-    // Detect substrate from what's on disk — no config needed.
+    // The harness scans for Skill/ and Subagent/ under any namespace folder.
     if let Some(root) = find_git_root() {
-        if root.join(".claude").exists() {
-            harness::sync(&root, "claude");
-        }
+        harness::sync(&root, "claude");
     }
 
     // Add everything, commit, let hooks handle extract + sync

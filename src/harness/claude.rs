@@ -25,7 +25,30 @@
 //!   filename stem                     → name
 
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+
+/// Find a class directory (e.g., "Skill") under any namespace folder.
+/// Scans top-level directories for a matching subfolder.
+/// Returns the first match (e.g., Soul/Skill/).
+fn find_class_dir(root: &Path, class_name: &str) -> Option<PathBuf> {
+    // Check root first (legacy flat layout)
+    let flat = root.join(class_name);
+    if flat.exists() && flat.is_dir() {
+        return Some(flat);
+    }
+    // Scan namespace folders
+    let entries = fs::read_dir(root).ok()?;
+    for entry in entries.filter_map(|e| e.ok()) {
+        let path = entry.path();
+        let name = entry.file_name().to_string_lossy().to_string();
+        if !path.is_dir() || name.starts_with('.') { continue; }
+        let candidate = path.join(class_name);
+        if candidate.exists() && candidate.is_dir() {
+            return Some(candidate);
+        }
+    }
+    None
+}
 
 /// Sync all soul documents into Claude Code's harness directories.
 pub fn sync_all(root: &Path) {
@@ -33,16 +56,18 @@ pub fn sync_all(root: &Path) {
     sync_subagents(root);
 }
 
-/// Sync all skills from Skill/ into .claude/skills/.
-/// Each Skill/{name}.md gets transformed into .claude/skills/{name}/SKILL.md
+/// Sync all skills from {Namespace}/Skill/ into .claude/skills/.
+/// Each {Namespace}/Skill/{name}.md gets transformed into .claude/skills/{name}/SKILL.md
 /// with Claude Code frontmatter derived from soul frontmatter.
+/// Scans all top-level directories for a Skill/ subfolder.
 fn sync_skills(root: &Path) {
-    let skill_dir = root.join("Skill");
     let target_dir = root.join(".claude").join("skills");
 
-    if !skill_dir.exists() {
-        return;
-    }
+    // Find Skill/ under any namespace folder (e.g., Soul/Skill/)
+    let skill_dir = match find_class_dir(root, "Skill") {
+        Some(d) => d,
+        None => return,
+    };
 
     let entries = match fs::read_dir(&skill_dir) {
         Ok(e) => e,
@@ -88,16 +113,17 @@ fn sync_skills(root: &Path) {
     }
 }
 
-/// Sync all subagents from Subagent/ into .claude/agents/.
-/// Each Subagent/{name}.md gets transformed into .claude/agents/{name}.md
+/// Sync all subagents from {Namespace}/Subagent/ into .claude/agents/.
+/// Each {Namespace}/Subagent/{name}.md gets transformed into .claude/agents/{name}.md
 /// with Claude Code frontmatter derived from soul frontmatter.
+/// Scans all top-level directories for a Subagent/ subfolder.
 fn sync_subagents(root: &Path) {
-    let subagent_dir = root.join("Subagent");
     let target_dir = root.join(".claude").join("agents");
 
-    if !subagent_dir.exists() {
-        return;
-    }
+    let subagent_dir = match find_class_dir(root, "Subagent") {
+        Some(d) => d,
+        None => return,
+    };
 
     let entries = match fs::read_dir(&subagent_dir) {
         Ok(e) => e,
