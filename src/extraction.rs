@@ -215,15 +215,27 @@ pub(crate) fn frontmatter_to_turtle(filepath: &std::path::Path, root: &std::path
     }
 
     // Read the kit ontology to find the prefix name and namespace
-    let kit_dir = kit_install_dir_for_spec(root, kit);
     let (_, _, short) = resolve_kit_spec(kit);
+    let ontology_dir = root.join(".lex").join("ontology").join(&short);
     let ttl_path = {
-        let primary = kit_dir.join(format!("{}.ttl", short));
+        let primary = ontology_dir.join(format!("{}.ttl", short));
         if primary.exists() { primary } else {
-            fs::read_dir(&kit_dir).ok()?
-                .filter_map(|e| e.ok())
-                .find(|e| e.path().extension().is_some_and(|ext| ext == "ttl") && !e.file_name().to_string_lossy().contains("shapes"))?
-                .path()
+            // Fallback: any non-shapes .ttl in ontology dir
+            let fallback = fs::read_dir(&ontology_dir).ok()
+                .and_then(|entries| entries
+                    .filter_map(|e| e.ok())
+                    .find(|e| e.path().extension().is_some_and(|ext| ext == "ttl")
+                        && !e.file_name().to_string_lossy().contains("shapes"))
+                    .map(|e| e.path()));
+            match fallback {
+                Some(p) => p,
+                None => {
+                    // Legacy: try .lex/kit/
+                    let kit_dir = kit_install_dir_for_spec(root, kit);
+                    let legacy = kit_dir.join(format!("{}.ttl", short));
+                    if legacy.exists() { legacy } else { return None; }
+                }
+            }
         }
     };
     let kit_ttl = fs::read_to_string(&ttl_path).ok()?;
