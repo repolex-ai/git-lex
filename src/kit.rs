@@ -281,11 +281,6 @@ pub(crate) fn install_scaffold_files_from(kit_dir: &std::path::Path) -> usize {
         None => return 0,
     };
 
-    let scaffold_dir = kit_dir.join("scaffold");
-    if !scaffold_dir.exists() {
-        return 0;
-    }
-
     let mut count = 0;
 
     fn install_recursive(
@@ -302,8 +297,6 @@ pub(crate) fn install_scaffold_files_from(kit_dir: &std::path::Path) -> usize {
             let name = entry.file_name();
             let dest = dest_dir.join(&name);
 
-            // Use symlink_metadata so we can detect symlinks before they get
-            // followed by is_dir/is_file.
             let meta = match fs::symlink_metadata(&src) {
                 Ok(m) => m,
                 Err(_) => continue,
@@ -311,18 +304,11 @@ pub(crate) fn install_scaffold_files_from(kit_dir: &std::path::Path) -> usize {
             let ft = meta.file_type();
 
             if ft.is_symlink() {
-                // Preserve the symlink. Read its target (which may be a
-                // relative path that doesn't exist inside the kit, but will
-                // resolve correctly in the target repo), remove whatever's
-                // at dest, then recreate the symlink pointing at the same
-                // target.
                 let target = match fs::read_link(&src) {
                     Ok(t) => t,
                     Err(_) => continue,
                 };
                 fs::create_dir_all(dest.parent().unwrap_or(&dest)).ok();
-                // Clear any existing entry at dest — could be a stale file,
-                // directory, or symlink from a previous run.
                 if dest.symlink_metadata().is_ok() {
                     if dest.is_dir() && !dest.is_symlink() {
                         let _ = fs::remove_dir_all(&dest);
@@ -347,8 +333,6 @@ pub(crate) fn install_scaffold_files_from(kit_dir: &std::path::Path) -> usize {
 
             if ft.is_file() {
                 fs::create_dir_all(dest.parent().unwrap_or(&dest)).ok();
-                // If a symlink or non-file is currently at dest, remove it
-                // so fs::copy can write a regular file.
                 if dest.symlink_metadata().is_ok() {
                     let dmeta = dest.symlink_metadata().ok().map(|m| m.file_type());
                     if let Some(dft) = dmeta {
@@ -368,7 +352,43 @@ pub(crate) fn install_scaffold_files_from(kit_dir: &std::path::Path) -> usize {
         }
     }
 
-    install_recursive(&scaffold_dir, &root, &mut count);
+    // New kit structure: ontology/, content/, harness/ (and legacy scaffold/)
+    // Each maps to a different destination:
+    //   ontology/ → .lex/ontology/  (system area)
+    //   content/  → repo root       (content files)
+    //   harness/  → repo root       (substrate adapter files)
+    //   www/      → .lex/www/       (web UI assets)
+    //   scaffold/ → repo root       (legacy, for pre-migration kits)
+    let ontology_src = kit_dir.join("ontology");
+    if ontology_src.exists() {
+        let ontology_dest = root.join(".lex").join("ontology");
+        fs::create_dir_all(&ontology_dest).ok();
+        install_recursive(&ontology_src, &ontology_dest, &mut count);
+    }
+
+    let content_src = kit_dir.join("content");
+    if content_src.exists() {
+        install_recursive(&content_src, &root, &mut count);
+    }
+
+    let harness_src = kit_dir.join("harness");
+    if harness_src.exists() {
+        install_recursive(&harness_src, &root, &mut count);
+    }
+
+    let www_src = kit_dir.join("www");
+    if www_src.exists() {
+        let www_dest = root.join(".lex").join("www");
+        fs::create_dir_all(&www_dest).ok();
+        install_recursive(&www_src, &www_dest, &mut count);
+    }
+
+    // Legacy: scaffold/ → repo root (for kits not yet migrated)
+    let scaffold_src = kit_dir.join("scaffold");
+    if scaffold_src.exists() {
+        install_recursive(&scaffold_src, &root, &mut count);
+    }
+
     count
 }
 
@@ -389,11 +409,6 @@ pub(crate) fn install_scaffold_files_from_skip_existing(
         Some(r) => r,
         None => return (0, 0),
     };
-
-    let scaffold_dir = kit_dir.join("scaffold");
-    if !scaffold_dir.exists() {
-        return (0, 0);
-    }
 
     let mut installed = 0usize;
     let mut skipped = 0usize;
@@ -421,8 +436,6 @@ pub(crate) fn install_scaffold_files_from_skip_existing(
             let ft = meta.file_type();
 
             if ft.is_symlink() {
-                // Symlinks: skip if destination already exists (any kind) and
-                // not forcing. Otherwise preserve the symlink from the kit.
                 if !force && dest.symlink_metadata().is_ok() {
                     *skipped += 1;
                     continue;
@@ -449,9 +462,6 @@ pub(crate) fn install_scaffold_files_from_skip_existing(
             }
 
             if ft.is_dir() {
-                // Always recurse into directories — existing dirs don't block
-                // installation of new files underneath. Per-file skip logic
-                // handles the rest.
                 fs::create_dir_all(&dest).ok();
                 install_recursive(&src, &dest, force, installed, skipped);
                 continue;
@@ -459,7 +469,6 @@ pub(crate) fn install_scaffold_files_from_skip_existing(
 
             if ft.is_file() {
                 if !force && dest.symlink_metadata().is_ok() {
-                    // Destination already exists — preserve whatever is there.
                     *skipped += 1;
                     continue;
                 }
@@ -483,7 +492,37 @@ pub(crate) fn install_scaffold_files_from_skip_existing(
         }
     }
 
-    install_recursive(&scaffold_dir, &root, force, &mut installed, &mut skipped);
+    // New kit structure: ontology/, content/, harness/, www/
+    let ontology_src = kit_dir.join("ontology");
+    if ontology_src.exists() {
+        let ontology_dest = root.join(".lex").join("ontology");
+        fs::create_dir_all(&ontology_dest).ok();
+        install_recursive(&ontology_src, &ontology_dest, force, &mut installed, &mut skipped);
+    }
+
+    let content_src = kit_dir.join("content");
+    if content_src.exists() {
+        install_recursive(&content_src, &root, force, &mut installed, &mut skipped);
+    }
+
+    let harness_src = kit_dir.join("harness");
+    if harness_src.exists() {
+        install_recursive(&harness_src, &root, force, &mut installed, &mut skipped);
+    }
+
+    let www_src = kit_dir.join("www");
+    if www_src.exists() {
+        let www_dest = root.join(".lex").join("www");
+        fs::create_dir_all(&www_dest).ok();
+        install_recursive(&www_src, &www_dest, force, &mut installed, &mut skipped);
+    }
+
+    // Legacy: scaffold/ → repo root
+    let scaffold_dir = kit_dir.join("scaffold");
+    if scaffold_dir.exists() {
+        install_recursive(&scaffold_dir, &root, force, &mut installed, &mut skipped);
+    }
+
     (installed, skipped)
 }
 
