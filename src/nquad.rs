@@ -34,23 +34,31 @@ pub(crate) fn nq_escape(s: &str) -> String {
         .replace('\r', "\\r")
 }
 
-/// Percent-encode a path for use in URIs (spaces, special chars).
+/// Percent-encode a path for use in URIs (spaces, special chars, non-ASCII).
 pub(crate) fn uri_encode_path(s: &str) -> String {
-    s.chars()
-        .map(|c| match c {
-            ' ' => "%20".to_string(),
-            '<' => "%3C".to_string(),
-            '>' => "%3E".to_string(),
-            '{' => "%7B".to_string(),
-            '}' => "%7D".to_string(),
-            '|' => "%7C".to_string(),
-            '^' => "%5E".to_string(),
-            '`' => "%60".to_string(),
-            '[' => "%5B".to_string(),
-            ']' => "%5D".to_string(),
-            _ => c.to_string(),
-        })
-        .collect()
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            ' ' => out.push_str("%20"),
+            '<' => out.push_str("%3C"),
+            '>' => out.push_str("%3E"),
+            '{' => out.push_str("%7B"),
+            '}' => out.push_str("%7D"),
+            '|' => out.push_str("%7C"),
+            '^' => out.push_str("%5E"),
+            '`' => out.push_str("%60"),
+            '[' => out.push_str("%5B"),
+            ']' => out.push_str("%5D"),
+            c if !c.is_ascii() => {
+                let mut buf = [0u8; 4];
+                for b in c.encode_utf8(&mut buf).bytes() {
+                    out.push_str(&format!("%{:02X}", b));
+                }
+            }
+            c => out.push(c),
+        }
+    }
+    out
 }
 
 /// Generate all virtual N-Quads from git (commits, tree, refs).
