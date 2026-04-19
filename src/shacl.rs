@@ -216,7 +216,7 @@ pub(crate) fn generate_shacl_shapes(kit: &str) -> Option<String> {
         }
     }
 
-    // Query 4: Find required fields (owl:Restriction with minCardinality)
+    // Query 4: Find required fields (owl:Restriction with minCardinality or cardinality)
     let mut required_props: HashSet<(String, String)> = HashSet::new(); // (class_iri, prop_iri)
     {
         let q = "PREFIX owl: <http://www.w3.org/2002/07/owl#>
@@ -224,9 +224,11 @@ pub(crate) fn generate_shacl_shapes(kit: &str) -> Option<String> {
                  SELECT ?class ?prop WHERE {
                      ?class rdfs:subClassOf ?restriction .
                      ?restriction a owl:Restriction ;
-                                  owl:onProperty ?prop ;
-                                  owl:minCardinality ?minCard .
-                     FILTER(?minCard >= 1)
+                                  owl:onProperty ?prop .
+                     { ?restriction owl:minCardinality ?card }
+                     UNION
+                     { ?restriction owl:cardinality ?card }
+                     FILTER(?card >= 1)
                  }";
         if let Ok(oxigraph::sparql::QueryResults::Solutions(sols)) = store.query(q) {
             for s in sols.flatten() {

@@ -493,11 +493,13 @@ pub(crate) fn install_scaffold_files_from_skip_existing(
     }
 
     // New kit structure: ontology/, content/, harness/, www/
+    // Ontology files are ALWAYS overwritten — they're the kit's schema
+    // definition and must stay in sync with the kit version.
     let ontology_src = kit_dir.join("ontology");
     if ontology_src.exists() {
         let ontology_dest = root.join(".lex").join("ontology");
         fs::create_dir_all(&ontology_dest).ok();
-        install_recursive(&ontology_src, &ontology_dest, force, &mut installed, &mut skipped);
+        install_recursive(&ontology_src, &ontology_dest, true, &mut installed, &mut skipped);
     }
 
     let content_src = kit_dir.join("content");
