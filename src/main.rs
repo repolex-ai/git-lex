@@ -27,7 +27,7 @@ mod kit;
 mod extraction;
 
 use crate::git::{auto_commit_snapshot, base_uri, get_repo_id};
-use crate::nquad::{build_slug_path_indexes, compile_extraction_log, emit_spo_line_nquads,
+use crate::nquad::{build_slug_path_indexes, emit_spo_line_nquads,
                    generate_frontmatter_nquads, generate_git_nquads,
                    load_lex_nquads, nq_escape, uri_encode_path};
 use crate::ontology::{get_kit_prefix_name, get_kit_types,
@@ -115,12 +115,6 @@ enum Commands {
     Validate,
     /// Dump all generated N-Quads to stdout (debug)
     Dump,
-    /// Resolve extraction log into RDF N-Quads (mechanical transformation)
-    Resolve {
-        /// Rebuild from scratch instead of diffing
-        #[arg(long)]
-        full: bool,
-    },
     /// Sync git data + .lex/*.nq into the persistent store
     Sync,
     /// LLM agent tools
@@ -297,14 +291,14 @@ fn cmd_init(directory: Option<String>, kit: Option<String>, dev: bool) {
     // PRESERVE .lex/ entirely (including the local kit you are developing)
     // and just regenerate derived artifacts. In normal mode we ask the user,
     // then refresh only the kit-derived subdirs (kit/, ontology/). User
-    // data (extract/, extraction.log.spo, tickets/) is preserved.
+    // data (extract/, tickets/) is preserved.
     if lex_dir.exists() && !dev {
         carryover = read_repo_yml_fields(&lex_dir.join("repo.yml"));
 
         eprint!(
             "This repo is already initialized at {}.\n\
              Re-initializing will refresh the kit and ontology files and overwrite scaffold files.\n\
-             Extractions, extraction log, tickets, and repo.yml fields are preserved.\n\
+             Extractions, tickets, and repo.yml fields are preserved.\n\
              Continue? [y/N] ",
             lex_dir.display()
         );
@@ -976,7 +970,7 @@ fn cmd_llm_list() {
     // Check which files have .llm.spo sidecars and what blob hash they contain
     let extract_dir = root.join(".lex").join("extract");
     let mut new_files = Vec::new();
-    let mut changed_files = Vec::new();
+    let mut changed_files: Vec<&str> = Vec::new();
     let mut fresh_files = Vec::new();
 
     for (path, current_hash) in &current_files {
@@ -1005,17 +999,9 @@ fn cmd_llm_list() {
         if !has_llm_spo {
             new_files.push(path.as_str());
         } else {
-            // Check extraction log for this file's current blob hash
-            let log_content = fs::read_to_string(&root.join(".lex").join("extraction.log.spo")).unwrap_or_default();
-            let file_id_prefix = format!("{}/{}", current_hash, path);
-            // If the current hash appears in the log, extraction is fresh
-            // If a different hash appears for this path, it's changed
-            let has_current = log_content.lines().any(|l| l.starts_with(&file_id_prefix));
-            if has_current {
-                fresh_files.push(path.as_str());
-            } else {
-                changed_files.push(path.as_str());
-            }
+            // Sidecar exists — mark as fresh (blob-hash staleness check removed
+            // with extraction.log.spo; sidecars are the source of truth).
+            fresh_files.push(path.as_str());
         }
     }
 
@@ -1156,205 +1142,6 @@ fn cmd_llm_recheck(file: &str, model: &str) {
     println!("Sort output alphabetically by subject, then predicate, then object.");
     println!();
     println!("Write the output to: .lex/extract/{}.{}.spo", file, model);
-}
-
-// ─── git lex resolve ────────────────────────────────────────────
-
-fn cmd_resolve(full: bool) {
-    let start = Instant::now();
-
-    let root = match find_git_root() {
-        Some(r) => r,
-        None => {
-            eprintln!("fatal: not a git repository");
-            exit(1);
-        }
-    };
-
-    let base = base_uri();
-    let log_path = root.join(".lex").join("extraction.log.spo");
-    let knowledge_path = root.join(".lex").join("graph").join("knowledge.nq");
-
-    // Get current commit hash for named graph
-    let commit_hash = Command::new("git")
-        .args(["rev-parse", "HEAD"])
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-        .unwrap_or_else(|| "unknown".to_string());
-
-    let graph = format!("<{}/commit/{}>", base, commit_hash);
-
-    // Read current extraction log
-    let current_log = fs::read_to_string(&log_path).unwrap_or_default();
-    let current_lines: HashSet<&str> = current_log.lines().filter(|l| !l.is_empty()).collect();
-
-    // Read previous version (from last commit) for diff
-    let previous_log = if full {
-        String::new() // Full rebuild — treat everything as new
-    } else {
-        Command::new("git")
-            .args(["show", "HEAD~1:.lex/extraction.log.spo"])
-            .output()
-            .ok()
-            .filter(|o| o.status.success())
-            .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
-            .unwrap_or_default()
-    };
-    let previous_lines: HashSet<&str> = previous_log.lines().filter(|l| !l.is_empty()).collect();
-
-    // Compute diff
-    let new_lines: Vec<&str> = current_lines.difference(&previous_lines).copied().collect();
-    let removed_lines: Vec<&str> = previous_lines.difference(&current_lines).copied().collect();
-
-    if new_lines.is_empty() && removed_lines.is_empty() {
-        println!("Nothing to resolve (no changes in extraction log).");
-        return;
-    }
-
-    let mut nq = String::new();
-
-    // Process new assertions
-    for line in &new_lines {
-        // Parse: blobhash/filepath | subject | predicate | object
-        let parts: Vec<&str> = line.splitn(2, " | ").collect();
-        if parts.len() < 2 {
-            continue;
-        }
-        let file_id = parts[0]; // blobhash/filepath
-        let spo_part = parts[1]; // subject | predicate | object
-
-        let spo_fields: Vec<&str> = spo_part.splitn(3, " | ").collect();
-        if spo_fields.len() < 3 {
-            continue;
-        }
-        let (subject, predicate, object) = (spo_fields[0], spo_fields[1], spo_fields[2]);
-
-        // Extract blob hash and filepath from file_id
-        let (blob_hash, filepath) = if let Some(pos) = file_id.find('/') {
-            (&file_id[..pos], &file_id[pos + 1..])
-        } else {
-            (file_id, "")
-        };
-
-        // Build entity URIs (sanitized for valid IRI)
-        let subject_uri = format!("<{}/entity/{}~{}>", base, sanitize_uri_segment(subject), blob_hash);
-
-        // Handle predicate: isA → rdf:type, hasValue → fm:key, others → unresolved URI
-        let predicate_nq = if predicate == "isA" {
-            "<http://www.w3.org/1999/02/22-rdf-syntax-ns#type>".to_string()
-        } else if predicate == "hasValue" {
-            // For frontmatter, the subject IS the key name — use fm: namespace
-            format!("<https://repolex.ai/ontology/git-lex/fm/{}>", uri_encode_path(subject))
-        } else {
-            // Unresolved predicate — wrap in a namespace so it's a valid IRI
-            format!("<https://repolex.ai/r/{}/predicate/{}>", get_repo_id(), sanitize_uri_segment(predicate))
-        };
-
-        // Handle object based on property type:
-        // - isA → literal (class name)
-        // - hasValue with -link/-links subject → resolve as entity URI
-        // - hasValue otherwise → literal
-        // - other predicates → entity from same file
-        let object_nq = if predicate == "isA" {
-            format!("\"{}\"", nq_escape(object))
-        } else if predicate == "hasValue" {
-            if subject.ends_with("-link") || subject.ends_with("-links") {
-                // Resolve -link values as entity URIs
-                let slug = object.trim().trim_start_matches('@').to_lowercase()
-                    .replace(' ', "-")
-                    .replace(|c: char| !c.is_alphanumeric() && c != '-' && c != '/' && c != '.', "");
-                if slug.contains('/') || slug.ends_with(".md") {
-                    format!("<{}/file/{}>", base, uri_encode_path(&slug))
-                } else if !slug.is_empty() {
-                    format!("<{}/entity/{}>", base, uri_encode_path(&slug))
-                } else {
-                    format!("\"{}\"", nq_escape(object))
-                }
-            } else {
-                format!("\"{}\"", nq_escape(object))
-            }
-        } else {
-            format!("<{}/entity/{}~{}>", base, sanitize_uri_segment(object), blob_hash)
-        };
-
-        // Write the assertion triple
-        nq.push_str(&format!("{} {} {} {} .\n", subject_uri, predicate_nq, object_nq, graph));
-
-        // Write name triple for subject (if we haven't seen it yet)
-        nq.push_str(&format!(
-            "{} <https://repolex.ai/ontology/git-lex/lex/name> \"{}\" {} .\n",
-            subject_uri, nq_escape(subject), graph
-        ));
-
-        // Generate annotation with triple term
-        let spo_key = format!("{}|{}|{}|{}", file_id, subject, predicate, object);
-        let ann_hash = short_hash(&spo_key);
-        let ann_uri = format!("<{}/ann/{}>", base, ann_hash);
-
-        // Triple term annotation
-        nq.push_str(&format!(
-            "{} <http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies> <<( {} {} {} )>> {} .\n",
-            ann_uri, subject_uri, predicate_nq, object_nq, graph
-        ));
-        nq.push_str(&format!(
-            "{} <https://repolex.ai/ontology/git-lex/git/filePath> \"{}\" {} .\n",
-            ann_uri, nq_escape(filepath), graph
-        ));
-        nq.push_str(&format!(
-            "{} <https://repolex.ai/ontology/git-lex/git/blobHash> \"{}\" {} .\n",
-            ann_uri, nq_escape(blob_hash), graph
-        ));
-    }
-
-    // Process retractions
-    for line in &removed_lines {
-        let parts: Vec<&str> = line.splitn(2, " | ").collect();
-        if parts.len() < 2 {
-            continue;
-        }
-        let file_id = parts[0];
-        let spo_part = parts[1];
-
-        let spo_fields: Vec<&str> = spo_part.splitn(3, " | ").collect();
-        if spo_fields.len() < 3 {
-            continue;
-        }
-        let (subject, predicate, object) = (spo_fields[0], spo_fields[1], spo_fields[2]);
-
-        let spo_key = format!("{}|{}|{}|{}", file_id, subject, predicate, object);
-        let ann_hash = short_hash(&spo_key);
-        let ann_uri = format!("<{}/ann/{}>", base, ann_hash);
-
-        // Retraction annotation
-        nq.push_str(&format!(
-            "{} <https://repolex.ai/ontology/git-lex/git/retracted> \"true\"^^<http://www.w3.org/2001/XMLSchema#boolean> {} .\n",
-            ann_uri, graph
-        ));
-    }
-
-    // Write knowledge graph
-    fs::create_dir_all(root.join(".lex").join("graph")).ok();
-    if full {
-        fs::write(&knowledge_path, &nq).expect("failed to write knowledge.nq");
-    } else {
-        // Append to existing
-        let mut existing = fs::read_to_string(&knowledge_path).unwrap_or_default();
-        existing.push_str(&nq);
-        fs::write(&knowledge_path, &existing).expect("failed to write knowledge.nq");
-    }
-
-    let elapsed = start.elapsed();
-    let triple_count = nq.lines().filter(|l| !l.is_empty()).count();
-    println!(
-        "Resolved {} new + {} retracted → {} quads in {:.1}ms",
-        new_lines.len(),
-        removed_lines.len(),
-        triple_count,
-        elapsed.as_secs_f64() * 1000.0
-    );
-    println!("Written to: {}", knowledge_path.display());
 }
 
 // ─── git lex create ─────────────────────────────────────────────
@@ -1937,9 +1724,6 @@ fn cmd_extract() {
 
     // Run JSONL extraction for claude-code kit
     extract_jsonl_sessions();
-
-    // Compile the extraction log
-    compile_extraction_log();
 
     let elapsed = start.elapsed();
     eprintln!("Extracted in {:.1}ms", elapsed.as_secs_f64() * 1000.0);
@@ -2722,7 +2506,6 @@ fn main() {
             LlmCommands::Extract { file, model } => cmd_llm_extract(&file, &model),
             LlmCommands::Recheck { file, model } => cmd_llm_recheck(&file, &model),
         },
-        Commands::Resolve { full } => cmd_resolve(full),
         Commands::Sync => cmd_sync(),
     }
 }

@@ -55,9 +55,7 @@ pub struct Options {
     pub only_changes: bool,
     pub dedup: bool,
     pub inconsistency_log: Option<String>,
-    /// Print canonical URIs alongside event lines. Requires the walker to be
-    /// scoped to `.lex/extract/**/*.spo` only (which it now is by default —
-    /// `extraction.log.spo` is excluded because it lives outside `extract/`).
+    /// Print canonical URIs alongside event lines.
     pub canonical: bool,
 }
 

@@ -1,17 +1,15 @@
 //! N-Quad / N-Triple encoding and generation.
 //!
-//! Low-level escapers (`nq_escape`, `uri_encode_path`) plus the four big
-//! N-Quad generators that produce git-lex's "now" view of the world:
+//! Low-level escapers (`nq_escape`, `uri_encode_path`) plus the N-Quad
+//! generators that produce git-lex's "now" view of the world:
 //!
 //! - `generate_git_nquads` — git-layer triples (commits, tree, refs, blame,
 //!   changesets, language detection) across multiple named graphs.
 //! - `generate_frontmatter_nquads` — the "now" graph: current-state frontmatter
-//!   extraction, body wikilinks, @mentions, commit-message mentions/links.
+//!   extraction, body wikilinks.
 //! - `load_lex_nquads` — slurp any `.lex/**/*.nq` files the user wrote by hand.
-//! - `compile_extraction_log` — fold all `.spo` sidecars into a single
-//!   deterministic `extraction.log.spo` (blobhash + relpath + line).
 //!
-//! Peeled out of `main.rs` during modularization. No behavior changes.
+//! Peeled out of `main.rs` during modularization.
 
 use std::collections::{HashMap, HashSet};
 use std::fs;
@@ -860,106 +858,3 @@ pub(crate) fn build_slug_path_indexes(
     (slug_index, path_index)
 }
 
-/// Compile extraction log from all .spo sidecar files.
-/// Prepends blobhash/filepath to each line for grounding.
-pub(crate) fn compile_extraction_log() {
-    let root = find_git_root().unwrap();
-    let extract_dir = root.join(".lex").join("extract");
-    let log_path = root.join(".lex").join("extraction.log.spo");
-
-    // Build blob hash lookup from git index
-    let repo = git2::Repository::discover(".").ok();
-    let blob_map: HashMap<String, String> = repo.as_ref().map(|r| {
-        let mut map = HashMap::new();
-        if let Ok(index) = r.index() {
-            for entry in index.iter() {
-                let path = String::from_utf8_lossy(&entry.path).to_string();
-                let hash = entry.id.to_string();
-                let short = hash[..8.min(hash.len())].to_string();
-                map.insert(path, short);
-            }
-        }
-        map
-    }).unwrap_or_default();
-
-    let mut all_spo_lines: Vec<String> = Vec::new();
-
-    // Walk .spo files, derive source file path from sidecar path
-    fn walk_spo(dir: &std::path::Path, extract_dir: &std::path::Path, blob_map: &HashMap<String, String>, lines: &mut Vec<String>) {
-        if let Ok(entries) = fs::read_dir(dir) {
-            for entry in entries.filter_map(|e| e.ok()) {
-                let path = entry.path();
-                if path.is_dir() {
-                    walk_spo(&path, extract_dir, blob_map, lines);
-                } else if path.extension().is_some_and(|e| e == "spo") {
-                    // Derive source file path: strip extract_dir prefix and .fm.spo/.llm.spo suffix
-                    let rel = path.strip_prefix(extract_dir).unwrap_or(&path);
-                    let rel_str = rel.to_string_lossy().to_string();
-                    // Strip extractor suffix: filename.ext.{extractor}.spo → filename.ext
-                    let source_path = if let Some(pos) = rel_str.rfind(".spo") {
-                        let without_spo = &rel_str[..pos];
-                        // Find the second-to-last dot (the extractor separator)
-                        if let Some(ext_pos) = without_spo.rfind('.') {
-                            // Check if what's between the dots looks like an extractor name
-                            // (not a file extension like .md)
-                            let maybe_ext = &without_spo[ext_pos + 1..];
-                            if maybe_ext == "fm" || maybe_ext.contains('-') || maybe_ext.len() > 5 {
-                                without_spo[..ext_pos].to_string()
-                            } else {
-                                without_spo.to_string()
-                            }
-                        } else {
-                            without_spo.to_string()
-                        }
-                    } else {
-                        rel_str.clone()
-                    };
-
-                    let blob_hash = blob_map.get(&source_path)
-                        .cloned()
-                        .unwrap_or_else(|| "00000000".to_string());
-
-                    let file_id = format!("{}/{}", blob_hash, source_path);
-
-                    if let Ok(content) = fs::read_to_string(&path) {
-                        for line in content.lines() {
-                            if !line.is_empty() && !line.starts_with('#') {
-                                lines.push(format!("{} | {}", file_id, line));
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-    if extract_dir.exists() {
-        walk_spo(&extract_dir, &extract_dir, &blob_map, &mut all_spo_lines);
-    }
-
-    // Sort for deterministic output (canonical ordering)
-    all_spo_lines.sort();
-    all_spo_lines.dedup();
-
-    let new_log = if all_spo_lines.is_empty() {
-        String::new()
-    } else {
-        all_spo_lines.join("\n") + "\n"
-    };
-    let old_log = fs::read_to_string(&log_path).unwrap_or_default();
-
-    if new_log != old_log {
-        fs::write(&log_path, &new_log).expect("failed to write extraction.log.spo");
-        let new_count = all_spo_lines.len();
-        let old_count = old_log.lines().filter(|l| !l.is_empty()).count();
-        let added = new_count as i64 - old_count as i64;
-        if added > 0 {
-            eprintln!("Extraction log: {} assertions (+{})", new_count, added);
-        } else if added < 0 {
-            eprintln!("Extraction log: {} assertions ({})", new_count, added);
-        } else {
-            eprintln!("Extraction log: {} assertions (content changed)", new_count);
-        }
-    } else {
-        eprintln!("Extraction log: {} assertions (unchanged)", all_spo_lines.len());
-    }
-}
