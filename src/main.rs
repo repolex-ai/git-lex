@@ -1479,33 +1479,45 @@ fn cmd_validate() -> bool {
     let mut files = Vec::new();
     walk_md(&root, &mut files);
 
-    // Initialize rudof
-    let config = match rudof_lib::RudofConfig::new() {
+    // Parse SHACL shapes into compiled schema (once)
+    use rudof_rdf::rdf_core::RDFFormat;
+    use rudof_rdf::rdf_impl::{InMemoryGraph, ReaderMode};
+    use sparql_service::RdfData;
+    use shacl_rdf::ShaclParser;
+    use shacl_ir::compiled::schema_ir::SchemaIR as ShaclSchemaIR;
+    use shacl_validation::shacl_processor::{GraphValidation, ShaclProcessor, ShaclValidationMode};
+    use shacl_validation::store::Graph;
+
+    let shapes_graph = match InMemoryGraph::from_reader(
+        &mut shapes_ttl.as_bytes(), "shapes", &RDFFormat::Turtle, None, &ReaderMode::Lax,
+    ) {
+        Ok(g) => g,
+        Err(e) => {
+            eprintln!("Failed to parse SHACL shapes: {}", e);
+            return true;
+        }
+    };
+    let shapes_rdf = match RdfData::from_graph(shapes_graph) {
+        Ok(d) => d,
+        Err(e) => {
+            eprintln!("Failed to load SHACL shapes: {}", e);
+            return true;
+        }
+    };
+    let shapes_schema = match ShaclParser::new(shapes_rdf).parse() {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("Failed to parse SHACL schema: {}", e);
+            return true;
+        }
+    };
+    let compiled_shapes = match ShaclSchemaIR::compile(&shapes_schema) {
         Ok(c) => c,
         Err(e) => {
-            eprintln!("Failed to create rudof config: {}", e);
+            eprintln!("Failed to compile SHACL shapes: {}", e);
             return true;
         }
     };
-    let mut rudof = match rudof_lib::Rudof::new(&config) {
-        Ok(r) => r,
-        Err(e) => {
-            eprintln!("Failed to create rudof instance: {}", e);
-            return true;
-        }
-    };
-
-    // Load shapes once
-    if let Err(e) = rudof.read_shacl(
-        &mut shapes_ttl.as_bytes(),
-        "shapes",
-        Some(&rudof_lib::ShaclFormat::Turtle),
-        None,
-        Some(&rudof_lib::ReaderMode::Lax),
-    ) {
-        eprintln!("Failed to load SHACL shapes: {}", e);
-        return true;
-    }
 
     let mut total_files = 0;
     let mut total_violations = 0;
@@ -1518,25 +1530,29 @@ fn cmd_validate() -> bool {
         };
         total_files += 1;
 
-        // Reset data, keep shapes cached
-        rudof.reset_data();
-
-        if let Err(e) = rudof.read_data(
-            &mut ttl.as_bytes(),
-            &filepath.to_string_lossy(),
-            Some(&rudof_lib::RDFFormat::Turtle),
-            None,
-            Some(&rudof_lib::ReaderMode::Strict),
-            Some(false),
+        // Parse this file's Turtle into RdfData
+        let data_graph = match InMemoryGraph::from_reader(
+            &mut ttl.as_bytes(), &filepath.to_string_lossy(), &RDFFormat::Turtle, None, &ReaderMode::Strict,
         ) {
-            eprintln!("  Parse error in {}: {}", filepath.display(), e);
-            continue;
-        }
+            Ok(g) => g,
+            Err(e) => {
+                eprintln!("  Parse error in {}: {}", filepath.display(), e);
+                continue;
+            }
+        };
+        let data_rdf = match RdfData::from_graph(data_graph) {
+            Ok(d) => d,
+            Err(e) => {
+                eprintln!("  Data load error in {}: {}", filepath.display(), e);
+                continue;
+            }
+        };
 
-        match rudof.validate_shacl(
-            Some(&rudof_lib::ShaclValidationMode::Native),
-            Some(&rudof_lib::ShapesGraphSource::CurrentSchema),
-        ) {
+        // Validate
+        let mut validator = GraphValidation::from_graph(
+            Graph::from_data(data_rdf), ShaclValidationMode::Native,
+        );
+        match ShaclProcessor::validate(&mut validator, &compiled_shapes) {
             Ok(report) => {
                 if !report.conforms() {
                     let relpath = filepath.strip_prefix(&root).unwrap_or(filepath);

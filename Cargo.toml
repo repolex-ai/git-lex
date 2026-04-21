@@ -29,7 +29,11 @@ regex = "1"
 oxiri = "0.2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-rudof_lib = "=0.2.8"
+shacl_validation = "0.2"
+shacl_ir = "0.2"
+shacl_rdf = "0.2"
+rudof_rdf = "0.2"
+sparql_service = "0.2"
 tree-sitter = "0.26"
 tree-sitter-md = { version = "0.5", features = ["parser"] }
 dateparser = "0.3"
