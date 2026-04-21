@@ -1660,24 +1660,10 @@ fn cmd_validate() -> bool {
         }
     };
 
-    // Load kit ontology TTL from .lex/ontology/{short}/
+    // Load SHACL shapes TTL from .lex/ontology/{short}/
+    // Shapes are self-contained — no ontology TTL needed for validation.
     let (_, _, short) = resolve_kit_spec(&kit);
     let ontology_dir = root.join(".lex").join("ontology").join(&short);
-    let ont_ttl = {
-        let primary = ontology_dir.join(format!("{}.ttl", short));
-        if primary.exists() {
-            fs::read_to_string(&primary).unwrap_or_default()
-        } else {
-            fs::read_dir(&ontology_dir).ok()
-                .and_then(|entries| entries.filter_map(|e| e.ok())
-                    .find(|e| e.path().extension().is_some_and(|ext| ext == "ttl")
-                        && !e.file_name().to_string_lossy().contains("shapes"))
-                    .and_then(|e| fs::read_to_string(e.path()).ok()))
-                .unwrap_or_default()
-        }
-    };
-
-    // Load SHACL shapes TTL from .lex/ontology/{short}/
     let shapes_ttl = {
         let shapes_path = ontology_dir.join(format!("{}-shapes.ttl", short));
         fs::read_to_string(&shapes_path).ok()
@@ -1690,9 +1676,6 @@ fn cmd_validate() -> bool {
             return true;
         }
     };
-
-    // Combine ontology + shapes for rudof (shapes reference ontology classes)
-    let combined_shapes = format!("{}\n{}", ont_ttl, shapes_ttl);
 
     // Find all .md files in the repo
     fn walk_md(dir: &std::path::Path, files: &mut Vec<PathBuf>) {
@@ -1728,7 +1711,7 @@ fn cmd_validate() -> bool {
 
     // Load shapes once
     if let Err(e) = rudof.read_shacl(
-        &mut combined_shapes.as_bytes(),
+        &mut shapes_ttl.as_bytes(),
         "shapes",
         Some(&rudof_lib::ShaclFormat::Turtle),
         None,
