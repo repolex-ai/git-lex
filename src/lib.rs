@@ -23,9 +23,11 @@ pub fn find_git_root() -> Option<PathBuf> {
     }
 }
 
-/// Path to the oxigraph store directory: `{repo_root}/.lex/oxigraph/`.
+/// Path to the oxigraph store directory: `{repo_root}/.git/lex/oxigraph/`.
+/// Lives under .git/ because the store is derived data (rebuildable from
+/// .spo sidecars) and should never be version-controlled.
 pub fn store_path() -> Option<PathBuf> {
-    find_git_root().map(|r| r.join(".lex").join("oxigraph"))
+    find_git_root().map(|r| r.join(".git").join("lex").join("oxigraph"))
 }
 
 /// Open the persistent store in read-only mode. Does not acquire the

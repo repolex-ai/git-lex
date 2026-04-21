@@ -380,10 +380,9 @@ fn cmd_init(directory: Option<String>, kit: Option<String>, dev: bool) {
         }
     }
 
-    // .lex/.gitignore — universal: ignore the local oxigraph store. This is
-    // a nested .gitignore scoped to .lex/, so it doesn't pollute the repo
-    // root's .gitignore file.
-    fs::write(lex_dir.join(".gitignore"), "oxigraph/\n").ok();
+    // Create .git/lex/ for derived data (oxigraph store, etc.)
+    let git_lex_dir = root.join(".git").join("lex");
+    fs::create_dir_all(&git_lex_dir).ok();
 
     // Claude Code kit needs a whitelist-style root .gitignore because it
     // runs against an existing project directory and only wants to track
@@ -464,7 +463,7 @@ fn cmd_init(directory: Option<String>, kit: Option<String>, dev: bool) {
             "# .lex/\n\nKnowledge graph managed by git-lex.\nKit: {}\n\n\
              - `extract/` — extraction sidecars (.spo)\n\
              - `ontology/` — ontology definitions\n\
-             - `oxigraph/` — local SPARQL store (gitignored)\n",
+             - `.git/lex/oxigraph/` — local SPARQL store\n",
             kit_name
         )).ok();
     }
@@ -927,7 +926,7 @@ fn open_store() -> Option<Store> {
 /// Create or open the persistent store.
 fn open_or_create_store() -> Store {
     let path = store_path().expect("not in a git repo");
-    fs::create_dir_all(&path).expect("failed to create .lex/oxigraph/");
+    fs::create_dir_all(&path).expect("failed to create .git/lex/oxigraph/");
     Store::open(&path).expect("failed to open store")
 }
 
@@ -2594,7 +2593,7 @@ fn cmd_history_verify(show: usize) {
     let base = base_uri();
     let history_graph = format!("<{}/history>", base);
 
-    let store_path_buf = root.join(".lex").join("oxigraph");
+    let store_path_buf = root.join(".git").join("lex").join("oxigraph");
     let store = match Store::open(&store_path_buf) {
         Ok(s) => s,
         Err(e) => {
@@ -2845,24 +2844,20 @@ fn cmd_nuke() {
 
     eprintln!("╔══════════════════════════════════════════════════════════╗");
     eprintln!("║  WARNING: This will completely remove git-lex from      ║");
-    eprintln!("║  this repo by deleting the .lex/ directory.             ║");
+    eprintln!("║  this repo by deleting .lex/ and .git/lex/.             ║");
     eprintln!("║                                                         ║");
     eprintln!("║  DELETED:                                               ║");
-    eprintln!("║    • .lex/oxigraph/    (SPARQL store)                   ║");
     eprintln!("║    • .lex/extract/     (extraction sidecars)            ║");
     eprintln!("║    • .lex/kit/         (installed kit)                  ║");
     eprintln!("║    • .lex/ontology/    (ontology files)                 ║");
     eprintln!("║    • .lex/repo.yml     (configuration)                  ║");
-    eprintln!("║    • Everything else in .lex/                           ║");
+    eprintln!("║    • .git/lex/         (SPARQL store)                   ║");
     eprintln!("║                                                         ║");
     eprintln!("║  NOT DELETED:                                           ║");
     eprintln!("║    • Your content files (markdown, etc.)                ║");
     eprintln!("║    • Git history (all commits preserved)                ║");
-    eprintln!("║    • .git/ directory                                    ║");
     eprintln!("║                                                         ║");
     eprintln!("║  You can re-initialize with: git lex init               ║");
-    eprintln!("║  To also remove git tracking:                           ║");
-    eprintln!("║    rm -rf .git                                          ║");
     eprintln!("╚══════════════════════════════════════════════════════════╝");
     eprint!("\nType 'nuke' to confirm: ");
 
@@ -2877,12 +2872,23 @@ fn cmd_nuke() {
     auto_commit_snapshot("pre-nuke");
 
     match fs::remove_dir_all(&lex_dir) {
-        Ok(_) => println!(".lex/ removed. git-lex is no longer active in this repo."),
+        Ok(_) => println!(".lex/ removed."),
         Err(e) => {
             eprintln!("Failed to remove .lex/: {}", e);
             exit(1);
         }
     }
+
+    // Also remove .git/lex/ (oxigraph store and other derived data)
+    let git_lex_dir = root.join(".git").join("lex");
+    if git_lex_dir.exists() {
+        match fs::remove_dir_all(&git_lex_dir) {
+            Ok(_) => println!(".git/lex/ removed."),
+            Err(e) => eprintln!("Warning: failed to remove .git/lex/: {}", e),
+        }
+    }
+
+    println!("git-lex is no longer active in this repo.");
 }
 
 // ─── kit-update ────────────────────────────────────────────────
