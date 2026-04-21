@@ -1,6 +1,6 @@
 //! Kit configuration, TTL-loading, and install pipeline.
 //!
-//! Three concerns bundled because they are all "things we do with a kit":
+//! Four concerns:
 //!
 //! 1. **Config readers** — `kit_config_init_prompts`, `kit_config_bool`,
 //!    `kit_config_str`, `read_repo_yml_fields`: read-only access to
@@ -10,14 +10,10 @@
 //!    store (used by SHACL-shape generation).
 //! 3. **Install pipeline** — `fetch_kit_from_github`,
 //!    `collect_init_variables`, `install_scaffold_files_from`,
-//!    `install_scaffold_files_from_skip_existing`, `install_asset_files`,
-//!    `substitute_vars`, `copy_dir_recursive`, `kit_install_dir`,
-//!    `AssetInstallReport`: everything that turns a kit spec into
-//!    on-disk scaffolded files.
-//!
-//! Whether kit management ultimately stays in git-lex is an open question
-//! (see product notes in Day 8 handoff). Bundling it here makes an
-//! eventual eviction to a separate binary/crate straightforward.
+//!    `install_scaffold_files_from_skip_existing`: everything that turns
+//!    a kit spec into on-disk scaffolded files.
+//! 4. **Kit lifecycle** — `add_kit`, `remove_kit`: add/remove kits from
+//!    a repo. Stubs for now.
 
 use oxigraph::io::RdfFormat;
 use oxigraph::store::Store;
@@ -665,4 +661,22 @@ pub(crate) fn copy_dir_recursive(src: &std::path::Path, dest: &std::path::Path) 
         }
     }
     Ok(())
+}
+
+// ─── kit lifecycle ─────────────────────────────────────────────
+
+/// Add a kit to an existing repo. Downloads the kit, installs ontology
+/// and scaffold files, updates repo.yml.
+///
+/// Not yet implemented — currently handled inline by cmd_init.
+pub(crate) fn add_kit(_kit_spec: &str) {
+    unimplemented!("kit::add_kit — not yet extracted from cmd_init");
+}
+
+/// Remove a kit from a repo. Removes kit-installed files (ontology,
+/// shapes, scaffold), updates repo.yml.
+///
+/// Not yet implemented.
+pub(crate) fn remove_kit(_kit_spec: &str) {
+    unimplemented!("kit::remove_kit — not yet implemented");
 }
