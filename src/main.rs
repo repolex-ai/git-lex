@@ -55,28 +55,6 @@ struct Cli {
 }
 
 #[derive(Subcommand)]
-enum LlmCommands {
-    /// List files needing LLM extraction (new, changed, fresh)
-    List,
-    /// Extract entities and relationships from a file (two-step)
-    Extract {
-        /// File path to extract
-        file: String,
-        /// Model identifier for the .spo filename (e.g., claude-haiku-4-5-20251001)
-        #[arg(long)]
-        model: String,
-    },
-    /// Re-check extraction after file changed (uses old extraction + diff)
-    Recheck {
-        /// File path to recheck
-        file: String,
-        /// Model identifier for the .spo filename
-        #[arg(long)]
-        model: String,
-    },
-}
-
-#[derive(Subcommand)]
 enum Commands {
     /// Initialize .lex/ in a repo (defaults to current directory)
     Init {
@@ -124,11 +102,6 @@ enum Commands {
     Dump,
     /// Sync git data + .lex/*.nq into the persistent store
     Sync,
-    /// LLM agent tools
-    Llm {
-        #[command(subcommand)]
-        command: LlmCommands,
-    },
     /// Create a new document from the kit ontology
     Create {
         /// Class name (e.g., journal, task, message)
@@ -911,226 +884,7 @@ fn open_or_create_store() -> Store {
 }
 
 
-// ─── git lex llm ───────────────────────────────────────────────
-
-fn cmd_llm_list() {
-    let root = match find_git_root() {
-        Some(r) => r,
-        None => {
-            eprintln!("fatal: not a git repository");
-            exit(1);
-        }
-    };
-
-    let repo = match git2::Repository::discover(".") {
-        Ok(r) => r,
-        Err(_) => {
-            eprintln!("fatal: cannot open git repository");
-            exit(1);
-        }
-    };
-
-    // Get current file list with blob hashes from index
-    let index = repo.index().expect("failed to read index");
-    let mut current_files: HashMap<String, String> = HashMap::new();
-    for entry in index.iter() {
-        let path = String::from_utf8_lossy(&entry.path).to_string();
-        let pl = path.to_lowercase();
-        if (pl.ends_with(".md") || pl.ends_with(".txt"))
-            && !pl.starts_with(".lex/")
-            && !pl.starts_with(".git")
-        {
-            let hash = entry.id.to_string();
-            let short_hash = hash[..8.min(hash.len())].to_string();
-            current_files.insert(path, short_hash);
-        }
-    }
-
-    // Check which files have .llm.spo sidecars and what blob hash they contain
-    let extract_dir = root.join(".lex").join("extract");
-    let mut new_files = Vec::new();
-    let mut changed_files: Vec<&str> = Vec::new();
-    let mut fresh_files = Vec::new();
-
-    for (path, current_hash) in &current_files {
-        // Check for any non-fm .spo sidecar for this file
-        let spo_dir = extract_dir.join(std::path::Path::new(path).parent().unwrap_or(std::path::Path::new("")));
-        let fname = std::path::Path::new(path).file_name().unwrap_or_default().to_string_lossy();
-        let has_llm_spo = spo_dir.exists() && fs::read_dir(&spo_dir)
-            .map(|entries| entries.filter_map(|e| e.ok()).any(|e| {
-                let n = e.file_name().to_string_lossy().to_string();
-                n.starts_with(&format!("{}.", fname)) && n.ends_with(".spo") && !n.ends_with(".fm.spo")
-            }))
-            .unwrap_or(false);
-        let spo_path = if has_llm_spo {
-            // Find the actual spo file to check blob hash
-            fs::read_dir(&spo_dir)
-                .ok()
-                .and_then(|entries| entries.filter_map(|e| e.ok()).find(|e| {
-                    let n = e.file_name().to_string_lossy().to_string();
-                    n.starts_with(&format!("{}.", fname)) && n.ends_with(".spo") && !n.ends_with(".fm.spo")
-                }))
-                .map(|e| e.path())
-                .unwrap_or_else(|| extract_dir.join("nonexistent"))
-        } else {
-            extract_dir.join("nonexistent")
-        };
-        if !has_llm_spo {
-            new_files.push(path.as_str());
-        } else {
-            // Sidecar exists — mark as fresh (blob-hash staleness check removed
-            // with extraction.log.spo; sidecars are the source of truth).
-            fresh_files.push(path.as_str());
-        }
-    }
-
-    new_files.sort();
-    changed_files.sort();
-    fresh_files.sort();
-
-    if !new_files.is_empty() {
-        println!("New ({} files — never extracted):", new_files.len());
-        for f in &new_files {
-            println!("  {}", f);
-        }
-        println!();
-    }
-
-    if !changed_files.is_empty() {
-        println!("Changed ({} files — blob hash differs, needs re-extraction):", changed_files.len());
-        for f in &changed_files {
-            println!("  {}", f);
-        }
-        println!();
-    }
-
-    if !fresh_files.is_empty() {
-        println!("Fresh ({} files — up to date):", fresh_files.len());
-        for f in &fresh_files {
-            println!("  {}", f);
-        }
-        println!();
-    }
-
-    println!("Summary: {} new, {} changed, {} fresh", new_files.len(), changed_files.len(), fresh_files.len());
-}
-
-fn cmd_llm_extract(file: &str, model: &str) {
-    let root = match find_git_root() {
-        Some(r) => r,
-        None => {
-            eprintln!("fatal: not a git repository");
-            exit(1);
-        }
-    };
-
-    // Read the file content
-    let filepath = root.join(file);
-    let content = match fs::read_to_string(&filepath) {
-        Ok(c) => c,
-        Err(e) => {
-            eprintln!("Cannot read {}: {}", file, e);
-            exit(1);
-        }
-    };
-
-    let spo_path = format!(".lex/extract/{}.{}.spo", file, model);
-
-    println!("Extract entities and relationships from this document.");
-    println!();
-    println!("Step 1: Identify all entities (things, concepts, technologies, people, systems, components).");
-    println!("Step 2: For those entities, output triples in this format, one per line:");
-    println!("  subject | predicate | object");
-    println!();
-    println!("Include: isA (type), properties (attributes), relationships between entities.");
-    println!("Use lowercase-with-dashes for names. Stay grounded to the actual text.");
-    println!("Sort output alphabetically by subject, then predicate, then object.");
-    println!();
-    println!("--- FILE: {} ---", file);
-    println!("{}", content);
-    println!("--- END FILE ---");
-    println!();
-    println!("Write the output to: {}", spo_path);
-}
-
-fn cmd_llm_recheck(file: &str, model: &str) {
-    let root = match find_git_root() {
-        Some(r) => r,
-        None => {
-            eprintln!("fatal: not a git repository");
-            exit(1);
-        }
-    };
-
-    // Get current blob hash
-    let repo = git2::Repository::discover(".").expect("failed to open repo");
-    let index = repo.index().expect("failed to read index");
-    let entry = index.get_path(std::path::Path::new(file), 0);
-    let blob_hash = match entry {
-        Some(e) => {
-            let hash = e.id.to_string();
-            hash[..8.min(hash.len())].to_string()
-        }
-        None => {
-            eprintln!("File not found in git index: {}", file);
-            exit(1);
-        }
-    };
-
-    let file_id = format!("{}/{}", blob_hash, file);
-
-    // Read old extraction
-    let spo_path = root.join(".lex").join("extract").join(format!("{}.{}.spo", file, model));
-    let old_extraction = fs::read_to_string(&spo_path).unwrap_or_default();
-
-    if old_extraction.is_empty() {
-        eprintln!("No existing extraction for {} by {}. Use 'git lex llm extract' instead.", file, model);
-        exit(1);
-    }
-
-    // Read the current file content
-    let filepath = root.join(file);
-    let content = fs::read_to_string(&filepath).unwrap_or_default();
-
-    // Get the diff
-    let diff_output = Command::new("git")
-        .args(["diff", "HEAD", "--", file])
-        .output();
-
-    let diff = diff_output
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
-        .unwrap_or_default();
-
-    println!("Re-check extraction after file change.");
-    println!();
-    println!("Previous extraction:");
-    println!("{}", old_extraction);
-    println!();
-    if !diff.is_empty() {
-        println!("Changes since last extraction:");
-        println!("{}", diff);
-    } else {
-        println!("--- FILE: {} ---", file);
-        println!("{}", content);
-        println!("--- END FILE ---");
-    }
-    println!();
-    println!("Update the triples. Keep unchanged ones, add/remove/modify based on changes.");
-    println!("Sort output alphabetically by subject, then predicate, then object.");
-    println!();
-    println!("Write the output to: .lex/extract/{}.{}.spo", file, model);
-}
-
 // ─── git lex create ─────────────────────────────────────────────
-
-// get_kit, resolve_kit_spec, kit_install_dir_for_spec imported from git_lex lib
-
-
-// ─── Ontology Builder ──────���───────────────────────────────────
-// Loads kit TTL into oxigraph, queries OWL constraints, generates SHACL shapes.
-// Single source of truth: the TTL. Shapes are derived artifacts.
 
 
 
@@ -2555,11 +2309,6 @@ fn main() {
         Commands::HistoryVerify { show } => {
             cmd_history_verify(show);
         }
-        Commands::Llm { command } => match command {
-            LlmCommands::List => cmd_llm_list(),
-            LlmCommands::Extract { file, model } => cmd_llm_extract(&file, &model),
-            LlmCommands::Recheck { file, model } => cmd_llm_recheck(&file, &model),
-        },
         Commands::Sync => cmd_sync(),
     }
 }
