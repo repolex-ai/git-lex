@@ -1431,22 +1431,52 @@ fn cmd_validate() -> bool {
         }
     };
 
-    // Load SHACL shapes TTL from .lex/ontology/{short}/
-    // Shapes are self-contained — no ontology TTL needed for validation.
+    // Collect SHACL shapes TTL from both .lex/ontology/{short}/ (kit-owned,
+    // built at kit install time) and _ontology/ (agent-owned, built at sync
+    // time by build_adaptive_shapes). Concatenated into one shapes graph —
+    // each TTL carries its own @prefix declarations, so merging is safe.
     let (_, _, short) = resolve_kit_spec(&kit);
-    let ontology_dir = root.join(".lex").join("ontology").join(&short);
-    let shapes_ttl = {
-        let shapes_path = ontology_dir.join(format!("{}-shapes.ttl", short));
-        fs::read_to_string(&shapes_path).ok()
-    };
+    let mut shapes_sources: Vec<(PathBuf, String)> = Vec::new();
 
-    let shapes_ttl = match shapes_ttl {
-        Some(s) => s,
-        None => {
-            println!("No SHACL shapes found for kit '{}' — skipping validation.", kit);
-            return true;
+    // Kit shapes
+    let kit_shapes = root.join(".lex").join("ontology").join(&short)
+        .join(format!("{}-shapes.ttl", short));
+    if let Ok(ttl) = fs::read_to_string(&kit_shapes) {
+        shapes_sources.push((kit_shapes, ttl));
+    }
+
+    // Adaptive shapes from _ontology/{name}/{name}-shapes.ttl
+    let adaptive_root = root.join("_ontology");
+    if adaptive_root.exists() {
+        if let Ok(entries) = fs::read_dir(&adaptive_root) {
+            for entry in entries.flatten() {
+                let subdir = entry.path();
+                if !subdir.is_dir() { continue; }
+                if let Ok(files) = fs::read_dir(&subdir) {
+                    for f in files.flatten() {
+                        let p = f.path();
+                        if p.file_name()
+                            .is_some_and(|n| n.to_string_lossy().ends_with("-shapes.ttl"))
+                        {
+                            if let Ok(ttl) = fs::read_to_string(&p) {
+                                shapes_sources.push((p, ttl));
+                            }
+                        }
+                    }
+                }
+            }
         }
-    };
+    }
+
+    if shapes_sources.is_empty() {
+        println!("No SHACL shapes found for kit '{}' — skipping validation.", kit);
+        return true;
+    }
+
+    let shapes_ttl: String = shapes_sources.iter()
+        .map(|(_, ttl)| ttl.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
 
     // Find all .md files in the repo
     fn walk_md(dir: &std::path::Path, files: &mut Vec<PathBuf>) {
@@ -1810,6 +1840,15 @@ fn cmd_sync() {
                 store.clear_graph(&oxigraph::model::GraphName::from(graph)).ok();
             }
         }
+    }
+
+    // Regenerate SHACL shapes for agent-authored ontologies in _ontology/.
+    // Static kit ontologies under .lex/ontology/ have their shapes built at
+    // kit install/update time; _ontology/ TTLs change at runtime (AutoKnow),
+    // so their shapes must be regenerated on every sync.
+    let (adaptive_ok, adaptive_fail) = crate::shacl::build_adaptive_shapes();
+    for (ttl, err) in &adaptive_fail {
+        eprintln!("warning: adaptive shapes failed for {}: {}", ttl.display(), err);
     }
 
     // Load ontology TBoxes (upper + installed kits) into named graphs.
@@ -2300,6 +2339,9 @@ fn cmd_sync() {
         elapsed.as_secs_f64() * 1000.0
     );
     println!("  Virtual: {} git + {} now + {} TBox files", git_count, fm_count, tbox_count);
+    if !adaptive_ok.is_empty() || !adaptive_fail.is_empty() {
+        println!("  Adaptive shapes: {} built, {} failed", adaptive_ok.len(), adaptive_fail.len());
+    }
     if new_assertions > 0 || retracted > 0 {
         println!(
             "  Sync /sync/{}/: +{} assertions, -{} retracted ({} quads)",
