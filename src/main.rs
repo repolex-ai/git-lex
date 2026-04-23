@@ -85,6 +85,10 @@ enum Commands {
     Query {
         /// The SPARQL query string
         query: String,
+        /// Emit SPARQL 1.1 JSON Results format on stdout. Suppresses the
+        /// human-readable table and the trailing stats line (stats go to stderr).
+        #[arg(long)]
+        json: bool,
     },
     /// Extract frontmatter from .md files → write .spo sidecars + compile log
     #[command(hide = true)]
@@ -102,12 +106,26 @@ enum Commands {
     Dump,
     /// Sync git data + .lex/*.nq into the persistent store
     Sync,
+    /// List all document classes defined across the repo's installed shapes.
+    /// Walks both `.lex/ontology/` (kit-installed) and `_ontology/`
+    /// (agent-authored/adaptive) — so `list` sees every class the repo knows,
+    /// not just the classes from the configured kit.
+    List {
+        /// Emit a JSON array on stdout instead of a human list.
+        /// Each entry: {prefix, class, namespace, uri}.
+        #[arg(long)]
+        json: bool,
+    },
     /// Create a new document from the kit ontology
     Create {
         /// Class name (e.g., journal, task, message)
         doctype: String,
         /// Instance ID — becomes the filename and classId value (e.g., "day-1")
         instance_id: Option<String>,
+        /// Emit a JSON summary on stdout instead of a human banner.
+        /// Fields: ok, path, uri, class, id.
+        #[arg(long)]
+        json: bool,
     },
     /// Save changes (add + commit + sync in one command)
     Save {
@@ -884,25 +902,74 @@ fn open_or_create_store() -> Store {
 }
 
 
+// ─── git lex list ──────────────────────────────────────────────
+
+/// Walk every installed SHACL shape file and emit the class list.
+/// Covers both kit-installed shapes (.lex/ontology/*/*-shapes.ttl) and
+/// adaptive shapes (_ontology/**/*-shapes.ttl). Output is grouped by prefix.
+fn cmd_list(json: bool) {
+    let classes = ontology::all_classes();
+
+    if json {
+        let arr: Vec<serde_json::Value> = classes.iter().map(|(prefix, name, ns)| {
+            serde_json::json!({
+                "prefix": prefix,
+                "class": name,
+                "namespace": ns,
+                "uri": format!("{}{}", ns, name),
+            })
+        }).collect();
+        println!("{}", serde_json::to_string(&arr).unwrap());
+        return;
+    }
+
+    if classes.is_empty() {
+        println!("No classes found. Install a kit with `git lex init --kit <name>` or add shapes under _ontology/.");
+        return;
+    }
+
+    // Group by prefix for readability.
+    let mut by_prefix: std::collections::BTreeMap<String, Vec<String>> =
+        std::collections::BTreeMap::new();
+    for (prefix, name, _ns) in classes {
+        by_prefix.entry(prefix).or_default().push(name);
+    }
+
+    for (prefix, mut names) in by_prefix {
+        names.sort();
+        println!("{} ({} classes):", prefix, names.len());
+        for n in names {
+            println!("  {}:{}", prefix, n);
+        }
+    }
+}
+
 // ─── git lex create ─────────────────────────────────────────────
 
+fn cmd_create(doctype: &str, instance_id: Option<&str>, json: bool) {
+    // Emit an error in the right format, then exit. Used for all failure
+    // paths so --json consumers don't have to parse human text.
+    let fail = |code: &str, msg: String| -> ! {
+        if json {
+            let out = serde_json::json!({"ok": false, "error": code, "message": msg});
+            eprintln!("{}", serde_json::to_string(&out).unwrap());
+        } else {
+            eprintln!("{}", msg);
+        }
+        exit(1);
+    };
 
-
-fn cmd_create(doctype: &str, instance_id: Option<&str>) {
     let root = match find_git_root() {
         Some(r) => r,
-        None => {
-            eprintln!("fatal: not a git repository");
-            exit(1);
-        }
+        None => fail("not-a-repo", "fatal: not a git repository".to_string()),
     };
 
     let kit = match get_kit() {
         Some(k) => k,
-        None => {
-            eprintln!("No kit configured. Run 'git lex init --kit <name>' first.");
-            exit(1);
-        }
+        None => fail(
+            "no-kit",
+            "No kit configured. Run 'git lex init --kit <name>' first.".to_string(),
+        ),
     };
 
     // Find valid types
@@ -915,11 +982,13 @@ fn cmd_create(doctype: &str, instance_id: Option<&str>) {
         Some((name, props)) => (name.clone(), props.clone()),
         None => {
             let valid: Vec<String> = kit_types.iter().map(|(n, _)| n.clone()).collect();
-            eprintln!(
-                "Unknown document type '{}'. Valid types for kit '{}': {}",
-                doctype, kit, valid.join(", ")
+            fail(
+                "unknown-doctype",
+                format!(
+                    "Unknown document type '{}'. Valid types for kit '{}': {}",
+                    doctype, kit, valid.join(", ")
+                ),
             );
-            exit(1);
         }
     };
 
@@ -947,8 +1016,7 @@ fn cmd_create(doctype: &str, instance_id: Option<&str>) {
     };
 
     if filepath.exists() {
-        eprintln!("File already exists: {}", display_path);
-        exit(1);
+        fail("exists", format!("File already exists: {}", display_path));
     }
 
     // Auto-generate agent email for Agent type
@@ -993,13 +1061,32 @@ fn cmd_create(doctype: &str, instance_id: Option<&str>) {
     fm.push_str("<!-- Write your content here -->\n");
 
     fs::write(&filepath, &fm).expect("failed to create document");
-    println!("Created: {}", display_path);
-    println!("Type: {}:{}", short, class_name);
-    if class_name == "Agent" {
-        println!("Agent ID: {}", agent_email);
-        println!("Use this as your git author: git -c user.email=\"{}\"", agent_email);
+
+    // Document URI = {repo base}/{path-relative-to-root}. Matches the scheme
+    // used by the nquad generator so the JSON payload matches what the
+    // extraction pipeline will produce on the next sync.
+    let base = base_uri();
+    let rel = filepath.strip_prefix(&root).unwrap_or(&filepath);
+    let uri = format!("{}/{}", base, rel.to_string_lossy().replace('\\', "/"));
+
+    if json {
+        let out = serde_json::json!({
+            "ok": true,
+            "path": display_path,
+            "uri": uri,
+            "class": format!("{}:{}", short, class_name),
+            "id": id_str,
+        });
+        println!("{}", serde_json::to_string(&out).unwrap());
+    } else {
+        println!("Created: {}", display_path);
+        println!("Type: {}:{}", short, class_name);
+        if class_name == "Agent" {
+            println!("Agent ID: {}", agent_email);
+            println!("Use this as your git author: git -c user.email=\"{}\"", agent_email);
+        }
+        println!("Edit the file, then run 'git lex save' to commit.");
     }
-    println!("Edit the file, then run 'git lex save' to commit.");
 }
 
 // ─── git lex save ──────────────────────────────────────────────
@@ -2111,14 +2198,69 @@ fn cmd_sync() {
 // add_prefixes imported from git_lex lib
 
 #[allow(deprecated)]
-fn run_query(store: &Store, query: &str, store_type: &str) {
+/// Serialize a SPARQL term to W3C SPARQL JSON binding format.
+/// https://www.w3.org/TR/sparql11-results-json/#select-encode-terms
+fn term_to_json(term: &Term) -> serde_json::Value {
+    match term {
+        Term::NamedNode(n) => serde_json::json!({
+            "type": "uri",
+            "value": n.as_str(),
+        }),
+        Term::BlankNode(b) => serde_json::json!({
+            "type": "bnode",
+            "value": b.as_str(),
+        }),
+        Term::Literal(l) => {
+            let mut obj = serde_json::Map::new();
+            obj.insert("type".to_string(), serde_json::Value::String("literal".to_string()));
+            obj.insert("value".to_string(), serde_json::Value::String(l.value().to_string()));
+            if let Some(lang) = l.language() {
+                obj.insert("xml:lang".to_string(), serde_json::Value::String(lang.to_string()));
+            } else {
+                let dt = l.datatype().as_str();
+                // W3C convention: only emit datatype if it's not the implicit xsd:string.
+                if dt != "http://www.w3.org/2001/XMLSchema#string" {
+                    obj.insert("datatype".to_string(), serde_json::Value::String(dt.to_string()));
+                }
+            }
+            serde_json::Value::Object(obj)
+        }
+        // Not standard SPARQL JSON — RDF 1.2 triple terms. Emit as a nested
+        // object with a "triple" type so consumers can detect and parse.
+        Term::Triple(t) => serde_json::json!({
+            "type": "triple",
+            "value": {
+                "subject": term_to_json_subject(&t.subject),
+                "predicate": term_to_json(&Term::NamedNode(t.predicate.clone())),
+                "object": term_to_json(&t.object),
+            },
+        }),
+    }
+}
+
+/// Subject terms in this oxigraph version are `NamedOrBlankNode` — no
+/// quoted-triple subjects yet. (RDF 1.2 triple terms are supported as
+/// objects only.)
+fn term_to_json_subject(subj: &oxigraph::model::NamedOrBlankNode) -> serde_json::Value {
+    use oxigraph::model::NamedOrBlankNode;
+    match subj {
+        NamedOrBlankNode::NamedNode(n) => term_to_json(&Term::NamedNode(n.clone())),
+        NamedOrBlankNode::BlankNode(b) => term_to_json(&Term::BlankNode(b.clone())),
+    }
+}
+
+fn run_query(store: &Store, query: &str, store_type: &str, json: bool) {
     let start = Instant::now();
     let prefixed = add_prefixes(query);
 
     let mut parsed_query = match oxigraph::sparql::Query::parse(&prefixed, None) {
         Ok(e) => e,
         Err(e) => {
-            eprintln!("SPARQL parse error: {}", e);
+            if json {
+                eprintln!("{}", serde_json::json!({"error": "parse", "message": e.to_string()}));
+            } else {
+                eprintln!("SPARQL parse error: {}", e);
+            }
             exit(1);
         }
     };
@@ -2127,7 +2269,11 @@ fn run_query(store: &Store, query: &str, store_type: &str) {
     let results = match store.query(parsed_query) {
         Ok(r) => r,
         Err(e) => {
-            eprintln!("SPARQL evaluation error: {}", e);
+            if json {
+                eprintln!("{}", serde_json::json!({"error": "eval", "message": e.to_string()}));
+            } else {
+                eprintln!("SPARQL evaluation error: {}", e);
+            }
             exit(1);
         }
     };
@@ -2141,70 +2287,109 @@ fn run_query(store: &Store, query: &str, store_type: &str) {
                 .map(|v| v.as_str().to_string())
                 .collect();
 
-            let mut all_rows = Vec::new();
-            for solution in solutions {
-                let solution = match solution {
-                    Ok(s) => s,
-                    Err(e) => {
-                        eprintln!("Error reading solution: {}", e);
-                        continue;
-                    }
-                };
-                count += 1;
-                let mut row = Vec::new();
-                for var in &vars {
-                    let val = solution
-                        .get(var.as_str())
-                        .map(|t| match t {
-                            Term::NamedNode(n) => n.as_str().to_string(),
-                            Term::Literal(l) => l.value().to_string(),
-                            Term::BlankNode(b) => format!("_:{}", b.as_str()),
-                            Term::Triple(t) => format!("<< {} {} {} >>", t.subject, t.predicate, t.object),
-                        })
-                        .unwrap_or_default();
-                    row.push(val);
-                }
-                all_rows.push(row);
-            }
-
-            if !all_rows.is_empty() {
-                // Compute column widths
-                let mut widths = vec![0; vars.len()];
-                for (i, var) in vars.iter().enumerate() {
-                    widths[i] = var.len();
-                }
-                for row in &all_rows {
-                    for (i, val) in row.iter().enumerate() {
-                        if val.len() > widths[i] {
-                            widths[i] = val.len();
+            if json {
+                // W3C SPARQL 1.1 Query Results JSON Format.
+                // Stream bindings directly — don't buffer for table layout.
+                let mut bindings: Vec<serde_json::Value> = Vec::new();
+                for solution in solutions {
+                    let solution = match solution {
+                        Ok(s) => s,
+                        Err(e) => {
+                            eprintln!("Error reading solution: {}", e);
+                            continue;
+                        }
+                    };
+                    count += 1;
+                    let mut binding = serde_json::Map::new();
+                    for var in &vars {
+                        if let Some(term) = solution.get(var.as_str()) {
+                            binding.insert(var.clone(), term_to_json(term));
                         }
                     }
+                    bindings.push(serde_json::Value::Object(binding));
                 }
-
-                // Print header
-                let mut header = String::new();
-                for (i, var) in vars.iter().enumerate() {
-                    header.push_str(&format!(" {:width$} |", var, width = widths[i]));
-                }
-                println!("|{} \n|{}", header, "-".repeat(header.len().saturating_sub(1)));
-
-                // Print rows
-                for row in &all_rows {
-                    let mut row_str = String::new();
-                    for (i, val) in row.iter().enumerate() {
-                        row_str.push_str(&format!(" {:width$} |", val, width = widths[i]));
-                    }
-                    println!("|{}", row_str);
-                }
+                let out = serde_json::json!({
+                    "head": { "vars": vars },
+                    "results": { "bindings": bindings },
+                });
+                println!("{}", serde_json::to_string(&out).unwrap());
             } else {
-                println!("(No results found)");
+                let mut all_rows = Vec::new();
+                for solution in solutions {
+                    let solution = match solution {
+                        Ok(s) => s,
+                        Err(e) => {
+                            eprintln!("Error reading solution: {}", e);
+                            continue;
+                        }
+                    };
+                    count += 1;
+                    let mut row = Vec::new();
+                    for var in &vars {
+                        let val = solution
+                            .get(var.as_str())
+                            .map(|t| match t {
+                                Term::NamedNode(n) => n.as_str().to_string(),
+                                Term::Literal(l) => l.value().to_string(),
+                                Term::BlankNode(b) => format!("_:{}", b.as_str()),
+                                Term::Triple(t) => format!("<< {} {} {} >>", t.subject, t.predicate, t.object),
+                            })
+                            .unwrap_or_default();
+                        row.push(val);
+                    }
+                    all_rows.push(row);
+                }
+
+                if !all_rows.is_empty() {
+                    // Compute column widths
+                    let mut widths = vec![0; vars.len()];
+                    for (i, var) in vars.iter().enumerate() {
+                        widths[i] = var.len();
+                    }
+                    for row in &all_rows {
+                        for (i, val) in row.iter().enumerate() {
+                            if val.len() > widths[i] {
+                                widths[i] = val.len();
+                            }
+                        }
+                    }
+
+                    // Print header
+                    let mut header = String::new();
+                    for (i, var) in vars.iter().enumerate() {
+                        header.push_str(&format!(" {:width$} |", var, width = widths[i]));
+                    }
+                    println!("|{} \n|{}", header, "-".repeat(header.len().saturating_sub(1)));
+
+                    // Print rows
+                    for row in &all_rows {
+                        let mut row_str = String::new();
+                        for (i, val) in row.iter().enumerate() {
+                            row_str.push_str(&format!(" {:width$} |", val, width = widths[i]));
+                        }
+                        println!("|{}", row_str);
+                    }
+                } else {
+                    println!("(No results found)");
+                }
             }
         }
         oxigraph::sparql::QueryResults::Boolean(b) => {
-            println!("{}", b);
+            if json {
+                println!("{}", serde_json::json!({"head": {}, "boolean": b}));
+            } else {
+                println!("{}", b);
+            }
             count = 1;
         }
         oxigraph::sparql::QueryResults::Graph(_) => {
+            if json {
+                eprintln!("{}", serde_json::json!({
+                    "error": "unsupported",
+                    "message": "CONSTRUCT/DESCRIBE JSON output not yet supported"
+                }));
+                exit(1);
+            }
             println!("CONSTRUCT/DESCRIBE queries not yet supported in output");
         }
     }
@@ -2218,10 +2403,10 @@ fn run_query(store: &Store, query: &str, store_type: &str) {
     );
 }
 
-fn cmd_query(query: String) {
+fn cmd_query(query: String, json: bool) {
     // Try persistent store first
     if let Some(store) = open_store() {
-        run_query(&store, &query, "persistent store");
+        run_query(&store, &query, "persistent store", json);
         return;
     }
 
@@ -2249,6 +2434,7 @@ fn cmd_query(query: String) {
         &store,
         &query,
         &format!("in-memory, loaded {} git + {} lex triples in {:.1}ms", git_count, lex_count, load_ms),
+        json,
     );
 }
 
@@ -2260,9 +2446,10 @@ fn main() {
     match cli.command {
         Commands::Init { directory, kit, dev } => cmd_init(directory, kit, dev),
         Commands::Status => cmd_status(),
-        Commands::Create { doctype, instance_id } => cmd_create(&doctype, instance_id.as_deref()),
+        Commands::Create { doctype, instance_id, json } => cmd_create(&doctype, instance_id.as_deref(), json),
+        Commands::List { json } => cmd_list(json),
         Commands::Save { message } => cmd_save(&message),
-        Commands::Query { query } => cmd_query(query),
+        Commands::Query { query, json } => cmd_query(query, json),
         Commands::Dump => {
             let git_nq = generate_git_nquads();
             let (fm_nq, _) = generate_frontmatter_nquads();
