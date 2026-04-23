@@ -414,10 +414,10 @@ pub(crate) fn load_lex_nquads() -> String {
 /// Extract frontmatter, body wikilinks, and @mentions from all .md/.txt files
 /// in the repo into the "now" graph. Also writes `.fm.spo` sidecars and scans
 /// commit messages for mentions/wikilinks.
-pub(crate) fn generate_frontmatter_nquads() -> String {
+pub(crate) fn generate_frontmatter_nquads() -> (String, u32) {
     let root = match find_git_root() {
         Some(r) => r,
-        None => return String::new(),
+        None => return (String::new(), 0),
     };
 
     let base = base_uri();
@@ -429,6 +429,7 @@ pub(crate) fn generate_frontmatter_nquads() -> String {
     // fm: namespace (wikilinks, mentions, etc are also here).
     let graph = format!("<{}/now>", base);
     let mut nq = String::new();
+    let mut total_errors: u32 = 0;
 
     // Build ObjectProperty lookup from kit ontology
     let obj_props = get_kit().map(|k| get_object_properties(&k)).unwrap_or_default();
@@ -572,7 +573,7 @@ pub(crate) fn generate_frontmatter_nquads() -> String {
         let mut emitted_types: HashSet<String> = HashSet::new();
 
         for line in &spo_lines {
-            emit_spo_line_nquads(
+            total_errors += emit_spo_line_nquads(
                 line,
                 &doc_uri,
                 &graph,
@@ -612,7 +613,7 @@ pub(crate) fn generate_frontmatter_nquads() -> String {
         }
     }
 
-    nq
+    (nq, total_errors)
 }
 
 /// Emit N-Quads for a single `.spo` line (`subject | predicate | object`).
@@ -645,14 +646,29 @@ pub(crate) fn emit_spo_line_nquads(
     prop_datatypes: &HashMap<String, String>,
     emitted_types: &mut HashSet<String>,
     out: &mut String,
-) {
+) -> u32 {
+    let mut errors: u32 = 0;
     let parts: Vec<&str> = line.splitn(3, " | ").collect();
     if parts.len() != 3 {
-        return;
+        return 0;
     }
     let subject = parts[0];
     let predicate = parts[1];
     let object = parts[2];
+
+    // Hard-fail: empty values produce empty literal triples — skip entirely
+    if object.trim().is_empty() {
+        return 0;
+    }
+
+    // Hard-fail: [[wikilinks]] in frontmatter values corrupt the graph
+    if predicate != "linksTo" && (object.contains("[[") || object.contains("]]")) {
+        eprintln!(
+            "error: {}: {} — wikilink syntax [[...]] is not allowed in frontmatter values. Write the bare slug instead.",
+            relpath_str, subject
+        );
+        return 1;
+    }
 
     if predicate == "linksTo" {
         // [[wikilink]] → lex:linksTo (resolved) or literal fallback (broken).
@@ -761,9 +777,10 @@ pub(crate) fn emit_spo_line_nquads(
                         }
                         resolve::ResolveResult::Rejected(msg) => {
                             eprintln!(
-                                "warning: {}: {} — {}",
+                                "error: {}: {} — {}",
                                 relpath_str, prop_seg, msg
                             );
+                            errors += 1;
                         }
                     }
                 }
@@ -815,6 +832,7 @@ pub(crate) fn emit_spo_line_nquads(
             }
         }
     }
+    errors
 }
 
 /// Build the slug→path and path indexes used for @mention / [[wikilink]]

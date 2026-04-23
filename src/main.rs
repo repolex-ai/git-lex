@@ -12,7 +12,8 @@ use tree_sitter;
 
 // Shared utilities (also used by git-lex-serve)
 use git_lex::{find_git_root, store_path, get_kit,
-              resolve_kit_spec, kit_install_dir_for_spec, add_prefixes};
+              resolve_kit_spec, kit_install_dir_for_spec, add_prefixes,
+              registry_add, registry_remove};
 
 // Frontmatter ObjectProperty value resolver. The rules for what is and isn't
 // allowed in frontmatter values are codified as tests in this module — read
@@ -20,6 +21,7 @@ use git_lex::{find_git_root, store_path, get_kit,
 mod resolve;
 mod harness;
 mod git;
+mod hooks;
 mod nquad;
 mod ontology;
 mod shacl;
@@ -110,9 +112,17 @@ enum Commands {
         query: String,
     },
     /// Extract frontmatter from .md files → write .spo sidecars + compile log
+    #[command(hide = true)]
     Extract,
     /// Validate documents against SHACL shapes from the kit ontology
+    #[command(hide = true)]
     Validate,
+    /// Internal: called by git hooks, not for direct use
+    #[command(hide = true)]
+    Hook {
+        /// Hook event name (e.g., pre-commit)
+        event: String,
+    },
     /// Dump all generated N-Quads to stdout (debug)
     Dump,
     /// Sync git data + .lex/*.nq into the persistent store
@@ -124,11 +134,10 @@ enum Commands {
     },
     /// Create a new document from the kit ontology
     Create {
-        /// Document type (e.g., decision, agent, task)
+        /// Class name (e.g., journal, task, message)
         doctype: String,
-        /// Title for the document
-        #[arg(long)]
-        title: Option<String>,
+        /// Instance ID — becomes the filename and classId value (e.g., "day-1")
+        instance_id: Option<String>,
     },
     /// Save changes (add + commit + sync in one command)
     Save {
@@ -740,21 +749,10 @@ fn cmd_init(directory: Option<String>, kit: Option<String>, dev: bool) {
     println!("  .lex/kit/         — installed kit");
     println!();
 
-    // Pre-commit hook: extract changed files → write sidecars → stage
-    let hooks_dir = root.join(".git").join("hooks");
-    fs::create_dir_all(&hooks_dir).ok();
-
-    let pre_commit_path = hooks_dir.join("pre-commit");
-    let pre_commit_content = "#!/bin/sh\ngit-lex extract\ngit add .lex/extract/ 2>/dev/null\ngit-lex validate || exit 1\n";
-    if !pre_commit_path.exists() || !fs::read_to_string(&pre_commit_path).unwrap_or_default().contains("git-lex extract") {
-        fs::write(&pre_commit_path, pre_commit_content).ok();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            fs::set_permissions(&pre_commit_path, fs::Permissions::from_mode(0o755)).ok();
-        }
-    }
-    println!("Installed pre-commit hook (extract on commit)");
+    // Pre-commit hook: extract + validate on every commit.
+    // Respects core.hooksPath (husky, lefthook, etc.)
+    hooks::install_hook();
+    println!("Installed pre-commit hook (extract + validate on commit)");
 
     // NO post-commit hook — sync is manual/background
 
@@ -806,6 +804,9 @@ fn cmd_init(directory: Option<String>, kit: Option<String>, dev: bool) {
             println!("Identity: {}", first_sha);
         }
     }
+
+    // Register this repo in the machine-level registry (~/.lex/repos)
+    registry_add(&root);
 }
 
 
@@ -1154,7 +1155,7 @@ fn cmd_llm_recheck(file: &str, model: &str) {
 
 
 
-fn cmd_create(doctype: &str, title: Option<&str>) {
+fn cmd_create(doctype: &str, instance_id: Option<&str>) {
     let root = match find_git_root() {
         Some(r) => r,
         None => {
@@ -1189,9 +1190,9 @@ fn cmd_create(doctype: &str, title: Option<&str>) {
         }
     };
 
-    // Generate filename in type-specific folder (folder name matches ontology class exactly)
-    let title_str = title.unwrap_or("untitled");
-    let slug = title_str
+    // Generate filename from instance ID (becomes both filename and classId value)
+    let id_str = instance_id.unwrap_or("untitled");
+    let slug = id_str
         .to_lowercase()
         .replace(' ', "-")
         .replace(|c: char| !c.is_alphanumeric() && c != '-', "");
@@ -1238,8 +1239,12 @@ fn cmd_create(doctype: &str, title: Option<&str>) {
             format!("  # {}", comment)
         };
 
-        // Auto-fill agentEmail for Agent type
-        if prop_name == "agentEmail" && class_name == "Agent" {
+        // Auto-fill the classId property from the instance ID
+        let class_id_field = format!("{}Id", class_name.chars().next().unwrap().to_lowercase().collect::<String>() + &class_name[1..]);
+        if prop_name == &class_id_field && instance_id.is_some() {
+            fm.push_str(&format!("{}: \"{}\"{}\n", key, id_str, comment_suffix));
+        } else if prop_name == "agentEmail" && class_name == "Agent" {
+            // Auto-fill agentEmail for Agent type
             fm.push_str(&format!("{}: \"{}\"{}\n", key, agent_email, comment_suffix));
         } else {
             match prop_type.as_str() {
@@ -1251,7 +1256,7 @@ fn cmd_create(doctype: &str, title: Option<&str>) {
     }
 
     fm.push_str("---\n\n");
-    fm.push_str(&format!("# {}\n\n", title_str));
+    fm.push_str(&format!("# {}\n\n", id_str));
     fm.push_str("<!-- Write your content here -->\n");
 
     fs::write(&filepath, &fm).expect("failed to create document");
@@ -1705,6 +1710,22 @@ async fn cmd_display(query: &str, port: u16) {
 // (future `.haiku.spo` subagent output) survive folder renames without
 // re-running extractors.
 
+/// Combined extraction + validation, called by the pre-commit hook.
+/// Runs sidecar cleanup, frontmatter extraction, markdown link extraction,
+/// stages artifacts, then SHACL validates. Exits non-zero if anything fails.
+fn hook_pre_commit() {
+    // Phase 1: extraction
+    cmd_extract();
+
+    // Stage extraction artifacts
+    let _ = Command::new("git").args(["add", ".lex/extract/"]).status();
+
+    // Phase 2: SHACL validation
+    if !cmd_validate() {
+        exit(1);
+    }
+}
+
 fn cmd_extract() {
     let start = Instant::now();
 
@@ -1732,7 +1753,7 @@ fn cmd_extract() {
     }
 
     // Run frontmatter extraction (writes .spo sidecars as a side effect)
-    generate_frontmatter_nquads();
+    let (_nq, extraction_errors) = generate_frontmatter_nquads();
 
     // Run markdown link extraction via tree-sitter
     extract_markdown_links();
@@ -1742,6 +1763,11 @@ fn cmd_extract() {
 
     let elapsed = start.elapsed();
     eprintln!("Extracted in {:.1}ms", elapsed.as_secs_f64() * 1000.0);
+
+    if extraction_errors > 0 {
+        eprintln!("fatal: {} frontmatter error(s) — fix before committing", extraction_errors);
+        std::process::exit(1);
+    }
 }
 
 fn cmd_sync() {
@@ -1819,7 +1845,10 @@ fn cmd_sync() {
         .expect("failed to load git triples");
 
     // Regenerate frontmatter + mention + wikilink triples
-    let fm_nq = generate_frontmatter_nquads();
+    let (fm_nq, fm_errors) = generate_frontmatter_nquads();
+    if fm_errors > 0 {
+        eprintln!("warning: {} frontmatter error(s) during sync — graph may be incomplete", fm_errors);
+    }
     let fm_count = fm_nq.lines().filter(|l| !l.is_empty()).count();
     if !fm_nq.is_empty() {
         store
@@ -2461,12 +2490,12 @@ fn main() {
     match cli.command {
         Commands::Init { directory, kit, dev } => cmd_init(directory, kit, dev),
         Commands::Status => cmd_status(),
-        Commands::Create { doctype, title } => cmd_create(&doctype, title.as_deref()),
+        Commands::Create { doctype, instance_id } => cmd_create(&doctype, instance_id.as_deref()),
         Commands::Save { message } => cmd_save(&message),
         Commands::Query { query } => cmd_query(query),
         Commands::Dump => {
             let git_nq = generate_git_nquads();
-            let fm_nq = generate_frontmatter_nquads();
+            let (fm_nq, _) = generate_frontmatter_nquads();
             let lex_nq = load_lex_nquads();
             print!("{}{}{}", git_nq, fm_nq, lex_nq);
         }
@@ -2474,6 +2503,15 @@ fn main() {
         Commands::Validate => {
             if !cmd_validate() {
                 exit(1);
+            }
+        }
+        Commands::Hook { event } => {
+            match event.as_str() {
+                "pre-commit" => hook_pre_commit(),
+                _ => {
+                    eprintln!("unknown hook event: {}", event);
+                    exit(1);
+                }
             }
         }
         Commands::Join { squad_path } => cmd_join(&squad_path),
@@ -2754,7 +2792,7 @@ fn cmd_history_verify(show: usize) {
             let check = line.trim_start();
             if check.is_empty() || check.starts_with('#') { continue; }
             let mut buf = String::new();
-            emit_spo_line_nquads(
+            let _errs = emit_spo_line_nquads(
                 line,
                 &doc_uri,
                 &emit_graph,
@@ -2884,6 +2922,9 @@ fn cmd_nuke() {
         return;
     }
 
+    // Remove our section from the pre-commit hook
+    hooks::remove_hook();
+
     // Auto-commit any uncommitted work first so nothing is lost.
     auto_commit_snapshot("pre-nuke");
 
@@ -2903,6 +2944,9 @@ fn cmd_nuke() {
             Err(e) => eprintln!("Warning: failed to remove .git/lex/: {}", e),
         }
     }
+
+    // Unregister from ~/.lex/repos
+    registry_remove(&root);
 
     println!("git-lex is no longer active in this repo.");
 }

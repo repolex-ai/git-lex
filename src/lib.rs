@@ -59,6 +59,135 @@ pub fn get_kit() -> Option<String> {
     None
 }
 
+// ─── Machine-level registry (~/.lex/repos) ───────��─────────────
+
+/// Path to the machine-level registry file: `~/.lex/repos`.
+/// One absolute path per line, each pointing to a git-lex repo on this machine.
+fn registry_path() -> Option<PathBuf> {
+    // HOME on macOS/Linux, USERPROFILE on Windows
+    std::env::var("HOME")
+        .or_else(|_| std::env::var("USERPROFILE"))
+        .ok()
+        .map(|h| PathBuf::from(h).join(".lex").join("repos"))
+}
+
+/// Register a repo path in `~/.lex/repos`. Idempotent — won't add duplicates.
+/// Creates `~/.lex/` if it doesn't exist.
+pub fn registry_add(repo_path: &std::path::Path) {
+    let reg = match registry_path() {
+        Some(p) => p,
+        None => return,
+    };
+    fs::create_dir_all(reg.parent().unwrap()).ok();
+
+    let canonical = match repo_path.canonicalize() {
+        Ok(p) => p.to_string_lossy().to_string(),
+        Err(_) => repo_path.to_string_lossy().to_string(),
+    };
+
+    // Read existing entries, check for duplicates
+    let existing = fs::read_to_string(&reg).unwrap_or_default();
+    for line in existing.lines() {
+        if line.trim() == canonical {
+            return; // already registered
+        }
+    }
+
+    // Append
+    let mut file = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&reg)
+        .expect("failed to open ~/.lex/repos");
+    use std::io::Write;
+    writeln!(file, "{}", canonical).ok();
+}
+
+/// Remove a repo path from `~/.lex/repos`. No-op if not found.
+pub fn registry_remove(repo_path: &std::path::Path) {
+    let reg = match registry_path() {
+        Some(p) => p,
+        None => return,
+    };
+
+    let canonical = match repo_path.canonicalize() {
+        Ok(p) => p.to_string_lossy().to_string(),
+        Err(_) => repo_path.to_string_lossy().to_string(),
+    };
+
+    let existing = match fs::read_to_string(&reg) {
+        Ok(s) => s,
+        Err(_) => return,
+    };
+
+    let filtered: Vec<&str> = existing.lines()
+        .filter(|l| l.trim() != canonical)
+        .collect();
+    fs::write(&reg, filtered.join("\n") + "\n").ok();
+}
+
+/// Check if a repo path is already in `~/.lex/repos`.
+pub fn registry_contains(repo_path: &std::path::Path) -> bool {
+    let reg = match registry_path() {
+        Some(p) => p,
+        None => return false,
+    };
+
+    let canonical = match repo_path.canonicalize() {
+        Ok(p) => p.to_string_lossy().to_string(),
+        Err(_) => repo_path.to_string_lossy().to_string(),
+    };
+
+    let existing = fs::read_to_string(&reg).unwrap_or_default();
+    existing.lines().any(|l| l.trim() == canonical)
+}
+
+/// Prune stale entries from `~/.lex/repos`. Removes any path where the
+/// directory no longer exists or no longer contains a `.lex/` subdirectory.
+/// Returns the number of entries removed.
+pub fn registry_check() -> usize {
+    let reg = match registry_path() {
+        Some(p) => p,
+        None => return 0,
+    };
+
+    let existing = match fs::read_to_string(&reg) {
+        Ok(s) => s,
+        Err(_) => return 0,
+    };
+
+    let mut kept = Vec::new();
+    let mut pruned = 0usize;
+    for line in existing.lines() {
+        let path = line.trim();
+        if path.is_empty() { continue; }
+        let p = std::path::Path::new(path);
+        if p.is_dir() && p.join(".lex").is_dir() {
+            kept.push(path);
+        } else {
+            pruned += 1;
+        }
+    }
+
+    if pruned > 0 {
+        fs::write(&reg, kept.join("\n") + "\n").ok();
+    }
+    pruned
+}
+
+/// List all registered repo paths from `~/.lex/repos`.
+pub fn registry_list() -> Vec<String> {
+    let reg = match registry_path() {
+        Some(p) => p,
+        None => return vec![],
+    };
+    let content = fs::read_to_string(&reg).unwrap_or_default();
+    content.lines()
+        .map(|l| l.trim().to_string())
+        .filter(|l| !l.is_empty())
+        .collect()
+}
+
 /// Resolve a kit spec into (org, repo, short_name). Accepts either a short
 /// form (`soul`) which is sugar for `repolex-ai/git-lex-kit-{name}`, or a
 /// full `org/repo` form.

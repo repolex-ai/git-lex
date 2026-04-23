@@ -348,18 +348,64 @@ pub(crate) fn install_scaffold_files_from(kit_dir: &std::path::Path) -> usize {
         }
     }
 
+    fn install_recursive_skip_existing(
+        src_dir: &std::path::Path,
+        dest_dir: &std::path::Path,
+        count: &mut usize,
+    ) {
+        let entries = match fs::read_dir(src_dir) {
+            Ok(e) => e,
+            Err(_) => return,
+        };
+        for entry in entries.flatten() {
+            let src = entry.path();
+            let name = entry.file_name();
+            let dest = dest_dir.join(&name);
+
+            if src.is_dir() {
+                fs::create_dir_all(&dest).ok();
+                install_recursive_skip_existing(&src, &dest, count);
+            } else if src.is_file() && !dest.exists() {
+                fs::create_dir_all(dest.parent().unwrap_or(&dest)).ok();
+                if fs::copy(&src, &dest).is_ok() {
+                    *count += 1;
+                }
+            }
+        }
+    }
+
     // New kit structure: ontology/, content/, harness/ (and legacy scaffold/)
     // Each maps to a different destination:
-    //   ontology/ → .lex/ontology/  (system area)
+    //   ontology/ → .lex/ontology/  (static kit) or _ontology/ (adaptive kit)
     //   content/  → repo root       (content files)
     //   harness/  → repo root       (substrate adapter files)
     //   www/      → .lex/www/       (web UI assets)
     //   scaffold/ → repo root       (legacy, for pre-migration kits)
     let ontology_src = kit_dir.join("ontology");
     if ontology_src.exists() {
-        let ontology_dest = root.join(".lex").join("ontology");
-        fs::create_dir_all(&ontology_dest).ok();
-        install_recursive(&ontology_src, &ontology_dest, &mut count);
+        // Adaptive kits seed ontology to _ontology/ (never clobber — agent-owned).
+        // Static kits install to .lex/ontology/ (always clobber — kit-owned).
+        let is_adaptive = fs::read_to_string(kit_dir.join("kit.yml"))
+            .ok()
+            .map(|c| c.lines().any(|l| {
+                let l = l.trim();
+                l.starts_with("adaptive:") && {
+                    let v = l.strip_prefix("adaptive:").unwrap().trim();
+                    v == "true" || v == "yes"
+                }
+            }))
+            .unwrap_or(false);
+
+        if is_adaptive {
+            let ontology_dest = root.join("_ontology");
+            fs::create_dir_all(&ontology_dest).ok();
+            // Only seed if nothing is there yet — never clobber agent work
+            install_recursive_skip_existing(&ontology_src, &ontology_dest, &mut count);
+        } else {
+            let ontology_dest = root.join(".lex").join("ontology");
+            fs::create_dir_all(&ontology_dest).ok();
+            install_recursive(&ontology_src, &ontology_dest, &mut count);
+        }
     }
 
     let content_src = kit_dir.join("content");
@@ -489,13 +535,32 @@ pub(crate) fn install_scaffold_files_from_skip_existing(
     }
 
     // New kit structure: ontology/, content/, harness/, www/
-    // Ontology files are ALWAYS overwritten — they're the kit's schema
-    // definition and must stay in sync with the kit version.
+    // Static kits: ontology ALWAYS overwritten — kit's schema, must stay in sync.
+    // Adaptive kits: ontology seeded to _ontology/, never clobbered — agent-owned.
     let ontology_src = kit_dir.join("ontology");
     if ontology_src.exists() {
-        let ontology_dest = root.join(".lex").join("ontology");
-        fs::create_dir_all(&ontology_dest).ok();
-        install_recursive(&ontology_src, &ontology_dest, true, &mut installed, &mut skipped);
+        let is_adaptive = fs::read_to_string(kit_dir.join("kit.yml"))
+            .ok()
+            .map(|c| c.lines().any(|l| {
+                let l = l.trim();
+                l.starts_with("adaptive:") && {
+                    let v = l.strip_prefix("adaptive:").unwrap().trim();
+                    v == "true" || v == "yes"
+                }
+            }))
+            .unwrap_or(false);
+
+        if is_adaptive {
+            // Never clobber agent-owned ontology — only seed missing files
+            let ontology_dest = root.join("_ontology");
+            fs::create_dir_all(&ontology_dest).ok();
+            // Use force=false so existing files are preserved
+            install_recursive(&ontology_src, &ontology_dest, false, &mut installed, &mut skipped);
+        } else {
+            let ontology_dest = root.join(".lex").join("ontology");
+            fs::create_dir_all(&ontology_dest).ok();
+            install_recursive(&ontology_src, &ontology_dest, true, &mut installed, &mut skipped);
+        }
     }
 
     let content_src = kit_dir.join("content");

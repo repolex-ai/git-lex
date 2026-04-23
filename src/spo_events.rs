@@ -1765,7 +1765,7 @@ pub(crate) fn history_walk_engine(
             let scratch_graph = history_graph.to_string();
             let mut emit_buf = String::new();
             let mut emitted_types: HashSet<String> = HashSet::new();
-            crate::nquad::emit_spo_line_nquads(
+            let _errs = crate::nquad::emit_spo_line_nquads(
                 &ev.line,
                 &doc_uri,
                 &scratch_graph,
@@ -1826,7 +1826,7 @@ pub(crate) fn history_walk_engine(
                     let scratch_graph = history_graph.to_string();
                     let mut emit_buf = String::new();
                     let mut emitted_types: HashSet<String> = HashSet::new();
-                    crate::nquad::emit_spo_line_nquads(
+                    let _errs = crate::nquad::emit_spo_line_nquads(
                         line, &doc_uri, &scratch_graph, base, &relpath_str,
                         slug_index, path_index, obj_props, prop_datatypes,
                         &mut emitted_types, &mut emit_buf,

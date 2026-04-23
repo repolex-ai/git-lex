@@ -7,7 +7,9 @@
 //!   derive SHACL shapes automatically (owl:oneOf → sh:in, ObjectProperty
 //!   → sh:nodeKind sh:IRI, owl:Restriction minCard → sh:minCount).
 //! - `build_shacl_shapes` writes the generated shapes to
-//!   `.lex/kit/.../{kit}-shapes.ttl`.
+//!   `.lex/ontology/{short}/{short}-shapes.ttl`.
+//! - `build_adaptive_shapes` scans `_ontology/` for agent-authored TTLs,
+//!   generates shapes alongside them.
 //!
 //! Peeled out of `main.rs` during modularization. No behavior changes.
 
@@ -16,7 +18,7 @@ use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::PathBuf;
 
-use git_lex::{find_git_root, kit_install_dir_for_spec, resolve_kit_spec};
+use git_lex::{find_git_root, resolve_kit_spec};
 
 /// Parse SHACL shapes TTL to extract inline hints for class template comments.
 /// Returns a map of property name → hint string (e.g. "enum: certain, likely, hypothesis, hunch")
@@ -101,34 +103,17 @@ fn build_shacl_hint(in_values: &[String], node_kind: &str, min_count: Option<u32
     }
 }
 
-/// Generate SHACL shapes TTL from a kit ontology using SPARQL queries.
-/// Reads OWL constraints (owl:oneOf, owl:Restriction, owl:ObjectProperty, rdfs:range)
-/// and emits equivalent SHACL shapes.
-pub(crate) fn generate_shacl_shapes(kit: &str) -> Option<String> {
-    let store = crate::kit::load_kit_into_store(kit)?;
-    let ttl_path = crate::kit::find_kit_ttl(kit)?;
-    let ttl_content = fs::read_to_string(&ttl_path).ok()?;
+// ─── Core shape generation ────────────────────────────────────
 
-    // Find the kit prefix name and namespace from the TTL. Namespace uses
-    // the short kit name, not the full org/repo spec.
-    let (_, _, short) = resolve_kit_spec(kit);
-    let kit_ns_pattern = format!("/kit/{}/", short);
-    let mut prefix_name = short.clone();
-    let mut namespace = format!("https://repolex.ai/ontology/kit/{}/", short);
-    for line in ttl_content.lines() {
-        if line.starts_with("@prefix ") && line.contains(&kit_ns_pattern) {
-            if let Some(colon_pos) = line[8..].find(':') {
-                prefix_name = line[8..8 + colon_pos].trim().to_string();
-            }
-            if let Some(start) = line.find('<') {
-                if let Some(end) = line.find('>') {
-                    namespace = line[start + 1..end].to_string();
-                }
-            }
-            break;
-        }
-    }
-
+/// Generate SHACL shapes from an oxigraph store containing an OWL ontology.
+/// Takes the store, prefix name, namespace IRI, and a label for the comment header.
+/// Returns SHACL Turtle string.
+fn generate_shapes_from_store(
+    store: &oxigraph::store::Store,
+    prefix_name: &str,
+    namespace: &str,
+    source_label: &str,
+) -> Option<String> {
     // Helper: extract local name from full IRI
     let local_name = |iri: &str| -> String {
         iri.rsplit('/').next().unwrap_or(iri).to_string()
@@ -145,7 +130,7 @@ pub(crate) fn generate_shacl_shapes(kit: &str) -> Option<String> {
                         Term::NamedNode(n) => n.as_str().to_string(),
                         _ => String::new(),
                     })
-                })).filter(|s| s.starts_with(&namespace)).collect()
+                })).filter(|s| s.starts_with(namespace)).collect()
             }
             _ => Vec::new(),
         }
@@ -253,8 +238,8 @@ pub(crate) fn generate_shacl_shapes(kit: &str) -> Option<String> {
     shacl.push_str(&format!("@prefix {}: <{}> .\n", prefix_name, namespace));
     shacl.push_str("@prefix xsd:   <http://www.w3.org/2001/XMLSchema#> .\n");
     shacl.push_str("@prefix rdfs:  <http://www.w3.org/2000/01/rdf-schema#> .\n\n");
-    shacl.push_str(&format!("# Auto-generated SHACL shapes from {} ontology.\n", kit));
-    shacl.push_str("# Do not hand-edit — regenerate with: git lex kit update\n\n");
+    shacl.push_str(&format!("# Auto-generated SHACL shapes from {} ontology.\n", source_label));
+    shacl.push_str("# Do not hand-edit — regenerate with: git lex kit-update\n\n");
 
     for class_iri in &classes {
         let class_name = local_name(class_iri);
@@ -318,7 +303,37 @@ pub(crate) fn generate_shacl_shapes(kit: &str) -> Option<String> {
     Some(shacl)
 }
 
-/// Generate and write SHACL shapes for the current kit.
+// ─── Kit-based shapes ─────────────────────────────────────────
+
+/// Generate SHACL shapes TTL from a kit ontology using SPARQL queries.
+pub(crate) fn generate_shacl_shapes(kit: &str) -> Option<String> {
+    let store = crate::kit::load_kit_into_store(kit)?;
+    let ttl_path = crate::kit::find_kit_ttl(kit)?;
+    let ttl_content = fs::read_to_string(&ttl_path).ok()?;
+
+    // Find the kit prefix name and namespace from the TTL.
+    let (_, _, short) = resolve_kit_spec(kit);
+    let kit_ns_pattern = format!("/kit/{}/", short);
+    let mut prefix_name = short.clone();
+    let mut namespace = format!("https://repolex.ai/ontology/kit/{}/", short);
+    for line in ttl_content.lines() {
+        if line.starts_with("@prefix ") && line.contains(&kit_ns_pattern) {
+            if let Some(colon_pos) = line[8..].find(':') {
+                prefix_name = line[8..8 + colon_pos].trim().to_string();
+            }
+            if let Some(start) = line.find('<') {
+                if let Some(end) = line.find('>') {
+                    namespace = line[start + 1..end].to_string();
+                }
+            }
+            break;
+        }
+    }
+
+    generate_shapes_from_store(&store, &prefix_name, &namespace, kit)
+}
+
+/// Generate and write SHACL shapes for a kit.
 /// Returns the path to the generated shapes file.
 pub(crate) fn build_shacl_shapes(kit: &str) -> Option<PathBuf> {
     let root = find_git_root()?;
@@ -331,4 +346,119 @@ pub(crate) fn build_shacl_shapes(kit: &str) -> Option<PathBuf> {
     let shapes_path = ontology_dir.join(format!("{}-shapes.ttl", short));
     fs::write(&shapes_path, &shacl).ok()?;
     Some(shapes_path)
+}
+
+// ─── Adaptive shapes (_ontology/) ─────────────────────────────
+
+/// Scan `_ontology/` for agent-authored TTL files. For each, generate SHACL
+/// shapes and write them alongside the source TTL. Returns a list of
+/// (ttl_path, shapes_path) for successes and (ttl_path, error) for failures.
+pub(crate) fn build_adaptive_shapes() -> (Vec<(PathBuf, PathBuf)>, Vec<(PathBuf, String)>) {
+    let root = match find_git_root() {
+        Some(r) => r,
+        None => return (vec![], vec![]),
+    };
+
+    let adaptive_dir = root.join("_ontology");
+    if !adaptive_dir.exists() {
+        return (vec![], vec![]);
+    }
+
+    let mut successes: Vec<(PathBuf, PathBuf)> = Vec::new();
+    let mut failures: Vec<(PathBuf, String)> = Vec::new();
+
+    // Walk _ontology/{name}/{name}.ttl — same structure as .lex/ontology/
+    let entries = match fs::read_dir(&adaptive_dir) {
+        Ok(e) => e,
+        Err(_) => return (vec![], vec![]),
+    };
+
+    for entry in entries.flatten() {
+        if !entry.path().is_dir() { continue; }
+        let subdir = entry.path();
+        let ttl_files: Vec<PathBuf> = fs::read_dir(&subdir)
+            .into_iter()
+            .flat_map(|e| e.flatten())
+            .filter(|e| {
+                let p = e.path();
+                p.extension().is_some_and(|ext| ext == "ttl")
+                    && !p.file_name().unwrap_or_default().to_string_lossy().ends_with("-shapes.ttl")
+            })
+            .map(|e| e.path())
+            .collect();
+
+        for ttl_path in ttl_files {
+            let ttl_content = match fs::read_to_string(&ttl_path) {
+                Ok(c) => c,
+                Err(e) => {
+                    failures.push((ttl_path, format!("read error: {}", e)));
+                    continue;
+                }
+            };
+
+            // Load into temp store
+            let store = match oxigraph::store::Store::new() {
+                Ok(s) => s,
+                Err(e) => {
+                    failures.push((ttl_path, format!("store error: {}", e)));
+                    continue;
+                }
+            };
+            if let Err(e) = store.load_from_reader(
+                oxigraph::io::RdfFormat::Turtle,
+                std::io::Cursor::new(ttl_content.as_bytes()),
+            ) {
+                failures.push((ttl_path, format!("parse error: {}", e)));
+                continue;
+            }
+
+            // Detect prefix and namespace from the TTL
+            let mut prefix_name = String::new();
+            let mut namespace = String::new();
+            for line in ttl_content.lines() {
+                if line.starts_with("@prefix ")
+                    && !line.contains("owl:") && !line.contains("rdfs:")
+                    && !line.contains("rdf:") && !line.contains("xsd:")
+                {
+                    if let Some(colon_pos) = line[8..].find(':') {
+                        prefix_name = line[8..8 + colon_pos].trim().to_string();
+                    }
+                    if let Some(start) = line.find('<') {
+                        if let Some(end) = line.find('>') {
+                            namespace = line[start + 1..end].to_string();
+                        }
+                    }
+                    if !prefix_name.is_empty() && !namespace.is_empty() {
+                        break;
+                    }
+                }
+            }
+            if prefix_name.is_empty() || namespace.is_empty() {
+                failures.push((ttl_path, "no prefix declaration found".to_string()));
+                continue;
+            }
+
+            let label = ttl_path.file_stem()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .to_string();
+
+            match generate_shapes_from_store(&store, &prefix_name, &namespace, &label) {
+                Some(shacl) => {
+                    let shapes_path = ttl_path.with_file_name(
+                        format!("{}-shapes.ttl", label)
+                    );
+                    match fs::write(&shapes_path, &shacl) {
+                        Ok(_) => successes.push((ttl_path, shapes_path)),
+                        Err(e) => failures.push((ttl_path, format!("write error: {}", e))),
+                    }
+                }
+                None => {
+                    failures.push((ttl_path, "shape generation produced no output".to_string()));
+                }
+            }
+        }
+    }
+
+    (successes, failures)
 }
