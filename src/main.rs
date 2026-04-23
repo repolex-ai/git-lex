@@ -43,11 +43,9 @@ use crate::kit::{collect_init_variables, fetch_kit_from_github, install_scaffold
                  kit_config_bool, kit_config_str, read_repo_yml_fields};
 
 // .spo event stream — git-aware change detector for .spo sidecars. Used by
-// orphan cleanup (pre-commit hook), history graph ingest (rebuild +
-// incremental), and the `git lex history-spike` debug subcommand. Imported
-// 2026-04-11 from the w4r3z/history-spike branch (was src/history_spike.rs).
-// See Situation/2026-04-09-history-graph-temporal-ledger.md §11 for the
-// phase plan this module is the foundation for.
+// orphan cleanup (pre-commit hook) and history graph ingest (rebuild +
+// incremental). See Situation/2026-04-09-history-graph-temporal-ledger.md §11
+// for the phase plan this module is the foundation for.
 mod spo_events;
 
 #[derive(Parser)]
@@ -189,24 +187,6 @@ enum Commands {
         /// Arguments passed through to git-lex-serve
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
-    },
-    /// (dev) Walk git history and print .spo line additions/removals per commit
-    HistorySpike {
-        /// Limit to the most recent N commits (0 = all)
-        #[arg(long, default_value = "0")]
-        limit: usize,
-        /// Only show commits that actually touched .spo files
-        #[arg(long)]
-        only_changes: bool,
-        /// Collapse extraction-id hash-prefix churn (drop first field when deduping)
-        #[arg(long)]
-        dedup: bool,
-        /// Write inconsistency reports to this file (default: stderr)
-        #[arg(long)]
-        inconsistency_log: Option<String>,
-        /// Print canonical URIs alongside event lines
-        #[arg(long)]
-        canonical: bool,
     },
     /// Build the history graph: walk git history, diff .spo files per
     /// commit, wrap each change in an RDF 1.2 triple-term annotation,
@@ -2532,21 +2512,6 @@ fn main() {
                 }
                 _ => {}
             }
-        }
-        Commands::HistorySpike {
-            limit,
-            only_changes,
-            dedup,
-            inconsistency_log,
-            canonical,
-        } => {
-            spo_events::run(spo_events::Options {
-                limit,
-                only_changes,
-                dedup,
-                inconsistency_log,
-                canonical,
-            });
         }
         Commands::HistoryBuild { limit } => {
             spo_events::spike_history_walk(limit);
