@@ -136,21 +136,23 @@ fn generate_shapes_from_store(
         }
     };
 
-    // Query 2: Find properties with domains, types, and ranges
+    // Query 2: Find properties with domains, types, ranges, and comments
     struct PropInfo {
         iri: String,
         is_object_prop: bool,
         domain: String,
         range: String,
+        comment: String,
     }
     let properties: Vec<PropInfo> = {
         let q = "PREFIX owl: <http://www.w3.org/2002/07/owl#>
                  PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>
-                 SELECT ?prop ?propType ?domain ?range WHERE {
+                 SELECT ?prop ?propType ?domain ?range ?comment WHERE {
                      ?prop rdfs:domain ?domain .
                      ?prop a ?propType .
                      FILTER(?propType IN (owl:DatatypeProperty, owl:ObjectProperty))
                      OPTIONAL { ?prop rdfs:range ?range }
+                     OPTIONAL { ?prop rdfs:comment ?comment }
                  } ORDER BY ?domain ?prop";
         match store.query(q) {
             Ok(oxigraph::sparql::QueryResults::Solutions(sols)) => {
@@ -158,6 +160,7 @@ fn generate_shapes_from_store(
                     let term_str = |name: &str| -> String {
                         s.get(name).map(|t| match t {
                             Term::NamedNode(n) => n.as_str().to_string(),
+                            Term::Literal(l) => l.value().to_string(),
                             _ => String::new(),
                         }).unwrap_or_default()
                     };
@@ -166,6 +169,7 @@ fn generate_shapes_from_store(
                         is_object_prop: term_str("propType").contains("ObjectProperty"),
                         domain: term_str("domain"),
                         range: term_str("range"),
+                        comment: term_str("comment"),
                     }
                 })).collect()
             }
@@ -266,6 +270,11 @@ fn generate_shapes_from_store(
 
             shacl.push_str(" ;\n    sh:property [\n");
             shacl.push_str(&format!("        sh:path {}:{} ;\n", prefix_name, prop_name));
+
+            if !prop.comment.is_empty() {
+                let escaped = prop.comment.replace('\\', "\\\\").replace('"', "\\\"");
+                shacl.push_str(&format!("        rdfs:comment \"{}\" ;\n", escaped));
+            }
 
             if prop.is_object_prop {
                 shacl.push_str("        sh:nodeKind sh:IRI ;\n");

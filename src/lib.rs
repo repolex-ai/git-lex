@@ -228,30 +228,34 @@ pub fn add_prefixes(query: &str) -> String {
         .unwrap_or_default();
     let o_prefix = format!("PREFIX o: <https://repolex.ai/ont/{}/>", first_commit);
 
-    // Also read kit from repo.yml and get the actual prefix from the TTL
+    // Read kit from repo.yml, then pull the kit's prefix+namespace from its
+    // installed SHACL shapes file (the runtime source of truth). Shapes live
+    // at .lex/ontology/{short}/{short}-shapes.ttl.
     let kit_prefix = find_git_root().and_then(|r| {
         let content = fs::read_to_string(r.join(".lex").join("repo.yml")).ok()?;
         for line in content.lines() {
             if let Some(kit) = line.strip_prefix("kit: ") {
                 let kit = kit.trim();
                 if kit == "none" { return None; }
-                let kit_dir = kit_install_dir_for_spec(&r, kit);
                 let (_, _, short) = resolve_kit_spec(kit);
-                let ttl_path = kit_dir.join(format!("{}.ttl", short));
-                let ttl_path = if ttl_path.exists() { ttl_path } else {
-                    fs::read_dir(&kit_dir).ok()
-                        .and_then(|entries| entries.filter_map(|e| e.ok())
-                            .find(|e| e.path().extension().is_some_and(|ext| ext == "ttl"))
-                            .map(|e| e.path()))
-                        .unwrap_or(ttl_path)
-                };
+                let shapes_path = r
+                    .join(".lex")
+                    .join("ontology")
+                    .join(&short)
+                    .join(format!("{}-shapes.ttl", short));
                 let kit_ns_pattern = format!("/kit/{}/", short);
-                if let Ok(ttl) = fs::read_to_string(&ttl_path) {
+                if let Ok(ttl) = fs::read_to_string(&shapes_path) {
                     for tline in ttl.lines() {
+                        let tline = tline.trim();
                         if tline.starts_with("@prefix ") && tline.contains(&kit_ns_pattern) {
                             if let Some(colon_pos) = tline[8..].find(':') {
                                 let pname = tline[8..8 + colon_pos].trim();
-                                let ns = format!("https://repolex.ai/ontology/kit/{}/", short);
+                                let ns_start = tline.find('<');
+                                let ns_end = tline.find('>');
+                                let ns = match (ns_start, ns_end) {
+                                    (Some(s), Some(e)) if s < e => tline[s + 1..e].to_string(),
+                                    _ => format!("https://repolex.ai/ontology/kit/{}/", short),
+                                };
                                 return Some((
                                     format!("{}:", pname),
                                     format!("PREFIX {}: <{}>", pname, ns),

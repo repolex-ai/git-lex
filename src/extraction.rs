@@ -11,7 +11,7 @@ use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::fs;
 
-use git_lex::{kit_install_dir_for_spec, resolve_kit_spec};
+use git_lex::resolve_kit_spec;
 
 use crate::nquad::uri_encode_path;
 use crate::ontology::{get_object_properties, get_property_datatypes};
@@ -214,48 +214,14 @@ pub(crate) fn frontmatter_to_turtle(filepath: &std::path::Path, root: &std::path
         return None;
     }
 
-    // Read the kit ontology to find the prefix name and namespace
-    let (_, _, short) = resolve_kit_spec(kit);
-    let ontology_dir = root.join(".lex").join("ontology").join(&short);
-    let ttl_path = {
-        let primary = ontology_dir.join(format!("{}.ttl", short));
-        if primary.exists() { primary } else {
-            // Fallback: any non-shapes .ttl in ontology dir
-            let fallback = fs::read_dir(&ontology_dir).ok()
-                .and_then(|entries| entries
-                    .filter_map(|e| e.ok())
-                    .find(|e| e.path().extension().is_some_and(|ext| ext == "ttl")
-                        && !e.file_name().to_string_lossy().contains("shapes"))
-                    .map(|e| e.path()));
-            match fallback {
-                Some(p) => p,
-                None => {
-                    // Legacy: try .lex/kit/
-                    let kit_dir = kit_install_dir_for_spec(root, kit);
-                    let legacy = kit_dir.join(format!("{}.ttl", short));
-                    if legacy.exists() { legacy } else { return None; }
-                }
-            }
-        }
-    };
-    let kit_ttl = fs::read_to_string(&ttl_path).ok()?;
-
-    // Find prefix name and namespace from TTL — uses short kit name
-    let kit_ns_pattern = format!("/kit/{}/", short);
-    let mut prefix_name = short.clone();
-    let mut namespace = format!("https://repolex.ai/ontology/kit/{}/", short);
-    for line in kit_ttl.lines() {
-        if line.starts_with("@prefix ") && line.contains(&kit_ns_pattern) {
-            if let Some(colon_pos) = line[8..].find(':') {
-                prefix_name = line[8..8 + colon_pos].trim().to_string();
-            }
-            if let Some(start) = line.find('<') {
-                if let Some(end) = line.find('>') {
-                    namespace = line[start + 1..end].to_string();
-                }
-            }
-            break;
-        }
+    // Prefix name + namespace come from the kit's SHACL shapes file (the
+    // single runtime source of truth). If shapes aren't installed yet, fall
+    // back to the short kit name with the conventional namespace.
+    let prefix_name = crate::ontology::get_kit_prefix_name(kit);
+    let mut namespace = crate::ontology::get_kit_namespace(kit);
+    if namespace.is_empty() {
+        let (_, _, short) = resolve_kit_spec(kit);
+        namespace = format!("https://repolex.ai/ontology/kit/{}/", short);
     }
 
     // Build ObjectProperty set and datatype map for proper literal emission

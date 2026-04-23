@@ -12,7 +12,7 @@ use tree_sitter;
 
 // Shared utilities (also used by git-lex-serve)
 use git_lex::{find_git_root, store_path, get_kit,
-              resolve_kit_spec, kit_install_dir_for_spec, add_prefixes,
+              resolve_kit_spec, add_prefixes,
               registry_add, registry_remove};
 
 // Frontmatter ObjectProperty value resolver. The rules for what is and isn't
@@ -28,7 +28,7 @@ mod shacl;
 mod kit;
 mod extraction;
 
-use crate::git::{auto_commit_snapshot, base_uri, get_repo_id};
+use crate::git::{auto_commit_snapshot, base_uri};
 use crate::nquad::{build_slug_path_indexes, emit_spo_line_nquads,
                    generate_frontmatter_nquads, generate_git_nquads,
                    load_lex_nquads, nq_escape, uri_encode_path};
