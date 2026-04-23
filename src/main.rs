@@ -33,8 +33,7 @@ use crate::nquad::{build_slug_path_indexes, emit_spo_line_nquads,
                    generate_frontmatter_nquads, generate_git_nquads,
                    load_lex_nquads, nq_escape, uri_encode_path};
 use crate::ontology::{get_kit_prefix_name, get_kit_types,
-                      get_object_properties, get_property_datatypes,
-                      load_ontology_tboxes};
+                      get_object_properties, get_property_datatypes};
 use crate::shacl::{build_shacl_shapes, parse_shacl_hints};
 use crate::extraction::{extract_jsonl_sessions, extract_markdown_links, frontmatter_to_turtle,
                         sanitize_uri_segment, short_hash};
@@ -1851,11 +1850,6 @@ fn cmd_sync() {
         eprintln!("warning: adaptive shapes failed for {}: {}", ttl.display(), err);
     }
 
-    // Load ontology TBoxes (upper + installed kits) into named graphs.
-    // Drop-and-replace on every sync — the TTL files on disk are the source
-    // of truth, the store should always match. Parse errors fail loudly.
-    let tbox_count = load_ontology_tboxes(&store, &root);
-
     // Regenerate git virtual triples
     let git_nq = generate_git_nquads();
     let git_count = git_nq.lines().count();
@@ -2338,7 +2332,7 @@ fn cmd_sync() {
         "Synced in {:.1}ms:",
         elapsed.as_secs_f64() * 1000.0
     );
-    println!("  Virtual: {} git + {} now + {} TBox files", git_count, fm_count, tbox_count);
+    println!("  Virtual: {} git + {} now", git_count, fm_count);
     if !adaptive_ok.is_empty() || !adaptive_fail.is_empty() {
         println!("  Adaptive shapes: {} built, {} failed", adaptive_ok.len(), adaptive_fail.len());
     }
