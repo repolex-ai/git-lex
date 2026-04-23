@@ -2928,15 +2928,24 @@ fn cmd_nuke() {
     // Auto-commit any uncommitted work first so nothing is lost.
     auto_commit_snapshot("pre-nuke");
 
-    match fs::remove_dir_all(&lex_dir) {
-        Ok(_) => println!(".lex/ removed."),
-        Err(e) => {
+    // `git rm -rf .lex/` — un-track anything committed and delete from disk
+    // in one shot. Ignore failure (the path may not be tracked at all, which
+    // is fine — we'll clean up any remaining files below).
+    let _ = Command::new("git")
+        .args(["rm", "-rf", "--ignore-unmatch", ".lex"])
+        .current_dir(&root)
+        .status();
+
+    // Mop up anything not tracked (untracked files, leftover empty dirs)
+    if lex_dir.exists() {
+        if let Err(e) = fs::remove_dir_all(&lex_dir) {
             eprintln!("Failed to remove .lex/: {}", e);
             exit(1);
         }
     }
+    println!(".lex/ removed.");
 
-    // Also remove .git/lex/ (oxigraph store and other derived data)
+    // Remove .git/lex/ (oxigraph store and other derived data, never tracked)
     let git_lex_dir = root.join(".git").join("lex");
     if git_lex_dir.exists() {
         match fs::remove_dir_all(&git_lex_dir) {
@@ -2947,6 +2956,31 @@ fn cmd_nuke() {
 
     // Unregister from ~/.lex/repos
     registry_remove(&root);
+
+    // Commit the removal and push — the user has already confirmed they
+    // want git-lex out of this repo, so finish the job.
+    let status = Command::new("git").args(["status", "--porcelain"])
+        .current_dir(&root).output();
+    let has_changes = matches!(&status, Ok(o) if !String::from_utf8_lossy(&o.stdout).trim().is_empty());
+    if has_changes {
+        let _ = Command::new("git").args(["add", "-A"]).current_dir(&root).status();
+        let commit = Command::new("git")
+            .args(["commit", "-m", "git lex nuke"])
+            .current_dir(&root)
+            .status();
+        if matches!(commit, Ok(s) if s.success()) {
+            println!("Committed nuke.");
+        } else {
+            eprintln!("Warning: failed to commit nuke changes.");
+        }
+    }
+
+    // Push — the user agreed to remove git-lex from the repo, so propagate it.
+    let push = Command::new("git").args(["push"]).current_dir(&root).status();
+    match push {
+        Ok(s) if s.success() => println!("Pushed nuke to remote."),
+        _ => eprintln!("Warning: push failed or no remote configured. Run `git push` manually to complete."),
+    }
 
     println!("git-lex is no longer active in this repo.");
 }
