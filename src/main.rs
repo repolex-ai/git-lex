@@ -1641,6 +1641,48 @@ fn cmd_sync() {
         return;
     }
 
+    // ─── Fast path: already-synced no-op ───
+    // If a /sync/{HEAD_SHA}/ graph already exists AND the extract dir is
+    // clean (no uncommitted .spo changes), every phase of sync would be a
+    // no-op that rebuilds identical state. Skip the whole thing.
+    //
+    // Contract this depends on: the oxigraph store is derived. If you've
+    // manually mutated it, rebuild via `rm -rf .git/lex/oxigraph`.
+    {
+        let sync_graph_uri = format!("{}/sync/{}", base, head_sha);
+        let probe = format!(
+            "ASK {{ GRAPH <{}> {{ ?s ?p ?o }} }}",
+            sync_graph_uri
+        );
+        let already_synced = oxigraph::sparql::SparqlEvaluator::new()
+            .parse_query(&probe)
+            .ok()
+            .and_then(|q| q.on_store(&store).execute().ok())
+            .map(|r| matches!(r, oxigraph::sparql::QueryResults::Boolean(true)))
+            .unwrap_or(false);
+
+        if already_synced {
+            // Check .lex/extract/ for uncommitted .spo changes
+            let dirty = Command::new("git")
+                .args(["status", "--porcelain", "--", ".lex/extract/"])
+                .current_dir(&root)
+                .output()
+                .ok()
+                .map(|o| !o.stdout.is_empty())
+                .unwrap_or(true); // on error, fall through to full sync
+
+            if !dirty {
+                let elapsed = start.elapsed();
+                println!(
+                    "Already synced at {} ({:.1}ms).",
+                    &head_sha[..8.min(head_sha.len())],
+                    elapsed.as_secs_f64() * 1000.0
+                );
+                return;
+            }
+        }
+    }
+
     // ─── Phase 1: Clear and regenerate virtual graphs ───
     // Virtual graphs are ephemeral — rebuilt from git every sync.
     // We clear ALL graphs that aren't /sync/ graphs, then reload.
