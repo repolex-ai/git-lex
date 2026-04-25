@@ -411,9 +411,9 @@ pub(crate) fn load_lex_nquads() -> String {
     nq
 }
 
-/// Extract frontmatter, body wikilinks, and @mentions from all .md/.txt files
-/// in the repo into the "now" graph. Also writes `.fm.spo` sidecars and scans
-/// commit messages for mentions/wikilinks.
+/// Extract frontmatter and body wikilinks from all .md/.txt files in the
+/// repo into the "now" graph. Also writes `.fm.spo` sidecars and scans
+/// commit messages for wikilinks.
 pub(crate) fn generate_frontmatter_nquads() -> (String, u32) {
     let root = match find_git_root() {
         Some(r) => r,
@@ -835,12 +835,11 @@ pub(crate) fn emit_spo_line_nquads(
     errors
 }
 
-/// Build the slug→path and path indexes used for @mention / [[wikilink]]
-/// resolution.
+/// Build the slug→path and path indexes used for `[[wikilink]]` resolution.
 ///
 /// Takes the repo root and a list of `.md` / `.txt` file paths, returns:
 /// - `slug_index`: lowercase filename stem → relative path (with a dot-stripped
-///   alias key for handles like `@spaceg.o.a.t.` → `spacegoat`). Template files
+///   alias key for handles like `spaceg.o.a.t.` → `spacegoat`). Template files
 ///   (prefix `__`) are excluded.
 /// - `path_index`: set of relative paths, for path-style wikilink resolution.
 ///
@@ -851,7 +850,7 @@ pub(crate) fn emit_spo_line_nquads(
 /// Known fragility: slug_index is inherently collision-prone (two files with
 /// the same stem in different folders). The canonical direction is to prefer
 /// full-path wikilinks `[[Class/id]]` going forward and retain slug_index only
-/// as a shim for legacy `@mention`-style content.
+/// as a shim for bare `[[name]]` references.
 pub(crate) fn build_slug_path_indexes(
     root: &std::path::Path,
     files: &[PathBuf],

@@ -535,15 +535,15 @@ fn cmd_init(directory: Option<String>, kit: Option<String>, dev: bool) {
                 doc.push_str(&format!("{}.memory.source: \"observation\"\n", kit_short));
                 doc.push_str(&format!("{}.memory.category: \"fact\"\n", kit_short));
                 doc.push_str("---\n\n");
-                doc.push_str("Your content here. Use @mentions and [[wikilinks]] for relationships.\n");
+                doc.push_str("Your content here. Use [[wikilinks]] for relationships between documents.\n");
                 doc.push_str("```\n\n");
                 doc.push_str("See `__ClassName.md` files in each folder for available properties and SHACL-derived constraints.\n\n");
 
-                doc.push_str("## @mentions and [[wikilinks]]\n\n");
-                doc.push_str("Reference other agents and documents naturally in your text:\n\n");
-                doc.push_str("- `@agentname` — creates a `lex:mentions` relationship\n");
-                doc.push_str("- `[[document-title]]` — creates a `lex:linksTo` relationship\n\n");
-                doc.push_str("These are extracted automatically from document bodies and commit messages.\n\n");
+                doc.push_str("## [[wikilinks]]\n\n");
+                doc.push_str("Reference other documents naturally in your text:\n\n");
+                doc.push_str("- `[[Class/id]]` — creates a `lex:linksTo` relationship to that document\n");
+                doc.push_str("- bare `[[some-doc]]` is also accepted (resolved via slug)\n\n");
+                doc.push_str("Wikilinks are extracted automatically from document bodies and commit messages.\n\n");
 
                 // Kit-specific section
                 doc.push_str(&format!("## {} Kit — Document Types\n\n", kit_short));
@@ -1750,7 +1750,7 @@ fn cmd_sync() {
         .load_from_reader(RdfFormat::NQuads, Cursor::new(git_nq.as_bytes()))
         .expect("failed to load git triples");
 
-    // Regenerate frontmatter + mention + wikilink triples
+    // Regenerate frontmatter + wikilink triples
     let (fm_nq, fm_errors) = generate_frontmatter_nquads();
     if fm_errors > 0 {
         eprintln!("warning: {} frontmatter error(s) during sync — graph may be incomplete", fm_errors);
