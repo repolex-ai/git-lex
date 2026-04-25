@@ -421,14 +421,30 @@ pub(crate) fn build_adaptive_shapes() -> (Vec<(PathBuf, PathBuf)>, Vec<(PathBuf,
                 continue;
             }
 
-            // Detect prefix and namespace from the TTL
+            // Detect prefix and namespace from the TTL.
+            //
+            // The convention is `_ontology/{short}/{short}.ttl`, so the filename
+            // stem IS the kit short name. Prefer a `@prefix` line whose
+            // namespace contains `/kit/{short}/` — that's how non-adaptive
+            // build does it (generate_shacl_shapes line 325). Fall back to
+            // the first non-system prefix only if no match is found.
+            //
+            // Without this, a TTL that imports an upper ontology (e.g.
+            // `@prefix lex-o:` declared before `@prefix autoknow:`) caused
+            // the upper-ontology prefix to be picked, and shape generation
+            // then queried the wrong namespace and produced an empty file.
+            let label = ttl_path.file_stem()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .to_string();
+            let kit_ns_pattern = format!("/kit/{}/", label);
+
             let mut prefix_name = String::new();
             let mut namespace = String::new();
+            // First pass: prefer the prefix matching `/kit/{stem}/`.
             for line in ttl_content.lines() {
-                if line.starts_with("@prefix ")
-                    && !line.contains("owl:") && !line.contains("rdfs:")
-                    && !line.contains("rdf:") && !line.contains("xsd:")
-                {
+                if !line.starts_with("@prefix ") { continue; }
+                if line.contains(&kit_ns_pattern) {
                     if let Some(colon_pos) = line[8..].find(':') {
                         prefix_name = line[8..8 + colon_pos].trim().to_string();
                     }
@@ -437,8 +453,27 @@ pub(crate) fn build_adaptive_shapes() -> (Vec<(PathBuf, PathBuf)>, Vec<(PathBuf,
                             namespace = line[start + 1..end].to_string();
                         }
                     }
-                    if !prefix_name.is_empty() && !namespace.is_empty() {
-                        break;
+                    break;
+                }
+            }
+            // Fallback: first non-system prefix.
+            if prefix_name.is_empty() {
+                for line in ttl_content.lines() {
+                    if line.starts_with("@prefix ")
+                        && !line.contains("owl:") && !line.contains("rdfs:")
+                        && !line.contains("rdf:") && !line.contains("xsd:")
+                    {
+                        if let Some(colon_pos) = line[8..].find(':') {
+                            prefix_name = line[8..8 + colon_pos].trim().to_string();
+                        }
+                        if let Some(start) = line.find('<') {
+                            if let Some(end) = line.find('>') {
+                                namespace = line[start + 1..end].to_string();
+                            }
+                        }
+                        if !prefix_name.is_empty() && !namespace.is_empty() {
+                            break;
+                        }
                     }
                 }
             }
@@ -446,11 +481,6 @@ pub(crate) fn build_adaptive_shapes() -> (Vec<(PathBuf, PathBuf)>, Vec<(PathBuf,
                 failures.push((ttl_path, "no prefix declaration found".to_string()));
                 continue;
             }
-
-            let label = ttl_path.file_stem()
-                .unwrap_or_default()
-                .to_string_lossy()
-                .to_string();
 
             match generate_shapes_from_store(&store, &prefix_name, &namespace, &label) {
                 Some(shacl) => {

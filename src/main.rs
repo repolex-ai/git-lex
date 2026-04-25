@@ -1641,6 +1641,18 @@ fn cmd_sync() {
         return;
     }
 
+    // ─── Always: regenerate adaptive shapes before the fast-path check ───
+    // Adaptive shapes are derived from `_ontology/*.ttl` (agent-authored,
+    // can change at any time). Regenerating is cheap and idempotent. We
+    // do it BEFORE the fast-path so that when an agent edits an ontology
+    // without committing, the shapes file refreshes even if HEAD hasn't
+    // moved. Adaptive shapes are also a precondition for `git lex create`
+    // / `git lex list` finding adaptive-kit doctypes.
+    let (adaptive_ok, adaptive_fail) = crate::shacl::build_adaptive_shapes();
+    for (ttl, err) in &adaptive_fail {
+        eprintln!("warning: adaptive shapes failed for {}: {}", ttl.display(), err);
+    }
+
     // ─── Fast path: already-synced no-op ───
     // If a /sync/{HEAD_SHA}/ graph already exists AND the extract dir is
     // clean (no uncommitted .spo changes), every phase of sync would be a
@@ -1724,14 +1736,7 @@ fn cmd_sync() {
         }
     }
 
-    // Regenerate SHACL shapes for agent-authored ontologies in _ontology/.
-    // Static kit ontologies under .lex/ontology/ have their shapes built at
-    // kit install/update time; _ontology/ TTLs change at runtime (AutoKnow),
-    // so their shapes must be regenerated on every sync.
-    let (adaptive_ok, adaptive_fail) = crate::shacl::build_adaptive_shapes();
-    for (ttl, err) in &adaptive_fail {
-        eprintln!("warning: adaptive shapes failed for {}: {}", ttl.display(), err);
-    }
+    // (adaptive shapes already built at top of cmd_sync, before fast-path check)
 
     // Regenerate git virtual triples
     let git_nq = generate_git_nquads();

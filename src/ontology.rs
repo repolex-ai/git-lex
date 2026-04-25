@@ -23,19 +23,32 @@ use git_lex::{find_git_root, resolve_kit_spec};
 // ─── Shape file discovery ────────────────────────────────────
 
 /// Locate the shapes TTL for a kit. Returns empty string if not found.
-/// Shapes live at `.lex/ontology/{short}/{short}-shapes.ttl`.
+///
+/// Static kits ship shapes at `.lex/ontology/{short}/{short}-shapes.ttl`.
+/// Adaptive kits (kit.yml `adaptive: true`) install their ontology TTL into
+/// `_ontology/{short}/`, and `build_adaptive_shapes` generates the shapes
+/// file alongside it: `_ontology/{short}/{short}-shapes.ttl`.
+///
+/// Try the static path first, then fall back to the adaptive location.
 fn read_kit_shapes(kit: &str) -> String {
     let root = match find_git_root() {
         Some(r) => r,
         None => return String::new(),
     };
     let (_, _, short) = resolve_kit_spec(kit);
-    let shapes_path = root
+    let static_path = root
         .join(".lex")
         .join("ontology")
         .join(&short)
         .join(format!("{}-shapes.ttl", short));
-    fs::read_to_string(&shapes_path).unwrap_or_default()
+    if let Ok(content) = fs::read_to_string(&static_path) {
+        return content;
+    }
+    let adaptive_path = root
+        .join("_ontology")
+        .join(&short)
+        .join(format!("{}-shapes.ttl", short));
+    fs::read_to_string(&adaptive_path).unwrap_or_default()
 }
 
 /// Return paths to every shape TTL installed in the repo, across both
