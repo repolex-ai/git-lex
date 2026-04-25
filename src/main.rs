@@ -66,12 +66,6 @@ enum Commands {
         /// this adds a domain-specific kit on top.
         #[arg(long)]
         kit: Option<String>,
-        /// Dev mode: skip the GitHub fetch and use the kit already at
-        /// .lex/kit/{org}/{repo}/. Preserves .lex/ state across re-init so
-        /// the kit you are developing is not nuked. Regenerates SHACL
-        /// shapes and class templates from the local kit TTL.
-        #[arg(long)]
-        dev: bool,
     },
     /// Query the knowledge graph.
     ///
@@ -152,10 +146,6 @@ enum Commands {
         /// Kit to update (e.g., repolex-ai/git-lex-kit-squad). If omitted,
         /// uses the kit from .lex/repo.yml.
         kit: Option<String>,
-        /// Dev mode: use the kit already at .lex/kit/{org}/{repo}/ instead
-        /// of fetching from GitHub. Regenerates shapes and templates.
-        #[arg(long)]
-        dev: bool,
         /// Force reinstall scaffold files even if they already exist in the
         /// repo. Without this, kit-update only installs scaffold files that
         /// are missing — preserving any local customizations. Use this when
@@ -212,7 +202,7 @@ enum Commands {
 
 const BASE_KIT: &str = "repolex-ai/git-lex-kit-base";
 
-fn cmd_init(directory: Option<String>, kit: Option<String>, dev: bool) {
+fn cmd_init(directory: Option<String>, kit: Option<String>) {
     // Follow git convention: `git lex init [<directory>]`
     // If a directory is given, cd into it (creating it if necessary).
     if let Some(ref dir) = directory {
@@ -245,13 +235,6 @@ fn cmd_init(directory: Option<String>, kit: Option<String>, dev: bool) {
         }
     };
 
-    // --dev requires --kit: we need to know which kit dir to use locally.
-    if dev && kit.is_none() {
-        eprintln!("--dev requires --kit to specify which local kit to use.");
-        eprintln!("Example: git lex init --kit goodlex/mytestkit --dev");
-        exit(1);
-    }
-
     // Every repo gets the base kit. If --kit is specified, that kit is
     // installed alongside base (not instead of it). The kit_spec in repo.yml
     // records the domain kit; base is implicit and always present.
@@ -266,12 +249,10 @@ fn cmd_init(directory: Option<String>, kit: Option<String>, dev: bool) {
     // without re-prompting.
     let mut carryover: HashMap<String, String> = HashMap::new();
 
-    // If .lex/ already exists, this is a re-initialization. In dev mode we
-    // PRESERVE .lex/ entirely (including the local kit you are developing)
-    // and just regenerate derived artifacts. In normal mode we ask the user,
+    // If .lex/ already exists, this is a re-initialization. We ask the user,
     // then refresh only the kit-derived subdirs (kit/, ontology/). User
     // data (extract/, tickets/) is preserved.
-    if lex_dir.exists() && !dev {
+    if lex_dir.exists() {
         carryover = read_repo_yml_fields(&lex_dir.join("repo.yml"));
 
         eprint!(
@@ -297,13 +278,9 @@ fn cmd_init(directory: Option<String>, kit: Option<String>, dev: bool) {
         // Remove only kit-derived subdirs. Everything else in .lex/ stays.
         let _ = fs::remove_dir_all(lex_dir.join("kit"));
         let _ = fs::remove_dir_all(lex_dir.join("ontology"));
-    } else if dev && lex_dir.exists() {
-        // Dev mode: read existing carryover from repo.yml, but don't nuke.
-        carryover = read_repo_yml_fields(&lex_dir.join("repo.yml"));
-        println!("Dev mode: preserving .lex/ and regenerating from local kit.");
     }
 
-    // Create .lex/ structure (idempotent — safe in dev mode too)
+    // Create .lex/ structure (idempotent)
     fs::create_dir_all(lex_dir.join("extract")).ok();
 
     // Ontologies are installed from the base kit scaffold (scaffold/.lex/ontology/)
@@ -312,49 +289,34 @@ fn cmd_init(directory: Option<String>, kit: Option<String>, dev: bool) {
     // Install kit(s). Every repo gets the base kit. If --kit specifies a
     // domain kit (squad, soul, etc.), that's installed alongside base in
     // the same .lex/kit/ directory.
-    //
-    // In dev mode, don't fetch — verify the local kit dir already exists.
     {
         let lex_kit_root = lex_dir.join("kit");
-        if !dev {
-            let _ = fs::remove_dir_all(&lex_kit_root);
-        }
+        let _ = fs::remove_dir_all(&lex_kit_root);
 
-        // Always install base kit (unless dev mode where it may already exist).
+        // Always install base kit.
         let (base_org, base_repo, _) = resolve_kit_spec(BASE_KIT);
         let base_dir = lex_kit_root.join(&base_org).join(&base_repo);
-        if !dev || !base_dir.exists() {
-            fs::create_dir_all(&base_dir).ok();
-            println!("Downloading base kit {}/{}...", base_org, base_repo);
-            if fetch_kit_from_github(BASE_KIT, &base_dir) {
-                println!("Base kit installed.");
-            } else {
-                eprintln!("Failed to fetch base kit from GitHub.");
-                eprintln!("Check network access to https://github.com/{}/{}", base_org, base_repo);
-                exit(1);
-            }
+        fs::create_dir_all(&base_dir).ok();
+        println!("Downloading base kit {}/{}...", base_org, base_repo);
+        if fetch_kit_from_github(BASE_KIT, &base_dir) {
+            println!("Base kit installed.");
+        } else {
+            eprintln!("Failed to fetch base kit from GitHub.");
+            eprintln!("Check network access to https://github.com/{}/{}", base_org, base_repo);
+            exit(1);
         }
 
         // Install the domain kit (if different from base).
         let kit_dir = lex_kit_root.join(&org).join(&repo);
         if kit_spec != format!("{}/{}", base_org, base_repo) {
-            if dev {
-                if !kit_dir.exists() {
-                    eprintln!("--dev: kit directory not found at {}", kit_dir.display());
-                    eprintln!("Populate the kit locally first, then re-run with --dev.");
-                    exit(1);
-                }
-                println!("Dev mode: using local kit at {}", kit_dir.display());
+            fs::create_dir_all(&kit_dir).ok();
+            println!("Downloading additional kit {}/{}...", org, repo);
+            if fetch_kit_from_github(kit_name, &kit_dir) {
+                println!("Additional kit installed.");
             } else {
-                fs::create_dir_all(&kit_dir).ok();
-                println!("Downloading additional kit {}/{}...", org, repo);
-                if fetch_kit_from_github(kit_name, &kit_dir) {
-                    println!("Additional kit installed.");
-                } else {
-                    eprintln!("Failed to fetch kit '{}' from GitHub.", kit_name);
-                    eprintln!("Check that https://github.com/{}/{} exists and you have network access.", org, repo);
-                    exit(1);
-                }
+                eprintln!("Failed to fetch kit '{}' from GitHub.", kit_name);
+                eprintln!("Check that https://github.com/{}/{} exists and you have network access.", org, repo);
+                exit(1);
             }
         }
     }
@@ -395,10 +357,9 @@ fn cmd_init(directory: Option<String>, kit: Option<String>, dev: bool) {
     }
 
     // repo.yml — create if missing, otherwise update the kit: field to
-    // match the spec passed to this init run. This matters for dev mode
-    // and for re-initialization: if the user ran init once without --kit
-    // and then runs again with --kit X, the kit: field needs to change
-    // from "none" to the new spec.
+    // match the spec passed to this init run. This matters for re-init:
+    // if the user ran init once without --kit and then runs again with
+    // --kit X, the kit: field needs to change from "none" to the new spec.
     let repo_yml_path = lex_dir.join("repo.yml");
     if !repo_yml_path.exists() {
         let repo_name = root.file_name()
@@ -2496,7 +2457,7 @@ fn main() {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Init { directory, kit, dev } => cmd_init(directory, kit, dev),
+        Commands::Init { directory, kit } => cmd_init(directory, kit),
         Commands::Status => cmd_status(),
         Commands::Create { doctype, instance_id, json } => cmd_create(&doctype, instance_id.as_deref(), json),
         Commands::List { json } => cmd_list(json),
@@ -2526,7 +2487,7 @@ fn main() {
         Commands::Join { squad_path } => cmd_join(&squad_path),
         Commands::Parse { file } => cmd_parse(&file),
         Commands::Nuke => cmd_nuke(),
-        Commands::KitUpdate { kit, dev, force } => cmd_kit_update(kit, dev, force),
+        Commands::KitUpdate { kit, force } => cmd_kit_update(kit, force),
         Commands::Display { query, port } => cmd_display(&query, port),
         Commands::Serve { args } => {
             let status = Command::new("git-lex-serve")
@@ -2976,7 +2937,7 @@ fn cmd_nuke() {
 
 // ─── kit-update ────────────────────────────────────────────────
 
-fn cmd_kit_update(kit_arg: Option<String>, dev: bool, force: bool) {
+fn cmd_kit_update(kit_arg: Option<String>, force: bool) {
     let root = find_git_root().expect("not in a git repo");
     let lex_dir = root.join(".lex");
 
@@ -3024,41 +2985,30 @@ fn cmd_kit_update(kit_arg: Option<String>, dev: bool, force: bool) {
     let base_is_same_as_domain = kit_name == BASE_KIT
         || (org == base_org && repo == base_repo);
 
-    if dev {
-        // Dev mode: verify local kit exists, regenerate derived artifacts.
-        // Don't refetch base kit either — agent is iterating locally.
-        if !kit_dir.exists() {
-            eprintln!("--dev: kit directory not found at {}", kit_dir.display());
-            eprintln!("Populate the kit locally first, then re-run with --dev.");
-            exit(1);
-        }
-        println!("Dev mode: using local kit at {}", kit_dir.display());
+    // Refresh the base kit first (always), then the domain kit.
+
+    // Base kit.
+    println!("Updating base kit '{}/{}' from GitHub...", base_org, base_repo);
+    let _ = fs::remove_dir_all(&base_kit_dir);
+    fs::create_dir_all(&base_kit_dir).ok();
+    if fetch_kit_from_github(BASE_KIT, &base_kit_dir) {
+        println!("Base kit '{}/{}' fetched.", base_org, base_repo);
     } else {
-        // Normal mode: refresh the base kit first (always), then the domain kit.
+        eprintln!("Failed to fetch base kit '{}' from GitHub.", BASE_KIT);
+        eprintln!("Check network access to https://github.com/{}/{}", base_org, base_repo);
+        exit(1);
+    }
 
-        // Base kit.
-        println!("Updating base kit '{}/{}' from GitHub...", base_org, base_repo);
-        let _ = fs::remove_dir_all(&base_kit_dir);
-        fs::create_dir_all(&base_kit_dir).ok();
-        if fetch_kit_from_github(BASE_KIT, &base_kit_dir) {
-            println!("Base kit '{}/{}' fetched.", base_org, base_repo);
+    // Domain kit (if different from base).
+    if !base_is_same_as_domain {
+        println!("Updating kit '{}/{}' from GitHub...", org, repo);
+        let _ = fs::remove_dir_all(&kit_dir);
+        fs::create_dir_all(&kit_dir).ok();
+        if fetch_kit_from_github(&kit_name, &kit_dir) {
+            println!("Kit '{}/{}' fetched.", org, repo);
         } else {
-            eprintln!("Failed to fetch base kit '{}' from GitHub.", BASE_KIT);
-            eprintln!("Check network access to https://github.com/{}/{}", base_org, base_repo);
+            eprintln!("Failed to fetch kit '{}' from GitHub.", kit_name);
             exit(1);
-        }
-
-        // Domain kit (if different from base).
-        if !base_is_same_as_domain {
-            println!("Updating kit '{}/{}' from GitHub...", org, repo);
-            let _ = fs::remove_dir_all(&kit_dir);
-            fs::create_dir_all(&kit_dir).ok();
-            if fetch_kit_from_github(&kit_name, &kit_dir) {
-                println!("Kit '{}/{}' fetched.", org, repo);
-            } else {
-                eprintln!("Failed to fetch kit '{}' from GitHub.", kit_name);
-                exit(1);
-            }
         }
     }
 
