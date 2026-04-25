@@ -344,13 +344,16 @@ pub(crate) fn generate_shacl_shapes(kit: &str) -> Option<String> {
 
 /// Generate and write SHACL shapes for a kit.
 /// Returns the path to the generated shapes file.
+///
+/// Output location is chosen to live alongside the source TTL:
+///   - static kit  → `.lex/ontology/{short}/{short}-shapes.ttl`
+///   - adaptive kit → `_ontology/{short}/{short}-shapes.ttl`
 pub(crate) fn build_shacl_shapes(kit: &str) -> Option<PathBuf> {
-    let root = find_git_root()?;
     let shacl = generate_shacl_shapes(kit)?;
     let (_, _, short) = resolve_kit_spec(kit);
-    // Write shapes to .lex/ontology/{short}/ alongside the source TTL.
-    // This keeps .lex/kit/ as a read-only download cache.
-    let ontology_dir = root.join(".lex").join("ontology").join(&short);
+    // Locate the source TTL so we can drop the shapes file next to it.
+    let source_ttl = crate::kit::find_kit_ttl(kit)?;
+    let ontology_dir = source_ttl.parent()?.to_path_buf();
     fs::create_dir_all(&ontology_dir).ok()?;
     let shapes_path = ontology_dir.join(format!("{}-shapes.ttl", short));
     fs::write(&shapes_path, &shacl).ok()?;

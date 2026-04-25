@@ -593,11 +593,16 @@ fn cmd_init(directory: Option<String>, kit: Option<String>, dev: bool) {
     }
     {
         let kit_types = get_kit_types(kit_name);
+        // Read shapes from wherever build_shacl_shapes wrote them (next to
+        // the source TTL — static or adaptive). Try both locations.
         let shapes_content = {
             let r = find_git_root().unwrap();
             let (_, _, short) = resolve_kit_spec(kit_name);
-            let shapes_path = r.join(".lex").join("ontology").join(&short).join(format!("{}-shapes.ttl", short));
-            fs::read_to_string(&shapes_path).unwrap_or_default()
+            let static_p = r.join(".lex").join("ontology").join(&short).join(format!("{}-shapes.ttl", short));
+            let adaptive_p = r.join("_ontology").join(&short).join(format!("{}-shapes.ttl", short));
+            fs::read_to_string(&static_p)
+                .or_else(|_| fs::read_to_string(&adaptive_p))
+                .unwrap_or_default()
         };
         let shacl_hints = parse_shacl_hints(&shapes_content);
 
@@ -3093,10 +3098,16 @@ fn cmd_kit_update(kit_arg: Option<String>, dev: bool, force: bool) {
 
     // Regenerate class templates from the kit.
     let kit_types = get_kit_types(&kit_name);
+    // Read shapes from wherever build_shacl_shapes wrote them (next to
+    // the source TTL — static or adaptive).
     let shapes_content = {
-        let shapes_path = root.join(".lex").join("ontology").join(&short)
+        let static_p = root.join(".lex").join("ontology").join(&short)
             .join(format!("{}-shapes.ttl", short));
-        fs::read_to_string(&shapes_path).unwrap_or_default()
+        let adaptive_p = root.join("_ontology").join(&short)
+            .join(format!("{}-shapes.ttl", short));
+        fs::read_to_string(&static_p)
+            .or_else(|_| fs::read_to_string(&adaptive_p))
+            .unwrap_or_default()
     };
     let shacl_hints = parse_shacl_hints(&shapes_content);
 

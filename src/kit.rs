@@ -118,30 +118,41 @@ pub(crate) fn kit_config_str(kit: &str, key: &str) -> Option<String> {
 }
 
 /// Find the kit TTL file path. Tries {kit}.ttl first, then any .ttl in the kit dir.
+///
+/// Lookup order:
+///   1. `.lex/ontology/{short}/{short}.ttl`        — static kit primary
+///   2. any non-shapes `.ttl` in `.lex/ontology/{short}/` — static fallback
+///   3. `_ontology/{short}/{short}.ttl`            — adaptive kit primary
+///   4. any non-shapes `.ttl` in `_ontology/{short}/` — adaptive fallback
+///   5. `.lex/kit/{org}/{repo}/{short}.ttl`        — legacy
 pub(crate) fn find_kit_ttl(kit: &str) -> Option<PathBuf> {
     let root = find_git_root()?;
     let (_, _, short_name) = resolve_kit_spec(kit);
 
-    // Primary: .lex/ontology/{short}/{short}.ttl
-    let ontology_dir = root.join(".lex").join("ontology").join(&short_name);
-    let primary = ontology_dir.join(format!("{}.ttl", short_name));
-    if primary.exists() {
-        return Some(primary);
-    }
-
-    // Fallback: any non-shapes .ttl in .lex/ontology/{short}/
-    if ontology_dir.exists() {
-        if let Some(p) = fs::read_dir(&ontology_dir).ok()
-            .and_then(|entries| entries.filter_map(|e| e.ok())
-                .find(|e| {
-                    let name = e.file_name().to_string_lossy().to_string();
-                    name.ends_with(".ttl") && !name.contains("shapes")
-                })
-                .map(|e| e.path()))
-        {
-            return Some(p);
+    let try_dir = |dir: &PathBuf| -> Option<PathBuf> {
+        let primary = dir.join(format!("{}.ttl", short_name));
+        if primary.exists() {
+            return Some(primary);
         }
-    }
+        if dir.exists() {
+            return fs::read_dir(dir).ok()
+                .and_then(|entries| entries.filter_map(|e| e.ok())
+                    .find(|e| {
+                        let name = e.file_name().to_string_lossy().to_string();
+                        name.ends_with(".ttl") && !name.contains("shapes")
+                    })
+                    .map(|e| e.path()));
+        }
+        None
+    };
+
+    // Static kit location
+    let static_dir = root.join(".lex").join("ontology").join(&short_name);
+    if let Some(p) = try_dir(&static_dir) { return Some(p); }
+
+    // Adaptive kit location (kit.yml `adaptive: true`; ontology lives outside .lex/)
+    let adaptive_dir = root.join("_ontology").join(&short_name);
+    if let Some(p) = try_dir(&adaptive_dir) { return Some(p); }
 
     // Legacy fallback: .lex/kit/{org}/{repo}/{short}.ttl
     let kit_dir = kit_install_dir_for_spec(&root, kit);
