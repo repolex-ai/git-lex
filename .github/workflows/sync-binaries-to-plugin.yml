@@ -5,14 +5,16 @@
 # changes to this workflow.
 #
 # Checks out the subtext-mcp repo with a PAT, lays the binaries into bin/.platforms/<target>/,
-# commits to a branch, and opens a PR.
+# and pushes directly to main. Solo maintainer + demo cadence: PR-and-merge ceremony adds
+# friction without adding safety. The build matrix is the only gate that matters — if those
+# binaries built green, they ship.
 #
 # REQUIRES: repository secret `SUBTEXT_MCP_PAT` — fine-grained PAT with
 #   - Repository access: repolex-ai/subtext-mcp
-#   - Permissions: Contents=write, Pull requests=write
+#   - Permissions: Contents=write
 #
 # Why a PAT and not GITHUB_TOKEN: GITHUB_TOKEN is scoped to the current repo only.
-# Cross-repo PRs need a token that has write on the target repo.
+# Cross-repo writes need a token that has write on the target repo.
 
 name: Sync binaries to subtext-mcp plugin
 
@@ -30,7 +32,7 @@ jobs:
     permissions:
       actions: read            # download artifacts from the upstream build run
       contents: read           # checkout the workflow's own repo (git-lex)
-    # NOTE: writes to the subtext-mcp repo (checkout + branch push + PR) use
+    # NOTE: writes to the subtext-mcp repo (checkout + push to main) use
     # SUBTEXT_MCP_PAT, not GITHUB_TOKEN. The job-level permissions above only
     # govern access to git-lex itself.
 
@@ -94,7 +96,7 @@ jobs:
           # plugin bin/-PATH augmentation only sees the top-level bin/ dir.
           mkdir -p subtext-mcp/bin/.platforms
           # Each artifact is plugin-bin-<target>/bin/<target>/{git-lex,git-lex-serve}
-          # (W4R3Z's build.yml lays them out in plain bin/<target>/ inside the artifact)
+          # (build.yml lays them out in plain bin/<target>/ inside the artifact)
           artifact_dirs=(artifacts/plugin-bin-*)
           if [ ${#artifact_dirs[@]} -eq 0 ]; then
             echo "No plugin-bin-* artifacts found — build run may have failed or expired" >&2
@@ -110,39 +112,28 @@ jobs:
           done
           ls -laR subtext-mcp/bin/
 
-      - name: Compute git-lex version + SHAs
+      - name: Compute git-lex version short SHA
         id: meta
         run: |
           set -euo pipefail
           GITLEX_SHA="${{ steps.build_run.outputs.head_sha }}"
           GITLEX_SHA_SHORT=$(echo "$GITLEX_SHA" | cut -c1-7)
-          {
-            echo "gitlex_sha=$GITLEX_SHA"
-            echo "gitlex_sha_short=$GITLEX_SHA_SHORT"
-            echo "branch=sync-git-lex-$GITLEX_SHA_SHORT"
-          } >> "$GITHUB_OUTPUT"
+          echo "gitlex_sha_short=$GITLEX_SHA_SHORT" >> "$GITHUB_OUTPUT"
 
-          # Per-binary SHA256 manifest for the PR body
-          {
-            echo "## SHA256 manifest"
-            echo
-            echo '```'
-            for f in subtext-mcp/bin/.platforms/*/git-lex subtext-mcp/bin/.platforms/*/git-lex-serve; do
-              shasum -a 256 "$f"
-            done
-            echo '```'
-          } > /tmp/sha256-manifest.md
-
-      - name: Create PR to subtext-mcp
-        uses: peter-evans/create-pull-request@v6
-        with:
-          path: subtext-mcp
-          token: ${{ secrets.SUBTEXT_MCP_PAT }}
-          branch: ${{ steps.meta.outputs.branch }}
-          base: main
-          commit-message: "binaries: sync git-lex @ ${{ steps.meta.outputs.gitlex_sha_short }}"
-          title: "binaries: sync git-lex @ ${{ steps.meta.outputs.gitlex_sha_short }}"
-          body-path: /tmp/sha256-manifest.md
-          delete-branch: true
-          add-paths: |
-            bin/**
+      - name: Commit and push binaries directly to subtext-mcp main
+        run: |
+          set -euo pipefail
+          cd subtext-mcp
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add bin/
+          # Skip if nothing changed (binaries byte-identical to what's already there).
+          if git diff --cached --quiet; then
+            echo "No binary changes — skipping commit/push."
+            exit 0
+          fi
+          git commit -m "binaries: sync git-lex @ ${{ steps.meta.outputs.gitlex_sha_short }}"
+          # Pull-with-rebase first to land cleanly if something else pushed
+          # since we checked out (rare, but the safe default).
+          git pull --rebase origin main
+          git push origin main
