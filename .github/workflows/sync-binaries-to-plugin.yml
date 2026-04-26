@@ -1,6 +1,4 @@
-# DRAFT — to be added to git-lex repo at .github/workflows/sync-binaries-to-plugin.yml
-#
-# Triggers after the existing build.yml matrix completes successfully on main (or on tag push).
+# Triggers after the build matrix completes successfully on main (or on workflow_dispatch).
 # Downloads each `plugin-bin-<target>` artifact produced by build.yml — currently 3 platforms
 # (darwin-arm64, darwin-x86_64, linux-x86_64); linux-arm64 dropped pending oxrocksdb C++20 fix.
 # The wildcard pattern handles any subset gracefully — adding/removing platforms requires no
@@ -20,7 +18,7 @@ name: Sync binaries to subtext-mcp plugin
 
 on:
   workflow_run:
-    workflows: ["Build"]      # name of the existing build.yml workflow
+    workflows: ["build"]      # must match build.yml's `name:` exactly (case-sensitive)
     types: [completed]
     branches: [main]
   workflow_dispatch:           # manual trigger for testing
@@ -30,7 +28,11 @@ jobs:
     if: ${{ github.event.workflow_run.conclusion == 'success' || github.event_name == 'workflow_dispatch' }}
     runs-on: ubuntu-latest
     permissions:
-      actions: read            # to download artifacts from the upstream run
+      actions: read            # download artifacts from the upstream build run
+      contents: read           # checkout the workflow's own repo (git-lex)
+    # NOTE: writes to the subtext-mcp repo (checkout + branch push + PR) use
+    # SUBTEXT_MCP_PAT, not GITHUB_TOKEN. The job-level permissions above only
+    # govern access to git-lex itself.
 
     steps:
       - name: Checkout subtext-mcp
