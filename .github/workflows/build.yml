@@ -22,9 +22,9 @@ jobs:
             target: x86_64-apple-darwin
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
-          - os: ubuntu-latest
-            target: aarch64-unknown-linux-gnu
-            cross: true
+          # TODO: aarch64-unknown-linux-gnu — `cross` default image's g++
+          # is too old for oxrocksdb-sys (-std=c++20). Needs a Cross.toml
+          # with a newer ubuntu base. Post-demo polish.
 
     steps:
       - uses: actions/checkout@v4
@@ -43,17 +43,8 @@ jobs:
             target
           key: ${{ matrix.target }}-cargo-${{ hashFiles('**/Cargo.lock') }}
 
-      - name: Install cross (linux-aarch64 only)
-        if: matrix.cross
-        run: cargo install cross --locked
-
       - name: Build
-        run: |
-          if [ "${{ matrix.cross }}" = "true" ]; then
-            cross build --release --locked --target ${{ matrix.target }}
-          else
-            cargo build --release --locked --target ${{ matrix.target }}
-          fi
+        run: cargo build --release --locked --target ${{ matrix.target }}
 
       - name: Package tarball (for direct download / Releases)
         shell: bash
