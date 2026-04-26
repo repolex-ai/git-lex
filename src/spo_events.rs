@@ -5,10 +5,11 @@
 //! 1. **History graph ingest** — `history_walk_engine` walks a list of
 //!    commits, parses each commit's `.spo` diffs into add/remove events,
 //!    wraps each event in an RDF 1.2 triple-term annotation
-//!    (`spike_history_annotation`), and loads the resulting N-Quads into
-//!    oxigraph. Driven by `spike_history_walk` (full rebuild) and by
-//!    `cmd_history_build` in `main.rs` (incremental sync via
-//!    `rev_list_range` + `collect_commits_from_shas`).
+//!    (`history_annotation`), and loads the resulting N-Quads into
+//!    oxigraph. Driven by `cmd_sync` in `main.rs` (incremental sync via
+//!    `rev_list_range` + `collect_commits_from_shas`, falling back to a
+//!    full rebuild when the `lastHistorySync` marker is missing or
+//!    unreachable from HEAD).
 //!
 //! 2. **Pre-commit orphan cleanup** — `parse_staged_md_changes` and
 //!    `cleanup_sidecars_for_staged_changes` detect deletions and renames
@@ -100,43 +101,6 @@ fn find_git_root() -> Option<PathBuf> {
     } else {
         Some(PathBuf::from(s))
     }
-}
-
-/// Run `git rev-list --topo-order --reverse [--max-count=N] HEAD` and return
-/// the resulting SHAs as a vector. Note the quirk (called out in the spike
-/// report): with `--max-count=N`, git takes the most recent N commits from
-/// HEAD backwards and only *then* applies `--reverse`, so you get the slice
-/// of the N most-recent commits presented oldest-first-within-slice. This
-/// is usually NOT what "first N commits from repo root" would mean. The real
-/// walker implementation will need to decide which semantics it wants; for
-/// the spike we document the quirk and move on.
-fn rev_list_head(limit: usize) -> Vec<String> {
-    let mut args: Vec<String> = vec![
-        "rev-list".into(),
-        "--topo-order".into(),
-        "--reverse".into(),
-        "HEAD".into(),
-    ];
-    if limit > 0 {
-        args.push(format!("--max-count={}", limit));
-    }
-    let out = Command::new("git").args(&args).output().expect("git rev-list failed");
-    if !out.status.success() {
-        eprintln!("git rev-list failed: {}", String::from_utf8_lossy(&out.stderr));
-        exit(1);
-    }
-    String::from_utf8_lossy(&out.stdout)
-        .lines()
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-        .collect()
-}
-
-/// Collect per-commit metadata and diff events. One git process per commit;
-/// wasteful but the spike's only goal is correctness, not speed.
-fn collect_commits(limit: usize) -> Vec<SpikeCommit> {
-    let shas = rev_list_head(limit);
-    shas.iter().map(|sha| build_commit(sha)).collect()
 }
 
 /// List commits in the range `since..HEAD` (exclusive of `since`, inclusive of
@@ -946,7 +910,7 @@ pub fn doc_uri_from_sidecar(sidecar_path: &str, base: &str) -> Option<String> {
     Some(format!("<{}/{}>", base, crate::nquad::uri_encode_path(doc_path)))
 }
 
-/// spike: build the N-Quad lines for the history-graph annotation of a
+/// build the N-Quad lines for the history-graph annotation of a
 /// single (s, p, o, op) event. The annotation pattern is:
 ///
 ///     <ann-uri> rdf:reifies <<( s p o )>> .
@@ -959,9 +923,9 @@ pub fn doc_uri_from_sidecar(sidecar_path: &str, base: &str) -> Option<String> {
 /// dedupe).
 ///
 /// `triple_nq` is one assertion line as already produced by
-/// `spike_triple_maker`, in N-Quad form: `S P O G .`. We parse out S/P/O
+/// the production emitter, in N-Quad form: `S P O G .`. We parse out S/P/O
 /// to build the triple term.
-pub fn spike_history_annotation(
+pub fn history_annotation(
     triple_nq: &str,
     op: char,
     commit_sha: &str,
@@ -982,7 +946,7 @@ pub fn spike_history_annotation(
         return None;
     }
 
-    // spike: hash the canonical key for the annotation URI.
+    // hash the canonical key for the annotation URI.
     let key = format!("{}|{}|{}|{}|{}|{}", commit_sha, op, s, p, o, sidecar_path);
     let mut hasher = Sha256::new();
     hasher.update(key.as_bytes());
@@ -1015,7 +979,7 @@ pub fn spike_history_annotation(
     ])
 }
 
-/// spike: take one whitespace-separated term from the start of `s`. A term
+/// take one whitespace-separated term from the start of `s`. A term
 /// is either `<...>` (an IRI), or `"..."` possibly with `^^<...>` datatype
 /// suffix, or a bare token. Returns (term, rest).
 fn take_term(s: &str) -> Option<(String, &str)> {
@@ -1051,7 +1015,10 @@ fn take_term(s: &str) -> Option<(String, &str)> {
     }
 }
 
-/// Stats returned by the history walk engine.
+/// Stats returned by the history walk engine. Some fields are not read by
+/// the production caller (`cmd_sync` only logs `events_emitted`) but the
+/// engine still tracks them for diagnostic output.
+#[allow(dead_code)]
 pub(crate) struct HistoryWalkStats {
     pub events_seen: usize,
     pub events_emitted: usize,
@@ -1154,7 +1121,7 @@ pub(crate) fn history_walk_engine(
             }
 
             for triple_nq in &triple_nqs {
-                if let Some(ann_quads) = spike_history_annotation(
+                if let Some(ann_quads) = history_annotation(
                     triple_nq,
                     ev.op,
                     &c.sha,
@@ -1201,7 +1168,7 @@ pub(crate) fn history_walk_engine(
                         .map(|l| l.to_string())
                         .collect();
                     for triple_nq in &triple_nqs {
-                        if let Some(ann_quads) = spike_history_annotation(
+                        if let Some(ann_quads) = history_annotation(
                             triple_nq, op, commit_sha, sidecar_path, base, history_graph,
                         ) {
                             for q in ann_quads {
@@ -1272,163 +1239,6 @@ pub(crate) fn history_walk_engine(
     }
 }
 
-/// SPIKE: walk git history, build the history graph in `<base/historytest>`,
-/// load it into oxigraph, run a verification SPARQL query.
-///
-/// This is the entry point a new CLI subcommand will eventually call. For
-/// the spike, we wire it up as a function and let main.rs add a subcommand.
-/// Errors during walk are logged to stderr but never fatal.
-pub fn spike_history_walk(commit_limit: usize) {
-    let root = match find_git_root() {
-        Some(r) => r,
-        None => {
-            eprintln!("spike: not in a git repo");
-            return;
-        }
-    };
-    if std::env::set_current_dir(&root).is_err() {
-        eprintln!("spike: failed to cd to {}", root.display());
-        return;
-    }
-
-    // Read repo base URI the same way the production code does.
-    let base = crate::git::base_uri();
-    let history_graph = format!("<{}/history>", base);
-    let meta_graph = format!("<{}/meta>", base);
-
-    // Capture HEAD SHA at the start of the walk so the marker triple
-    // records exactly which commit was the tip when this rebuild ran.
-    let head_sha = match Command::new("git").args(["rev-parse", "HEAD"]).output() {
-        Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).trim().to_string(),
-        _ => {
-            eprintln!("spike: failed to resolve HEAD — aborting");
-            return;
-        }
-    };
-
-    // Load ontology helpers from the kit, same as production extract.
-    let kit = match git_lex::get_kit() {
-        Some(k) => k,
-        None => {
-            eprintln!("spike: no kit configured in .lex/repo.yml — aborting");
-            return;
-        }
-    };
-    let obj_props = crate::get_object_properties(&kit);
-    let prop_datatypes = crate::get_property_datatypes(&kit);
-
-    // Build slug/path indexes against today's filesystem, exactly like the
-    // now-graph builder does. This keeps the history walker's output
-    // byte-compatible with generate_frontmatter_nquads — the precondition
-    // for the history==now equivalence invariant to hold.
-    //
-    // Walk .md/.txt files in the working tree (skip hidden dirs like .lex,
-    // .git, .claude). Same rules as the now-graph builder.
-    fn walk_md(dir: &std::path::Path, files: &mut Vec<PathBuf>) {
-        if let Ok(entries) = fs::read_dir(dir) {
-            for entry in entries.filter_map(|e| e.ok()) {
-                let path = entry.path();
-                let name = entry.file_name().to_string_lossy().to_string();
-                if name.starts_with('.') { continue; }
-                if path.is_dir() {
-                    walk_md(&path, files);
-                } else if name.ends_with(".md") || name.ends_with(".txt") {
-                    files.push(path);
-                }
-            }
-        }
-    }
-    let mut md_files = Vec::new();
-    walk_md(&root, &mut md_files);
-    let (slug_index, path_index) = crate::nquad::build_slug_path_indexes(&root, &md_files);
-
-    eprintln!("spike: walking history → <historytest>");
-    eprintln!("spike: kit = {}", kit);
-    eprintln!("spike: base = {}", base);
-    eprintln!("spike: history_graph = {}", history_graph);
-    eprintln!("spike: slug_index = {} entries, path_index = {} entries",
-              slug_index.len(), path_index.len());
-
-    let commits = collect_commits(commit_limit);
-    let total = commits.len();
-    eprintln!("spike: {} commit(s) to walk", total);
-
-    // Open the store and delegate to the shared engine (which handles
-    // events, renames, loading, and marker writing).
-    let store_path = root.join(".lex").join("oxigraph");
-    let store = match oxigraph::store::Store::open(&store_path) {
-        Ok(s) => s,
-        Err(e) => {
-            eprintln!("spike: failed to open store at {}: {}", store_path.display(), e);
-            return;
-        }
-    };
-
-    let stats = history_walk_engine(
-        &commits, &store, &base, &history_graph, &meta_graph, &head_sha,
-        &slug_index, &path_index, &obj_props, &prop_datatypes,
-        true,  // clear_first (full rebuild)
-        true,  // show_progress
-    );
-
-    eprintln!("spike: events seen={}, emitted={}, skipped={}",
-        stats.events_seen, stats.events_emitted, stats.events_skipped);
-    eprintln!("spike: nquad buffer size = {} bytes", stats.nq_bytes);
-
-    // Verification queries
-    eprintln!("spike: ────────────────────────────────────────────");
-    eprintln!("spike: verification queries");
-    eprintln!("spike: ────────────────────────────────────────────");
-
-    let queries = [
-        ("triple count in history",
-         format!("SELECT (COUNT(*) AS ?c) WHERE {{ GRAPH {} {{ ?s ?p ?o }} }}", history_graph)),
-        ("annotation subject count",
-         format!("SELECT (COUNT(DISTINCT ?ann) AS ?c) WHERE {{ GRAPH {} {{ ?ann <http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies> ?tt }} }}", history_graph)),
-        ("addedIn vs removedIn count",
-         format!("SELECT ?op (COUNT(?ann) AS ?c) WHERE {{ GRAPH {} {{ ?ann ?op ?commit . FILTER(?op IN (<https://repolex.ai/ontology/spo/addedIn>, <https://repolex.ai/ontology/spo/removedIn>)) }} }} GROUP BY ?op", history_graph)),
-    ];
-
-    for (label, q) in &queries {
-        eprintln!("\nspike Q: {}", label);
-        eprintln!("spike:   {}", q.replace('\n', " "));
-        let result = SparqlEvaluator::new()
-            .parse_query(q.as_str())
-            .ok()
-            .and_then(|prepared| prepared.on_store(&store).execute().ok());
-        match result {
-            Some(oxigraph::sparql::QueryResults::Solutions(sols)) => {
-                let vars: Vec<String> = sols.variables().iter().map(|v| v.as_str().to_string()).collect();
-                let mut row_count = 0;
-                for sol in sols.flatten() {
-                    let mut parts: Vec<String> = Vec::new();
-                    for v in &vars {
-                        if let Some(t) = sol.get(v.as_str()) {
-                            parts.push(format!("{}={}", v, term_short(t)));
-                        }
-                    }
-                    eprintln!("spike:     {}", parts.join("  "));
-                    row_count += 1;
-                }
-                eprintln!("spike:   ({} row(s))", row_count);
-            }
-            Some(_) => eprintln!("spike:   non-SELECT result"),
-            None => eprintln!("spike:   query error or no results"),
-        }
-    }
-}
-
-/// spike: short string repr of an oxigraph Term for debug output.
-fn term_short(t: &oxigraph::model::Term) -> String {
-    match t {
-        oxigraph::model::Term::NamedNode(n) => format!("<{}>", n.as_str()),
-        oxigraph::model::Term::Literal(l) => format!("\"{}\"", l.value()),
-        oxigraph::model::Term::BlankNode(b) => format!("_:{}", b.as_str()),
-        oxigraph::model::Term::Triple(t) => {
-            format!("<<{} {} {}>>", t.subject, t.predicate, t.object)
-        }
-    }
-}
 
 // ════════════════════════════════════════════════════════════════════════════
 // Tests

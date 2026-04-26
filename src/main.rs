@@ -168,15 +168,6 @@ enum Commands {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
-    /// Build the history graph: walk git history, diff .spo files per
-    /// commit, wrap each change in an RDF 1.2 triple-term annotation,
-    /// load into oxigraph. Writes to <base/history> and records the
-    /// lastHistorySync marker in <base/meta>.
-    HistoryBuild {
-        /// Limit to the most recent N commits (0 = all)
-        #[arg(long, default_value = "0")]
-        limit: usize,
-    },
     /// Verify the history==now equivalence invariant.
     ///
     /// Reconstructs the set of "live at HEAD" triples from the history
@@ -2508,9 +2499,6 @@ fn main() {
                 _ => {}
             }
         }
-        Commands::HistoryBuild { limit } => {
-            spo_events::spike_history_walk(limit);
-        }
         Commands::HistoryVerify { show } => {
             cmd_history_verify(show);
         }
@@ -2654,7 +2642,7 @@ fn cmd_history_verify(show: usize) {
             }
         }
         _ => {
-            eprintln!("history-verify: reconstruct query failed (is the history graph populated? try `git lex history-build` first)");
+            eprintln!("history-verify: reconstruct query failed (is the history graph populated? run `git lex sync` first)");
             exit(1);
         }
     }
