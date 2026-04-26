@@ -1,0 +1,109 @@
+# Triggers after the build matrix completes successfully on main (or on workflow_dispatch).
+# Downloads each `plugin-bin-<target>` artifact produced by build.yml — currently 3 platforms
+# (darwin-arm64, darwin-x86_64, linux-x86_64); linux-arm64 dropped pending oxrocksdb C++20 fix.
+# The wildcard pattern handles any subset gracefully — adding/removing platforms requires no
+# changes to this workflow.
+#
+# Checks out the subtext-mcp repo with a PAT, lays the binaries into bin/.platforms/<target>/,
+# commits to a branch, and opens a PR.
+#
+# REQUIRES: repository secret `SUBTEXT_MCP_PAT` — fine-grained PAT with
+#   - Repository access: repolex-ai/subtext-mcp
+#   - Permissions: Contents=write, Pull requests=write
+#
+# Why a PAT and not GITHUB_TOKEN: GITHUB_TOKEN is scoped to the current repo only.
+# Cross-repo PRs need a token that has write on the target repo.
+
+name: Sync binaries to subtext-mcp plugin
+
+on:
+  workflow_run:
+    workflows: ["build"]      # must match build.yml's `name:` exactly (case-sensitive)
+    types: [completed]
+    branches: [main]
+  workflow_dispatch:           # manual trigger for testing
+
+jobs:
+  sync:
+    if: ${{ github.event.workflow_run.conclusion == 'success' || github.event_name == 'workflow_dispatch' }}
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read            # download artifacts from the upstream build run
+      contents: read           # checkout the workflow's own repo (git-lex)
+    # NOTE: writes to the subtext-mcp repo (checkout + branch push + PR) use
+    # SUBTEXT_MCP_PAT, not GITHUB_TOKEN. The job-level permissions above only
+    # govern access to git-lex itself.
+
+    steps:
+      - name: Checkout subtext-mcp
+        uses: actions/checkout@v4
+        with:
+          repository: repolex-ai/subtext-mcp
+          token: ${{ secrets.SUBTEXT_MCP_PAT }}
+          path: subtext-mcp
+
+      - name: Download plugin-bin artifacts from build run
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          pattern: plugin-bin-*
+          merge-multiple: false
+          run-id: ${{ github.event.workflow_run.id || github.run_id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Lay out binaries into subtext-mcp/bin/.platforms/
+        run: |
+          set -euo pipefail
+          # Layout A (locked 2026-04-26): per-platform binaries live under
+          # bin/.platforms/<target>/. The plugin's MCP server symlinks the
+          # host-target binaries up into bin/ at startup, because Claude Code's
+          # plugin bin/-PATH augmentation only sees the top-level bin/ dir.
+          mkdir -p subtext-mcp/bin/.platforms
+          # Each artifact is plugin-bin-<target>/bin/<target>/{git-lex,git-lex-serve}
+          # (W4R3Z's build.yml lays them out in plain bin/<target>/ inside the artifact)
+          for artifact_dir in artifacts/plugin-bin-*; do
+            target=$(basename "$artifact_dir" | sed 's/^plugin-bin-//')
+            echo "Syncing target: $target"
+            mkdir -p "subtext-mcp/bin/.platforms/$target"
+            cp -f "$artifact_dir/bin/$target/git-lex" "subtext-mcp/bin/.platforms/$target/"
+            cp -f "$artifact_dir/bin/$target/git-lex-serve" "subtext-mcp/bin/.platforms/$target/"
+            chmod +x "subtext-mcp/bin/.platforms/$target/git-lex" "subtext-mcp/bin/.platforms/$target/git-lex-serve"
+          done
+          ls -laR subtext-mcp/bin/
+
+      - name: Compute git-lex version + SHAs
+        id: meta
+        run: |
+          set -euo pipefail
+          GITLEX_SHA="${{ github.event.workflow_run.head_sha || github.sha }}"
+          GITLEX_SHA_SHORT=$(echo "$GITLEX_SHA" | cut -c1-7)
+          {
+            echo "gitlex_sha=$GITLEX_SHA"
+            echo "gitlex_sha_short=$GITLEX_SHA_SHORT"
+            echo "branch=sync-git-lex-$GITLEX_SHA_SHORT"
+          } >> "$GITHUB_OUTPUT"
+
+          # Per-binary SHA256 manifest for the PR body
+          {
+            echo "## SHA256 manifest"
+            echo
+            echo '```'
+            for f in subtext-mcp/bin/.platforms/*/git-lex subtext-mcp/bin/.platforms/*/git-lex-serve; do
+              shasum -a 256 "$f"
+            done
+            echo '```'
+          } > /tmp/sha256-manifest.md
+
+      - name: Create PR to subtext-mcp
+        uses: peter-evans/create-pull-request@v6
+        with:
+          path: subtext-mcp
+          token: ${{ secrets.SUBTEXT_MCP_PAT }}
+          branch: ${{ steps.meta.outputs.branch }}
+          base: main
+          commit-message: "binaries: sync git-lex @ ${{ steps.meta.outputs.gitlex_sha_short }}"
+          title: "binaries: sync git-lex @ ${{ steps.meta.outputs.gitlex_sha_short }}"
+          body-path: /tmp/sha256-manifest.md
+          delete-branch: true
+          add-paths: |
+            bin/**
