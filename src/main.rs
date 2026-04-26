@@ -1065,26 +1065,22 @@ fn cmd_create(doctype: &str, instance_id: Option<&str>, json: bool) {
 fn cmd_save(message: &str) {
     // Sync skills/subagents into substrate harness.
     // The harness scans for Skill/ and Subagent/ under any namespace folder.
+    // Derived output (.claude/skills/, .claude/agents/) is staged by the
+    // pre-commit hook, not here — save owns no staging of source files.
     if let Some(root) = find_git_root() {
         harness::sync(&root, "claude");
     }
 
-    // Add everything, commit, let hooks handle extract + sync
-    let status = Command::new("git")
-        .args(["add", "-A"])
-        .status();
-    if !status.map(|s| s.success()).unwrap_or(false) {
-        eprintln!("fatal: git add failed");
-        exit(1);
-    }
-
-    // Check if there's anything to commit
+    // Save commits what the user has explicitly staged. It does NOT sweep
+    // untracked files — in shared repos that swept siblings' work under the
+    // saver's git identity. User stages source files; hook stages derived
+    // artifacts; save just commits.
     let diff = Command::new("git")
         .args(["diff", "--cached", "--quiet"])
         .status();
     if diff.map(|s| s.success()).unwrap_or(false) {
-        println!("Nothing to save (no changes).");
-        return;
+        eprintln!("Nothing staged. Use `git add <paths>` first.");
+        exit(1);
     }
 
     let status = Command::new("git")
@@ -1533,13 +1529,27 @@ async fn cmd_display(query: &str, port: u16) {
 
 /// Combined extraction + validation, called by the pre-commit hook.
 /// Runs sidecar cleanup, frontmatter extraction, markdown link extraction,
-/// stages artifacts, then SHACL validates. Exits non-zero if anything fails.
+/// stages derived artifacts, then SHACL validates. Exits non-zero if
+/// anything fails.
+///
+/// The hook owns staging of derived files (.lex/extract/, .claude/skills/,
+/// .claude/agents/) so source-file staging stays the user's responsibility.
+/// This boundary keeps `git lex save` from sweeping siblings' untracked
+/// files in shared repos.
 fn hook_pre_commit() {
     // Phase 1: extraction
     cmd_extract();
 
-    // Stage extraction artifacts
+    // Stage derived artifacts: extraction output + harness-synced files.
+    // Stage harness paths separately — git's `add` is atomic across
+    // pathspecs, so a missing dir would cancel the whole add.
     let _ = Command::new("git").args(["add", ".lex/extract/"]).status();
+    if std::path::Path::new(".claude/skills").exists() {
+        let _ = Command::new("git").args(["add", ".claude/skills"]).status();
+    }
+    if std::path::Path::new(".claude/agents").exists() {
+        let _ = Command::new("git").args(["add", ".claude/agents"]).status();
+    }
 
     // Phase 2: SHACL validation
     if !cmd_validate() {
