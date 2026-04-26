@@ -55,7 +55,7 @@ jobs:
             cargo build --release --locked --target ${{ matrix.target }}
           fi
 
-      - name: Package
+      - name: Package tarball (for direct download / Releases)
         shell: bash
         run: |
           mkdir -p dist
@@ -65,14 +65,28 @@ jobs:
           cd dist
           tar czf ../git-lex-${{ matrix.target }}.tar.gz *
 
-      - name: Upload artifact
+      - name: Layout uncompressed binaries (for plugin bin/ consumption)
+        shell: bash
+        run: |
+          mkdir -p plugin-bin-layout/bin/${{ matrix.target }}
+          cp target/${{ matrix.target }}/release/git-lex plugin-bin-layout/bin/${{ matrix.target }}/
+          cp target/${{ matrix.target }}/release/git-lex-serve plugin-bin-layout/bin/${{ matrix.target }}/
+
+      - name: Upload tarball artifact
         uses: actions/upload-artifact@v4
         with:
           name: git-lex-${{ matrix.target }}
           path: git-lex-${{ matrix.target }}.tar.gz
           retention-days: 90
 
-      - name: Attach to release
+      - name: Upload plugin-bin-layout artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: plugin-bin-${{ matrix.target }}
+          path: plugin-bin-layout/
+          retention-days: 90
+
+      - name: Attach tarball to release
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
