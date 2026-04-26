@@ -17,9 +17,41 @@ use git_lex::find_git_root;
 const MARKER_START: &str = "# --- git-lex managed (do not edit this section) ---";
 const MARKER_END: &str = "# --- end git-lex managed ---";
 
+// The pre-commit hook runs from the user's shell environment, not from
+// Claude Code's plugin-augmented PATH. So we can't assume `git-lex` is on
+// PATH — judges and other users may have only the bundled binary from the
+// subtext plugin installed. The hook resolves git-lex in this order:
+//
+//   1. `$PATH` — for users with a system install (cargo, brew, etc.)
+//   2. Newest `~/.claude/plugins/cache/repolex/subtext/*/bin/git-lex`
+//      symlink — populated by the plugin's host-binaries setup on MCP start
+//   3. Newest `~/.claude/plugins/cache/repolex/subtext/*/bin/.platforms/*/git-lex`
+//      direct — covers the case where the symlink hasn't been created yet
+//      because no Claude Code session has booted the plugin in this version
+//      directory
+//
+// On miss: print a clear install-path message and fail the commit.
 const MANAGED_SECTION: &str = "\
 # --- git-lex managed (do not edit this section) ---
-git-lex hook pre-commit || exit 1
+_glx=\"\"
+if command -v git-lex >/dev/null 2>&1; then
+    _glx=git-lex
+else
+    for d in \"$HOME\"/.claude/plugins/cache/repolex/subtext/*/bin; do
+        if [ -x \"$d/git-lex\" ]; then _glx=\"$d/git-lex\"; fi
+    done
+    if [ -z \"$_glx\" ]; then
+        for d in \"$HOME\"/.claude/plugins/cache/repolex/subtext/*/bin/.platforms/*; do
+            if [ -x \"$d/git-lex\" ]; then _glx=\"$d/git-lex\"; fi
+        done
+    fi
+fi
+if [ -z \"$_glx\" ]; then
+    echo \"git-lex not found on PATH or in ~/.claude/plugins/cache/repolex/subtext/*/bin/.\" >&2
+    echo \"Install the subtext plugin (claude code: /plugin install subtext@repolex) or build from source.\" >&2
+    exit 1
+fi
+\"$_glx\" hook pre-commit || exit 1
 # --- end git-lex managed ---";
 
 /// Find where git looks for hooks. Checks `core.hooksPath` first,
