@@ -425,6 +425,13 @@ fn cmd_init(directory: Option<String>, kit: Option<String>) {
         }
     }
 
+    // Generate SHACL shapes from kit ontology now — both the type-folder
+    // loop below and the README generator read shapes via get_kit_types,
+    // so shapes must exist before either runs.
+    if let Some(shapes_path) = build_shacl_shapes(kit_name) {
+        println!("SHACL shapes generated: {}", shapes_path.file_name().unwrap_or_default().to_string_lossy());
+    }
+
     // Create type folders from kit ontology.
     // Reads from kit.yml: "install folders", "folder base", "folder ontology".
     // Falls back to legacy "createTypeFolders" for pre-migration kits.
@@ -548,10 +555,8 @@ fn cmd_init(directory: Option<String>, kit: Option<String>) {
         }
     }
 
-    // Generate SHACL shapes from ontology, then class templates
-    if let Some(shapes_path) = build_shacl_shapes(kit_name) {
-        println!("SHACL shapes generated: {}", shapes_path.file_name().unwrap_or_default().to_string_lossy());
-    }
+    // Class templates (shapes were already generated above before the
+    // type-folder loop).
     {
         let kit_types = get_kit_types(kit_name);
         // Read shapes from wherever build_shacl_shapes wrote them (next to
