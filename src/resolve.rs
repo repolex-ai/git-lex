@@ -99,14 +99,18 @@ pub fn resolve_frontmatter_value(
         ));
     }
 
-    // Rule 4: full IRI passthrough
+    // Rule 4: full IRI passthrough — but percent-encode any character that
+    // would make the IRI structurally invalid (spaces, parens, etc. that
+    // appear in real-world URLs). Without this, oxigraph's strict NQuads
+    // parser rejects entire history-walk batches when one external link
+    // contains an unencoded character.
     if raw.starts_with("http://") || raw.starts_with("https://") {
-        return ResolveResult::Iri(format!("<{}>", raw));
+        return ResolveResult::Iri(format!("<{}>", crate::nquad::uri_encode_path(raw)));
     }
 
     // Rule 5: path-style values
     if raw.contains('/') || raw.ends_with(".md") {
-        return ResolveResult::Iri(format!("<{}/{}>", base, raw));
+        return ResolveResult::Iri(format!("<{}/{}>", base, crate::nquad::uri_encode_path(raw)));
     }
 
     // Rule 3: bare slug lookup (lowercased to match index convention)
@@ -115,7 +119,7 @@ pub fn resolve_frontmatter_value(
         return ResolveResult::Unresolved(raw.to_string());
     }
     if let Some(rel_path) = slug_index.get(&slug) {
-        ResolveResult::Iri(format!("<{}/{}>", base, rel_path))
+        ResolveResult::Iri(format!("<{}/{}>", base, crate::nquad::uri_encode_path(rel_path)))
     } else {
         // Rule 7: unresolved → literal, not blank node
         ResolveResult::Unresolved(raw.to_string())
