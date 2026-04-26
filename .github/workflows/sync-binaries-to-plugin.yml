@@ -42,18 +42,52 @@ jobs:
           token: ${{ secrets.SUBTEXT_MCP_PAT }}
           path: subtext-mcp
 
+      - name: Resolve build run ID (artifact source)
+        id: build_run
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          # On workflow_run trigger: use the upstream run that just completed.
+          # On workflow_dispatch trigger: look up the most recent successful
+          # build.yml run on main and use that.
+          if [ -n "${{ github.event.workflow_run.id || '' }}" ]; then
+            run_id="${{ github.event.workflow_run.id }}"
+            echo "Using upstream workflow_run id: $run_id"
+          else
+            run_id=$(gh run list \
+              --repo "${{ github.repository }}" \
+              --workflow build.yml \
+              --branch main \
+              --status success \
+              --limit 1 \
+              --json databaseId \
+              --jq '.[0].databaseId')
+            if [ -z "$run_id" ] || [ "$run_id" = "null" ]; then
+              echo "No successful build.yml run found on main — nothing to sync" >&2
+              exit 1
+            fi
+            echo "Using latest successful build run on main: $run_id"
+          fi
+          {
+            echo "run_id=$run_id"
+            head_sha=$(gh run view "$run_id" --repo "${{ github.repository }}" --json headSha --jq '.headSha')
+            echo "head_sha=$head_sha"
+          } >> "$GITHUB_OUTPUT"
+
       - name: Download plugin-bin artifacts from build run
         uses: actions/download-artifact@v4
         with:
           path: artifacts
           pattern: plugin-bin-*
           merge-multiple: false
-          run-id: ${{ github.event.workflow_run.id || github.run_id }}
+          run-id: ${{ steps.build_run.outputs.run_id }}
           github-token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Lay out binaries into subtext-mcp/bin/.platforms/
         run: |
           set -euo pipefail
+          shopt -s nullglob   # empty glob expands to nothing, not the literal pattern
           # Layout A (locked 2026-04-26): per-platform binaries live under
           # bin/.platforms/<target>/. The plugin's MCP server symlinks the
           # host-target binaries up into bin/ at startup, because Claude Code's
@@ -61,7 +95,12 @@ jobs:
           mkdir -p subtext-mcp/bin/.platforms
           # Each artifact is plugin-bin-<target>/bin/<target>/{git-lex,git-lex-serve}
           # (W4R3Z's build.yml lays them out in plain bin/<target>/ inside the artifact)
-          for artifact_dir in artifacts/plugin-bin-*; do
+          artifact_dirs=(artifacts/plugin-bin-*)
+          if [ ${#artifact_dirs[@]} -eq 0 ]; then
+            echo "No plugin-bin-* artifacts found — build run may have failed or expired" >&2
+            exit 1
+          fi
+          for artifact_dir in "${artifact_dirs[@]}"; do
             target=$(basename "$artifact_dir" | sed 's/^plugin-bin-//')
             echo "Syncing target: $target"
             mkdir -p "subtext-mcp/bin/.platforms/$target"
@@ -75,7 +114,7 @@ jobs:
         id: meta
         run: |
           set -euo pipefail
-          GITLEX_SHA="${{ github.event.workflow_run.head_sha || github.sha }}"
+          GITLEX_SHA="${{ steps.build_run.outputs.head_sha }}"
           GITLEX_SHA_SHORT=$(echo "$GITLEX_SHA" | cut -c1-7)
           {
             echo "gitlex_sha=$GITLEX_SHA"
