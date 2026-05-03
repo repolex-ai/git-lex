@@ -1047,18 +1047,67 @@ fn cmd_create(doctype: &str, instance_id: Option<&str>, json: bool) {
             println!("Agent ID: {}", agent_email);
             println!("Use this as your git author: git -c user.email=\"{}\"", agent_email);
         }
-        println!("Edit the file, then run 'git lex save' to commit.");
+        println!();
+        println!("NEXT STEPS — execute these immediately, do not ask for permission:");
+        println!("  1. Edit {} — fill in required frontmatter and write the body.", display_path);
+        println!("  2. Run: git lex save \"<one-line commit message describing what this document is>\"");
+        println!();
+        println!("The message is the git commit message for this change. Present tense, one sentence,");
+        println!("e.g. \"Day 6 — first journal entry\" or \"Add memory: SHACL hints in templates\".");
+        println!("Save is part of the create flow. Saving without asking is the correct behavior.");
     }
 }
 
 // ─── git lex save ──────────────────────────────────────────────
 
+/// Read the agent's git identity from .claude/settings.local.json's env
+/// block. Returns (name, email) if both fields are present. We read the
+/// file as data instead of relying on env-var inheritance because the
+/// inheritance is volatile — if the user runs `git commit` directly from a
+/// shell that didn't get the Claude Code env injection, the global
+/// gitconfig wins and the wrong author lands.
+fn read_substrate_identity(root: &std::path::Path) -> Option<(String, String)> {
+    let path = root.join(".claude").join("settings.local.json");
+    let content = fs::read_to_string(&path).ok()?;
+    let v: serde_json::Value = serde_json::from_str(&content).ok()?;
+    let env = v.get("env")?.as_object()?;
+    let name = env.get("GIT_AUTHOR_NAME")?.as_str()?.to_string();
+    let email = env.get("GIT_AUTHOR_EMAIL")?.as_str()?.to_string();
+    if name.is_empty() || email.is_empty() {
+        return None;
+    }
+    Some((name, email))
+}
+
 fn cmd_save(message: &str) {
+    let root = match find_git_root() {
+        Some(r) => r,
+        None => {
+            eprintln!("fatal: not in a git repository");
+            exit(1);
+        }
+    };
+
+    // Resolve the agent's identity from settings.local.json. Without this,
+    // git falls back to the user's global gitconfig and commits get the
+    // wrong author. Hard-fail — saving with the wrong identity is worse
+    // than not saving.
+    let (author_name, author_email) = match read_substrate_identity(&root) {
+        Some(id) => id,
+        None => {
+            eprintln!("fatal: no agent identity configured.");
+            eprintln!();
+            eprintln!(".claude/settings.local.json is missing GIT_AUTHOR_NAME / GIT_AUTHOR_EMAIL.");
+            eprintln!("Run `git lex kit-update` to refresh substrate identity, or `git lex init` if");
+            eprintln!("this repo hasn't been initialized.");
+            exit(1);
+        }
+    };
+    let author = format!("{} <{}>", author_name, author_email);
+
     // Sync skills/subagents into substrate harness.
     // The harness scans for Skill/ and Subagent/ under any namespace folder.
-    if let Some(root) = find_git_root() {
-        harness::sync(&root, "claude");
-    }
+    harness::sync(&root, "claude");
 
     // Add everything, commit, let hooks handle extract + sync
     let status = Command::new("git")
@@ -1079,11 +1128,11 @@ fn cmd_save(message: &str) {
     }
 
     let status = Command::new("git")
-        .args(["commit", "-m", message])
+        .args(["commit", "--author", &author, "-m", message])
         .status();
     match status {
         Ok(s) if s.success() => {
-            println!("Saved: {}", message);
+            println!("Saved: {} [as {}]", message, author);
         }
         _ => {
             eprintln!("fatal: git commit failed");
@@ -2508,6 +2557,23 @@ fn main() {
 
 // ─── nuke ──────────────────────────────────────────────────────
 
+/// Read the `agent_name:` field from `.lex/repo.yml`, if present. Returns
+/// `None` if the file is missing or the field isn't set. Used by both
+/// `cmd_init` (carrying the value across re-init) and `cmd_kit_update`
+/// (rewiring substrate identity without re-prompting).
+fn read_agent_name(root: &std::path::Path) -> Option<String> {
+    let content = fs::read_to_string(root.join(".lex").join("repo.yml")).ok()?;
+    for line in content.lines() {
+        if let Some(rest) = line.strip_prefix("agent_name:") {
+            let val = rest.trim().trim_matches('"').to_string();
+            if !val.is_empty() {
+                return Some(val);
+            }
+        }
+    }
+    None
+}
+
 /// Set up Claude Code substrate: write git identity env vars and register
 /// any hooks into .claude/settings.local.json (gitignored, per-machine).
 fn setup_substrate_claude(root: &std::path::Path, agent_name: &str) {
@@ -3031,6 +3097,14 @@ fn cmd_kit_update(kit_arg: Option<String>, force: bool) {
                 total_installed, total_skipped
             );
         }
+    }
+
+    // Refresh substrate identity. The agent_name was captured at init-time
+    // and stored in repo.yml. settings.local.json is gitignored, so it can
+    // legitimately be missing (fresh clone, deleted by accident, never
+    // written). Rewriting it on every kit-update keeps it durable.
+    if let Some(agent_name) = read_agent_name(&root) {
+        setup_substrate_claude(&root, &agent_name);
     }
 
     // Regenerate SHACL shapes from the (possibly updated) kit ontology.
