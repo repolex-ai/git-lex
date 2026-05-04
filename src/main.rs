@@ -1060,13 +1060,34 @@ fn cmd_create(doctype: &str, instance_id: Option<&str>, json: bool) {
 
 // ─── git lex save ──────────────────────────────────────────────
 
-/// Read the agent's git identity from .claude/settings.local.json's env
-/// block. Returns (name, email) if both fields are present. We read the
-/// file as data instead of relying on env-var inheritance because the
-/// inheritance is volatile — if the user runs `git commit` directly from a
-/// shell that didn't get the Claude Code env injection, the global
-/// gitconfig wins and the wrong author lands.
-fn read_substrate_identity(root: &std::path::Path) -> Option<(String, String)> {
+/// Resolve the agent's git identity for this commit. Two sources, in order:
+///
+/// 1. **Process environment** — `GIT_AUTHOR_NAME` + `GIT_AUTHOR_EMAIL`. This
+///    is the *squad-repo* case: the agent's Claude Code session
+///    (running in their soul repo) injects these env vars from
+///    `<soul>/.claude/settings.local.json`. When `git lex save` runs in a
+///    squad repo from that session, the env carries through.
+///
+/// 2. **`<root>/.claude/settings.local.json`** — read as data, not env.
+///    This is the *soul-repo* case (the agent committing to their own
+///    repo) and a defensive fallback if env injection is for any reason
+///    not in effect (raw shell, subagent, etc.).
+///
+/// Returns `(name, email)` from whichever source resolves first. Returns
+/// `None` only if both are missing — in which case we hard-fail rather
+/// than commit as the user's global gitconfig.
+fn resolve_agent_identity(root: &std::path::Path) -> Option<(String, String)> {
+    // 1. Process environment.
+    if let (Ok(name), Ok(email)) = (
+        std::env::var("GIT_AUTHOR_NAME"),
+        std::env::var("GIT_AUTHOR_EMAIL"),
+    ) {
+        if !name.is_empty() && !email.is_empty() {
+            return Some((name, email));
+        }
+    }
+
+    // 2. .claude/settings.local.json env block (read as data).
     let path = root.join(".claude").join("settings.local.json");
     let content = fs::read_to_string(&path).ok()?;
     let v: serde_json::Value = serde_json::from_str(&content).ok()?;
@@ -1088,18 +1109,22 @@ fn cmd_save(message: &str) {
         }
     };
 
-    // Resolve the agent's identity from settings.local.json. Without this,
-    // git falls back to the user's global gitconfig and commits get the
-    // wrong author. Hard-fail — saving with the wrong identity is worse
-    // than not saving.
-    let (author_name, author_email) = match read_substrate_identity(&root) {
+    // Resolve the agent's identity. Tries env first (squad-repo case where
+    // the agent's soul session injects GIT_AUTHOR_*) then settings.local.json
+    // (soul-repo case). Hard-fail otherwise — saving with the wrong identity
+    // (e.g. user's global gitconfig leaking in) is worse than not saving.
+    let (author_name, author_email) = match resolve_agent_identity(&root) {
         Some(id) => id,
         None => {
             eprintln!("fatal: no agent identity configured.");
             eprintln!();
-            eprintln!(".claude/settings.local.json is missing GIT_AUTHOR_NAME / GIT_AUTHOR_EMAIL.");
-            eprintln!("Run `git lex kit-update` to refresh substrate identity, or `git lex init` if");
-            eprintln!("this repo hasn't been initialized.");
+            eprintln!("Couldn't resolve GIT_AUTHOR_NAME / GIT_AUTHOR_EMAIL from either:");
+            eprintln!("  - process environment (your Claude Code session should inject these)");
+            eprintln!("  - {}/.claude/settings.local.json", root.display());
+            eprintln!();
+            eprintln!("If this is your soul repo, run `git lex kit-update` to refresh identity.");
+            eprintln!("If this is a squad repo, your soul session should be injecting env vars —");
+            eprintln!("check that your soul's .claude/settings.local.json has the env block.");
             exit(1);
         }
     };
