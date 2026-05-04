@@ -647,14 +647,15 @@ fn cmd_init(directory: Option<String>, kit: Option<String>) {
         // into the substrate's local config so commits, hooks, and tool
         // calls all use the correct identity.
         //
-        // Currently: Claude Code (via settings.local.json env block).
+        // Currently: Claude Code (via settings.json env block).
         // Future: Gemini, OpenAI Codex, etc. — stub those as needed after
         // researching how each model's CLI handles per-project identity.
 
         let agent_name = vars.get("agent_name").cloned().unwrap_or_default();
         if !agent_name.is_empty() {
             // Claude Code: write git identity env vars into
-            // .claude/settings.local.json (gitignored, per-machine).
+            // .claude/settings.json (committed — souls are portable across
+            // machines via git, so identity travels with the repo).
             // These get injected into every Bash tool call automatically.
             setup_substrate_claude(&root, &agent_name);
 
@@ -1065,13 +1066,13 @@ fn cmd_create(doctype: &str, instance_id: Option<&str>, json: bool) {
 /// 1. **Process environment** — `GIT_AUTHOR_NAME` + `GIT_AUTHOR_EMAIL`. This
 ///    is the *squad-repo* case: the agent's Claude Code session
 ///    (running in their soul repo) injects these env vars from
-///    `<soul>/.claude/settings.local.json`. When `git lex save` runs in a
+///    `<soul>/.claude/settings.json`. When `git lex save` runs in a
 ///    squad repo from that session, the env carries through.
 ///
-/// 2. **`<root>/.claude/settings.local.json`** — read as data, not env.
-///    This is the *soul-repo* case (the agent committing to their own
-///    repo) and a defensive fallback if env injection is for any reason
-///    not in effect (raw shell, subagent, etc.).
+/// 2. **`<root>/.claude/settings.json`** — read as data, not env. This is
+///    the *soul-repo* case (the agent committing to their own repo) and
+///    a defensive fallback if env injection is for any reason not in
+///    effect (raw shell, subagent, etc.).
 ///
 /// Returns `(name, email)` from whichever source resolves first. Returns
 /// `None` only if both are missing — in which case we hard-fail rather
@@ -1087,8 +1088,8 @@ fn resolve_agent_identity(root: &std::path::Path) -> Option<(String, String)> {
         }
     }
 
-    // 2. .claude/settings.local.json env block (read as data).
-    let path = root.join(".claude").join("settings.local.json");
+    // 2. .claude/settings.json env block (read as data).
+    let path = root.join(".claude").join("settings.json");
     let content = fs::read_to_string(&path).ok()?;
     let v: serde_json::Value = serde_json::from_str(&content).ok()?;
     let env = v.get("env")?.as_object()?;
@@ -1110,7 +1111,7 @@ fn cmd_save(message: &str) {
     };
 
     // Resolve the agent's identity. Tries env first (squad-repo case where
-    // the agent's soul session injects GIT_AUTHOR_*) then settings.local.json
+    // the agent's soul session injects GIT_AUTHOR_*) then settings.json
     // (soul-repo case). Hard-fail otherwise — saving with the wrong identity
     // (e.g. user's global gitconfig leaking in) is worse than not saving.
     let (author_name, author_email) = match resolve_agent_identity(&root) {
@@ -1120,11 +1121,11 @@ fn cmd_save(message: &str) {
             eprintln!();
             eprintln!("Couldn't resolve GIT_AUTHOR_NAME / GIT_AUTHOR_EMAIL from either:");
             eprintln!("  - process environment (your Claude Code session should inject these)");
-            eprintln!("  - {}/.claude/settings.local.json", root.display());
+            eprintln!("  - {}/.claude/settings.json", root.display());
             eprintln!();
             eprintln!("If this is your soul repo, run `git lex kit-update` to refresh identity.");
             eprintln!("If this is a squad repo, your soul session should be injecting env vars —");
-            eprintln!("check that your soul's .claude/settings.local.json has the env block.");
+            eprintln!("check that your soul's .claude/settings.json has the env block.");
             exit(1);
         }
     };
@@ -2600,9 +2601,12 @@ fn read_agent_name(root: &std::path::Path) -> Option<String> {
 }
 
 /// Set up Claude Code substrate: write git identity env vars and register
-/// any hooks into .claude/settings.local.json (gitignored, per-machine).
+/// any hooks into .claude/settings.json (committed). Souls are portable
+/// across machines via git — checking identity in keeps it traveling with
+/// the repo. Anyone running a Claude Code session in this soul commits as
+/// this soul, which is the correct semantics: the soul *is* the agent.
 fn setup_substrate_claude(root: &std::path::Path, agent_name: &str) {
-    let settings_path = root.join(".claude").join("settings.local.json");
+    let settings_path = root.join(".claude").join("settings.json");
     fs::create_dir_all(settings_path.parent().unwrap()).ok();
 
     let mut settings: serde_json::Value = if settings_path.exists() {
@@ -2632,7 +2636,23 @@ fn setup_substrate_claude(root: &std::path::Path, agent_name: &str) {
 
     let json_str = serde_json::to_string_pretty(&settings).unwrap();
     fs::write(&settings_path, json_str + "\n").ok();
-    println!("Claude Code: identity and hooks written to .claude/settings.local.json");
+    println!("Claude Code: identity and hooks written to .claude/settings.json");
+
+    // Warn if a stale .claude/settings.local.json exists. Older versions
+    // wrote identity to that file (gitignored), but souls are portable so
+    // identity now lives in committed settings.json. Claude Code load order
+    // is user → project → local, so a stale local file silently overrides
+    // the new committed one. Don't auto-delete (user may have hand-edited
+    // it) — just flag it loudly.
+    let local_path = root.join(".claude").join("settings.local.json");
+    if local_path.exists() {
+        eprintln!();
+        eprintln!("warning: .claude/settings.local.json still exists.");
+        eprintln!("Identity now lives in committed settings.json. The local file");
+        eprintln!("(gitignored) overrides settings.json in Claude Code load order,");
+        eprintln!("so its env block (if any) will silently win. Review and delete");
+        eprintln!("if you do not need it: rm .claude/settings.local.json");
+    }
 }
 
 /// Add a hook entry to a settings JSON value (in-memory merge, no file I/O).
@@ -3125,9 +3145,9 @@ fn cmd_kit_update(kit_arg: Option<String>, force: bool) {
     }
 
     // Refresh substrate identity. The agent_name was captured at init-time
-    // and stored in repo.yml. settings.local.json is gitignored, so it can
-    // legitimately be missing (fresh clone, deleted by accident, never
-    // written). Rewriting it on every kit-update keeps it durable.
+    // and stored in repo.yml. Rewriting settings.json on every kit-update
+    // keeps it in sync with the (possibly updated) kit content and recovers
+    // gracefully if it was hand-deleted.
     if let Some(agent_name) = read_agent_name(&root) {
         setup_substrate_claude(&root, &agent_name);
     }
