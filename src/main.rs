@@ -3152,6 +3152,18 @@ fn cmd_kit_update(kit_arg: Option<String>, force: bool) {
         setup_substrate_claude(&root, &agent_name);
     }
 
+    // Remove legacy .env if present. Older souls used .env + SessionStart
+    // hook to inject identity; identity now lives in .claude/settings.json
+    // and the .env path silently wins over settings.json when both exist
+    // (the hook appended .env after settings.json's env block). Sweeping
+    // it on every kit-update guarantees one source of truth.
+    let legacy_env = root.join(".env");
+    if legacy_env.exists() {
+        if fs::remove_file(&legacy_env).is_ok() {
+            println!("Removed legacy .env — identity now lives in .claude/settings.json");
+        }
+    }
+
     // Regenerate SHACL shapes from the (possibly updated) kit ontology.
     if let Some(shapes_path) = build_shacl_shapes(&kit_name) {
         println!("SHACL shapes regenerated: {}",
