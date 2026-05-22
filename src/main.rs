@@ -127,8 +127,6 @@ enum Commands {
         #[arg(default_value = "git lex save")]
         message: String,
     },
-    /// Show status of .lex/ in the current repo
-    Status,
     /// Join a squad repo (creates mutual identity binding)
     Join {
         /// Path to the squad repo to join
@@ -471,7 +469,6 @@ fn cmd_init(directory: Option<String>, kit: Option<String>) {
                 doc.push_str("git lex save \"message\"   # Add + commit (extracts automatically)\n");
                 doc.push_str("git lex sync              # Build/update the knowledge graph\n");
                 doc.push_str("git lex query \"SPARQL...\" # Query the knowledge graph\n");
-                doc.push_str("git lex status            # Show extraction status\n");
                 doc.push_str("```\n\n");
 
                 doc.push_str("## Commands\n\n");
@@ -481,7 +478,6 @@ fn cmd_init(directory: Option<String>, kit: Option<String>) {
                 doc.push_str("| `git lex save \"msg\"` | Stage all changes, commit, extract frontmatter |\n");
                 doc.push_str("| `git lex sync` | Build the SPARQL knowledge graph from git + extractions |\n");
                 doc.push_str("| `git lex query \"...\"` | Run a SPARQL query against the knowledge graph |\n");
-                doc.push_str("| `git lex status` | Show which files have been extracted |\n");
                 doc.push_str("| `git lex log` | Show commit history |\n");
                 doc.push_str("| `git lex llm list` | Show files needing LLM extraction |\n");
                 doc.push_str("| `git lex llm extract <file> --model <id>` | Extract entities via LLM |\n\n");
@@ -742,104 +738,6 @@ fn cmd_init(directory: Option<String>, kit: Option<String>) {
     registry_add(&root);
 }
 
-
-// ─── git lex status ────────────────────────────────────────────
-
-fn cmd_status() {
-    let root = match find_git_root() {
-        Some(r) => r,
-        None => {
-            eprintln!("fatal: not a git repository (or any parent up to mount point /)");
-            exit(1);
-        }
-    };
-
-    let lex_dir = root.join(".lex");
-
-    if !lex_dir.exists() {
-        println!("No .lex/ directory found.");
-        println!("Run 'git lex init' to initialize.");
-        return;
-    }
-
-    println!("git-lex status for {}", root.display());
-    println!();
-
-    for subdir in &["graph", "ontology"] {
-        let dir = lex_dir.join(subdir);
-        if dir.exists() {
-            let count = fs::read_dir(&dir)
-                .map(|entries| entries.filter_map(|e| e.ok()).count())
-                .unwrap_or(0);
-            println!("  .lex/{}/  — {} files", subdir, count);
-        } else {
-            println!("  .lex/{}/  — (not created)", subdir);
-        }
-    }
-
-    // Document lexification status
-    // Get file list with blob hashes
-    let output = Command::new("git")
-        .args(["ls-tree", "-r", "--format=%(objectname)\t%(path)", "HEAD"])
-        .output();
-    if let Ok(o) = output {
-        if o.status.success() {
-            let stdout = String::from_utf8_lossy(&o.stdout);
-            let docs: Vec<(&str, &str)> = stdout
-                .lines()
-                .filter_map(|line| {
-                    let parts: Vec<&str> = line.splitn(2, '\t').collect();
-                    if parts.len() < 2 { return None; }
-                    let (hash, path) = (parts[0], parts[1]);
-                    let pl = path.to_lowercase();
-                    if (pl.ends_with(".md") || pl.ends_with(".txt"))
-                        && !pl.starts_with(".lex/")
-                        && !pl.starts_with(".git") {
-                        Some((hash, path))
-                    } else {
-                        None
-                    }
-                })
-                .collect();
-
-            if !docs.is_empty() {
-                let lex_nq = load_lex_nquads();
-
-                let mut lexified = Vec::new();
-                let mut stale = Vec::new();
-                let mut unlexified = Vec::new();
-
-                for (hash, path) in &docs {
-                    let path_mentioned = lex_nq.contains(path);
-                    let blob_mentioned = lex_nq.contains(hash);
-
-                    if path_mentioned && blob_mentioned {
-                        lexified.push(*path);
-                    } else if path_mentioned && !blob_mentioned {
-                        stale.push(*path);
-                    } else {
-                        unlexified.push(*path);
-                    }
-                }
-
-                println!();
-                println!("  Documents:");
-                for doc in &lexified {
-                    println!("    {}  — lexified", doc);
-                }
-                for doc in &stale {
-                    println!("    {}  — stale (content changed since lexification)", doc);
-                }
-                for doc in &unlexified {
-                    println!("    {}  — unlexified", doc);
-                }
-                println!();
-                let total = lexified.len() + stale.len() + unlexified.len();
-                println!("  {}/{} lexified, {} stale", lexified.len(), total, stale.len());
-            }
-        }
-    }
-}
 
 // ─── git lex query ─────────────────────────────────────────────
 
@@ -2529,7 +2427,6 @@ fn main() {
 
     match cli.command {
         Commands::Init { directory, kit } => cmd_init(directory, kit),
-        Commands::Status => cmd_status(),
         Commands::Create { doctype, instance_id, json } => cmd_create(&doctype, instance_id.as_deref(), json),
         Commands::List { json } => cmd_list(json),
         Commands::Save { message } => cmd_save(&message),
