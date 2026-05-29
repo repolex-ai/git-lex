@@ -99,31 +99,30 @@ pub fn read_config(root: &Path) -> (bool, Vec<HarnessPath>) {
         .and_then(|v| v.as_bool())
         .unwrap_or(true);
 
-    let mut paths = Vec::new();
-    if let Some(arr) = block.get("harness-paths").and_then(|v| v.as_sequence()) {
-        for entry in arr {
-            let harness = entry.get("harness").and_then(|v| v.as_str()).unwrap_or("");
-            let watch_path = entry.get("watch-path").and_then(|v| v.as_str()).unwrap_or("");
-            let file_glob = entry.get("file-glob").and_then(|v| v.as_str()).unwrap_or("*");
-            if harness.is_empty() || watch_path.is_empty() {
-                continue;
+    // Three states for harness-paths:
+    //   key absent          → fall back to defaults (block exists but unconfigured)
+    //   key present, empty  → explicit suppression, no harness watched
+    //   key present, items  → use what user wrote
+    match block.get("harness-paths").and_then(|v| v.as_sequence()) {
+        None => (enabled, default_harness_paths(root)),
+        Some(arr) => {
+            let mut paths = Vec::new();
+            for entry in arr {
+                let harness = entry.get("harness").and_then(|v| v.as_str()).unwrap_or("");
+                let watch_path = entry.get("watch-path").and_then(|v| v.as_str()).unwrap_or("");
+                let file_glob = entry.get("file-glob").and_then(|v| v.as_str()).unwrap_or("*");
+                if harness.is_empty() || watch_path.is_empty() {
+                    continue;
+                }
+                paths.push(HarnessPath {
+                    harness: harness.to_string(),
+                    watch_path: watch_path.to_string(),
+                    file_glob: file_glob.to_string(),
+                });
             }
-            paths.push(HarnessPath {
-                harness: harness.to_string(),
-                watch_path: watch_path.to_string(),
-                file_glob: file_glob.to_string(),
-            });
+            (enabled, paths)
         }
     }
-
-    // If the user wrote an empty `raw-mirror:` block (no harness-paths), still
-    // fall back to defaults — explicit `harness-paths: []` would be needed to
-    // opt out, distinct from "block present but unconfigured."
-    if paths.is_empty() {
-        paths = default_harness_paths(root);
-    }
-
-    (enabled, paths)
 }
 
 /// Built-in default harness paths. Active when no explicit `raw-mirror:`
