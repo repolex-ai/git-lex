@@ -27,6 +27,7 @@ mod ontology;
 mod shacl;
 mod kit;
 mod extraction;
+mod raw_mirror;
 
 use crate::git::{auto_commit_snapshot, base_uri};
 use crate::nquad::{build_slug_path_indexes, emit_spo_line_nquads,
@@ -179,6 +180,24 @@ enum Commands {
         #[arg(long, default_value = "10")]
         show: usize,
     },
+    /// Manage the Raw/ harness-session mirror.
+    ///
+    /// Raw/ holds byte-faithful copies of harness session files (Claude Code
+    /// jsonls, etc.) so the soul keeps its own canonical record independent
+    /// of harness storage policy. The live mirror runs on every `git lex save`;
+    /// `git lex raw backfill` is a one-shot to rescue pre-existing sessions.
+    Raw {
+        #[command(subcommand)]
+        cmd: RawCommands,
+    },
+}
+
+#[derive(Subcommand)]
+enum RawCommands {
+    /// Copy every existing harness session file into Raw/ using mtime as the
+    /// first-seen date. Run once to rescue historical sessions before the
+    /// harness expires them.
+    Backfill,
 }
 
 
@@ -1032,6 +1051,13 @@ fn cmd_save(message: &str) {
     // Sync skills/subagents into substrate harness.
     // The harness scans for Skill/ and Subagent/ under any namespace folder.
     harness::sync(&root, "claude");
+
+    // Mirror harness session files into Raw/ — soul-as-canonical-record.
+    // Runs before `git add -A` so newly-mirrored files land in this commit.
+    let mirror = raw_mirror::run(&root);
+    if !mirror.is_noop() {
+        eprintln!("Raw: mirrored {} new, {} updated", mirror.new, mirror.updated);
+    }
 
     // Add everything, commit, let hooks handle extract + sync
     let status = Command::new("git")
@@ -2475,6 +2501,32 @@ fn main() {
             cmd_history_verify(show);
         }
         Commands::Sync => cmd_sync(),
+        Commands::Raw { cmd } => match cmd {
+            RawCommands::Backfill => cmd_raw_backfill(),
+        },
+    }
+}
+
+fn cmd_raw_backfill() {
+    let root = match find_git_root() {
+        Some(r) => r,
+        None => {
+            eprintln!("fatal: not in a git repository");
+            exit(1);
+        }
+    };
+    let report = raw_mirror::backfill(&root);
+    if report.harnesses_checked == 0 {
+        println!("No raw-mirror harness paths configured (or none exist on disk).");
+        println!("Add a `raw-mirror:` block to .lex/repo.yml — see kit-soul defaults.");
+        return;
+    }
+    if report.is_noop() {
+        println!("Backfill: nothing to copy ({} harness path(s) checked, all already mirrored).",
+            report.harnesses_checked);
+    } else {
+        println!("Backfill: copied {} session file(s) into Raw/.", report.new);
+        println!("Run `git lex save \"backfill historical sessions\"` to commit.");
     }
 }
 
