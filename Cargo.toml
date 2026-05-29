@@ -29,6 +29,12 @@ regex = "1"
 oxiri = "0.2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# rudof family — always install with `cargo install --path . --locked`.
+# The 0.2.x series has known sibling-crate API coupling where one patch
+# version of shacl_ast/shacl_validation may not match a freshly-resolved
+# prefixmap or iri_s. Pinning a few crates only relocates the failure to
+# a sibling; pinning every sibling is unmaintainable. The lockfile is the
+# correct source of compatibility truth. README documents --locked.
 shacl_validation = ">=0.2.8, <0.3"
 shacl_ir = "0.2"
 shacl_rdf = "0.2"

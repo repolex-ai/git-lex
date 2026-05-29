@@ -38,6 +38,13 @@ cargo install --path . --locked
 
 This installs both `git-lex` and `git-lex-serve` to `~/.cargo/bin/`.
 
+> **`--locked` is required.** The rudof crate family has sibling-crate API
+> coupling that needs the exact version combination recorded in
+> `Cargo.lock`. Plain `cargo install --path .` will re-resolve transitive
+> deps and may fail to compile on `shacl_ast` / `rudof_rdf`. Always use
+> `--locked` for source installs; same for `cargo install --path . --force`
+> when reinstalling after local changes.
+
 ## Quick start
 
 ```bash
