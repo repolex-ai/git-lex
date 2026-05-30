@@ -2576,11 +2576,25 @@ fn setup_substrate_claude(root: &std::path::Path, agent_name: &str) {
     env.insert("GIT_COMMITTER_NAME".to_string(), serde_json::json!(agent_name));
     env.insert("GIT_COMMITTER_EMAIL".to_string(), serde_json::json!(email));
 
-    // Register SessionStart hook if the scaffold provided one.
-    let hook_script = root.join(".claude").join("hooks").join("SessionStart.sh");
-    if hook_script.exists() {
-        register_hook_in_settings(&mut settings, "SessionStart",
-            r#"bash "$CLAUDE_PROJECT_DIR/.claude/hooks/SessionStart.sh""#);
+    // Auto-register any hook scripts the kit's harness/.claude/hooks/ shipped.
+    // Each `<EventName>.sh` in .claude/hooks/ is registered as a Claude Code
+    // hook on the matching event (SessionStart, PreCompact, PostCompact, etc.).
+    // Idempotent — `register_hook_in_settings` dedups by command string, so
+    // re-running kit-update doesn't duplicate entries.
+    let hooks_dir = root.join(".claude").join("hooks");
+    if let Ok(entries) = fs::read_dir(&hooks_dir) {
+        for entry in entries.filter_map(|e| e.ok()) {
+            let name = entry.file_name().to_string_lossy().to_string();
+            let Some(event) = name.strip_suffix(".sh") else { continue };
+            if event.is_empty() || event.starts_with('.') {
+                continue;
+            }
+            let cmd = format!(
+                r#"bash "$CLAUDE_PROJECT_DIR/.claude/hooks/{}""#,
+                name
+            );
+            register_hook_in_settings(&mut settings, event, &cmd);
+        }
     }
 
     let json_str = serde_json::to_string_pretty(&settings).unwrap();
