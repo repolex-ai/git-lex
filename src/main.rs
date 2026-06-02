@@ -145,11 +145,11 @@ enum Commands {
         /// Kit to update (e.g., repolex-ai/git-lex-kit-squad). If omitted,
         /// uses the kit from .lex/repo.yml.
         kit: Option<String>,
-        /// Force reinstall scaffold files even if they already exist in the
-        /// repo. Without this, kit-update only installs scaffold files that
-        /// are missing — preserving any local customizations. Use this when
-        /// developing a kit and you want the latest shipped files to
-        /// overwrite whatever is currently in the repo.
+        /// Overwrite local files that differ from the kit. Without this,
+        /// drifted files are left untouched and the kit version is installed
+        /// alongside as `<file>.kit-latest` so you can diff and decide. With
+        /// --force, prior locals are stashed under
+        /// `.kit-pre-force/<timestamp>/` before being overwritten.
         #[arg(long)]
         force: bool,
     },
