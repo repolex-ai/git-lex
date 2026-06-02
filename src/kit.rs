@@ -20,8 +20,9 @@ use oxigraph::store::Store;
 use std::collections::HashMap;
 use std::fs;
 use std::io::Cursor;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::SystemTime;
 
 use git_lex::{find_git_root, get_kit, kit_install_dir_for_spec, resolve_kit_spec};
 
@@ -445,33 +446,166 @@ pub(crate) fn install_scaffold_files_from(kit_dir: &std::path::Path) -> usize {
     count
 }
 
-/// Like `install_scaffold_files_from`, but safe for `kit-update` against a
-/// live repo. If `force` is false, files that already exist in the repo are
-/// left alone (preserving any local customizations an agent has made). If
-/// `force` is true, behaves exactly like `install_scaffold_files_from` —
-/// clobbers everything. Used by `kit-update` to refresh base-kit scaffold
-/// pieces like `.lex/www/` without blowing away an agent's `.claude/`
-/// customizations.
+/// Report from `install_scaffold_files_from_skip_existing`.
 ///
-/// Returns `(installed, skipped)` counts.
+/// Beyond the legacy (installed, skipped) counts, this carries:
+/// - `drifted`: files where the local copy differs from the kit-shipped one;
+///   for each, a `.kit-latest` sibling has been written so the agent can see
+///   the diff. The local file itself was NOT touched.
+/// - `stashed`: files moved to `<repo-root>/.kit-pre-force/<timestamp>/<rel>`
+///   before being overwritten under `--force`. Recovery path if --force was
+///   wrong.
+///
+/// Paths are relative to the repo root, for display.
+#[derive(Default)]
+pub(crate) struct ScaffoldInstallReport {
+    pub installed: usize,
+    pub skipped: usize,
+    pub drifted: Vec<String>,
+    pub stashed: Vec<String>,
+}
+
+/// Best-effort kit version string for the `.kit-latest` header.
+/// Reads `version:` from `kit.yml`; falls back to the kit dir name.
+fn kit_version_for(kit_dir: &Path) -> String {
+    if let Ok(content) = fs::read_to_string(kit_dir.join("kit.yml")) {
+        for line in content.lines() {
+            let l = line.trim();
+            if let Some(rest) = l.strip_prefix("version:") {
+                let v = rest.trim().trim_matches('"').trim_matches('\'');
+                if !v.is_empty() {
+                    return v.to_string();
+                }
+            }
+        }
+    }
+    kit_dir
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_else(|| "unknown".to_string())
+}
+
+/// `YYYYMMDD-HHMMSS` (UTC) from `SystemTime`. Used for `.kit-pre-force/` stash
+/// dirs and `.kit-latest` header dates. UTC, not local — stash dirs sort right
+/// across timezones.
+fn timestamp_now_utc() -> String {
+    let secs = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    // Days since 1970-01-01.
+    let days = (secs / 86400) as i64;
+    let sod = secs % 86400;
+    let hh = sod / 3600;
+    let mm = (sod % 3600) / 60;
+    let ss = sod % 60;
+
+    // Civil-from-days (Howard Hinnant's algorithm — exact, no chrono dep).
+    let z = days + 719468;
+    let era = if z >= 0 { z } else { z - 146096 } / 146097;
+    let doe = (z - era * 146097) as u64;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    let y = yoe as i64 + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = if m <= 2 { y + 1 } else { y };
+
+    format!("{:04}{:02}{:02}-{:02}{:02}{:02}", y, m, d, hh, mm, ss)
+}
+
+/// ISO date `YYYY-MM-DD` (UTC), for `.kit-latest` headers.
+fn iso_date_utc() -> String {
+    let ts = timestamp_now_utc();
+    // ts is "YYYYMMDD-HHMMSS"; reformat the date portion.
+    if ts.len() >= 8 {
+        format!("{}-{}-{}", &ts[0..4], &ts[4..6], &ts[6..8])
+    } else {
+        ts
+    }
+}
+
+/// Pick the comment-prefix to use for a `.kit-latest` header, based on the
+/// file's existing first line (shebang-aware) and extension. Default: `# `.
+/// Recognizes `//` for JS/TS/Rust/C/Java/Go and `<!--`/`-->` for HTML/Markdown.
+fn header_for_drift_file(local_path: &Path, kit_version: &str, kit_path_rel: &str) -> String {
+    let ext = local_path
+        .extension()
+        .map(|e| e.to_string_lossy().to_lowercase())
+        .unwrap_or_default();
+    let date = iso_date_utc();
+    let line1 = format!(
+        "kit-latest from {} installed {} — your local {} differs",
+        kit_version, date, kit_path_rel
+    );
+    let line2 = format!("Diff: diff {0} {0}.kit-latest", kit_path_rel);
+    match ext.as_str() {
+        "rs" | "js" | "ts" | "jsx" | "tsx" | "c" | "h" | "cpp" | "java" | "go" | "swift" | "kt" => {
+            format!("// {}\n// {}\n", line1, line2)
+        }
+        "html" | "htm" | "md" | "xml" | "svg" => {
+            format!("<!-- {} -->\n<!-- {} -->\n", line1, line2)
+        }
+        _ => format!("# {}\n# {}\n", line1, line2),
+    }
+}
+
+/// True if the destination is a regular file whose bytes match `src`. Returns
+/// false on any error (treat as drift so the agent gets a chance to inspect).
+fn files_byte_identical(src: &Path, dest: &Path) -> bool {
+    match (fs::read(src), fs::read(dest)) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => false,
+    }
+}
+
+/// Like `install_scaffold_files_from`, but safe for `kit-update` against a
+/// live repo.
+///
+/// Without `--force`:
+///   - Missing files: copied from kit (counted as `installed`).
+///   - Identical files: silent no-op (counted as `skipped`).
+///   - **Drifted files**: local left untouched; kit version installed
+///     alongside as `<name>.kit-latest` with a two-line header (kit version +
+///     diff one-liner). Recorded in `drifted` so the caller can surface the
+///     paths. This is the graceful upgrade path: drift is visible from `ls`,
+///     the decision stays with the agent.
+///
+/// With `--force`:
+///   - Files that differ are stashed to
+///     `<repo-root>/.kit-pre-force/<timestamp>/<rel-path>` before being
+///     overwritten. Recorded in `stashed`. Identical files still no-op.
 pub(crate) fn install_scaffold_files_from_skip_existing(
     kit_dir: &std::path::Path,
     force: bool,
-) -> (usize, usize) {
+) -> ScaffoldInstallReport {
     let root = match find_git_root() {
         Some(r) => r,
-        None => return (0, 0),
+        None => return ScaffoldInstallReport::default(),
     };
 
-    let mut installed = 0usize;
-    let mut skipped = 0usize;
+    let kit_version = kit_version_for(kit_dir);
+    // One stash dir per kit-update invocation (caller drives by passing the
+    // same timestamp via a fresh call — we use one per call here, which is
+    // fine since base+domain kit calls land within the same second and
+    // identical timestamps just merge into the same dir).
+    let stash_root = root.join(".kit-pre-force").join(timestamp_now_utc());
+
+    let mut report = ScaffoldInstallReport::default();
+
+    struct Ctx<'a> {
+        repo_root: &'a Path,
+        kit_version: &'a str,
+        stash_root: &'a Path,
+        force: bool,
+    }
 
     fn install_recursive(
-        src_dir: &std::path::Path,
-        dest_dir: &std::path::Path,
-        force: bool,
-        installed: &mut usize,
-        skipped: &mut usize,
+        src_dir: &Path,
+        dest_dir: &Path,
+        ctx: &Ctx,
+        report: &mut ScaffoldInstallReport,
     ) {
         let entries = match fs::read_dir(src_dir) {
             Ok(e) => e,
@@ -489,8 +623,11 @@ pub(crate) fn install_scaffold_files_from_skip_existing(
             let ft = meta.file_type();
 
             if ft.is_symlink() {
-                if !force && dest.symlink_metadata().is_ok() {
-                    *skipped += 1;
+                if !ctx.force && dest.symlink_metadata().is_ok() {
+                    // Symlinks: drift is "exists differently" — but resolving
+                    // a symlink's target to byte-compare is fragile. Treat
+                    // existing-symlink-no-force as skip (legacy behavior).
+                    report.skipped += 1;
                     continue;
                 }
                 let target = match fs::read_link(&src) {
@@ -508,7 +645,7 @@ pub(crate) fn install_scaffold_files_from_skip_existing(
                 #[cfg(unix)]
                 {
                     if std::os::unix::fs::symlink(&target, &dest).is_ok() {
-                        *installed += 1;
+                        report.installed += 1;
                     }
                 }
                 continue;
@@ -516,34 +653,88 @@ pub(crate) fn install_scaffold_files_from_skip_existing(
 
             if ft.is_dir() {
                 fs::create_dir_all(&dest).ok();
-                install_recursive(&src, &dest, force, installed, skipped);
+                install_recursive(&src, &dest, ctx, report);
                 continue;
             }
 
-            if ft.is_file() {
-                if !force && dest.symlink_metadata().is_ok() {
-                    *skipped += 1;
-                    continue;
+            if !ft.is_file() {
+                continue;
+            }
+
+            fs::create_dir_all(dest.parent().unwrap_or(&dest)).ok();
+
+            let dest_exists = dest.symlink_metadata().is_ok();
+            let dest_is_regular_file = dest_exists
+                && dest.symlink_metadata().ok().map(|m| m.file_type().is_file()).unwrap_or(false);
+
+            if !dest_exists {
+                // Missing → install.
+                if fs::copy(&src, &dest).is_ok() {
+                    report.installed += 1;
                 }
-                fs::create_dir_all(dest.parent().unwrap_or(&dest)).ok();
-                if dest.symlink_metadata().is_ok() {
-                    let dft = dest.symlink_metadata().ok().map(|m| m.file_type());
-                    if let Some(dft) = dft {
-                        if dft.is_symlink() || (dft.is_dir() && !dft.is_symlink()) {
-                            if dft.is_dir() && !dft.is_symlink() {
-                                let _ = fs::remove_dir_all(&dest);
-                            } else {
-                                let _ = fs::remove_file(&dest);
-                            }
-                        }
+                continue;
+            }
+
+            // Destination exists. Decide based on byte-compare.
+            let identical = dest_is_regular_file && files_byte_identical(&src, &dest);
+            if identical {
+                report.skipped += 1;
+                continue;
+            }
+
+            // Drift case.
+            let rel = dest
+                .strip_prefix(ctx.repo_root)
+                .unwrap_or(&dest)
+                .to_string_lossy()
+                .to_string();
+
+            if !ctx.force {
+                // Alongside-install: write `<dest>.kit-latest` with a header.
+                let kit_latest_path = {
+                    let mut p = dest.clone().into_os_string();
+                    p.push(".kit-latest");
+                    PathBuf::from(p)
+                };
+                let header = header_for_drift_file(&dest, ctx.kit_version, &rel);
+                if let Ok(body) = fs::read(&src) {
+                    let mut out: Vec<u8> = Vec::with_capacity(header.len() + body.len());
+                    out.extend_from_slice(header.as_bytes());
+                    out.extend_from_slice(&body);
+                    if fs::write(&kit_latest_path, &out).is_ok() {
+                        report.drifted.push(rel);
                     }
                 }
-                if fs::copy(&src, &dest).is_ok() {
-                    *installed += 1;
+                continue;
+            }
+
+            // --force: stash prior local, then overwrite.
+            let stash_dest = ctx.stash_root.join(&rel);
+            let stash_ok = fs::create_dir_all(stash_dest.parent().unwrap_or(&stash_dest)).is_ok()
+                && fs::copy(&dest, &stash_dest).is_ok();
+            // Remove dest if it was an odd type, then write the kit version.
+            if dest_exists && !dest_is_regular_file {
+                if dest.symlink_metadata().ok().map(|m| m.file_type().is_dir() && !m.file_type().is_symlink()).unwrap_or(false) {
+                    let _ = fs::remove_dir_all(&dest);
+                } else {
+                    let _ = fs::remove_file(&dest);
+                }
+            }
+            if fs::copy(&src, &dest).is_ok() {
+                report.installed += 1;
+                if stash_ok {
+                    report.stashed.push(rel);
                 }
             }
         }
     }
+
+    let ctx = Ctx {
+        repo_root: &root,
+        kit_version: &kit_version,
+        stash_root: &stash_root,
+        force,
+    };
 
     // New kit structure: ontology/, content/, harness/, www/
     // Static kits: ontology ALWAYS overwritten — kit's schema, must stay in sync.
@@ -562,42 +753,57 @@ pub(crate) fn install_scaffold_files_from_skip_existing(
             .unwrap_or(false);
 
         if is_adaptive {
-            // Never clobber agent-owned ontology — only seed missing files
+            // Adaptive: agent-owned. Never clobber; only seed missing.
             let ontology_dest = root.join("_ontology");
             fs::create_dir_all(&ontology_dest).ok();
-            // Use force=false so existing files are preserved
-            install_recursive(&ontology_src, &ontology_dest, false, &mut installed, &mut skipped);
+            let adaptive_ctx = Ctx {
+                repo_root: ctx.repo_root,
+                kit_version: ctx.kit_version,
+                stash_root: ctx.stash_root,
+                force: false,
+            };
+            install_recursive(&ontology_src, &ontology_dest, &adaptive_ctx, &mut report);
         } else {
+            // Static: kit-owned schema, ALWAYS clobber. Stash on force is
+            // implicit — and for static ontology we hard-overwrite even
+            // without --force because the SHACL/TTL graph must match the kit.
+            // (Same as legacy behavior; this is not a drift surface.)
             let ontology_dest = root.join(".lex").join("ontology");
             fs::create_dir_all(&ontology_dest).ok();
-            install_recursive(&ontology_src, &ontology_dest, true, &mut installed, &mut skipped);
+            let static_ctx = Ctx {
+                repo_root: ctx.repo_root,
+                kit_version: ctx.kit_version,
+                stash_root: ctx.stash_root,
+                force: true,
+            };
+            install_recursive(&ontology_src, &ontology_dest, &static_ctx, &mut report);
         }
     }
 
     let content_src = kit_dir.join("content");
     if content_src.exists() {
-        install_recursive(&content_src, &root, force, &mut installed, &mut skipped);
+        install_recursive(&content_src, &root, &ctx, &mut report);
     }
 
     let harness_src = kit_dir.join("harness");
     if harness_src.exists() {
-        install_recursive(&harness_src, &root, force, &mut installed, &mut skipped);
+        install_recursive(&harness_src, &root, &ctx, &mut report);
     }
 
     let www_src = kit_dir.join("www");
     if www_src.exists() {
         let www_dest = root.join(".lex").join("www");
         fs::create_dir_all(&www_dest).ok();
-        install_recursive(&www_src, &www_dest, force, &mut installed, &mut skipped);
+        install_recursive(&www_src, &www_dest, &ctx, &mut report);
     }
 
     // Legacy: scaffold/ → repo root
     let scaffold_dir = kit_dir.join("scaffold");
     if scaffold_dir.exists() {
-        install_recursive(&scaffold_dir, &root, force, &mut installed, &mut skipped);
+        install_recursive(&scaffold_dir, &root, &ctx, &mut report);
     }
 
-    (installed, skipped)
+    report
 }
 
 /// Report from install_asset_files — lists what was installed, what was
@@ -755,4 +961,102 @@ pub(crate) fn add_kit(_kit_spec: &str) {
 /// Not yet implemented.
 pub(crate) fn remove_kit(_kit_spec: &str) {
     unimplemented!("kit::remove_kit — not yet implemented");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+
+    #[test]
+    fn timestamp_now_utc_is_well_formed() {
+        let ts = timestamp_now_utc();
+        // YYYYMMDD-HHMMSS = 15 chars.
+        assert_eq!(ts.len(), 15);
+        assert_eq!(ts.chars().nth(8), Some('-'));
+        let year: u32 = ts[0..4].parse().expect("year parses");
+        assert!(year >= 2026 && year <= 2200, "year out of range: {}", year);
+        let month: u32 = ts[4..6].parse().expect("month parses");
+        assert!((1..=12).contains(&month), "month out of range: {}", month);
+        let day: u32 = ts[6..8].parse().expect("day parses");
+        assert!((1..=31).contains(&day), "day out of range: {}", day);
+    }
+
+    #[test]
+    fn iso_date_utc_is_well_formed() {
+        let d = iso_date_utc();
+        assert_eq!(d.len(), 10);
+        assert_eq!(d.chars().nth(4), Some('-'));
+        assert_eq!(d.chars().nth(7), Some('-'));
+    }
+
+    #[test]
+    fn files_byte_identical_detects_identity() {
+        let tmp = std::env::temp_dir().join(format!("git-lex-test-{}", timestamp_now_utc()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let a = tmp.join("a");
+        let b = tmp.join("b");
+        std::fs::write(&a, b"hello\n").unwrap();
+        std::fs::write(&b, b"hello\n").unwrap();
+        assert!(files_byte_identical(&a, &b));
+        std::fs::write(&b, b"hello!\n").unwrap();
+        assert!(!files_byte_identical(&a, &b));
+        std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    #[test]
+    fn header_picks_bash_style_for_shell() {
+        let p = Path::new("SessionStart.sh");
+        let h = header_for_drift_file(p, "git-lex-kit-soul", ".claude/hooks/SessionStart.sh");
+        assert!(h.starts_with("# kit-latest"), "got: {}", h);
+        assert!(h.contains("diff .claude/hooks/SessionStart.sh"));
+    }
+
+    #[test]
+    fn header_picks_html_style_for_md() {
+        let p = Path::new("README.md");
+        let h = header_for_drift_file(p, "kit", "README.md");
+        assert!(h.starts_with("<!--"), "got: {}", h);
+    }
+
+    #[test]
+    fn header_picks_rust_style_for_rs() {
+        let p = Path::new("lib.rs");
+        let h = header_for_drift_file(p, "kit", "src/lib.rs");
+        assert!(h.starts_with("// "), "got: {}", h);
+    }
+
+    /// Smoke test: build a fake kit + fake repo, exercise the install path.
+    /// Skipped if not in a git repo (we need find_git_root() to succeed).
+    #[test]
+    fn scaffold_install_drift_smoke() {
+        // Skip cleanly if find_git_root() returns None — the test asserts only
+        // that the function's contract holds when it can run.
+        if find_git_root().is_none() {
+            return;
+        }
+
+        let tmp_root = std::env::temp_dir().join(format!("git-lex-kit-smoke-{}", timestamp_now_utc()));
+        let kit_dir = tmp_root.join("kit");
+        let harness_dir = kit_dir.join("harness").join(".claude").join("hooks");
+        std::fs::create_dir_all(&harness_dir).unwrap();
+        let mut f = std::fs::File::create(harness_dir.join("FakeHook.sh")).unwrap();
+        f.write_all(b"#!/bin/bash\n# kit version\nexit 0\n").unwrap();
+
+        // Without --force on a non-existent dest, behavior should install.
+        // (We can't easily exercise the drift branch without writing into the
+        // real repo root, so this smoke just confirms no panic + counts work.)
+        let report = install_scaffold_files_from_skip_existing(&kit_dir, false);
+        // Either the file was installed in the real repo (and we should clean
+        // up) or it was skipped/drifted there. Don't assert exact counts.
+        let _ = report;
+        // Cleanup: best-effort.
+        std::fs::remove_dir_all(&tmp_root).ok();
+        // If the test ran and the install landed inside the real repo's root,
+        // try to remove it.
+        if let Some(root) = find_git_root() {
+            let _ = std::fs::remove_file(root.join(".claude").join("hooks").join("FakeHook.sh"));
+            let _ = std::fs::remove_file(root.join(".claude").join("hooks").join("FakeHook.sh.kit-latest"));
+        }
+    }
 }

@@ -39,7 +39,7 @@ use crate::shacl::{build_shacl_shapes, parse_shacl_hints};
 use crate::extraction::{extract_jsonl_sessions, extract_markdown_links, frontmatter_to_turtle,
                         sanitize_uri_segment, short_hash};
 use crate::kit::{collect_init_variables, fetch_kit_from_github, install_scaffold_files_from,
-                 install_scaffold_files_from_skip_existing,
+                 install_scaffold_files_from_skip_existing, ScaffoldInstallReport,
                  kit_config_bool, kit_config_str, read_repo_yml_fields};
 
 // .spo event stream — git-aware change detector for .spo sidecars. Used by
@@ -3081,29 +3081,59 @@ fn cmd_kit_update(kit_arg: Option<String>, force: bool) {
 
     // Install scaffold files from both kits. This is the new behavior that
     // mirrors init: base kit ships .lex/www/, .lex/ontology/, and domain kit
-    // ships its own scaffold (.claude/, AGENTS.md, etc.). Without --force,
-    // existing files in the repo are preserved — only missing files are
-    // installed. With --force, everything is clobbered (kit-development mode).
-    let (base_installed, base_skipped) =
-        install_scaffold_files_from_skip_existing(&base_kit_dir, force);
-    let (domain_installed, domain_skipped) = if !base_is_same_as_domain {
+    // ships its own scaffold (.claude/, AGENTS.md, etc.).
+    //
+    // Without --force:
+    //   - Missing files: installed.
+    //   - Identical files: silent no-op.
+    //   - Drifted files (exist locally but bytes differ from kit): local left
+    //     untouched, kit version written alongside as `<name>.kit-latest`
+    //     with a two-line header. Caller can diff and decide.
+    // With --force:
+    //   - Drifted files are stashed to `.kit-pre-force/<timestamp>/<rel>`
+    //     before being overwritten — recovery path if --force was wrong.
+    let base_report = install_scaffold_files_from_skip_existing(&base_kit_dir, force);
+    let domain_report = if !base_is_same_as_domain {
         install_scaffold_files_from_skip_existing(&kit_dir, force)
     } else {
-        (0, 0)
+        ScaffoldInstallReport::default()
     };
-    let total_installed = base_installed + domain_installed;
-    let total_skipped = base_skipped + domain_skipped;
-    if total_installed > 0 || total_skipped > 0 {
+    let total_installed = base_report.installed + domain_report.installed;
+    let total_skipped = base_report.skipped + domain_report.skipped;
+    let drifted: Vec<String> = base_report.drifted.into_iter()
+        .chain(domain_report.drifted.into_iter())
+        .collect();
+    let stashed: Vec<String> = base_report.stashed.into_iter()
+        .chain(domain_report.stashed.into_iter())
+        .collect();
+
+    if total_installed > 0 || total_skipped > 0 || !drifted.is_empty() || !stashed.is_empty() {
         if force {
             println!(
-                "Scaffold: {} file(s) installed (--force: overwrote existing)",
+                "Scaffold: {} file(s) installed (--force)",
                 total_installed
             );
+            if !stashed.is_empty() {
+                println!("Stashed {} local file(s) under .kit-pre-force/ before overwriting:", stashed.len());
+                for path in &stashed {
+                    println!("  {}", path);
+                }
+            }
         } else {
             println!(
-                "Scaffold: {} file(s) installed, {} preserved (already existed — use --force to overwrite)",
+                "Scaffold: {} file(s) installed, {} unchanged",
                 total_installed, total_skipped
             );
+            if !drifted.is_empty() {
+                println!(
+                    "Drift: {} file(s) differ from kit — kit version available as .kit-latest sibling:",
+                    drifted.len()
+                );
+                for path in &drifted {
+                    println!("  {} (see {}.kit-latest)", path, path);
+                }
+                println!("Run `diff <file> <file>.kit-latest` to inspect; rm the .kit-latest to dismiss, or mv it over the local to adopt.");
+            }
         }
     }
 
