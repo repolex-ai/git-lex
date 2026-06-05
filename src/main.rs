@@ -40,7 +40,10 @@ use crate::extraction::{extract_jsonl_sessions, extract_markdown_links, frontmat
                         sanitize_uri_segment, short_hash};
 use crate::kit::{collect_init_variables, fetch_kit_from_github, install_scaffold_files_from,
                  install_scaffold_files_from_skip_existing, ScaffoldInstallReport,
-                 kit_config_bool, kit_config_str, read_repo_yml_fields};
+                 kit_config_bool, kit_config_str, read_repo_yml_fields,
+                 read_repo_yml_optional_kits, append_optional_kit, remove_optional_kit,
+                 fetch_and_validate_optional_kit, remove_kit_install_dir,
+                 KitFetchOutcome, KitScope, read_kit_scope};
 
 // .spo event stream — git-aware change detector for .spo sidecars. Used by
 // orphan cleanup (pre-commit hook) and history graph ingest (rebuild +
@@ -143,13 +146,33 @@ enum Commands {
     /// Re-download and reinstall the kit without touching content or extractions
     KitUpdate {
         /// Kit to update (e.g., repolex-ai/git-lex-kit-squad). If omitted,
-        /// uses the kit from .lex/repo.yml.
+        /// updates ALL installed kits (base + domain + optionals).
         kit: Option<String>,
         /// Overwrite local files that differ from the kit. Without this,
         /// drifted files are left untouched and the kit version is installed
         /// alongside as `<file>.kit-latest` so you can diff and decide. With
         /// --force, prior locals are stashed under
         /// `.kit-pre-force/<timestamp>/` before being overwritten.
+        #[arg(long)]
+        force: bool,
+    },
+    /// Add an optional kit to this repo. The kit's `scope:` in kit.yml must
+    /// be `optional`. Folders + class templates are created at add-time so
+    /// the kit becomes discoverable from `ls`. Tracked in `.lex/repo.yml`'s
+    /// `optional_kits:` list and updated by `kit-update`.
+    KitAdd {
+        /// Kit spec (e.g., `repolex-ai/git-lex-kit-innerworld`).
+        kit: String,
+    },
+    /// Remove an optional kit from this repo. Scrubs the kit from
+    /// `optional_kits:` in repo.yml and deletes `.lex/kit/{org}/{repo}/`.
+    /// Will ASK before deleting the kit's content folders (e.g.
+    /// `Innerworld/`) — those contain user data.
+    KitRemove {
+        /// Kit spec to remove (e.g., `repolex-ai/git-lex-kit-innerworld`).
+        kit: String,
+        /// Skip the confirmation prompt and delete content folders too.
+        /// Use with care.
         #[arg(long)]
         force: bool,
     },
@@ -2482,6 +2505,8 @@ fn main() {
         Commands::Parse { file } => cmd_parse(&file),
         Commands::Nuke => cmd_nuke(),
         Commands::KitUpdate { kit, force } => cmd_kit_update(kit, force),
+        Commands::KitAdd { kit } => cmd_kit_add(kit),
+        Commands::KitRemove { kit, force } => cmd_kit_remove(kit, force),
         Commands::Display { query, port } => cmd_display(&query, port),
         Commands::Serve { args } => {
             let status = Command::new("git-lex-serve")
@@ -3004,169 +3029,56 @@ fn cmd_nuke() {
 
 // ─── kit-update ────────────────────────────────────────────────
 
-fn cmd_kit_update(kit_arg: Option<String>, force: bool) {
-    let root = find_git_root().expect("not in a git repo");
-    let lex_dir = root.join(".lex");
-
-    if !lex_dir.exists() {
-        eprintln!("Not a git-lex repo. Run 'git lex init' first.");
-        exit(1);
-    }
-
-    // Determine which kit to update: from the argument, or from repo.yml.
-    // This is the *domain* kit (soul, squad, lab, etc.). The base kit is
-    // implicit and always refreshed alongside it, mirroring init's behavior.
-    let kit_name = match kit_arg {
-        Some(ref k) => k.clone(),
-        None => {
-            // Read kit from repo.yml
-            let repo_yml = lex_dir.join("repo.yml");
-            let content = fs::read_to_string(&repo_yml).unwrap_or_default();
-            let mut found = None;
-            for line in content.lines() {
-                if let Some(rest) = line.strip_prefix("kit:") {
-                    let val = rest.trim().trim_matches('"').to_string();
-                    if val != "none" && !val.is_empty() {
-                        found = Some(val);
-                    }
-                }
-            }
-            match found {
-                Some(k) => k,
-                None => {
-                    eprintln!("No kit configured in .lex/repo.yml. Specify one: git lex kit-update org/repo");
-                    exit(1);
-                }
+/// Determine the primary domain kit from repo.yml. Returns None if the
+/// `kit:` field is missing or `none`.
+fn read_domain_kit_from_repo_yml(root: &std::path::Path) -> Option<String> {
+    let repo_yml = root.join(".lex").join("repo.yml");
+    let content = fs::read_to_string(&repo_yml).unwrap_or_default();
+    for line in content.lines() {
+        let trimmed = line.trim();
+        // Skip list items so a `- kit: ...` shape inside optional_kits doesn't match.
+        if trimmed.starts_with('-') { continue; }
+        if let Some(rest) = trimmed.strip_prefix("kit:") {
+            let val = rest.trim().trim_matches('"').to_string();
+            if val != "none" && !val.is_empty() {
+                return Some(val);
             }
         }
+    }
+    None
+}
+
+/// Fetch a single kit into its install dir. Caller decides whether to
+/// remove-and-replace (cleanest for update) or skip-if-present.
+/// Returns true on success.
+fn fetch_kit_for_update(kit_spec: &str) -> bool {
+    let root = match find_git_root() {
+        Some(r) => r,
+        None => return false,
     };
-
-    let (org, repo, short) = resolve_kit_spec(&kit_name);
-    let kit_dir = lex_dir.join("kit").join(&org).join(&repo);
-
-    // Resolve the base kit too — we fetch and install its scaffold (which
-    // ships core infrastructure like .lex/www/ and .lex/ontology/) on every
-    // kit-update, matching init's base+domain pattern.
-    let (base_org, base_repo, _) = resolve_kit_spec(BASE_KIT);
-    let base_kit_dir = lex_dir.join("kit").join(&base_org).join(&base_repo);
-    let base_is_same_as_domain = kit_name == BASE_KIT
-        || (org == base_org && repo == base_repo);
-
-    // Refresh the base kit first (always), then the domain kit.
-
-    // Base kit.
-    println!("Updating base kit '{}/{}' from GitHub...", base_org, base_repo);
-    let _ = fs::remove_dir_all(&base_kit_dir);
-    fs::create_dir_all(&base_kit_dir).ok();
-    if fetch_kit_from_github(BASE_KIT, &base_kit_dir) {
-        println!("Base kit '{}/{}' fetched.", base_org, base_repo);
-    } else {
-        eprintln!("Failed to fetch base kit '{}' from GitHub.", BASE_KIT);
-        eprintln!("Check network access to https://github.com/{}/{}", base_org, base_repo);
-        exit(1);
+    let (org, repo, _) = resolve_kit_spec(kit_spec);
+    let kit_dir = root.join(".lex").join("kit").join(&org).join(&repo);
+    let _ = fs::remove_dir_all(&kit_dir);
+    if fs::create_dir_all(&kit_dir).is_err() {
+        return false;
     }
+    fetch_kit_from_github(kit_spec, &kit_dir)
+}
 
-    // Domain kit (if different from base).
-    if !base_is_same_as_domain {
-        println!("Updating kit '{}/{}' from GitHub...", org, repo);
-        let _ = fs::remove_dir_all(&kit_dir);
-        fs::create_dir_all(&kit_dir).ok();
-        if fetch_kit_from_github(&kit_name, &kit_dir) {
-            println!("Kit '{}/{}' fetched.", org, repo);
-        } else {
-            eprintln!("Failed to fetch kit '{}' from GitHub.", kit_name);
-            exit(1);
-        }
-    }
+/// Regenerate one kit's derived artifacts: SHACL shapes, class folders +
+/// __ClassName.md templates, and the folder-vs-ontology audit.
+///
+/// Used by both `cmd_kit_update` (in a loop over all kits) and
+/// `cmd_kit_add` (single-kit). Stays silent if the kit has no types.
+fn regenerate_kit_artifacts(kit_name: &str, root: &std::path::Path, create_folders: bool) {
+    let (_, _, short) = resolve_kit_spec(kit_name);
 
-    // Install scaffold files from both kits. This is the new behavior that
-    // mirrors init: base kit ships .lex/www/, .lex/ontology/, and domain kit
-    // ships its own scaffold (.claude/, AGENTS.md, etc.).
-    //
-    // Without --force:
-    //   - Missing files: installed.
-    //   - Identical files: silent no-op.
-    //   - Drifted files (exist locally but bytes differ from kit): local left
-    //     untouched, kit version written alongside as `<name>.kit-latest`
-    //     with a two-line header. Caller can diff and decide.
-    // With --force:
-    //   - Drifted files are stashed to `.kit-pre-force/<timestamp>/<rel>`
-    //     before being overwritten — recovery path if --force was wrong.
-    let base_report = install_scaffold_files_from_skip_existing(&base_kit_dir, force);
-    let domain_report = if !base_is_same_as_domain {
-        install_scaffold_files_from_skip_existing(&kit_dir, force)
-    } else {
-        ScaffoldInstallReport::default()
-    };
-    let total_installed = base_report.installed + domain_report.installed;
-    let total_skipped = base_report.skipped + domain_report.skipped;
-    let drifted: Vec<String> = base_report.drifted.into_iter()
-        .chain(domain_report.drifted.into_iter())
-        .collect();
-    let stashed: Vec<String> = base_report.stashed.into_iter()
-        .chain(domain_report.stashed.into_iter())
-        .collect();
-
-    if total_installed > 0 || total_skipped > 0 || !drifted.is_empty() || !stashed.is_empty() {
-        if force {
-            println!(
-                "Scaffold: {} file(s) installed (--force)",
-                total_installed
-            );
-            if !stashed.is_empty() {
-                println!("Stashed {} local file(s) under .kit-pre-force/ before overwriting:", stashed.len());
-                for path in &stashed {
-                    println!("  {}", path);
-                }
-            }
-        } else {
-            println!(
-                "Scaffold: {} file(s) installed, {} unchanged",
-                total_installed, total_skipped
-            );
-            if !drifted.is_empty() {
-                println!(
-                    "Drift: {} file(s) differ from kit — kit version available as .kit-latest sibling:",
-                    drifted.len()
-                );
-                for path in &drifted {
-                    println!("  {} (see {}.kit-latest)", path, path);
-                }
-                println!("Run `diff <file> <file>.kit-latest` to inspect; rm the .kit-latest to dismiss, or mv it over the local to adopt.");
-            }
-        }
-    }
-
-    // Refresh substrate identity. The agent_name was captured at init-time
-    // and stored in repo.yml. Rewriting settings.json on every kit-update
-    // keeps it in sync with the (possibly updated) kit content and recovers
-    // gracefully if it was hand-deleted.
-    if let Some(agent_name) = read_agent_name(&root) {
-        setup_substrate_claude(&root, &agent_name);
-    }
-
-    // Remove legacy .env if present. Older souls used .env + SessionStart
-    // hook to inject identity; identity now lives in .claude/settings.json
-    // and the .env path silently wins over settings.json when both exist
-    // (the hook appended .env after settings.json's env block). Sweeping
-    // it on every kit-update guarantees one source of truth.
-    let legacy_env = root.join(".env");
-    if legacy_env.exists() {
-        if fs::remove_file(&legacy_env).is_ok() {
-            println!("Removed legacy .env — identity now lives in .claude/settings.json");
-        }
-    }
-
-    // Regenerate SHACL shapes from the (possibly updated) kit ontology.
-    if let Some(shapes_path) = build_shacl_shapes(&kit_name) {
-        println!("SHACL shapes regenerated: {}",
+    if let Some(shapes_path) = build_shacl_shapes(kit_name) {
+        println!("  SHACL shapes regenerated: {}",
             shapes_path.file_name().unwrap_or_default().to_string_lossy());
     }
 
-    // Regenerate class templates from the kit.
-    let kit_types = get_kit_types(&kit_name);
-    // Read shapes from wherever build_shacl_shapes wrote them (next to
-    // the source TTL — static or adaptive).
+    let kit_types = get_kit_types(kit_name);
     let shapes_content = {
         let static_p = root.join(".lex").join("ontology").join(&short)
             .join(format!("{}-shapes.ttl", short));
@@ -3178,18 +3090,29 @@ fn cmd_kit_update(kit_arg: Option<String>, force: bool) {
     };
     let shacl_hints = parse_shacl_hints(&shapes_content);
 
+    let folder_base = kit_config_str(kit_name, "folder base");
     let mut templates_updated = 0usize;
-    let update_folder_base = kit_config_str(&kit_name, "folder base");
     for (type_name, properties) in &kit_types {
-        let type_dir = if let Some(ref base) = update_folder_base {
+        let type_dir = if let Some(ref base) = folder_base {
             root.join(base).join(type_name)
         } else {
             root.join(type_name)
         };
-        fs::create_dir_all(&type_dir).ok();
+        // Create the folder if (a) caller wants it (kit-add / kit-update) and
+        // (b) it's missing. Templates land in here either way.
+        if create_folders {
+            fs::create_dir_all(&type_dir).ok();
+            let gitkeep = type_dir.join(".gitkeep");
+            if !gitkeep.exists() {
+                fs::write(&gitkeep, "").ok();
+            }
+        } else if !type_dir.exists() {
+            // No folder + no create → skip template emit so we don't litter
+            // a __ClassName.md in a parent that doesn't have the kit folder.
+            continue;
+        }
         let template_path = type_dir.join(format!("__{}.md", type_name));
 
-        // Always overwrite templates on kit-update — they're derived artifacts.
         let mut tmpl = String::new();
         tmpl.push_str("---\n");
         for (prop_name, prop_type, _required, _comment) in properties {
@@ -3210,21 +3133,18 @@ fn cmd_kit_update(kit_arg: Option<String>, force: bool) {
         templates_updated += 1;
     }
 
-    // ─── Folder audit: check disk matches ontology ───
-    if let Some(ref base) = update_folder_base {
+    // Folder audit — only meaningful when the kit declares a folder_base.
+    if let Some(ref base) = folder_base {
         let expected: std::collections::HashSet<String> =
             kit_types.iter().map(|(name, _)| name.clone()).collect();
         let base_dir = root.join(base);
 
-        // Check for missing folders (in ontology but not on disk)
         let mut missing = Vec::new();
         for name in &expected {
             if !base_dir.join(name).exists() {
                 missing.push(name.clone());
             }
         }
-
-        // Check for extra folders (on disk but not in ontology)
         let mut extra = Vec::new();
         if let Ok(entries) = fs::read_dir(&base_dir) {
             for entry in entries.filter_map(|e| e.ok()) {
@@ -3234,19 +3154,356 @@ fn cmd_kit_update(kit_arg: Option<String>, force: bool) {
                 }
             }
         }
-
         if !missing.is_empty() {
             eprintln!("  ⚠ Missing folders (in ontology but not on disk): {}", missing.join(", "));
         }
         if !extra.is_empty() {
             eprintln!("  ⚠ Extra folders (on disk but not in ontology): {}", extra.join(", "));
         }
-        if missing.is_empty() && extra.is_empty() {
+        if missing.is_empty() && extra.is_empty() && !expected.is_empty() {
             println!("  Folders: {}/{} match ontology ✓", expected.len(), expected.len());
         }
     }
 
-    println!("Kit update complete: {} class templates regenerated.", templates_updated);
+    if templates_updated > 0 {
+        println!("  {} class template(s) regenerated.", templates_updated);
+    }
+}
+
+/// Build the ordered list of kits a `kit-update` should refresh.
+/// Order matters: base first (carries shared scaffold/ontology), then
+/// domain, then optionals (alphabetical for determinism in output).
+///
+/// If `target` is provided, returns only that one kit (still validated
+/// against installed-kit list — refuses to update a kit that isn't here).
+fn collect_kits_for_update(root: &std::path::Path, target: Option<&str>) -> Vec<String> {
+    let mut all = vec![BASE_KIT.to_string()];
+    if let Some(domain) = read_domain_kit_from_repo_yml(root) {
+        if domain != BASE_KIT { all.push(domain); }
+    }
+    let mut optionals = read_repo_yml_optional_kits(&root.join(".lex").join("repo.yml"));
+    optionals.sort();
+    optionals.dedup();
+    for o in optionals {
+        if !all.contains(&o) { all.push(o); }
+    }
+    match target {
+        None => all,
+        Some(t) => {
+            // Exact match against installed list. Allow short or long form by
+            // resolving both sides to canonical (org, repo) tuples.
+            let (t_org, t_repo, _) = resolve_kit_spec(t);
+            let matched: Vec<String> = all.into_iter()
+                .filter(|k| {
+                    let (o, r, _) = resolve_kit_spec(k);
+                    o == t_org && r == t_repo
+                })
+                .collect();
+            if matched.is_empty() {
+                eprintln!("Kit '{}' is not installed in this repo. Use `git lex kit-add` first.", t);
+                exit(1);
+            }
+            matched
+        }
+    }
+}
+
+fn cmd_kit_update(kit_arg: Option<String>, force: bool) {
+    let root = find_git_root().expect("not in a git repo");
+    let lex_dir = root.join(".lex");
+
+    if !lex_dir.exists() {
+        eprintln!("Not a git-lex repo. Run 'git lex init' first.");
+        exit(1);
+    }
+
+    // The list of kits to update. Without a target arg, this is ALL installed
+    // kits: base + domain + optionals. With a target, just that one (still
+    // must be present in the installed list).
+    let kits_to_update = collect_kits_for_update(&root, kit_arg.as_deref());
+
+    // Fetch every kit fresh. Bail on any fetch failure — partial state is
+    // worse than no state, and the only way to fail here is network/auth
+    // (since the spec was validated against the installed list).
+    for spec in &kits_to_update {
+        let (org, repo, _) = resolve_kit_spec(spec);
+        println!("Updating kit '{}/{}' from GitHub...", org, repo);
+        if !fetch_kit_for_update(spec) {
+            eprintln!("Failed to fetch kit '{}' from GitHub.", spec);
+            eprintln!("Check network access to https://github.com/{}/{}", org, repo);
+            exit(1);
+        }
+    }
+
+    // Install scaffold files from each kit, accumulating drift/stash reports.
+    //
+    // Without --force:
+    //   - Missing files: installed.
+    //   - Identical files: silent no-op.
+    //   - Drifted files: local left untouched, kit version installed alongside
+    //     as `<file>.kit-latest` so the agent can diff and decide.
+    // With --force:
+    //   - Drifted files are stashed to `.kit-pre-force/<timestamp>/<rel>`
+    //     before being overwritten — recovery path if --force was wrong.
+    let mut total_installed = 0usize;
+    let mut total_skipped = 0usize;
+    let mut all_drifted: Vec<String> = Vec::new();
+    let mut all_stashed: Vec<String> = Vec::new();
+    for spec in &kits_to_update {
+        let (org, repo, _) = resolve_kit_spec(spec);
+        let kit_dir = lex_dir.join("kit").join(&org).join(&repo);
+        let report = install_scaffold_files_from_skip_existing(&kit_dir, force);
+        total_installed += report.installed;
+        total_skipped += report.skipped;
+        all_drifted.extend(report.drifted);
+        all_stashed.extend(report.stashed);
+    }
+
+    if total_installed > 0 || total_skipped > 0 || !all_drifted.is_empty() || !all_stashed.is_empty() {
+        if force {
+            println!("Scaffold: {} file(s) installed (--force)", total_installed);
+            if !all_stashed.is_empty() {
+                println!("Stashed {} local file(s) under .kit-pre-force/ before overwriting:", all_stashed.len());
+                for path in &all_stashed {
+                    println!("  {}", path);
+                }
+            }
+        } else {
+            println!("Scaffold: {} file(s) installed, {} unchanged", total_installed, total_skipped);
+            if !all_drifted.is_empty() {
+                println!(
+                    "Drift: {} file(s) differ from kit — kit version available as .kit-latest sibling:",
+                    all_drifted.len()
+                );
+                for path in &all_drifted {
+                    println!("  {} (see {}.kit-latest)", path, path);
+                }
+                println!("Run `diff <file> <file>.kit-latest` to inspect; rm the .kit-latest to dismiss, or mv it over the local to adopt.");
+            }
+        }
+    }
+
+    // Refresh substrate identity. Identity is per-repo, not per-kit, so this
+    // runs once after all kit scaffolds are in place.
+    if let Some(agent_name) = read_agent_name(&root) {
+        setup_substrate_claude(&root, &agent_name);
+    }
+
+    // Remove legacy .env if present. Older souls used .env + SessionStart
+    // hook to inject identity; identity now lives in .claude/settings.json
+    // and the .env path silently wins over settings.json when both exist
+    // (the hook appended .env after settings.json's env block). Sweeping
+    // it on every kit-update guarantees one source of truth.
+    let legacy_env = root.join(".env");
+    if legacy_env.exists() {
+        if fs::remove_file(&legacy_env).is_ok() {
+            println!("Removed legacy .env — identity now lives in .claude/settings.json");
+        }
+    }
+
+    // Regenerate derived artifacts (shapes, class templates, folder audit)
+    // for each kit. Order matches kits_to_update so base goes first.
+    for spec in &kits_to_update {
+        let (org, repo, _) = resolve_kit_spec(spec);
+        println!("Regenerating artifacts for '{}/{}'...", org, repo);
+        regenerate_kit_artifacts(spec, &root, true);
+    }
+
+    println!("Kit update complete: {} kit(s) refreshed.", kits_to_update.len());
+}
+
+// ─── kit-add ─────────────────────────────────────────────────────
+
+/// Add an optional kit to the repo. Validates `scope: optional`, installs
+/// scaffold via the drift-handler, creates class folders + templates, and
+/// records the kit in `repo.yml`'s `optional_kits:` list.
+fn cmd_kit_add(kit_spec: String) {
+    let root = find_git_root().expect("not in a git repo");
+    let lex_dir = root.join(".lex");
+    if !lex_dir.exists() {
+        eprintln!("Not a git-lex repo. Run 'git lex init' first.");
+        exit(1);
+    }
+    let (org, repo, _) = resolve_kit_spec(&kit_spec);
+    let canonical_spec = format!("{}/{}", org, repo);
+
+    // Refuse to re-add an already-installed kit; the right move is kit-update.
+    let already: Vec<String> = read_repo_yml_optional_kits(&lex_dir.join("repo.yml"));
+    let already_present = already.iter()
+        .any(|s| {
+            let (o, r, _) = resolve_kit_spec(s);
+            o == org && r == repo
+        });
+    if already_present {
+        eprintln!("Kit '{}' is already installed. Use `git lex kit-update {}` to refresh it.", canonical_spec, canonical_spec);
+        exit(1);
+    }
+
+    // Also refuse if it's the domain or base kit — those install via init,
+    // not kit-add.
+    if canonical_spec == BASE_KIT {
+        eprintln!("Kit '{}' is the base kit — installed implicitly by `git lex init`. Cannot kit-add.", canonical_spec);
+        exit(1);
+    }
+    if let Some(domain) = read_domain_kit_from_repo_yml(&root) {
+        let (d_org, d_repo, _) = resolve_kit_spec(&domain);
+        if d_org == org && d_repo == repo {
+            eprintln!("Kit '{}' is this repo's domain kit. Cannot kit-add a domain kit.", canonical_spec);
+            exit(1);
+        }
+    }
+
+    println!("Fetching '{}' from GitHub...", canonical_spec);
+    let kit_dir = match fetch_and_validate_optional_kit(&canonical_spec) {
+        KitFetchOutcome::Ready(p) => p,
+        KitFetchOutcome::FetchFailed => {
+            eprintln!("Failed to fetch kit '{}' from GitHub.", canonical_spec);
+            eprintln!("Check that https://github.com/{}/{} exists and is reachable.", org, repo);
+            exit(1);
+        }
+        KitFetchOutcome::ScopeMismatch(found_scope) => {
+            eprintln!(
+                "Kit '{}' has scope `{:?}`, not `Optional`. Use `git lex init --kit {}` for a domain kit.",
+                canonical_spec, found_scope, canonical_spec
+            );
+            // Leave the fetched dir for inspection but back out of the install.
+            exit(1);
+        }
+    };
+    println!("Kit fetched at {}.", kit_dir.strip_prefix(&root).unwrap_or(&kit_dir).display());
+
+    // Install scaffold (drift-aware). For a new optional kit nothing should
+    // exist locally yet, so this is almost entirely fresh-install — but if
+    // the agent has already hand-authored folders matching the kit's class
+    // names, the drift-handler will surface that as `.kit-latest` siblings.
+    let report = install_scaffold_files_from_skip_existing(&kit_dir, false);
+    if report.installed > 0 || report.skipped > 0 || !report.drifted.is_empty() {
+        println!(
+            "Scaffold: {} file(s) installed, {} unchanged",
+            report.installed, report.skipped
+        );
+        if !report.drifted.is_empty() {
+            println!("Drift: {} file(s) differ from kit:", report.drifted.len());
+            for path in &report.drifted {
+                println!("  {} (see {}.kit-latest)", path, path);
+            }
+        }
+    }
+
+    // Regenerate derived artifacts for this kit. create_folders=true so the
+    // class folders show up on disk immediately — lux's call: discoverability.
+    println!("Regenerating artifacts for '{}/{}'...", org, repo);
+    regenerate_kit_artifacts(&canonical_spec, &root, true);
+
+    // Record in repo.yml.
+    let repo_yml = lex_dir.join("repo.yml");
+    if let Err(e) = append_optional_kit(&repo_yml, &canonical_spec) {
+        eprintln!("Warning: failed to update .lex/repo.yml: {}", e);
+        eprintln!("The kit is installed but won't be tracked by `git lex kit-update`.");
+        eprintln!("Add this line manually under `optional_kits:`:");
+        eprintln!("  - {}", canonical_spec);
+    } else {
+        println!("Recorded '{}' under optional_kits in .lex/repo.yml.", canonical_spec);
+    }
+
+    println!("Kit '{}' added.", canonical_spec);
+}
+
+// ─── kit-remove ──────────────────────────────────────────────────
+
+/// Remove an optional kit. Scrubs from repo.yml's optional_kits list and
+/// deletes `.lex/kit/{org}/{repo}/`. Asks before deleting content folders
+/// (e.g. `Innerworld/`) unless --force.
+fn cmd_kit_remove(kit_spec: String, force: bool) {
+    let root = find_git_root().expect("not in a git repo");
+    let lex_dir = root.join(".lex");
+    if !lex_dir.exists() {
+        eprintln!("Not a git-lex repo. Run 'git lex init' first.");
+        exit(1);
+    }
+    let (org, repo, _) = resolve_kit_spec(&kit_spec);
+    let canonical_spec = format!("{}/{}", org, repo);
+
+    // Refuse to remove the base or domain kit.
+    if canonical_spec == BASE_KIT {
+        eprintln!("Cannot remove the base kit.");
+        exit(1);
+    }
+    if let Some(domain) = read_domain_kit_from_repo_yml(&root) {
+        let (d_org, d_repo, _) = resolve_kit_spec(&domain);
+        if d_org == org && d_repo == repo {
+            eprintln!("Cannot remove the domain kit ('{}'). To switch domain kits, re-init.", canonical_spec);
+            exit(1);
+        }
+    }
+
+    // Verify it's in the optional_kits list. If not, nothing to do — but
+    // still try to remove the on-disk dir in case of a half-removed state.
+    let in_optionals = read_repo_yml_optional_kits(&lex_dir.join("repo.yml"))
+        .iter()
+        .any(|s| {
+            let (o, r, _) = resolve_kit_spec(s);
+            o == org && r == repo
+        });
+    if !in_optionals {
+        eprintln!("Kit '{}' is not in optional_kits. Nothing to remove.", canonical_spec);
+        exit(0);
+    }
+
+    // Identify the kit's content folder for the prompt. read folder_base
+    // from the kit's kit.yml before we delete the install dir.
+    let folder_base = kit_config_str(&canonical_spec, "folder base");
+    let kit_types = get_kit_types(&canonical_spec);
+
+    // Prompt before deleting content folders.
+    let content_dir = folder_base.as_ref().map(|b| root.join(b));
+    let content_exists = content_dir.as_ref().map(|p| p.exists()).unwrap_or(false);
+    let mut delete_content = false;
+    if content_exists {
+        if force {
+            delete_content = true;
+        } else {
+            eprint!(
+                "Kit '{}' has a content folder at `{}/` with {} class folder(s). \
+                 Delete it (with all your authored content inside)? [y/N] ",
+                canonical_spec,
+                folder_base.as_deref().unwrap_or("?"),
+                kit_types.len()
+            );
+            let mut input = String::new();
+            std::io::stdin().read_line(&mut input).unwrap_or_default();
+            let input = input.trim().to_lowercase();
+            delete_content = input == "y" || input == "yes";
+        }
+    }
+
+    // Scrub repo.yml.
+    let repo_yml = lex_dir.join("repo.yml");
+    if let Err(e) = remove_optional_kit(&repo_yml, &canonical_spec) {
+        eprintln!("Failed to update repo.yml: {}", e);
+        exit(1);
+    }
+
+    // Delete the kit install dir.
+    if let Err(e) = remove_kit_install_dir(&canonical_spec) {
+        eprintln!("Warning: failed to delete .lex/kit/{}/{}/: {}", org, repo, e);
+    }
+
+    // Delete content folder if confirmed.
+    if delete_content {
+        if let Some(cd) = content_dir {
+            if let Err(e) = fs::remove_dir_all(&cd) {
+                eprintln!("Warning: failed to delete content folder '{}': {}",
+                    cd.strip_prefix(&root).unwrap_or(&cd).display(), e);
+            } else {
+                println!("Deleted content folder '{}/'.", folder_base.as_deref().unwrap_or("?"));
+            }
+        }
+    } else if content_exists {
+        println!("Content folder '{}/' kept on disk (you said no).", folder_base.as_deref().unwrap_or("?"));
+    }
+
+    println!("Kit '{}' removed.", canonical_spec);
 }
 
 

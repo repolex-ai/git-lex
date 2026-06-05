@@ -29,7 +29,7 @@ use git_lex::{find_git_root, get_kit, kit_install_dir_for_spec, resolve_kit_spec
 /// Read simple `key: value` fields from a repo.yml-style file into a map.
 /// Used for honoring existing init variables on re-init (single-shot with
 /// carry-over). Skips comment lines and anything that doesn't parse as a
-/// flat key/value.
+/// flat key/value. Skips list keys (lines ending with `:` and no value).
 pub(crate) fn read_repo_yml_fields(path: &std::path::Path) -> HashMap<String, String> {
     let mut out = HashMap::new();
     let content = match fs::read_to_string(path) {
@@ -39,6 +39,8 @@ pub(crate) fn read_repo_yml_fields(path: &std::path::Path) -> HashMap<String, St
     for line in content.lines() {
         let trimmed = line.trim();
         if trimmed.is_empty() || trimmed.starts_with('#') { continue; }
+        // Skip list-item lines (`  - foo`) and bare keys (`optional_kits:`).
+        if trimmed.starts_with('-') { continue; }
         if let Some(colon) = trimmed.find(':') {
             let key = trimmed[..colon].trim().to_string();
             let value = trimmed[colon + 1..].trim().to_string();
@@ -48,6 +50,223 @@ pub(crate) fn read_repo_yml_fields(path: &std::path::Path) -> HashMap<String, St
         }
     }
     out
+}
+
+/// Read the `optional_kits:` list from a repo.yml. Returns the kit specs
+/// (e.g. `["repolex-ai/git-lex-kit-innerworld"]`). Empty if missing or absent.
+///
+/// Format:
+/// ```yaml
+/// optional_kits:
+///   - repolex-ai/git-lex-kit-innerworld
+///   - repolex-ai/git-lex-kit-thoughtsmith
+/// ```
+pub(crate) fn read_repo_yml_optional_kits(path: &std::path::Path) -> Vec<String> {
+    let content = match fs::read_to_string(path) {
+        Ok(c) => c,
+        Err(_) => return Vec::new(),
+    };
+    let mut out = Vec::new();
+    let mut in_list = false;
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') { continue; }
+        if trimmed.starts_with("optional_kits:") {
+            in_list = true;
+            continue;
+        }
+        if in_list {
+            // List items are `  - <spec>` (any indent).
+            if let Some(rest) = trimmed.strip_prefix('-') {
+                let spec = rest.trim().trim_matches('"').trim_matches('\'').to_string();
+                if !spec.is_empty() {
+                    out.push(spec);
+                }
+            } else {
+                // Hit a non-list line — list is over.
+                in_list = false;
+            }
+        }
+    }
+    out
+}
+
+/// Append a kit spec to `optional_kits:` in repo.yml. Creates the list if
+/// missing. Idempotent — no duplicate entries. Preserves all other fields
+/// and existing list entries.
+pub(crate) fn append_optional_kit(path: &std::path::Path, spec: &str) -> std::io::Result<()> {
+    let existing = fs::read_to_string(path).unwrap_or_default();
+    // Already present?
+    let current = read_repo_yml_optional_kits(path);
+    if current.iter().any(|s| s == spec) {
+        return Ok(());
+    }
+    let mut lines: Vec<String> = existing.lines().map(|s| s.to_string()).collect();
+    // Find the `optional_kits:` line; if missing, append both the key and item.
+    let mut idx_of_key: Option<usize> = None;
+    for (i, line) in lines.iter().enumerate() {
+        if line.trim().starts_with("optional_kits:") {
+            idx_of_key = Some(i);
+            break;
+        }
+    }
+    match idx_of_key {
+        Some(idx) => {
+            // Insert as the LAST item under this key. Walk forward until we
+            // find a non-list line (or EOF) and insert just before it.
+            let mut insert_at = idx + 1;
+            for (i, line) in lines.iter().enumerate().skip(idx + 1) {
+                let t = line.trim();
+                if t.starts_with('-') {
+                    insert_at = i + 1;
+                } else if t.is_empty() {
+                    // blank line — keep going; list might continue after.
+                    continue;
+                } else {
+                    // New section — stop.
+                    break;
+                }
+            }
+            lines.insert(insert_at, format!("  - {}", spec));
+        }
+        None => {
+            // Ensure file ends with a newline before appending the section.
+            if !lines.last().map(|l| l.is_empty()).unwrap_or(true) {
+                lines.push(String::new());
+            }
+            lines.push("optional_kits:".to_string());
+            lines.push(format!("  - {}", spec));
+        }
+    }
+    let mut content = lines.join("\n");
+    if !content.ends_with('\n') { content.push('\n'); }
+    fs::write(path, content)
+}
+
+/// Remove a kit spec from `optional_kits:` in repo.yml. If the list becomes
+/// empty, also removes the `optional_kits:` key. Idempotent: removing a
+/// kit that isn't there is a no-op success.
+pub(crate) fn remove_optional_kit(path: &std::path::Path, spec: &str) -> std::io::Result<()> {
+    let existing = match fs::read_to_string(path) {
+        Ok(c) => c,
+        Err(_) => return Ok(()),
+    };
+    let lines: Vec<&str> = existing.lines().collect();
+    let mut out: Vec<String> = Vec::with_capacity(lines.len());
+    let mut in_list = false;
+    let mut list_items_remaining = 0usize;
+    let mut pending_key_line: Option<String> = None;
+    for line in &lines {
+        let t = line.trim();
+        if t.starts_with("optional_kits:") {
+            in_list = true;
+            // Hold the key line until we know whether any items survive.
+            pending_key_line = Some(line.to_string());
+            list_items_remaining = 0;
+            continue;
+        }
+        if in_list {
+            if let Some(rest) = t.strip_prefix('-') {
+                let item = rest.trim().trim_matches('"').trim_matches('\'').to_string();
+                if item == spec {
+                    // Drop this item.
+                    continue;
+                } else {
+                    // Keep — but first emit the held key line if we haven't.
+                    if let Some(key) = pending_key_line.take() {
+                        out.push(key);
+                    }
+                    out.push(line.to_string());
+                    list_items_remaining += 1;
+                    continue;
+                }
+            } else if t.is_empty() {
+                // Blank inside the list — preserve only if list survived.
+                if pending_key_line.is_none() {
+                    out.push(line.to_string());
+                }
+                continue;
+            } else {
+                // List is over.
+                in_list = false;
+                // If we never emitted the key (no items survived), drop both
+                // the key and any trailing blank.
+                if let Some(_dropped) = pending_key_line.take() {
+                    // strip a preceding blank line we may have left behind
+                    if matches!(out.last().map(|s| s.trim().is_empty()), Some(true)) {
+                        out.pop();
+                    }
+                }
+                out.push(line.to_string());
+                continue;
+            }
+        }
+        out.push(line.to_string());
+    }
+    // EOF cleanup: if list never closed and no items remained, drop key.
+    if in_list {
+        if pending_key_line.is_some() && list_items_remaining == 0 {
+            if matches!(out.last().map(|s| s.trim().is_empty()), Some(true)) {
+                out.pop();
+            }
+        }
+    }
+    let _ = list_items_remaining;
+    let mut content = out.join("\n");
+    if !content.ends_with('\n') { content.push('\n'); }
+    fs::write(path, content)
+}
+
+/// Kit scope as declared by `scope:` in the kit's kit.yml.
+///
+/// - `Base`: ships system ontologies/UI for every repo. Implicit; always
+///   installed first by init. Only one base kit per repo.
+/// - `Domain`: the repo's primary kit (soul, squad, lab, etc.). Recorded
+///   in `repo.yml`'s `kit:` field. Exactly one per repo.
+/// - `Optional`: add-on kits (innerworld, thoughtsmith, etc.). Tracked in
+///   `repo.yml`'s `optional_kits:` list. Zero or more per repo.
+///
+/// If a kit's kit.yml omits `scope:`, default is `Domain` (back-compat —
+/// every pre-scope kit was a domain kit).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum KitScope {
+    Base,
+    Domain,
+    Optional,
+}
+
+impl KitScope {
+    pub(crate) fn parse(s: &str) -> Option<Self> {
+        match s.trim().to_lowercase().as_str() {
+            "base" => Some(KitScope::Base),
+            "domain" => Some(KitScope::Domain),
+            "optional" => Some(KitScope::Optional),
+            _ => None,
+        }
+    }
+}
+
+/// Read the `scope:` field from a kit's kit.yml. Returns `KitScope::Domain`
+/// if the field is missing (back-compat).
+///
+/// The kit_dir is the on-disk install location of the kit (e.g.
+/// `.lex/kit/repolex-ai/git-lex-kit-innerworld/`).
+pub(crate) fn read_kit_scope(kit_dir: &std::path::Path) -> KitScope {
+    let path = kit_dir.join("kit.yml");
+    let content = match fs::read_to_string(&path) {
+        Ok(c) => c,
+        Err(_) => return KitScope::Domain,
+    };
+    for line in content.lines() {
+        let line = line.trim();
+        if line.starts_with('#') { continue; }
+        if let Some(val) = line.strip_prefix("scope:") {
+            if let Some(s) = KitScope::parse(val) {
+                return s;
+            }
+        }
+    }
+    KitScope::Domain
 }
 
 /// Read the `init_prompts:` list from a kit's kit.yml. Returns the variable
@@ -947,20 +1166,65 @@ pub(crate) fn copy_dir_recursive(src: &std::path::Path, dest: &std::path::Path) 
 
 // ─── kit lifecycle ─────────────────────────────────────────────
 
-/// Add a kit to an existing repo. Downloads the kit, installs ontology
-/// and scaffold files, updates repo.yml.
-///
-/// Not yet implemented — currently handled inline by cmd_init.
-pub(crate) fn add_kit(_kit_spec: &str) {
-    unimplemented!("kit::add_kit — not yet extracted from cmd_init");
+/// Outcome of `fetch_and_validate_optional_kit`. See that function for the
+/// validation flow.
+#[derive(Debug)]
+pub(crate) enum KitFetchOutcome {
+    /// Fetched and scope-validated as Optional. The kit is on disk at the
+    /// returned path, ready to install.
+    Ready(PathBuf),
+    /// Fetch failed (network, missing repo, etc.).
+    FetchFailed,
+    /// Fetched but kit.yml's `scope:` is not `optional`. Won't auto-install
+    /// as an optional kit. The carried scope tells the caller why.
+    ScopeMismatch(KitScope),
 }
 
-/// Remove a kit from a repo. Removes kit-installed files (ontology,
-/// shapes, scaffold), updates repo.yml.
+/// Fetch a kit from GitHub into the repo's `.lex/kit/{org}/{repo}/` and
+/// verify its `scope:` is `optional`. Used by `kit-add` to install add-on
+/// kits without conflating them with base or domain.
 ///
-/// Not yet implemented.
-pub(crate) fn remove_kit(_kit_spec: &str) {
-    unimplemented!("kit::remove_kit — not yet implemented");
+/// On `ScopeMismatch`, the fetched dir is left on disk (caller can inspect
+/// or clean up). On `FetchFailed`, the dir is removed.
+pub(crate) fn fetch_and_validate_optional_kit(kit_spec: &str) -> KitFetchOutcome {
+    let root = match find_git_root() {
+        Some(r) => r,
+        None => return KitFetchOutcome::FetchFailed,
+    };
+    let (org, repo, _) = resolve_kit_spec(kit_spec);
+    let kit_dir = root.join(".lex").join("kit").join(&org).join(&repo);
+
+    // Clean any prior state so the fetch is fresh.
+    let _ = fs::remove_dir_all(&kit_dir);
+    if fs::create_dir_all(&kit_dir).is_err() {
+        return KitFetchOutcome::FetchFailed;
+    }
+
+    if !fetch_kit_from_github(kit_spec, &kit_dir) {
+        let _ = fs::remove_dir_all(&kit_dir);
+        return KitFetchOutcome::FetchFailed;
+    }
+
+    let scope = read_kit_scope(&kit_dir);
+    if scope != KitScope::Optional {
+        return KitFetchOutcome::ScopeMismatch(scope);
+    }
+    KitFetchOutcome::Ready(kit_dir)
+}
+
+/// Remove a kit's on-disk install dir (`.lex/kit/{org}/{repo}/`). Does NOT
+/// touch the kit's content/ folders in the repo root (those are user data
+/// — `cmd_kit_remove` asks before deleting).
+pub(crate) fn remove_kit_install_dir(kit_spec: &str) -> std::io::Result<()> {
+    let root = find_git_root().ok_or_else(|| {
+        std::io::Error::new(std::io::ErrorKind::NotFound, "not in a git repo")
+    })?;
+    let (org, repo, _) = resolve_kit_spec(kit_spec);
+    let kit_dir = root.join(".lex").join("kit").join(&org).join(&repo);
+    if kit_dir.exists() {
+        fs::remove_dir_all(&kit_dir)?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -1058,5 +1322,161 @@ mod tests {
             let _ = std::fs::remove_file(root.join(".claude").join("hooks").join("FakeHook.sh"));
             let _ = std::fs::remove_file(root.join(".claude").join("hooks").join("FakeHook.sh.kit-latest"));
         }
+    }
+
+    // ─── Optional-kit / scope tests ──────────────────────────────────
+
+    // Per-test unique dir. Tests run in parallel and `timestamp_now_utc()`
+    // is second-resolution — collisions cause spurious failures. The atomic
+    // counter + process id gives every call a fresh dir.
+    fn unique_tmp_dir(prefix: &str) -> PathBuf {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let pid = std::process::id();
+        let dir = std::env::temp_dir().join(format!("{}-{}-{}-{}", prefix, pid, timestamp_now_utc(), n));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn write_tmp_repo_yml(content: &str) -> PathBuf {
+        let tmp = unique_tmp_dir("git-lex-repo-yml");
+        let p = tmp.join("repo.yml");
+        std::fs::write(&p, content).unwrap();
+        p
+    }
+
+    #[test]
+    fn read_optional_kits_basic() {
+        let p = write_tmp_repo_yml(
+            "name: TEST\nkit: repolex-ai/git-lex-kit-soul\noptional_kits:\n  - repolex-ai/git-lex-kit-innerworld\n  - repolex-ai/git-lex-kit-thoughtsmith\n"
+        );
+        let got = read_repo_yml_optional_kits(&p);
+        assert_eq!(got, vec![
+            "repolex-ai/git-lex-kit-innerworld".to_string(),
+            "repolex-ai/git-lex-kit-thoughtsmith".to_string(),
+        ]);
+        std::fs::remove_dir_all(p.parent().unwrap()).ok();
+    }
+
+    #[test]
+    fn read_optional_kits_empty_when_missing() {
+        let p = write_tmp_repo_yml("name: TEST\nkit: foo/bar\n");
+        assert!(read_repo_yml_optional_kits(&p).is_empty());
+        std::fs::remove_dir_all(p.parent().unwrap()).ok();
+    }
+
+    #[test]
+    fn read_repo_yml_fields_skips_list_items() {
+        // Regression: ensure the scalar-fields reader doesn't accidentally
+        // pick up `- something` list items as malformed key:values.
+        let p = write_tmp_repo_yml(
+            "name: TEST\nkit: foo/bar\noptional_kits:\n  - a/b\n  - c/d\nother: thing\n"
+        );
+        let fields = read_repo_yml_fields(&p);
+        assert_eq!(fields.get("name"), Some(&"TEST".to_string()));
+        assert_eq!(fields.get("kit"), Some(&"foo/bar".to_string()));
+        assert_eq!(fields.get("other"), Some(&"thing".to_string()));
+        // The list items should NOT appear as fields.
+        assert!(fields.get("a/b").is_none());
+        std::fs::remove_dir_all(p.parent().unwrap()).ok();
+    }
+
+    #[test]
+    fn append_optional_kit_creates_section() {
+        let p = write_tmp_repo_yml("name: TEST\nkit: foo/bar\n");
+        append_optional_kit(&p, "x/y").unwrap();
+        let got = read_repo_yml_optional_kits(&p);
+        assert_eq!(got, vec!["x/y".to_string()]);
+        std::fs::remove_dir_all(p.parent().unwrap()).ok();
+    }
+
+    #[test]
+    fn append_optional_kit_appends_to_existing() {
+        let p = write_tmp_repo_yml(
+            "name: TEST\nkit: foo/bar\noptional_kits:\n  - a/b\n"
+        );
+        append_optional_kit(&p, "c/d").unwrap();
+        let got = read_repo_yml_optional_kits(&p);
+        assert_eq!(got, vec!["a/b".to_string(), "c/d".to_string()]);
+        std::fs::remove_dir_all(p.parent().unwrap()).ok();
+    }
+
+    #[test]
+    fn append_optional_kit_is_idempotent() {
+        let p = write_tmp_repo_yml(
+            "name: TEST\nkit: foo/bar\noptional_kits:\n  - a/b\n"
+        );
+        append_optional_kit(&p, "a/b").unwrap();
+        append_optional_kit(&p, "a/b").unwrap();
+        let got = read_repo_yml_optional_kits(&p);
+        assert_eq!(got, vec!["a/b".to_string()]);
+        std::fs::remove_dir_all(p.parent().unwrap()).ok();
+    }
+
+    #[test]
+    fn remove_optional_kit_drops_entry() {
+        let p = write_tmp_repo_yml(
+            "name: TEST\nkit: foo/bar\noptional_kits:\n  - a/b\n  - c/d\n"
+        );
+        remove_optional_kit(&p, "a/b").unwrap();
+        let got = read_repo_yml_optional_kits(&p);
+        assert_eq!(got, vec!["c/d".to_string()]);
+        std::fs::remove_dir_all(p.parent().unwrap()).ok();
+    }
+
+    #[test]
+    fn remove_optional_kit_drops_empty_section() {
+        let p = write_tmp_repo_yml(
+            "name: TEST\nkit: foo/bar\noptional_kits:\n  - a/b\nother: thing\n"
+        );
+        remove_optional_kit(&p, "a/b").unwrap();
+        let got = read_repo_yml_optional_kits(&p);
+        assert!(got.is_empty());
+        // `other:` must survive.
+        let fields = read_repo_yml_fields(&p);
+        assert_eq!(fields.get("other"), Some(&"thing".to_string()));
+        // And `optional_kits:` key should NOT remain in the file.
+        let content = std::fs::read_to_string(&p).unwrap();
+        assert!(!content.contains("optional_kits:"),
+            "expected optional_kits: to be removed, got: {}", content);
+        std::fs::remove_dir_all(p.parent().unwrap()).ok();
+    }
+
+    #[test]
+    fn remove_optional_kit_missing_is_noop() {
+        let p = write_tmp_repo_yml(
+            "name: TEST\nkit: foo/bar\noptional_kits:\n  - a/b\n"
+        );
+        remove_optional_kit(&p, "x/y").unwrap();
+        let got = read_repo_yml_optional_kits(&p);
+        assert_eq!(got, vec!["a/b".to_string()]);
+        std::fs::remove_dir_all(p.parent().unwrap()).ok();
+    }
+
+    #[test]
+    fn kit_scope_parses_known_values() {
+        assert_eq!(KitScope::parse("base"), Some(KitScope::Base));
+        assert_eq!(KitScope::parse("domain"), Some(KitScope::Domain));
+        assert_eq!(KitScope::parse("optional"), Some(KitScope::Optional));
+        assert_eq!(KitScope::parse("Optional"), Some(KitScope::Optional));
+        assert_eq!(KitScope::parse("  optional  "), Some(KitScope::Optional));
+        assert_eq!(KitScope::parse("nonsense"), None);
+    }
+
+    #[test]
+    fn read_kit_scope_defaults_to_domain_when_missing() {
+        let tmp = unique_tmp_dir("git-lex-kityml");
+        std::fs::write(tmp.join("kit.yml"), "name: test\nfolder base: Test\n").unwrap();
+        assert_eq!(read_kit_scope(&tmp), KitScope::Domain);
+        std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    #[test]
+    fn read_kit_scope_picks_up_optional() {
+        let tmp = unique_tmp_dir("git-lex-kityml-opt");
+        std::fs::write(tmp.join("kit.yml"), "name: inner\nscope: optional\nfolder base: Innerworld\n").unwrap();
+        assert_eq!(read_kit_scope(&tmp), KitScope::Optional);
+        std::fs::remove_dir_all(&tmp).ok();
     }
 }
