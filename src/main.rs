@@ -849,6 +849,92 @@ fn cmd_list(json: bool) {
 
 // ─── git lex create ─────────────────────────────────────────────
 
+/// Resolve a doctype string to the kit + class it belongs to, across
+/// the union of base + domain + every installed optional kit.
+///
+/// Accepts two input shapes:
+///   - bare name: `place` or `Place` (case-insensitive). Resolves if exactly
+///     one kit declares this type. Errors with disambiguation hint if more
+///     than one does.
+///   - kit-prefixed: `innerworld/place` (also case-insensitive on the class
+///     part; kit-short must match exactly). Resolves directly to that kit's
+///     class, no collision check.
+///
+/// Returns (kit_spec, class_name, properties, all_valid_types_for_error).
+/// On success, `all_valid_types_for_error` is empty. On no-match, callers
+/// use it to build a helpful error message.
+fn resolve_doctype_across_kits(
+    doctype: &str,
+    root: &std::path::Path,
+) -> Result<(String, String, Vec<(String, String, bool, String)>), DoctypeError> {
+    // Build the full installed-kit list, same order as kit-update: base,
+    // domain, then optionals (alphabetical).
+    let installed = collect_kits_for_update(root, None);
+
+    // Detect kit-prefixed form: `innerworld/place`. The kit-short is the
+    // last segment of the kit spec (innerworld in repolex-ai/git-lex-kit-innerworld).
+    let (kit_filter, class_part) = match doctype.split_once('/') {
+        Some((k, c)) => (Some(k.to_lowercase()), c.to_string()),
+        None => (None, doctype.to_string()),
+    };
+    let class_lower = class_part.to_lowercase();
+
+    // Collect all (kit_spec, class_name, properties) tuples matching the
+    // class-name across kits (filtered by kit-short if prefixed form).
+    let mut matches: Vec<(String, String, Vec<(String, String, bool, String)>)> = Vec::new();
+    let mut all_choices: Vec<(String, String)> = Vec::new(); // (kit_short, class_name)
+    for spec in &installed {
+        let (_, _, short) = resolve_kit_spec(spec);
+        if let Some(ref want_short) = kit_filter {
+            if short.to_lowercase() != *want_short { continue; }
+        }
+        for (name, props) in get_kit_types(spec) {
+            all_choices.push((short.clone(), name.clone()));
+            if name.to_lowercase() == class_lower {
+                matches.push((spec.clone(), name, props));
+            }
+        }
+    }
+
+    match matches.len() {
+        0 => Err(DoctypeError::Unknown {
+            requested: doctype.to_string(),
+            kit_filter: kit_filter.clone(),
+            choices: all_choices,
+        }),
+        1 => {
+            let (spec, name, props) = matches.into_iter().next().unwrap();
+            Ok((spec, name, props))
+        }
+        _ => {
+            // Ambiguous: same class name in multiple kits. Build the
+            // disambiguator hint.
+            let hints: Vec<String> = matches.iter()
+                .map(|(spec, name, _)| {
+                    let (_, _, short) = resolve_kit_spec(spec);
+                    format!("`{}/{}`", short, name.to_lowercase())
+                })
+                .collect();
+            Err(DoctypeError::Ambiguous {
+                requested: doctype.to_string(),
+                hints,
+            })
+        }
+    }
+}
+
+enum DoctypeError {
+    Unknown {
+        requested: String,
+        kit_filter: Option<String>,
+        choices: Vec<(String, String)>, // (kit_short, class_name)
+    },
+    Ambiguous {
+        requested: String,
+        hints: Vec<String>,
+    },
+}
+
 fn cmd_create(doctype: &str, instance_id: Option<&str>, json: bool) {
     // Emit an error in the right format, then exit. Used for all failure
     // paths so --json consumers don't have to parse human text.
@@ -867,29 +953,34 @@ fn cmd_create(doctype: &str, instance_id: Option<&str>, json: bool) {
         None => fail("not-a-repo", "fatal: not a git repository".to_string()),
     };
 
-    let kit = match get_kit() {
-        Some(k) => k,
-        None => fail(
-            "no-kit",
-            "No kit configured. Run 'git lex init --kit <name>' first.".to_string(),
-        ),
-    };
-
-    // Find valid types
-    let kit_types = get_kit_types(&kit);
-    // Match case-insensitively so `git lex create task` and `git lex create Task` both work.
-    let doctype_lower = doctype.to_lowercase();
-    let matching_type = kit_types.iter().find(|(name, _)| name.to_lowercase() == doctype_lower);
-
-    let (class_name, properties) = match matching_type {
-        Some((name, props)) => (name.clone(), props.clone()),
-        None => {
-            let valid: Vec<String> = kit_types.iter().map(|(n, _)| n.clone()).collect();
+    // Resolve the doctype across base + domain + all installed optional kits.
+    // `kit` is the kit-spec that owns the resolved class — used to find the
+    // folder_base for placing the new file.
+    let (kit, class_name, properties) = match resolve_doctype_across_kits(doctype, &root) {
+        Ok(t) => t,
+        Err(DoctypeError::Unknown { requested, kit_filter, choices }) => {
+            // Group choices by kit so the error is scannable.
+            use std::collections::BTreeMap;
+            let mut by_kit: BTreeMap<String, Vec<String>> = BTreeMap::new();
+            for (k, c) in &choices {
+                by_kit.entry(k.clone()).or_default().push(c.clone());
+            }
+            let kit_lines: Vec<String> = by_kit.iter()
+                .map(|(k, types)| format!("  {}: {}", k, types.join(", ")))
+                .collect();
+            let prefix_hint = match kit_filter {
+                Some(ref k) => format!("Unknown document type '{}' in kit '{}'.", requested, k),
+                None => format!("Unknown document type '{}'.", requested),
+            };
+            fail("unknown-doctype", format!("{} Valid types:\n{}", prefix_hint, kit_lines.join("\n")));
+        }
+        Err(DoctypeError::Ambiguous { requested, hints }) => {
             fail(
-                "unknown-doctype",
+                "ambiguous-doctype",
                 format!(
-                    "Unknown document type '{}'. Valid types for kit '{}': {}",
-                    doctype, kit, valid.join(", ")
+                    "Document type '{}' is defined in multiple kits. Use one of: {}",
+                    requested,
+                    hints.join(", ")
                 ),
             );
         }
