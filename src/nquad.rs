@@ -21,7 +21,8 @@ use git_lex::{find_git_root, get_kit};
 use crate::git::{base_uri, git_unescape_path};
 use crate::extraction::{flatten_yaml, normalize_wikilink_path,
                         resolve_slug_to_uri};
-use crate::ontology::{get_object_properties, get_property_datatypes};
+use crate::ontology::{get_object_properties, get_property_datatypes,
+                       get_object_properties_all_kits, get_property_datatypes_all_kits};
 use crate::resolve;
 
 /// Escape a string for use in N-Quads literals.
@@ -431,9 +432,14 @@ pub(crate) fn generate_frontmatter_nquads() -> (String, u32) {
     let mut nq = String::new();
     let mut total_errors: u32 = 0;
 
-    // Build ObjectProperty lookup from kit ontology
-    let obj_props = get_kit().map(|k| get_object_properties(&k)).unwrap_or_default();
-    let prop_datatypes = get_kit().map(|k| get_property_datatypes(&k)).unwrap_or_default();
+    // Build ObjectProperty + datatype lookup across ALL installed kits (base
+    // + domain + optionals). Frontmatter triples from any kit's properties
+    // need correct IRI-vs-literal classification and typed-literal tags
+    // (xsd:integer, xsd:date, etc.) regardless of which kit declared the
+    // property. The previous single-kit lookup hid optional-kit datatypes —
+    // e.g. copia:firstVisited (xsd:date) emitted as untyped string.
+    let obj_props = get_object_properties_all_kits();
+    let prop_datatypes = get_property_datatypes_all_kits();
 
     // Open git repo for blob hash lookups
     let repo = git2::Repository::discover(".").ok();

@@ -300,6 +300,61 @@ pub(crate) fn get_property_datatypes(kit: &str) -> HashMap<String, String> {
     out
 }
 
+/// Like `get_property_datatypes`, but unions across every installed shapes
+/// file (base + domain + optional kits). The extractor uses this when emitting
+/// frontmatter triples so a property declared in an optional kit (e.g.
+/// `copia:firstVisited` typed `xsd:date`) still gets the typed-literal tag.
+///
+/// Property-name collisions across kits: last-writer-wins (whichever
+/// shapes file `all_shape_files()` returns later in sorted order). Today
+/// no collisions exist; document this contract before introducing one.
+pub(crate) fn get_property_datatypes_all_kits() -> HashMap<String, String> {
+    let mut out = HashMap::new();
+    for path in all_shape_files() {
+        let Ok(content) = fs::read_to_string(&path) else { continue };
+        let short = path.file_stem()
+            .and_then(|s| s.to_str())
+            .and_then(|s| s.strip_suffix("-shapes"))
+            .unwrap_or("")
+            .to_string();
+        let parsed = parse_shape_file(&content, &short);
+        for shape in &parsed.shapes {
+            for p in &shape.props {
+                if let Some(dt) = &p.datatype {
+                    let full = format!("http://www.w3.org/2001/XMLSchema#{}", dt);
+                    out.insert(p.name.clone(), full);
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Like `get_object_properties`, but unions across every installed shapes
+/// file. Returns the set of property local-names that are `sh:nodeKind sh:IRI`
+/// (object properties / references), so the extractor can emit them as IRIs
+/// instead of literals.
+pub(crate) fn get_object_properties_all_kits() -> HashSet<String> {
+    let mut out = HashSet::new();
+    for path in all_shape_files() {
+        let Ok(content) = fs::read_to_string(&path) else { continue };
+        let short = path.file_stem()
+            .and_then(|s| s.to_str())
+            .and_then(|s| s.strip_suffix("-shapes"))
+            .unwrap_or("")
+            .to_string();
+        let parsed = parse_shape_file(&content, &short);
+        for shape in &parsed.shapes {
+            for p in &shape.props {
+                if p.is_iri {
+                    out.insert(p.name.clone());
+                }
+            }
+        }
+    }
+    out
+}
+
 /// Types defined by the kit.
 /// Returns `Vec<(ClassName, Vec<(prop_name, prop_kind, required, comment)>)>`
 /// where `prop_kind` is `"reference"` for object properties, `"string"` for
