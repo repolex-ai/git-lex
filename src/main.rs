@@ -3392,6 +3392,20 @@ fn cmd_kit_update(kit_arg: Option<String>, force: bool) {
         }
     }
 
+    // Remove legacy `.lex/ontology/kit/` directory. Pre-multi-kit repos
+    // installed shapes at `.lex/ontology/kit/{short}/`; the current layout
+    // is `.lex/ontology/{short}/`. Stale shapes files in the old location
+    // sort alphabetically BEFORE the new location (`k` < `s`) and used to
+    // shadow current shapes via `read_kit_shapes`'s glob-walk. The resolver
+    // is now canonical-path-based and ignores them — but stale fossils on
+    // disk are still confusing, so sweep them. See task #29.
+    let legacy_ontology = root.join(".lex").join("ontology").join("kit");
+    if legacy_ontology.exists() {
+        if fs::remove_dir_all(&legacy_ontology).is_ok() {
+            println!("Removed legacy .lex/ontology/kit/ — shapes now resolve via canonical .lex/ontology/<short>/ path");
+        }
+    }
+
     // Regenerate derived artifacts (shapes, class templates, folder audit)
     // for each kit. Order matches kits_to_update so base goes first.
     for spec in &kits_to_update {

@@ -24,21 +24,71 @@ use git_lex::{find_git_root, resolve_kit_spec};
 
 /// Locate the shapes TTL for a kit. Returns empty string if not found.
 ///
-/// Reuses `all_shape_files()`'s recursive walk over both `.lex/ontology/` and
-/// `_ontology/`, then picks the first file named `{short}-shapes.ttl`. This
-/// matches old-layout repos that nest shapes a directory deeper (e.g.
-/// `.lex/ontology/kit/{short}/`) without forcing a migration.
+/// Resolved by canonical path, NOT by glob-walk. The two canonical
+/// install locations are:
+///   - `.lex/ontology/{short}/{short}-shapes.ttl`  (static kit)
+///   - `_ontology/{short}/{short}-shapes.ttl`      (adaptive kit)
+///
+/// Previous behavior glob-walked `all_shape_files()` and picked the FIRST
+/// file matching by name. That was first-wins-by-sort-order, which made
+/// stale fossils invisible to ls but visible to the loader — a 2-month-old
+/// `.lex/ontology/kit/{short}/{short}-shapes.ttl` (from a pre-multi-kit
+/// layout) sorted alphabetically before `.lex/ontology/{short}/...` and
+/// shadowed the current shapes. See task #29 (TR1P.L3X repro Day 22).
+///
+/// Now: try the static path; if missing, try adaptive. Anywhere else is
+/// ignored — `kit-update` sweeps the legacy `.lex/ontology/kit/` directory.
 fn read_kit_shapes(kit: &str) -> String {
+    let Some(root) = find_git_root() else { return String::new() };
     let (_, _, short) = resolve_kit_spec(kit);
     let target = format!("{}-shapes.ttl", short);
-    for path in all_shape_files() {
-        if path.file_name().and_then(|n| n.to_str()) == Some(target.as_str()) {
-            if let Ok(content) = fs::read_to_string(&path) {
-                return content;
-            }
+
+    // Static kit: .lex/ontology/{short}/{short}-shapes.ttl
+    let static_path = root.join(".lex").join("ontology").join(&short).join(&target);
+    let static_content = fs::read_to_string(&static_path).ok();
+
+    // Adaptive kit: _ontology/{short}/{short}-shapes.ttl
+    let adaptive_path = root.join("_ontology").join(&short).join(&target);
+    let adaptive_content = if static_content.is_none() {
+        fs::read_to_string(&adaptive_path).ok()
+    } else { None };
+
+    // Audit: surface ANY extra `{short}-shapes.ttl` found outside the two
+    // canonical paths. Catches old-layout stragglers like
+    // `.lex/ontology/kit/{short}/{short}-shapes.ttl` that were silently
+    // shadowing canonical shapes prior to this resolver. Warning only —
+    // we ignore them either way. Once-per-process per kit-short so a
+    // file-per-call caller (e.g. cmd_validate) doesn't spam.
+    use std::sync::Mutex;
+    use std::sync::OnceLock;
+    static WARNED: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+    let warned = WARNED.get_or_init(|| Mutex::new(HashSet::new()));
+    let mut should_warn = false;
+    {
+        let mut lock = warned.lock().unwrap();
+        if !lock.contains(&short) {
+            lock.insert(short.clone());
+            should_warn = true;
         }
     }
-    String::new()
+    if should_warn {
+        let mut stragglers: Vec<PathBuf> = Vec::new();
+        for path in all_shape_files() {
+            if path.file_name().and_then(|n| n.to_str()) != Some(target.as_str()) { continue; }
+            if path == static_path || path == adaptive_path { continue; }
+            stragglers.push(path);
+        }
+        if !stragglers.is_empty() {
+            eprintln!("warning: stale '{}' found outside the canonical install location(s):", target);
+            for p in &stragglers {
+                let rel = p.strip_prefix(&root).unwrap_or(p);
+                eprintln!("  {}", rel.display());
+            }
+            eprintln!("  These are ignored; `git lex kit-update` will sweep the legacy `.lex/ontology/kit/` location.");
+        }
+    }
+
+    static_content.or(adaptive_content).unwrap_or_default()
 }
 
 /// Return paths to every shape TTL installed in the repo, across both
