@@ -271,6 +271,14 @@ pub(crate) fn frontmatter_to_turtle(filepath: &std::path::Path, root: &std::path
         }
     }
 
+    // Diagnostic: dump the in-memory TTL that SHACL will validate against.
+    // Enable with `GIT_LEX_DEBUG_TTL=1`. Useful when SHACL flags violations
+    // that `git lex dump` doesn't show — the in-memory TTL and the /now
+    // graph are produced by different code paths and can diverge if one of
+    // them isn't consulting the kit ontology correctly.
+    if std::env::var("GIT_LEX_DEBUG_TTL").is_ok() {
+        eprintln!("=== TTL for {} ===\n{}", filepath.display(), ttl);
+    }
     Some(ttl)
 }
 
