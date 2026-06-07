@@ -52,38 +52,39 @@ pub(crate) fn read_repo_yml_fields(path: &std::path::Path) -> HashMap<String, St
     out
 }
 
-/// Read the `optional_kits:` list from a repo.yml. Returns the kit specs
-/// (e.g. `["repolex-ai/git-lex-kit-innerworld"]`). Empty if missing or absent.
+/// Read a flat YAML list value from repo.yml. Used by
+/// `read_repo_yml_optional_kits` and `read_repo_yml_substrates`.
 ///
 /// Format:
 /// ```yaml
-/// optional_kits:
-///   - repolex-ai/git-lex-kit-innerworld
-///   - repolex-ai/git-lex-kit-thoughtsmith
+/// <key>:
+///   - item-one
+///   - item-two
 /// ```
-pub(crate) fn read_repo_yml_optional_kits(path: &std::path::Path) -> Vec<String> {
+///
+/// The list ends at the first non-list, non-comment, non-blank line.
+fn read_repo_yml_list(path: &std::path::Path, key: &str) -> Vec<String> {
     let content = match fs::read_to_string(path) {
         Ok(c) => c,
         Err(_) => return Vec::new(),
     };
+    let key_prefix = format!("{}:", key);
     let mut out = Vec::new();
     let mut in_list = false;
     for line in content.lines() {
         let trimmed = line.trim();
         if trimmed.is_empty() || trimmed.starts_with('#') { continue; }
-        if trimmed.starts_with("optional_kits:") {
+        if trimmed.starts_with(&key_prefix) {
             in_list = true;
             continue;
         }
         if in_list {
-            // List items are `  - <spec>` (any indent).
             if let Some(rest) = trimmed.strip_prefix('-') {
-                let spec = rest.trim().trim_matches('"').trim_matches('\'').to_string();
-                if !spec.is_empty() {
-                    out.push(spec);
+                let item = rest.trim().trim_matches('"').trim_matches('\'').to_string();
+                if !item.is_empty() {
+                    out.push(item);
                 }
             } else {
-                // Hit a non-list line — list is over.
                 in_list = false;
             }
         }
@@ -91,51 +92,49 @@ pub(crate) fn read_repo_yml_optional_kits(path: &std::path::Path) -> Vec<String>
     out
 }
 
-/// Append a kit spec to `optional_kits:` in repo.yml. Creates the list if
+/// Append an item to a flat YAML list in repo.yml. Creates the list if
 /// missing. Idempotent — no duplicate entries. Preserves all other fields
 /// and existing list entries.
-pub(crate) fn append_optional_kit(path: &std::path::Path, spec: &str) -> std::io::Result<()> {
+fn append_repo_yml_list_item(
+    path: &std::path::Path,
+    key: &str,
+    item: &str,
+) -> std::io::Result<()> {
     let existing = fs::read_to_string(path).unwrap_or_default();
-    // Already present?
-    let current = read_repo_yml_optional_kits(path);
-    if current.iter().any(|s| s == spec) {
+    let current = read_repo_yml_list(path, key);
+    if current.iter().any(|s| s == item) {
         return Ok(());
     }
+    let key_prefix = format!("{}:", key);
     let mut lines: Vec<String> = existing.lines().map(|s| s.to_string()).collect();
-    // Find the `optional_kits:` line; if missing, append both the key and item.
     let mut idx_of_key: Option<usize> = None;
     for (i, line) in lines.iter().enumerate() {
-        if line.trim().starts_with("optional_kits:") {
+        if line.trim().starts_with(&key_prefix) {
             idx_of_key = Some(i);
             break;
         }
     }
     match idx_of_key {
         Some(idx) => {
-            // Insert as the LAST item under this key. Walk forward until we
-            // find a non-list line (or EOF) and insert just before it.
             let mut insert_at = idx + 1;
             for (i, line) in lines.iter().enumerate().skip(idx + 1) {
                 let t = line.trim();
                 if t.starts_with('-') {
                     insert_at = i + 1;
                 } else if t.is_empty() {
-                    // blank line — keep going; list might continue after.
                     continue;
                 } else {
-                    // New section — stop.
                     break;
                 }
             }
-            lines.insert(insert_at, format!("  - {}", spec));
+            lines.insert(insert_at, format!("  - {}", item));
         }
         None => {
-            // Ensure file ends with a newline before appending the section.
             if !lines.last().map(|l| l.is_empty()).unwrap_or(true) {
                 lines.push(String::new());
             }
-            lines.push("optional_kits:".to_string());
-            lines.push(format!("  - {}", spec));
+            lines.push(format!("{}:", key));
+            lines.push(format!("  - {}", item));
         }
     }
     let mut content = lines.join("\n");
@@ -143,14 +142,19 @@ pub(crate) fn append_optional_kit(path: &std::path::Path, spec: &str) -> std::io
     fs::write(path, content)
 }
 
-/// Remove a kit spec from `optional_kits:` in repo.yml. If the list becomes
-/// empty, also removes the `optional_kits:` key. Idempotent: removing a
-/// kit that isn't there is a no-op success.
-pub(crate) fn remove_optional_kit(path: &std::path::Path, spec: &str) -> std::io::Result<()> {
+/// Remove an item from a flat YAML list in repo.yml. If the list becomes
+/// empty, also removes the key. Idempotent: removing an item that isn't
+/// there is a no-op success.
+fn remove_repo_yml_list_item(
+    path: &std::path::Path,
+    key: &str,
+    item: &str,
+) -> std::io::Result<()> {
     let existing = match fs::read_to_string(path) {
         Ok(c) => c,
         Err(_) => return Ok(()),
     };
+    let key_prefix = format!("{}:", key);
     let lines: Vec<&str> = existing.lines().collect();
     let mut out: Vec<String> = Vec::with_capacity(lines.len());
     let mut in_list = false;
@@ -158,41 +162,33 @@ pub(crate) fn remove_optional_kit(path: &std::path::Path, spec: &str) -> std::io
     let mut pending_key_line: Option<String> = None;
     for line in &lines {
         let t = line.trim();
-        if t.starts_with("optional_kits:") {
+        if t.starts_with(&key_prefix) {
             in_list = true;
-            // Hold the key line until we know whether any items survive.
             pending_key_line = Some(line.to_string());
             list_items_remaining = 0;
             continue;
         }
         if in_list {
             if let Some(rest) = t.strip_prefix('-') {
-                let item = rest.trim().trim_matches('"').trim_matches('\'').to_string();
-                if item == spec {
-                    // Drop this item.
+                let parsed_item = rest.trim().trim_matches('"').trim_matches('\'').to_string();
+                if parsed_item == item {
                     continue;
                 } else {
-                    // Keep — but first emit the held key line if we haven't.
-                    if let Some(key) = pending_key_line.take() {
-                        out.push(key);
+                    if let Some(key_line) = pending_key_line.take() {
+                        out.push(key_line);
                     }
                     out.push(line.to_string());
                     list_items_remaining += 1;
                     continue;
                 }
             } else if t.is_empty() {
-                // Blank inside the list — preserve only if list survived.
                 if pending_key_line.is_none() {
                     out.push(line.to_string());
                 }
                 continue;
             } else {
-                // List is over.
                 in_list = false;
-                // If we never emitted the key (no items survived), drop both
-                // the key and any trailing blank.
                 if let Some(_dropped) = pending_key_line.take() {
-                    // strip a preceding blank line we may have left behind
                     if matches!(out.last().map(|s| s.trim().is_empty()), Some(true)) {
                         out.pop();
                     }
@@ -203,18 +199,68 @@ pub(crate) fn remove_optional_kit(path: &std::path::Path, spec: &str) -> std::io
         }
         out.push(line.to_string());
     }
-    // EOF cleanup: if list never closed and no items remained, drop key.
-    if in_list {
-        if pending_key_line.is_some() && list_items_remaining == 0 {
-            if matches!(out.last().map(|s| s.trim().is_empty()), Some(true)) {
-                out.pop();
-            }
+    if in_list && pending_key_line.is_some() && list_items_remaining == 0 {
+        if matches!(out.last().map(|s| s.trim().is_empty()), Some(true)) {
+            out.pop();
         }
     }
-    let _ = list_items_remaining;
     let mut content = out.join("\n");
     if !content.ends_with('\n') { content.push('\n'); }
     fs::write(path, content)
+}
+
+/// Read the `optional_kits:` list from a repo.yml. Returns the kit specs
+/// (e.g. `["repolex-ai/git-lex-kit-innerworld"]`). Empty if missing or absent.
+///
+/// Format:
+/// ```yaml
+/// optional_kits:
+///   - repolex-ai/git-lex-kit-innerworld
+///   - repolex-ai/git-lex-kit-thoughtsmith
+/// ```
+pub(crate) fn read_repo_yml_optional_kits(path: &std::path::Path) -> Vec<String> {
+    read_repo_yml_list(path, "optional_kits")
+}
+
+/// Read the `substrates:` list from a repo.yml. Returns short substrate
+/// names (e.g. `["claude", "hermes"]`) that the agent has explicitly
+/// declared this repo targets. Empty if missing or absent — in which case
+/// the harness falls back to on-disk auto-detection.
+///
+/// Format:
+/// ```yaml
+/// substrates:
+///   - claude
+///   - hermes
+/// ```
+pub(crate) fn read_repo_yml_substrates(path: &std::path::Path) -> Vec<String> {
+    read_repo_yml_list(path, "substrates")
+}
+
+/// Append a kit spec to `optional_kits:` in repo.yml. Creates the list if
+/// missing. Idempotent — no duplicate entries. Preserves all other fields
+/// and existing list entries.
+pub(crate) fn append_optional_kit(path: &std::path::Path, spec: &str) -> std::io::Result<()> {
+    append_repo_yml_list_item(path, "optional_kits", spec)
+}
+
+/// Remove a kit spec from `optional_kits:` in repo.yml. If the list becomes
+/// empty, also removes the `optional_kits:` key. Idempotent: removing a
+/// kit that isn't there is a no-op success.
+pub(crate) fn remove_optional_kit(path: &std::path::Path, spec: &str) -> std::io::Result<()> {
+    remove_repo_yml_list_item(path, "optional_kits", spec)
+}
+
+/// Append a substrate name to `substrates:` in repo.yml. Idempotent.
+#[allow(dead_code)]
+pub(crate) fn append_substrate(path: &std::path::Path, name: &str) -> std::io::Result<()> {
+    append_repo_yml_list_item(path, "substrates", name)
+}
+
+/// Remove a substrate name from `substrates:` in repo.yml. Idempotent.
+#[allow(dead_code)]
+pub(crate) fn remove_substrate(path: &std::path::Path, name: &str) -> std::io::Result<()> {
+    remove_repo_yml_list_item(path, "substrates", name)
 }
 
 /// Kit scope as declared by `scope:` in the kit's kit.yml.
@@ -1478,5 +1524,63 @@ mod tests {
         std::fs::write(tmp.join("kit.yml"), "name: inner\nscope: optional\nfolder base: Innerworld\n").unwrap();
         assert_eq!(read_kit_scope(&tmp), KitScope::Optional);
         std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    // ─── repo.yml substrates: tests ──────────────────────────────────
+
+    #[test]
+    fn read_substrates_basic() {
+        let p = write_tmp_repo_yml(
+            "name: TEST\nkit: foo/bar\nsubstrates:\n  - claude\n  - hermes\n"
+        );
+        let got = read_repo_yml_substrates(&p);
+        assert_eq!(got, vec!["claude".to_string(), "hermes".to_string()]);
+        std::fs::remove_dir_all(p.parent().unwrap()).ok();
+    }
+
+    #[test]
+    fn read_substrates_empty_when_missing() {
+        let p = write_tmp_repo_yml("name: TEST\nkit: foo/bar\n");
+        assert!(read_repo_yml_substrates(&p).is_empty());
+        std::fs::remove_dir_all(p.parent().unwrap()).ok();
+    }
+
+    #[test]
+    fn append_substrate_creates_section() {
+        let p = write_tmp_repo_yml("name: TEST\nkit: foo/bar\n");
+        append_substrate(&p, "claude").unwrap();
+        assert_eq!(read_repo_yml_substrates(&p), vec!["claude".to_string()]);
+        std::fs::remove_dir_all(p.parent().unwrap()).ok();
+    }
+
+    #[test]
+    fn append_substrate_is_idempotent() {
+        let p = write_tmp_repo_yml("name: TEST\nkit: foo/bar\nsubstrates:\n  - claude\n");
+        append_substrate(&p, "claude").unwrap();
+        append_substrate(&p, "claude").unwrap();
+        assert_eq!(read_repo_yml_substrates(&p), vec!["claude".to_string()]);
+        std::fs::remove_dir_all(p.parent().unwrap()).ok();
+    }
+
+    #[test]
+    fn remove_substrate_drops_entry() {
+        let p = write_tmp_repo_yml(
+            "name: TEST\nkit: foo/bar\nsubstrates:\n  - claude\n  - hermes\n"
+        );
+        remove_substrate(&p, "claude").unwrap();
+        assert_eq!(read_repo_yml_substrates(&p), vec!["hermes".to_string()]);
+        std::fs::remove_dir_all(p.parent().unwrap()).ok();
+    }
+
+    #[test]
+    fn substrates_and_optional_kits_coexist() {
+        // Both lists in the same file should be independently readable.
+        let p = write_tmp_repo_yml(
+            "name: TEST\nkit: foo/bar\noptional_kits:\n  - org/kit-a\nsubstrates:\n  - claude\n  - hermes\n"
+        );
+        assert_eq!(read_repo_yml_optional_kits(&p), vec!["org/kit-a".to_string()]);
+        assert_eq!(read_repo_yml_substrates(&p),
+            vec!["claude".to_string(), "hermes".to_string()]);
+        std::fs::remove_dir_all(p.parent().unwrap()).ok();
     }
 }

@@ -691,22 +691,24 @@ fn cmd_init(directory: Option<String>, kit: Option<String>) {
 
         let agent_name = vars.get("agent_name").cloned().unwrap_or_default();
         if !agent_name.is_empty() {
-            // Claude Code: write git identity env vars into
-            // .claude/settings.json (committed — souls are portable across
-            // machines via git, so identity travels with the repo).
-            // These get injected into every Bash tool call automatically.
-            setup_substrate_claude(&root, &agent_name);
-
-            // TODO: Gemini (Aistudio CLI / Project IDX)
-            // Needs research on how Gemini's agent substrate handles
-            // per-project env injection. Likely a similar local config
-            // file, but the path and format are different.
-            // setup_substrate_gemini(&root, &agent_name);
-
-            // TODO: OpenAI (Codex CLI)
-            // Same — needs research on the OpenAI agent substrate's
-            // local config mechanism.
-            // setup_substrate_openai(&root, &agent_name);
+            // Per-substrate identity injection. Souls are portable across
+            // machines via git, so identity travels with the repo —
+            // committed to a substrate-specific config file. Each active
+            // substrate gets its own setup pass.
+            for substrate in harness::active_substrates(&root) {
+                match substrate {
+                    harness::Substrate::Claude => setup_substrate_claude(&root, &agent_name),
+                    harness::Substrate::Hermes => {
+                        // TODO: Hermes per-project identity. Hermes uses
+                        // hermes-config.yaml + in-process Python lifecycle;
+                        // needs research on how it surfaces per-project git
+                        // identity vs global config.
+                    }
+                    harness::Substrate::Gemini => {
+                        // TODO: Gemini / Antigravity CLI per-project config.
+                    }
+                }
+            }
         }
 
     }
@@ -1162,9 +1164,12 @@ fn cmd_save(message: &str) {
     };
     let author = format!("{} <{}>", author_name, author_email);
 
-    // Sync skills/subagents into substrate harness.
-    // The harness scans for Skill/ and Subagent/ under any namespace folder.
-    harness::sync(&root, "claude");
+    // Sync skills/subagents into every active substrate's harness. The
+    // substrate list comes from `.lex/repo.yml`'s `substrates:` field
+    // (explicit override) or auto-detection from on-disk markers
+    // (.claude/, .hermes/, .gemini/). Falls back to Claude if nothing
+    // is detected, preserving pre-multi-substrate behavior.
+    harness::sync_all(&root);
 
     // Mirror harness session files into Raw/ — soul-as-canonical-record.
     // Runs before `git add -A` so newly-mirrored files land in this commit.
@@ -3374,10 +3379,20 @@ fn cmd_kit_update(kit_arg: Option<String>, force: bool) {
         }
     }
 
-    // Refresh substrate identity. Identity is per-repo, not per-kit, so this
-    // runs once after all kit scaffolds are in place.
+    // Refresh substrate identity for every active substrate. Identity is
+    // per-repo, not per-kit, so this runs once after all kit scaffolds are
+    // in place. Each substrate gets its own injection pass.
     if let Some(agent_name) = read_agent_name(&root) {
-        setup_substrate_claude(&root, &agent_name);
+        for substrate in harness::active_substrates(&root) {
+            match substrate {
+                harness::Substrate::Claude => setup_substrate_claude(&root, &agent_name),
+                harness::Substrate::Hermes | harness::Substrate::Gemini => {
+                    // Per-substrate identity injection not yet implemented.
+                    // The substrate's sync adapter will surface what shape
+                    // it needs (see harness/<substrate>.rs).
+                }
+            }
+        }
     }
 
     // Remove legacy .env if present. Older souls used .env + SessionStart
