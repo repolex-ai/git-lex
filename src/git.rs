@@ -174,8 +174,22 @@ fn sha_from_git() -> Option<String> {
     }
 }
 
-/// Write the genesis SHA to `.lex/identity.yml`. Idempotent — skips if
-/// the file already exists, so this is safe to call on every base_uri().
+/// Write the genesis SHA to `.lex/identity.yml`.
+///
+/// Three cases:
+/// 1. File doesn't exist → write it fresh.
+/// 2. File exists, has `genesis_sha:` line → no-op (already correct).
+/// 3. File exists but has the legacy `identity:` key (from git-lex's
+///    pre-7df99ce git-as-PKI era) → rewrite in place under the canonical
+///    `genesis_sha:` key. Same SHA bytes, new label. The legacy `identity:`
+///    line is dropped; everything else is preserved.
+///
+/// The "write once never modify" header in the file body refers to the
+/// SHA *value*, not the file's existence — the genesis SHA is immutable,
+/// but rewriting the key name when we discover the file's stuck on the
+/// legacy schema is a fix, not a violation. Souls initialized pre-7df99ce
+/// would otherwise be permanently stuck under sync-from / federation
+/// readers that only know the new key.
 fn write_identity_yml_sha(sha: &str) -> std::io::Result<()> {
     let root = match find_git_root() {
         Some(r) => r,
@@ -183,19 +197,59 @@ fn write_identity_yml_sha(sha: &str) -> std::io::Result<()> {
     };
     let path = root.join(".lex").join("identity.yml");
     if path.exists() {
-        return Ok(());
+        let existing = fs::read_to_string(&path).unwrap_or_default();
+        match identity_yml_rewrite_decision(&existing, sha) {
+            None => Ok(()), // case 2: already correct
+            Some(new_body) => fs::write(path, new_body), // case 3: legacy rewrite
+        }
+    } else {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::write(path, canonical_identity_yml(sha))
     }
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
+}
+
+/// Pure helper: given the existing identity.yml body and the canonical SHA,
+/// return `Some(new_body)` if the file needs to be rewritten (legacy key
+/// present, canonical missing), or `None` if it's already correct.
+///
+/// Preserves non-`identity:` lines from the original file so any comments
+/// or future fields a soul added survive the migration.
+fn identity_yml_rewrite_decision(existing: &str, sha: &str) -> Option<String> {
+    let has_canonical = existing
+        .lines()
+        .any(|l| l.trim().starts_with("genesis_sha:"));
+    if has_canonical {
+        return None;
     }
-    let body = format!(
+    let mut body = canonical_identity_yml(sha);
+    for line in existing.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if trimmed.starts_with("identity:") {
+            continue; // drop legacy key
+        }
+        if body.contains(line) {
+            continue; // don't double-write our own header lines
+        }
+        body.push_str(line);
+        body.push('\n');
+    }
+    Some(body)
+}
+
+/// The canonical body for a fresh `.lex/identity.yml`.
+fn canonical_identity_yml(sha: &str) -> String {
+    format!(
         "# WRITE ONCE. NEVER MODIFY. Soul identity anchor.\n\
          # If you accidentally delete this file, the next `git lex sync`\n\
          # will recompute and rewrite it from the genesis commit.\n\
          genesis_sha: {}\n",
         sha
-    );
-    fs::write(path, body)
+    )
 }
 
 /// Validate SHA-1 hex shape. Accept full (40-char) and short (>=4) — but
@@ -290,5 +344,82 @@ pub(crate) fn auto_commit_snapshot(reason: &str) {
             // actually staged (hidden files?). Just report and continue.
             eprintln!("Warning: auto-commit before {} did not succeed. Continuing.", reason);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const TEST_SHA: &str = "700c5bd401abcd02abcd03abcd04abcd05abcd06";
+
+    #[test]
+    fn canonical_file_is_a_noop() {
+        // Case 2: file already has the canonical key. No rewrite needed.
+        let existing = canonical_identity_yml(TEST_SHA);
+        let decision = identity_yml_rewrite_decision(&existing, TEST_SHA);
+        assert!(decision.is_none(), "canonical file should not be rewritten");
+    }
+
+    #[test]
+    fn legacy_identity_key_gets_migrated() {
+        // Case 3: pre-7df99ce souls have `identity: <sha>` instead of
+        // `genesis_sha: <sha>`. Must rewrite to canonical form.
+        let legacy = format!("identity: {}\n", TEST_SHA);
+        let decision = identity_yml_rewrite_decision(&legacy, TEST_SHA);
+        let rewritten = decision.expect("legacy file must be rewritten");
+        assert!(
+            rewritten.contains(&format!("genesis_sha: {}", TEST_SHA)),
+            "rewrite must contain canonical key: {}",
+            rewritten
+        );
+        assert!(
+            !rewritten.contains("identity:"),
+            "rewrite must NOT contain legacy `identity:` line: {}",
+            rewritten
+        );
+    }
+
+    #[test]
+    fn migration_preserves_extra_lines() {
+        // If a soul or future git-lex added other fields (comments, metadata),
+        // they survive the migration. Only `identity:` is dropped.
+        let mixed = format!(
+            "# my custom comment\n\
+             identity: {}\n\
+             custom_field: hello\n",
+            TEST_SHA
+        );
+        let rewritten = identity_yml_rewrite_decision(&mixed, TEST_SHA)
+            .expect("should rewrite");
+        assert!(rewritten.contains("custom_field: hello"), "{}", rewritten);
+        assert!(rewritten.contains("# my custom comment"), "{}", rewritten);
+        assert!(rewritten.contains(&format!("genesis_sha: {}", TEST_SHA)));
+        assert!(!rewritten.contains("identity:"));
+    }
+
+    #[test]
+    fn empty_or_garbage_file_gets_canonical_body() {
+        // If someone deleted the file body but the file exists, treat as
+        // legacy and rewrite — better to write the canonical body than to
+        // leave a soul stuck.
+        let empty = "";
+        let rewritten = identity_yml_rewrite_decision(empty, TEST_SHA)
+            .expect("empty file must be rewritten");
+        assert!(rewritten.contains(&format!("genesis_sha: {}", TEST_SHA)));
+    }
+
+    #[test]
+    fn both_keys_present_is_a_noop() {
+        // Defensive: if a file somehow has BOTH keys (manual edit by a
+        // confused squaddie), trust the canonical one and leave it alone.
+        // We don't want to thrash if both already exist.
+        let both = format!(
+            "identity: {sha}\n\
+             genesis_sha: {sha}\n",
+            sha = TEST_SHA
+        );
+        let decision = identity_yml_rewrite_decision(&both, TEST_SHA);
+        assert!(decision.is_none(), "both-keys present should be no-op");
     }
 }
