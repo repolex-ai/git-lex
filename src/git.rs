@@ -3,6 +3,7 @@
 //! Peeled out of `main.rs` during modularization. Everything here either
 //! shells out to `git` or derives identity from the remote URL.
 
+use std::fs;
 use std::process::Command;
 
 use git_lex::find_git_root;
@@ -54,8 +55,159 @@ pub(crate) fn get_repo_id() -> String {
     format!("{}/{}", org, repo)
 }
 
-/// Build the repo-level RDF base namespace: `https://host/org/repo`.
+/// Build the repo-level RDF base namespace.
+///
+/// **URN-emitting form (preferred):** `urn:soul:<first-commit-sha>` —
+/// anchored on the soul-repo's genesis commit SHA (immutable across
+/// re-clones, host migrations, SSH alias changes). The same anchor the
+/// `o:` ontology prefix already uses (`lib.rs:222-229`).
+///
+/// **Legacy fallback:** `https://<host>/<org>/<repo>` — for pre-genesis
+/// repos (no first commit yet) or non-git contexts (tests, fixtures).
+/// Squaddies in production stores should never see this form once the
+/// repo has its first commit.
+///
+/// Three-tier SHA resolution, ordered by cost:
+/// 1. `.lex/identity.yml` cache (write-once at init/sync, fastest read)
+/// 2. `.lex/repo.yml` cache (already there for the `o:` ontology prefix)
+/// 3. `git rev-list --max-parents=0 HEAD` (live query — slowest)
+///
+/// Callers MUST use [`iri_join`] (or `<{}/path>` for the legacy form) to
+/// concatenate a path to the base — the URN form requires `:` as the
+/// separator, the legacy form uses `/`. See [`iri_join`] for the rule.
 pub(crate) fn base_uri() -> String {
+    if let Some(sha) = sha_from_identity_yml() {
+        let _ = write_identity_yml_sha(&sha);
+        return format!("urn:soul:{}", sha);
+    }
+    if let Some(sha) = sha_from_repo_yml() {
+        let _ = write_identity_yml_sha(&sha);
+        return format!("urn:soul:{}", sha);
+    }
+    if let Some(sha) = sha_from_git() {
+        let _ = write_identity_yml_sha(&sha);
+        return format!("urn:soul:{}", sha);
+    }
+    legacy_host_derived_base()
+}
+
+/// Join a path to a base IRI using the correct separator.
+///
+/// For URN-emitting `urn:soul:<sha>` bases, paths join with `:` to preserve
+/// the bare-IRI-is-Self recursion (`urn:soul:<sha>:Soul/Note/foo`). For
+/// the legacy host-derived form, paths join with `/` (the historical
+/// `https://host/org/repo/Soul/Note/foo` shape).
+///
+/// Both call sites that use this helper get the right thing without
+/// knowing which mode is active. This is the difference between subjects
+/// being addressable across re-clones (URN form) vs identity changing
+/// every time a remote alias changes (legacy).
+///
+/// Empty `path` returns the base verbatim (caller wants the bare Self).
+pub(crate) fn iri_join(base: &str, path: &str) -> String {
+    if path.is_empty() {
+        return base.to_string();
+    }
+    if base.starts_with("urn:") {
+        format!("{}:{}", base, path)
+    } else {
+        format!("{}/{}", base, path)
+    }
+}
+
+// ---------------------------------------------------------------------
+// SHA resolution (three tiers, ordered by cost)
+// ---------------------------------------------------------------------
+
+/// Read first-commit SHA from `.lex/identity.yml` if present.
+///
+/// `.lex/identity.yml` is a write-once cache of the soul's genesis-SHA.
+/// System-owned (NOT squaddie-editable like `repo.yml`). Path-level
+/// separation makes the invariant visible.
+fn sha_from_identity_yml() -> Option<String> {
+    let root = find_git_root()?;
+    let content = fs::read_to_string(root.join(".lex").join("identity.yml")).ok()?;
+    for line in content.lines() {
+        if let Some(rest) = line.trim().strip_prefix("genesis_sha:") {
+            let sha = rest.trim();
+            if is_valid_sha(sha) {
+                return Some(sha.to_string());
+            }
+        }
+    }
+    None
+}
+
+/// Read first-commit SHA from `.lex/repo.yml`. Already persisted there for
+/// the `o:` ontology prefix path. Cheap to keep reading.
+fn sha_from_repo_yml() -> Option<String> {
+    let root = find_git_root()?;
+    let content = fs::read_to_string(root.join(".lex").join("repo.yml")).ok()?;
+    for line in content.lines() {
+        if let Some(rest) = line.trim().strip_prefix("first_commit:") {
+            let sha = rest.trim();
+            if is_valid_sha(sha) {
+                return Some(sha.to_string());
+            }
+        }
+    }
+    None
+}
+
+/// Query git directly for the first commit SHA.
+fn sha_from_git() -> Option<String> {
+    let output = Command::new("git")
+        .args(["rev-list", "--max-parents=0", "HEAD"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let raw = String::from_utf8_lossy(&output.stdout);
+    // Multiple root commits (rare) → take the LAST printed line, matching
+    // git rev-list's default reverse-chronological order — earliest commit.
+    let sha = raw.lines().last()?.trim();
+    if is_valid_sha(sha) {
+        Some(sha.to_string())
+    } else {
+        None
+    }
+}
+
+/// Write the genesis SHA to `.lex/identity.yml`. Idempotent — skips if
+/// the file already exists, so this is safe to call on every base_uri().
+fn write_identity_yml_sha(sha: &str) -> std::io::Result<()> {
+    let root = match find_git_root() {
+        Some(r) => r,
+        None => return Ok(()),
+    };
+    let path = root.join(".lex").join("identity.yml");
+    if path.exists() {
+        return Ok(());
+    }
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let body = format!(
+        "# WRITE ONCE. NEVER MODIFY. Soul identity anchor.\n\
+         # If you accidentally delete this file, the next `git lex sync`\n\
+         # will recompute and rewrite it from the genesis commit.\n\
+         genesis_sha: {}\n",
+        sha
+    );
+    fs::write(path, body)
+}
+
+/// Validate SHA-1 hex shape. Accept full (40-char) and short (>=4) — but
+/// the URN form WRITES full. Validation is shape-only.
+fn is_valid_sha(s: &str) -> bool {
+    !s.is_empty() && s.len() <= 40 && s.chars().all(|c| c.is_ascii_hexdigit())
+}
+
+/// Pre-genesis / non-git fallback. Returns the OLD `https://host/org/repo`
+/// form. Mostly hit during early init (before the first commit lands) or
+/// in non-repo contexts (tests, kit fixtures).
+fn legacy_host_derived_base() -> String {
     let (host, org, repo) = get_repo_parts();
     format!("https://{}/{}/{}", host, org, repo)
 }

@@ -29,7 +29,7 @@ mod kit;
 mod extraction;
 mod raw_mirror;
 
-use crate::git::{auto_commit_snapshot, base_uri};
+use crate::git::{auto_commit_snapshot, base_uri, iri_join};
 use crate::nquad::{build_slug_path_indexes, emit_spo_line_nquads,
                    generate_frontmatter_nquads, generate_git_nquads,
                    load_lex_nquads, nq_escape, uri_encode_path};
@@ -1923,7 +1923,7 @@ fn cmd_sync() {
     };
 
     // Compute delta
-    let sync_graph = format!("<{}/sync/{}>", base, head_sha);
+    let sync_graph = format!("<{}>", iri_join(&base, &format!("sync/{}", head_sha)));
     let mut sync_nq = String::new();
     let mut new_assertions = 0;
     let mut retracted = 0;
@@ -1971,7 +1971,7 @@ fn cmd_sync() {
             let (subject, predicate, object) = (parts[0], parts[1], parts[2]);
 
             // Build entity URIs
-            let subject_uri = format!("<{}/entity/{}~{}>", base, sanitize_uri_segment(subject), blob_hash);
+            let subject_uri = format!("<{}>", iri_join(&base, &format!("entity/{}~{}", sanitize_uri_segment(subject), blob_hash)));
             let predicate_uri = if predicate == "isA" {
                 "<http://www.w3.org/1999/02/22-rdf-syntax-ns#type>".to_string()
             } else if predicate == "hasValue" {
@@ -1981,7 +1981,7 @@ fn cmd_sync() {
             } else if predicate == "linksTo" {
                 "<https://repolex.ai/ontology/git-lex/lex/linksTo>".to_string()
             } else {
-                format!("<{}/predicate/{}>", base, sanitize_uri_segment(predicate))
+                format!("<{}>", iri_join(&base, &format!("predicate/{}", sanitize_uri_segment(predicate))))
             };
             // Determine if object is a literal or entity reference
             // Literals: isA, hasValue, mentions, linksTo, and any predicate where
@@ -2013,7 +2013,7 @@ fn cmd_sync() {
             let object_nq = if is_literal {
                 format!("\"{}\"", nq_escape(object))
             } else {
-                format!("<{}/entity/{}~{}>", base, sanitize_uri_segment(object), blob_hash)
+                format!("<{}>", iri_join(&base, &format!("entity/{}~{}", sanitize_uri_segment(object), blob_hash)))
             };
 
             // The assertion
@@ -2028,7 +2028,7 @@ fn cmd_sync() {
             // Triple term annotation
             let spo_key = format!("{}|{}|{}|{}", source_file, subject, predicate, object);
             let ann_hash = short_hash(&spo_key);
-            let ann_uri = format!("<{}/ann/{}>", base, ann_hash);
+            let ann_uri = format!("<{}>", iri_join(&base, &format!("ann/{}", ann_hash)));
 
             sync_nq.push_str(&format!(
                 "{} <http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies> <<( {} {} {} )>> {} .\n",
@@ -2058,7 +2058,7 @@ fn cmd_sync() {
 
             let spo_key = format!("{}|{}|{}|{}", source_file, subject, predicate, object);
             let ann_hash = short_hash(&spo_key);
-            let ann_uri = format!("<{}/ann/{}>", base, ann_hash);
+            let ann_uri = format!("<{}>", iri_join(&base, &format!("ann/{}", ann_hash)));
 
             sync_nq.push_str(&format!(
                 "{} <https://repolex.ai/ontology/git-lex/lex/retracted> \"true\"^^<http://www.w3.org/2001/XMLSchema#boolean> {} .\n",
@@ -2083,7 +2083,7 @@ fn cmd_sync() {
 
                 let spo_key = format!("{}|{}|{}|{}", source_file, subject, predicate, object);
                 let ann_hash = short_hash(&spo_key);
-                let ann_uri = format!("<{}/ann/{}>", base, ann_hash);
+                let ann_uri = format!("<{}>", iri_join(&base, &format!("ann/{}", ann_hash)));
 
                 sync_nq.push_str(&format!(
                     "{} <https://repolex.ai/ontology/git-lex/lex/retracted> \"true\"^^<http://www.w3.org/2001/XMLSchema#boolean> {} .\n",
@@ -2154,8 +2154,8 @@ fn cmd_sync() {
     // is an ancestor of HEAD, walk only commits since the marker (append).
     // Otherwise fall back to a full rebuild (clear + walk all).
 
-    let history_graph_uri = format!("<{}/history>", base);
-    let meta_graph_uri = format!("<{}/meta>", base);
+    let history_graph_uri = format!("<{}>", iri_join(&base, "history"));
+    let meta_graph_uri = format!("<{}>", iri_join(&base, "meta"));
 
     // Query the marker
     let marker_query = format!(
@@ -2783,7 +2783,7 @@ fn cmd_history_verify(show: usize) {
 
     let root = find_git_root().expect("not in a git repo");
     let base = base_uri();
-    let history_graph = format!("<{}/history>", base);
+    let history_graph = format!("<{}>", iri_join(&base, "history"));
 
     let store_path_buf = root.join(".git").join("lex").join("oxigraph");
     let store = match Store::open(&store_path_buf) {
