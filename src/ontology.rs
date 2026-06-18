@@ -420,6 +420,194 @@ pub(crate) fn get_kit_types(kit: &str) -> Vec<(String, Vec<(String, String, bool
     }).collect()
 }
 
+/// Read the `lex-o:instantiation` annotation for a single class out of
+/// the kit's source ontology TTL. Returns one of `"authored"`,
+/// `"graph-only"`, or `"abstract"`, defaulting to `"authored"` when the
+/// annotation is absent (which preserves pre-annotation backward
+/// compatibility — older kits without instantiation annotations behave
+/// as if every class were authored, the historical default).
+///
+/// Reads from the source `.ttl` (e.g. `.lex/ontology/copia/copia.ttl`),
+/// NOT the derived `-shapes.ttl`. The instantiation annotation lives in
+/// OWL; SHACL shapes don't carry it.
+///
+/// Parser is intentionally string-level (not a full Turtle parse). It
+/// scans for the class declaration line — either `kit:ClassName a owl:Class`
+/// or just `kit:ClassName a` followed by a class-y token — and looks for
+/// `lex-o:instantiation "<value>"` inside the same stanza (until the next
+/// statement-terminating `.`). This matches the conventional shape used
+/// across kit-copia, kit-pool, etc.
+pub(crate) fn get_class_instantiation(kit: &str, class_name: &str) -> String {
+    let default = "authored".to_string();
+    let Some(root) = find_git_root() else { return default };
+    let (_, _, short) = resolve_kit_spec(kit);
+    let target = format!("{}.ttl", short);
+
+    // Static kit: .lex/ontology/{short}/{short}.ttl
+    let static_path = root.join(".lex").join("ontology").join(&short).join(&target);
+    // Adaptive kit: _ontology/{short}/{short}.ttl
+    let adaptive_path = root.join("_ontology").join(&short).join(&target);
+
+    let content = fs::read_to_string(&static_path)
+        .or_else(|_| fs::read_to_string(&adaptive_path))
+        .unwrap_or_default();
+    if content.is_empty() {
+        return default;
+    }
+    parse_class_instantiation(&content, &short, class_name)
+}
+
+/// Pure parser for the `lex-o:instantiation` annotation lookup.
+/// Separated from filesystem I/O so it can be unit-tested directly.
+fn parse_class_instantiation(content: &str, short: &str, class_name: &str) -> String {
+    let default = "authored".to_string();
+
+    // Find the kit's prefix name by reading `@prefix <name>: <ns>` — the
+    // kit's own prefix maps to the namespace ending in `/{short}/`. We
+    // prefer matching that exact prefix to avoid colliding with classes
+    // from imported vocabularies. Fall back to `{short}:` literal.
+    let kit_prefix = {
+        let mut found = None;
+        for line in content.lines() {
+            let t = line.trim();
+            if !t.starts_with("@prefix") { continue; }
+            if let Some(rest) = t.strip_prefix("@prefix") {
+                let rest = rest.trim();
+                if let Some((name_part, ns_part)) = rest.split_once(':') {
+                    let name = name_part.trim().to_string();
+                    let ns_part = ns_part.trim();
+                    if ns_part.contains(&format!("/{}/", short))
+                        || ns_part.contains(&format!("/kit/{}/", short))
+                    {
+                        found = Some(name);
+                        break;
+                    }
+                }
+            }
+        }
+        found.unwrap_or_else(|| short.to_string())
+    };
+
+    let class_qname = format!("{}:{}", kit_prefix, class_name);
+
+    // Walk lines looking for the class declaration's stanza. Stanza
+    // terminator is a line whose trimmed end is `.` (Turtle's
+    // statement terminator). Within the stanza, look for
+    // `lex-o:instantiation "<value>"`.
+    let mut in_stanza = false;
+    for line in content.lines() {
+        let t = line.trim();
+        if !in_stanza {
+            // Stanza start: line begins with the class qname followed by
+            // whitespace + `a` (the rdf:type abbreviation).
+            if let Some(rest) = t.strip_prefix(&class_qname) {
+                let rest = rest.trim_start();
+                if rest.starts_with("a ") || rest == "a" {
+                    in_stanza = true;
+                }
+            }
+            continue;
+        }
+        // In-stanza: look for the annotation.
+        if let Some(idx) = t.find("lex-o:instantiation") {
+            let after = &t[idx + "lex-o:instantiation".len()..];
+            let after = after.trim_start();
+            if let Some(rest) = after.strip_prefix('"') {
+                if let Some(end) = rest.find('"') {
+                    return rest[..end].to_string();
+                }
+            }
+        }
+        // Stanza terminator — a `.` at end of trimmed line, not preceded
+        // by `;` (which is the predicate-list continuation marker).
+        if t.ends_with('.') && !t.ends_with(" ;") {
+            return default;
+        }
+    }
+
+    default
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const KIT_COPIA_SAMPLE: &str = r#"
+@prefix copia: <https://repolex.ai/ontology/kit/copia/> .
+@prefix lex-o: <https://repolex.ai/ontology/lex-o/> .
+@prefix owl: <http://www.w3.org/2002/07/owl#> .
+@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+
+copia:Place a owl:Class ;
+    rdfs:label "Place" ;
+    rdfs:comment "A canon location." .
+
+copia:Moment a owl:Class ;
+    lex-o:instantiation "graph-only" ;
+    rdfs:label "Moment" ;
+    rdfs:comment "Graph-only — never authored as a file." .
+
+copia:Depictable a owl:Class ;
+    lex-o:instantiation "abstract" ;
+    rdfs:label "Depictable" ;
+    rdfs:comment "Abstract — never instantiated directly." .
+"#;
+
+    #[test]
+    fn default_when_annotation_absent() {
+        let v = parse_class_instantiation(KIT_COPIA_SAMPLE, "copia", "Place");
+        assert_eq!(v, "authored");
+    }
+
+    #[test]
+    fn reads_graph_only() {
+        let v = parse_class_instantiation(KIT_COPIA_SAMPLE, "copia", "Moment");
+        assert_eq!(v, "graph-only");
+    }
+
+    #[test]
+    fn reads_abstract() {
+        let v = parse_class_instantiation(KIT_COPIA_SAMPLE, "copia", "Depictable");
+        assert_eq!(v, "abstract");
+    }
+
+    #[test]
+    fn default_when_class_missing() {
+        let v = parse_class_instantiation(KIT_COPIA_SAMPLE, "copia", "Nonexistent");
+        assert_eq!(v, "authored");
+    }
+
+    #[test]
+    fn default_when_content_empty() {
+        let v = parse_class_instantiation("", "copia", "Moment");
+        assert_eq!(v, "authored");
+    }
+
+    #[test]
+    fn does_not_leak_annotation_across_stanzas() {
+        // Place comes first with NO annotation; Moment comes after with
+        // graph-only. Place must NOT pick up Moment's annotation.
+        let v = parse_class_instantiation(KIT_COPIA_SAMPLE, "copia", "Place");
+        assert_eq!(v, "authored");
+    }
+
+    #[test]
+    fn handles_kit_prefix_via_kit_path() {
+        // Some namespaces use /kit/{short}/ (the actual convention for
+        // copia). Make sure the prefix-detect handles that form too.
+        let ttl = r#"
+@prefix soul: <https://repolex.ai/ontology/kit/soul/> .
+@prefix lex-o: <https://repolex.ai/ontology/lex-o/> .
+
+soul:Self a owl:Class ;
+    lex-o:instantiation "graph-only" ;
+    rdfs:label "Self" .
+"#;
+        let v = parse_class_instantiation(ttl, "soul", "Self");
+        assert_eq!(v, "graph-only");
+    }
+}
+
 /// Every class declared across all installed shape files — kit and
 /// adaptive. Each entry: (prefix_name, class_name, namespace).
 /// Used by `list` / `create` when they need a whole-repo view, not just one

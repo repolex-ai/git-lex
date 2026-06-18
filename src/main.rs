@@ -472,7 +472,15 @@ fn cmd_init(directory: Option<String>, kit: Option<String>) {
         let folder_base = kit_config_str(kit_name, "folder base");
         let kit_types = get_kit_types(kit_name);
         if create_folders {
+            let mut created: Vec<String> = Vec::new();
             for (type_name, _) in &kit_types {
+                // Instantiation gate (lex-o-seed v0.2): skip graph-only /
+                // abstract classes — they're declared in the ontology but
+                // never authored as files, so they don't earn a folder.
+                let inst = ontology::get_class_instantiation(kit_name, type_name);
+                if inst == "graph-only" || inst == "abstract" {
+                    continue;
+                }
                 let type_dir = if let Some(ref base) = folder_base {
                     root.join(base).join(type_name)
                 } else {
@@ -484,14 +492,14 @@ fn cmd_init(directory: Option<String>, kit: Option<String>) {
                 if !gitkeep.exists() {
                     fs::write(&gitkeep, "").ok();
                 }
+                created.push(type_name.clone());
             }
-            if !kit_types.is_empty() {
-                let type_names: Vec<String> = kit_types.iter().map(|(n, _)| n.clone()).collect();
+            if !created.is_empty() {
                 let prefix = folder_base.as_deref().unwrap_or("");
                 if prefix.is_empty() {
-                    println!("Created type folders: {}", type_names.join(", "));
+                    println!("Created type folders: {}", created.join(", "));
                 } else {
-                    println!("Created type folders: {}/{{{}}}", prefix, type_names.join(", "));
+                    println!("Created type folders: {}/{{{}}}", prefix, created.join(", "));
                 }
             }
         }
@@ -603,6 +611,13 @@ fn cmd_init(directory: Option<String>, kit: Option<String>) {
 
         let tmpl_folder_base = kit_config_str(kit_name, "folder base");
         for (type_name, properties) in &kit_types {
+            // Instantiation gate (lex-o-seed v0.2): graph-only / abstract
+            // classes don't get a `__ClassName.md` template, since they
+            // don't have authored .md files at all.
+            let inst = ontology::get_class_instantiation(kit_name, type_name);
+            if inst == "graph-only" || inst == "abstract" {
+                continue;
+            }
             let type_dir = if let Some(ref base) = tmpl_folder_base {
                 root.join(base).join(type_name)
             } else {
@@ -3189,6 +3204,17 @@ fn regenerate_kit_artifacts(kit_name: &str, root: &std::path::Path, create_folde
     let folder_base = kit_config_str(kit_name, "folder base");
     let mut templates_updated = 0usize;
     for (type_name, properties) in &kit_types {
+        // Instantiation gate (lex-o-seed v0.2 contract): classes annotated
+        // `graph-only` or `abstract` exist in the ontology / SHACL surface
+        // but should NOT get a folder or `__ClassName.md` template. Default
+        // when absent = "authored" → preserves pre-annotation backward
+        // compatibility for kits like soul/innerworld that haven't adopted
+        // the annotation yet.
+        let inst = ontology::get_class_instantiation(kit_name, type_name);
+        if inst == "graph-only" || inst == "abstract" {
+            continue;
+        }
+
         let type_dir = if let Some(ref base) = folder_base {
             root.join(base).join(type_name)
         } else {
