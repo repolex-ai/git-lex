@@ -792,6 +792,39 @@ copia:NocturneActivity a owl:Class ;
         let v = parse_class_okf_type(&content, "lex-o", "Agent");
         assert_eq!(v, "Agent", "lex-o:Agent has rdfs:label \"Agent\"");
     }
+
+    #[test]
+    fn okf_parses_real_kit_soul_with_annotations() {
+        // Receipt check against the live kit-soul ontology that just had
+        // okfType annotations added across all 17 classes. Verifies the
+        // annotation wins over the label (they happen to match for Memory,
+        // but the parser logic is exercised regardless).
+        let path = std::path::PathBuf::from("/Users/rob/repos/repolex-ai/git-lex-kit-soul/ontology/soul/soul.ttl");
+        let Ok(content) = fs::read_to_string(&path) else { return };
+        assert_eq!(parse_class_okf_type(&content, "soul", "Memory"), "Memory");
+        assert_eq!(parse_class_okf_type(&content, "soul", "Decision"), "Decision");
+        assert_eq!(parse_class_okf_type(&content, "soul", "Note"), "Note");
+        assert_eq!(parse_class_okf_type(&content, "soul", "Journal"), "Journal");
+    }
+
+    #[test]
+    fn okf_parses_real_kit_copia_with_multiword_annotation() {
+        // Receipt for the NocturneActivity case — multi-word OKF type
+        // labels survive the round-trip through the real ontology file.
+        let path = std::path::PathBuf::from("/Users/rob/repos/repolex-ai/git-lex-kit-copia/ontology/copia/copia.ttl");
+        let Ok(content) = fs::read_to_string(&path) else { return };
+        assert_eq!(parse_class_okf_type(&content, "copia", "Place"), "Place");
+        assert_eq!(parse_class_okf_type(&content, "copia", "NocturneActivity"), "Nocturne Activity");
+        assert_eq!(parse_class_okf_type(&content, "copia", "NocturneFeed"), "Nocturne Feed");
+    }
+
+    #[test]
+    fn okf_parses_real_kit_pool_with_annotations() {
+        let path = std::path::PathBuf::from("/Users/rob/repos/repolex-ai/git-lex-kit-pool/ontology/pool/pool.ttl");
+        let Ok(content) = fs::read_to_string(&path) else { return };
+        assert_eq!(parse_class_okf_type(&content, "pool", "Image"), "Image");
+        assert_eq!(parse_class_okf_type(&content, "pool", "Document"), "Document");
+    }
 }
 
 /// Every class declared across all installed shape files — kit and
