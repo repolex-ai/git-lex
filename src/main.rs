@@ -1039,6 +1039,14 @@ fn cmd_create(doctype: &str, instance_id: Option<&str>, json: bool) {
     let mut fm = String::new();
     fm.push_str("---\n");
 
+    // OKF `type:` — emitted first so partial-read parsers get the canonical
+    // type from a top-of-file scan (locked by tr1p 2026-06-18). Three-fallback
+    // chain: `lex-o:okfType` annotation → `rdfs:label` → local-name. The
+    // bottom of the chain always produces a string, so this is always safe
+    // to emit.
+    let okf_type = ontology::get_class_okf_type(&kit, &class_name);
+    fm.push_str(&format!("type: {}\n", okf_type));
+
     for (prop_name, prop_type, _required, comment) in &properties {
         // Property names pass through as-is from the ontology (camelCase).
         // Class name is capitalized to match the ontology exactly.

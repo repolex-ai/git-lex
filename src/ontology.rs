@@ -457,37 +457,123 @@ pub(crate) fn get_class_instantiation(kit: &str, class_name: &str) -> String {
     parse_class_instantiation(&content, &short, class_name)
 }
 
-/// Pure parser for the `lex-o:instantiation` annotation lookup.
-/// Separated from filesystem I/O so it can be unit-tested directly.
-fn parse_class_instantiation(content: &str, short: &str, class_name: &str) -> String {
-    let default = "authored".to_string();
+/// Look up the OKF type label for a class — used at `git lex create` time to
+/// emit the `type:` field at the top of the YAML frontmatter (per OKF spec
+/// v0.1; the only REQUIRED frontmatter field for OKF compliance).
+///
+/// Three-fallback chain (per the OKF spec, locked by tr1p 2026-06-18):
+///   1. `lex-o:okfType "<value>"` annotation on the class — kit author's
+///      explicit choice.
+///   2. `rdfs:label "<value>"` — soft-launch path so unannotated kits still
+///      emit a sensible `type:` value from their existing labels.
+///   3. Local-name of the class — final fallback; always exists.
+///
+/// Returns a string in every case (the bottom of the chain is the local-name
+/// itself, which the caller passes in). Never panics.
+pub(crate) fn get_class_okf_type(kit: &str, class_name: &str) -> String {
+    let Some(root) = find_git_root() else { return class_name.to_string() };
+    let (_, _, short) = resolve_kit_spec(kit);
+    let target = format!("{}.ttl", short);
 
-    // Find the kit's prefix name by reading `@prefix <name>: <ns>` — the
-    // kit's own prefix maps to the namespace ending in `/{short}/`. We
-    // prefer matching that exact prefix to avoid colliding with classes
-    // from imported vocabularies. Fall back to `{short}:` literal.
-    let kit_prefix = {
-        let mut found = None;
-        for line in content.lines() {
-            let t = line.trim();
-            if !t.starts_with("@prefix") { continue; }
-            if let Some(rest) = t.strip_prefix("@prefix") {
-                let rest = rest.trim();
-                if let Some((name_part, ns_part)) = rest.split_once(':') {
-                    let name = name_part.trim().to_string();
-                    let ns_part = ns_part.trim();
-                    if ns_part.contains(&format!("/{}/", short))
-                        || ns_part.contains(&format!("/kit/{}/", short))
-                    {
-                        found = Some(name);
-                        break;
+    // Static kit: .lex/ontology/{short}/{short}.ttl
+    let static_path = root.join(".lex").join("ontology").join(&short).join(&target);
+    // Adaptive kit: _ontology/{short}/{short}.ttl
+    let adaptive_path = root.join("_ontology").join(&short).join(&target);
+
+    let content = fs::read_to_string(&static_path)
+        .or_else(|_| fs::read_to_string(&adaptive_path))
+        .unwrap_or_default();
+    if content.is_empty() {
+        return class_name.to_string();
+    }
+    parse_class_okf_type(&content, &short, class_name)
+}
+
+/// Pure parser for the `lex-o:okfType` lookup with full three-fallback chain.
+/// Separated from filesystem I/O so it can be unit-tested directly.
+///
+/// Walks the class's stanza looking for `lex-o:okfType "..."` first; if not
+/// present, falls back to the stanza's `rdfs:label "..."`; if neither is
+/// present (or the class isn't declared in this file at all), returns the
+/// class's local-name unchanged.
+fn parse_class_okf_type(content: &str, short: &str, class_name: &str) -> String {
+    let kit_prefix = find_kit_prefix(content, short);
+    let class_qname = format!("{}:{}", kit_prefix, class_name);
+
+    let mut in_stanza = false;
+    let mut label: Option<String> = None;
+    for line in content.lines() {
+        let t = line.trim();
+        if !in_stanza {
+            if let Some(rest) = t.strip_prefix(&class_qname) {
+                let rest = rest.trim_start();
+                if rest.starts_with("a ") || rest == "a" {
+                    in_stanza = true;
+                }
+            }
+            continue;
+        }
+        // okfType wins.
+        if let Some(idx) = t.find("lex-o:okfType") {
+            let after = &t[idx + "lex-o:okfType".len()..];
+            let after = after.trim_start();
+            if let Some(rest) = after.strip_prefix('"') {
+                if let Some(end) = rest.find('"') {
+                    return rest[..end].to_string();
+                }
+            }
+        }
+        // Capture the label for the fallback — but keep scanning in case
+        // okfType appears later in the stanza.
+        if label.is_none() {
+            if let Some(idx) = t.find("rdfs:label") {
+                let after = &t[idx + "rdfs:label".len()..];
+                let after = after.trim_start();
+                if let Some(rest) = after.strip_prefix('"') {
+                    if let Some(end) = rest.find('"') {
+                        label = Some(rest[..end].to_string());
                     }
                 }
             }
         }
-        found.unwrap_or_else(|| short.to_string())
-    };
+        // Stanza terminator — a `.` at end of trimmed line, not preceded
+        // by `;` (predicate-list continuation).
+        if t.ends_with('.') && !t.ends_with(" ;") {
+            break;
+        }
+    }
 
+    label.unwrap_or_else(|| class_name.to_string())
+}
+
+/// Shared kit-prefix detector — finds the `@prefix <name>: <ns>` line whose
+/// namespace ends in `/{short}/` (or `/kit/{short}/`). Falls back to the
+/// short name itself if no `@prefix` line matches.
+fn find_kit_prefix(content: &str, short: &str) -> String {
+    for line in content.lines() {
+        let t = line.trim();
+        if !t.starts_with("@prefix") { continue; }
+        if let Some(rest) = t.strip_prefix("@prefix") {
+            let rest = rest.trim();
+            if let Some((name_part, ns_part)) = rest.split_once(':') {
+                let name = name_part.trim().to_string();
+                let ns_part = ns_part.trim();
+                if ns_part.contains(&format!("/{}/", short))
+                    || ns_part.contains(&format!("/kit/{}/", short))
+                {
+                    return name;
+                }
+            }
+        }
+    }
+    short.to_string()
+}
+
+/// Pure parser for the `lex-o:instantiation` annotation lookup.
+/// Separated from filesystem I/O so it can be unit-tested directly.
+fn parse_class_instantiation(content: &str, short: &str, class_name: &str) -> String {
+    let default = "authored".to_string();
+    let kit_prefix = find_kit_prefix(content, short);
     let class_qname = format!("{}:{}", kit_prefix, class_name);
 
     // Walk lines looking for the class declaration's stanza. Stanza
@@ -605,6 +691,106 @@ soul:Self a owl:Class ;
 "#;
         let v = parse_class_instantiation(ttl, "soul", "Self");
         assert_eq!(v, "graph-only");
+    }
+
+    // ── OKF type lookup — three-fallback chain ──
+
+    const KIT_WITH_OKF_TYPES: &str = r#"
+@prefix copia: <https://repolex.ai/ontology/kit/copia/> .
+@prefix lex-o: <https://repolex.ai/ontology/lex-o/> .
+@prefix owl: <http://www.w3.org/2002/07/owl#> .
+@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+
+# Explicit annotation — wins
+copia:Place a owl:Class ;
+    lex-o:okfType "Place" ;
+    rdfs:label "Canon Location" ;
+    rdfs:comment "A canon location." .
+
+# No annotation — falls back to rdfs:label
+copia:Outfit a owl:Class ;
+    rdfs:label "Outfit Item" ;
+    rdfs:comment "What someone is wearing." .
+
+# Neither annotation nor label — falls back to local-name
+copia:Bag a owl:Class ;
+    rdfs:comment "A grouping." .
+
+# Annotation with a multi-word value (the NocturneActivity case)
+copia:NocturneActivity a owl:Class ;
+    lex-o:okfType "Nocturne Activity" ;
+    rdfs:label "Nocturne Activity" .
+"#;
+
+    #[test]
+    fn okf_explicit_annotation_wins_over_label() {
+        let v = parse_class_okf_type(KIT_WITH_OKF_TYPES, "copia", "Place");
+        // Annotation says "Place"; rdfs:label says "Canon Location".
+        // Annotation wins per the three-fallback chain.
+        assert_eq!(v, "Place");
+    }
+
+    #[test]
+    fn okf_falls_back_to_rdfs_label_when_no_annotation() {
+        let v = parse_class_okf_type(KIT_WITH_OKF_TYPES, "copia", "Outfit");
+        assert_eq!(v, "Outfit Item");
+    }
+
+    #[test]
+    fn okf_falls_back_to_local_name_when_neither() {
+        let v = parse_class_okf_type(KIT_WITH_OKF_TYPES, "copia", "Bag");
+        assert_eq!(v, "Bag");
+    }
+
+    #[test]
+    fn okf_falls_back_to_local_name_when_class_missing() {
+        let v = parse_class_okf_type(KIT_WITH_OKF_TYPES, "copia", "Nonexistent");
+        assert_eq!(v, "Nonexistent");
+    }
+
+    #[test]
+    fn okf_falls_back_to_local_name_when_content_empty() {
+        let v = parse_class_okf_type("", "copia", "Memory");
+        assert_eq!(v, "Memory");
+    }
+
+    #[test]
+    fn okf_multiword_annotation_preserved() {
+        // The NocturneActivity case from the spec — multi-word OKF type
+        // labels are valid (open vocabulary).
+        let v = parse_class_okf_type(KIT_WITH_OKF_TYPES, "copia", "NocturneActivity");
+        assert_eq!(v, "Nocturne Activity");
+    }
+
+    #[test]
+    fn okf_does_not_leak_annotation_across_stanzas() {
+        // Place has okfType. Outfit (next stanza, no okfType) must NOT
+        // pick up Place's annotation — must fall back to its own label.
+        let v = parse_class_okf_type(KIT_WITH_OKF_TYPES, "copia", "Outfit");
+        assert_eq!(v, "Outfit Item");
+    }
+
+    #[test]
+    fn okf_does_not_leak_label_across_stanzas() {
+        // Outfit has rdfs:label. Bag (next stanza, no label) must NOT pick
+        // up Outfit's label — must fall back to local-name.
+        let v = parse_class_okf_type(KIT_WITH_OKF_TYPES, "copia", "Bag");
+        assert_eq!(v, "Bag");
+    }
+
+    #[test]
+    fn okf_parses_real_lex_o_seed_ontology() {
+        // Receipt check that our parser handles the actual lex-o.ttl
+        // shape. lex-o doesn't declare okfType on its own classes (it's the
+        // ontology that DEFINES the annotation property), so this exercises
+        // the rdfs:label fallback.
+        let path = std::path::PathBuf::from("/Users/rob/repos/repolex-ai/lex-o-seed/lex-o.ttl");
+        let Ok(content) = fs::read_to_string(&path) else {
+            // CI / detached test runs may not have this path. Skip cleanly.
+            return;
+        };
+        let v = parse_class_okf_type(&content, "lex-o", "Agent");
+        assert_eq!(v, "Agent", "lex-o:Agent has rdfs:label \"Agent\"");
     }
 }
 
