@@ -2710,7 +2710,17 @@ fn setup_substrate_claude(root: &std::path::Path, agent_name: &str) {
     };
 
     // Git identity env vars — injected into every Bash tool call.
-    let email = format!("{}@lex.local", agent_name.to_lowercase());
+    // Email source of truth: optional `agent_email:` in .lex/repo.yml
+    // (so a soul can use a real public address like their GitHub email).
+    // Falls back to the generated `<slug>@lex.local` form for souls who
+    // never set one. Without this, every `git lex kit-update` would silently
+    // clobber a custom-set email in settings.json with the @lex.local default.
+    let repo_yml = read_repo_yml_fields(&root.join(".lex").join("repo.yml"));
+    let email = repo_yml
+        .get("agent_email")
+        .cloned()
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| format!("{}@lex.local", agent_name.to_lowercase()));
     if !settings.get("env").is_some() {
         settings["env"] = serde_json::json!({});
     }
