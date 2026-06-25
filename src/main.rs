@@ -1130,35 +1130,30 @@ fn cmd_create(doctype: &str, instance_id: Option<&str>, json: bool) {
 
 // ─── git lex save ──────────────────────────────────────────────
 
-/// Resolve the agent's git identity for this commit. Two sources, in order:
+/// Resolve the agent's git identity for this commit. THREE sources, in
+/// precedence order (C23 fix, Day 40 — the resolver is now 3-of-3, not 2-of-3):
 ///
-/// 1. **Process environment** — `GIT_AUTHOR_NAME` + `GIT_AUTHOR_EMAIL`. This
-///    is the *squad-repo* case: the agent's Claude Code session
-///    (running in their soul repo) injects these env vars from
-///    `<soul>/.claude/settings.json`. When `git lex save` runs in a
-///    squad repo from that session, the env carries through.
+/// 1. **Process environment** — `GIT_AUTHOR_NAME` + `GIT_AUTHOR_EMAIL`. The
+///    *live-session / squad-repo* case: the agent's Claude Code session injects
+///    these from `<soul>/.claude/settings.json`, and they carry through to
+///    `git lex save`. Highest authority — it's the running agent's identity now.
 ///
-/// 2. **`<root>/.claude/settings.json`** — read as data, not env. This is
-///    the *soul-repo* case (the agent committing to their own repo) and
-///    a defensive fallback if env injection is for any reason not in
-///    effect (raw shell, subagent, etc.).
+/// 2. **`<root>/.lex/repo.yml`** (`agent_name` + `agent_email`) — the
+///    human-edited source of truth for identity. settings.json is *derived from*
+///    repo.yml at init/kit-update time, so when they disagree repo.yml is the
+///    authoritative one (settings.json is a stale cache). Reading repo.yml HERE
+///    is what fixes the frozen-config trap: edit repo.yml and identity takes
+///    effect immediately, no kit-update required.
 ///
-/// Returns `(name, email)` from whichever source resolves first. Returns
-/// `None` only if both are missing — in which case we hard-fail rather
-/// than commit as the user's global gitconfig.
-// QUESTION(w4r3z, Day 38): this is a 2-SOURCE chain (env → settings.json), but
-// repo.yml ALSO carries identity (agent_name + the agent_email field added Day 37
-// at main.rs:~1047). repo.yml feeds in ONLY at init/kit-update time, when it's
-// WRITTEN into settings.json — it is NOT a read-time fallback here. So if a soul
-// edits repo.yml's agent_email and does NOT re-run kit-update, this resolver
-// never sees the new value (it reads settings.json, which is now stale). That's
-// the SAME frozen-config trap that bit identity live on Day 38 (settings.json
-// env is read once per session). Decide: (a) add repo.yml as an explicit 3rd
-// fallback tier here so repo.yml is authoritative even without kit-update, or
-// (b) document loudly that repo.yml identity requires kit-update to take effect.
-// Either way the "3-source precedence" should be real + documented, not 2-of-3.
+/// 3. **`<root>/.claude/settings.json`** env block (read as data) — the last
+///    fallback, for repos that predate the repo.yml identity fields or where
+///    repo.yml is absent.
+///
+/// Returns `(name, email)` from the first source that resolves. Returns `None`
+/// only if all three are missing — in which case we hard-fail rather than commit
+/// as the user's global gitconfig.
 fn resolve_agent_identity(root: &std::path::Path) -> Option<(String, String)> {
-    // 1. Process environment.
+    // 1. Process environment (live session).
     if let (Ok(name), Ok(email)) = (
         std::env::var("GIT_AUTHOR_NAME"),
         std::env::var("GIT_AUTHOR_EMAIL"),
@@ -1168,7 +1163,16 @@ fn resolve_agent_identity(root: &std::path::Path) -> Option<(String, String)> {
         }
     }
 
-    // 2. .claude/settings.json env block (read as data).
+    // 2. repo.yml (the human-edited source of truth — authoritative over the
+    //    settings.json cache, so editing it works WITHOUT a kit-update).
+    let fields = read_repo_yml_fields(&root.join(".lex").join("repo.yml"));
+    if let (Some(name), Some(email)) = (fields.get("agent_name"), fields.get("agent_email")) {
+        if !name.is_empty() && !email.is_empty() {
+            return Some((name.clone(), email.clone()));
+        }
+    }
+
+    // 3. .claude/settings.json env block (read as data) — last fallback.
     let path = root.join(".claude").join("settings.json");
     let content = fs::read_to_string(&path).ok()?;
     let v: serde_json::Value = serde_json::from_str(&content).ok()?;
