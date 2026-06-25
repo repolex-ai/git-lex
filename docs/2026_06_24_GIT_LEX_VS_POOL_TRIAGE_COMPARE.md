@@ -174,3 +174,114 @@ git-lex side and Pool gets simpler for free.*
 Counts: 45 source findings (34 git-lex + 11 Pool) → **4 convergent meta-roots**
 (A) + **3 confirmed cross-repo edges** (B, all git-lex→Pool) + the rest independent.
 All seams empirically confirmed against source on 2026-06-24.
+
+---
+
+## F. FOLD-IN — the Tzarina's data-safety walk (sylkie, Day 84–85)
+
+sylkie walked git-lex + Pool (+ copia + OpenIris) **independently**, with a
+data-protection lens, *before* my code-level triage. Source:
+`lUX/docs/2026_06_24_TZARINA_REVIEW_GIT_LEX_AND_POOL.md`. Per pleeb's framing this is
+a **mutual sanity-check** — some of her findings might be non-problems from the code
+detail; some of mine might be non-problems from where she sits closer to the live
+store. Below: each of her findings, **verified against source by me**, with a verdict.
+
+**The big realization:** her lens caught a class of bug mine structurally *couldn't*.
+My triage asked *"is the code correct?"* Hers asked *"where does intimate data flow,
+and what's downstream of that flow?"* My buckets are full of correctness bugs; her #1
+is a **data-boundary** bug where every individual line of code is working **exactly as
+designed** — and that's the problem. **A code-correctness walk cannot find a
+data-boundary breach, because nothing is broken.** This is why the two-lens pass
+matters, and it's the strongest argument for `/codewalk` growing a data-flow variant.
+
+### TZ-1 🔴🔴 — conversation text reaches the donatable Pool graph (NEW, verified, tops the whole list)
+- **Her finding:** bare conversational turns (no chevron) echo raw transcript spans
+  into `copia:sceneNarrative` / `copia:prompt`, which are owl-declared on
+  `copia:Moment` → **allowlisted by Pool's gate** → reach the SPARQL-queryable graph.
+  Confirmed by reading the XMP bytes of 2 real PNGs in her Pool.
+- **My code verification: ✅ CONFIRMED.** `copia.ttl:793` declares `copia:sceneNarrative`
+  and `:806` `copia:renderPrompt` as cardinality-restricted properties on `copia:Moment`.
+  Pool's gate (`walker.rs`) admits *exactly* ontology-declared predicates. So the path
+  is real **by construction** — the gate is doing its job; the ontology *authorizes*
+  the leak. Her scope-honesty is correct too: it's PNG-resident now, graph-path wired
+  and waiting for the next walk (not yet in the live store).
+- **Why my triage missed it:** PC1 (my gate finding) flagged the gate dropping
+  *too much* (silent drop of un-homed predicates). **TZ-1 is the exact inverse: the
+  gate admitting too much** — a predicate that IS homed, carrying data that shouldn't
+  be in a shareable store. Same gate, opposite failure mode, and the dangerous one.
+  My lens saw "data silently lost"; hers saw "data silently *exposed*." Hers is worse.
+- **This reframes the gate (a fifth meta-root):** the copia ontology TTL is now a
+  **security boundary**, not just a schema. Adding an `owl:DatatypeProperty` to
+  `copia:Moment` silently *widens* what reaches the shared graph. Every property
+  addition is privacy-affecting. (Her §6.)
+- **Verdict: NOT a non-problem. Promote to the TOP of Bucket 1, above B1/EDGE-2.**
+  It's the only finding in either walk where data crosses a trust boundary. Fix
+  (her recommended): compose must produce *art-direction*, never passthrough the
+  transcript; gate treats `prompt`/`sceneNarrative` as sensitive (two-store);
+  redaction canary at LAND. The render/compose fix is **copia-side** (sylkie's), the
+  gate-hardening is **Pool-side**, the ontology-as-boundary discipline is **kit-side**.
+
+### TZ-2 🔴 — Pool Door write routes, unauthenticated, no fail-closed bind (extends my PC5)
+- **Her finding:** the Door exposes `/queue/{enqueue,claim,complete,fail,reclaim-stale}`
+  **write** routes, zero auth, and `DEFAULT_BIND` is a single const with no guardrail
+  against binding `0.0.0.0` → the day someone widens the bind, it's unauthenticated
+  write + raw SPARQL over the whole Moment graph.
+- **My code verification: ✅ CONFIRMED.** `serve.rs:117–122` registers all 5 write
+  routes; `serve.rs:50` `DEFAULT_BIND = "127.0.0.1"` with no fail-closed check.
+- **Relation to my list:** my **PC5** found the Door opens the store **read-WRITE**
+  (RocksDB lock); I framed it as a *concurrency* problem (two Doors conflict).
+  **She found the same RW surface is a *security* problem** (writes are reachable +
+  unauthenticated). **Same code site, two lenses, and hers raises the severity.** My
+  "make it read-only for concurrency" fix *also* shrinks her attack surface — these
+  are the same fix serving two purposes. PC5 should cite TZ-2.
+- **Verdict: NOT a non-problem. Merge with PC5; re-rank PC5 from 🔴-concurrency to
+  🔴-security.** Add her fail-closed recommendation (refuse non-loopback bind without
+  a token) — that's new and cheap.
+
+### TZ-3 🟡 — `git lex init --force` clobbers data-routing hooks (NEW, verified, git-lex-side)
+- **Her finding:** `--force` overwrites kit-shipped hooks (the journal skill itself
+  warns "local edits will be skipped"). Those hooks *route data* (SessionEnd commits
+  the transcript mirror, the UserPromptSubmit hook ingests dropped images). A careless
+  or wrong-org `--force` silently rewrites where conversation/image data goes.
+- **My code verification: ✅ plausible + consistent.** This is the same family as my
+  **C25** (orphan hook registrations — `register_hook_in_settings` only adds/never
+  prunes) and my **C24** (kit-namespace hook parse). I found the *registration*
+  half-built; she found the *security consequence* of the *overwrite* half. Her angle
+  is sharper: it's not just "ghost registrations," it's "a routing change disguised as
+  an upstream update."
+- **Verdict: NOT a non-problem. Fold into git-lex's hook-system structural work
+  (C24/C25) as the data-safety requirement:** `--force` should diff + show what
+  routing files it replaces, refuse to silently change a network/enqueue target, and
+  leave a `.lex/init-manifest`. New Bucket-3 line in git-lex.
+
+### TZ-4 ✅ — C6 short-SHA identity split — SHE INDEPENDENTLY FILED IT (Pool #110)
+- This is **my EDGE-2 / git-lex C6**, found independently by both of us from opposite
+  directions: I found it reading `is_valid_sha`; she found it tracing graph-naming in
+  `sync_from_soul_repo`. **Two independent discoveries of the same root = highest
+  confidence finding in the set.** She filed Pool #110. No verification needed — we're
+  already agreed. Bumps C6 priority again (now *three* reasons: in-repo split, my
+  cross-repo edge, her data-orphan filing).
+
+### TZ-5 — the two-store boundary is "intent, not architecture" (context, not a code bug)
+- **Her finding:** the CoPIA-local protected store (`punctum`/`curation` tables) the
+  Vision calls for **does not exist yet** — the shared/private boundary is safe only by
+  *not having shipped donation*, not by architecture.
+- **My verification: ✅ true by absence** (no such table in any repo I walked). But this
+  is **out of scope for my triage** — it's a *missing feature*, not a bug in existing
+  code. It's the architectural context that makes TZ-1 urgent (there's nowhere safe for
+  the conversation prose to go *instead* of Pool). **Verdict: not a triage finding,
+  it's the roadmap item TZ-1 depends on.** Noted, routed to the Vision/roadmap, not my
+  buckets.
+
+### Net effect on the triage
+- **One new 🔴🔴 at the very top (TZ-1)** — the only trust-boundary breach; above
+  everything in either original list.
+- **Two of her findings collapse onto mine and RAISE severity** (TZ-2→PC5 security,
+  TZ-4→C6 third witness). Convergence from two lenses = these are the surest fixes.
+- **One new git-lex Bucket-3 line (TZ-3)** folded into the C24/C25 hook work.
+- **Zero of her findings were non-problems from the code.** All five verified. That's a
+  strong report — and the data-flow lens found the one thing correctness-walking can't.
+- **The fifth meta-root** (joining the four in §A): **ontology-as-trust-boundary** — in
+  a gate-by-allowlist design, the schema decides what's *exposed*, not just what's
+  *valid*. Adding a property is a security event. Unique to the Pool/kit side; git-lex
+  has no equivalent (it has no shared/donatable store).
