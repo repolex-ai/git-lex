@@ -28,12 +28,14 @@ several at once.
 
 These are the ones that will embarrass us or burn an outsider on first contact.
 
-| ID | Sev | Finding | Effort | Site |
-|----|-----|---------|--------|------|
-| **B1 / C12** | 🔴 | **Silent class-casing footgun.** `soul.memory.x` emits `a soul:memory` (a class that doesn't exist); the natural query `?m a soul:Memory` returns 0 with no error, SHACL passes. Invisible to Mac devs (case-insensitive FS), bites on Linux/CI. Two emitters disagree on case (`extraction.rs` capitalizes first letter — itself a buggy guess: `cameraangle`→`Cameraangle`; `nquad.rs` does nothing). | **CHEAP** — `ontology.rs get_kit_types()/all_classes()` already parses the class set; both emitters just validate against it (exact hit → emit; case-only mismatch → canonical+warn; no match → loud error). | nquad.rs:749, extraction.rs:189 |
-| **B2** | 🟡 | **`query` after `save` shows "0 lex triples"** — frontmatter facts aren't visible until `git lex sync`. The documented `create→save→query` flow is incomplete; the README's headline query returns nothing. | LOW — either auto-sync/extract on query, or document the sync step. Decide which. | main.rs:2556 (cmd_query) |
-| **C23** | 🔴 | **`resolve_agent_identity` is 2-source (env→settings.json), not 3.** repo.yml's `agent_email` only feeds in at init/kit-update WRITE time, never as a read fallback → edit repo.yml without re-running kit-update and the resolver never sees it (the frozen-config trap that bit identity live on Day 38). | MEDIUM — add repo.yml as a 3rd read tier, OR document loudly that repo.yml identity needs kit-update. | main.rs:1149 |
-| **C6** | 🔴 | **`is_valid_sha` accepts short SHAs** but `base_uri` builds `urn:soul:<sha>` from it → a short SHA in repo.yml + full in identity.yml = SAME soul, TWO base IRIs, subjects split silently across them. | LOW — require exactly 40 hex for the identity anchor. | git.rs:257 |
+**✅ BUCKET 1 IS COMPLETE (Day 40, 2026-06-25).** All five fixed, tested, pushed.
+
+| ID | Sev | Status | Finding | Effort | Site |
+|----|-----|--------|---------|--------|------|
+| **B1 / C12** | 🔴 | ✅ b7c18a2 | **Silent class-casing footgun.** `soul.memory.x` emits `a soul:memory` (a class that doesn't exist); the natural query `?m a soul:Memory` returns 0 with no error, SHACL passes. Invisible to Mac devs (case-insensitive FS), bites on Linux/CI. Two emitters disagree on case (`extraction.rs` capitalizes first letter — itself a buggy guess: `cameraangle`→`Cameraangle`; `nquad.rs` does nothing). | **CHEAP** — `ontology.rs get_kit_types()/all_classes()` already parses the class set; both emitters just validate against it (exact hit → emit; case-only mismatch → canonical+warn; no match → loud error). | nquad.rs:749, extraction.rs:189 |
+| **B2** | 🟡 | ✅ 540de16 | **`query` after `save` shows "0 lex triples"** — frontmatter facts aren't visible until `git lex sync`. The documented `create→save→query` flow is incomplete; the README's headline query returns nothing. **FIXED:** `cmd_query` now builds the "now" view from the WORKING TREE every time (extract git + frontmatter fresh), so a doc's facts surface immediately, no sync. (Note: the README's example must use the `kit/soul:` prefix that frontmatter actually emits, not bare `soul:`.) | LOW — done: query reads working tree. | main.rs cmd_query |
+| **C23** | 🔴 | ✅ 265379b | **`resolve_agent_identity` is 2-source (env→settings.json), not 3.** repo.yml's `agent_email` only feeds in at init/kit-update WRITE time, never as a read fallback → edit repo.yml without re-running kit-update and the resolver never sees it (the frozen-config trap that bit identity live on Day 38). **FIXED:** added repo.yml as a read tier, precedence env→repo.yml→settings.json (repo.yml beats the settings.json cache it's derived from). Verified end-to-end. | MEDIUM — done: 3-of-3 read precedence. | main.rs:1160 |
+| **C6** | 🔴 | ✅ fd53e2c | **`is_valid_sha` accepts short SHAs** but `base_uri` builds `urn:soul:<sha>` from it → a short SHA in repo.yml + full in identity.yml = SAME soul, TWO base IRIs, subjects split silently across them. | LOW — require exactly 40 hex for the identity anchor. | git.rs:257 |
 
 ---
 
@@ -43,7 +45,7 @@ Cheap things that make git-lex feel finished. Knock these out in a batch.
 
 | ID | Sev | Finding | Site |
 |----|-----|---------|------|
-| **B4** | 🟢 | `git lex --version` errors ("unexpected argument"). First thing a user tries. Add `version = env!("CARGO_PKG_VERSION")` (+ bump Cargo.toml off 0.0.1). | main.rs:54 |
+| **B4** ✅ 5314e98 | 🟢 | `git lex --version` errors ("unexpected argument"). First thing a user tries. Add `version = env!("CARGO_PKG_VERSION")` (+ bump Cargo.toml off 0.0.1). DONE — version flag + bumped to 0.1.0. | main.rs:54 |
 | **B3** | 🟡 | No-id `create` silently writes `untitled.md`; every no-id create collides on the same file, exits 0. Require an id, or auto-suffix, or exit non-zero on collision. | main.rs:1012 |
 | **C16** | 🟢 | Dead code (build warnings name it): unused `is_valid_iri`, `get_kit`, `exit`, `SparqlEvaluator`, `get_object_properties`, `KitScope`/`ScaffoldInstallReport`/`read_kit_scope`. `cargo fix` handles 5; rest are manual. 26 warnings total → target near-zero. | various |
 | **B5** | 🟢 | Inconsistent exit codes (some errors exit 0: create-no-id, list-uninit). Matters for scripting/CI. Audit the `exit()` sites. | main.rs (many) |
