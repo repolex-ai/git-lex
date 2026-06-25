@@ -24,7 +24,10 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::SystemTime;
 
-use git_lex::{find_git_root, get_kit, kit_install_dir_for_spec, resolve_kit_spec};
+use git_lex::{
+    canonical_kit_ontology_path, find_git_root, get_kit, kit_install_dir_for_spec,
+    resolve_kit_spec,
+};
 
 /// Read simple `key: value` fields from a repo.yml-style file into a map.
 /// Used for honoring existing init variables on re-init (single-shot with
@@ -412,7 +415,13 @@ pub(crate) fn find_kit_ttl(kit: &str) -> Option<PathBuf> {
         None
     };
 
-    // Static kit location
+    // Static kit: THE canonical path first (the contract — see
+    // `canonical_kit_ontology_path`). Consumers may rely on this path alone.
+    let canonical = canonical_kit_ontology_path(&root, kit);
+    if canonical.exists() { return Some(canonical); }
+
+    // Resilience tier: any non-shapes .ttl already in the canonical kit dir
+    // (covers a kit that ships its TTL under a different filename — rare).
     let static_dir = root.join(".lex").join("ontology").join(&short_name);
     if let Some(p) = try_dir(&static_dir) { return Some(p); }
 
@@ -1399,6 +1408,44 @@ mod tests {
         let p = tmp.join("repo.yml");
         std::fs::write(&p, content).unwrap();
         p
+    }
+
+    /// PIN: the canonical kit-ontology path is a CONTRACT downstream consumers
+    /// (e.g. Pool) rely on as their ONE path. If this formula ever changes, this
+    /// test must fail loudly so the move is deliberate — and so every consumer
+    /// gets re-notified — rather than silently re-introducing a fallback chain.
+    /// (#8 / EDGE-1: git-lex moved this path twice before; never silently again.)
+    #[test]
+    fn canonical_kit_ontology_path_is_stable() {
+        let root = Path::new("/repo");
+        // Full org/repo spec resolves to the short name `copia`.
+        let p = canonical_kit_ontology_path(root, "repolex-ai/git-lex-kit-copia");
+        assert_eq!(
+            p,
+            Path::new("/repo/.lex/ontology/copia/copia.ttl"),
+            "canonical kit-ontology path moved — update ALL downstream consumers \
+             (Pool's locate_kit_copia_ontology, etc.) before changing this"
+        );
+        // Bare short-name spec resolves identically.
+        let p2 = canonical_kit_ontology_path(root, "soul");
+        assert_eq!(p2, Path::new("/repo/.lex/ontology/soul/soul.ttl"));
+    }
+
+    /// PIN: find_kit_ttl must resolve a kit installed at the canonical path —
+    /// the function and the contract agree by construction.
+    #[test]
+    fn find_kit_ttl_resolves_canonical_install() {
+        let tmp = unique_tmp_dir("git-lex-canon-ttl");
+        // Lay down a kit ontology at the canonical path under a fake repo root.
+        let canon = canonical_kit_ontology_path(&tmp, "repolex-ai/git-lex-kit-copia");
+        std::fs::create_dir_all(canon.parent().unwrap()).unwrap();
+        std::fs::write(&canon, "# copia ontology\n").unwrap();
+        // try_dir's exact-name primary should find it at the canonical location.
+        let dir = tmp.join(".lex").join("ontology").join("copia");
+        let primary = dir.join("copia.ttl");
+        assert!(primary.exists(), "canonical install must exist for the pin");
+        assert_eq!(primary, canon, "find path agrees with the canonical contract");
+        std::fs::remove_dir_all(&tmp).ok();
     }
 
     #[test]

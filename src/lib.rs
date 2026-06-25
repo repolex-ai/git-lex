@@ -220,6 +220,29 @@ pub fn kit_install_dir_for_spec(root: &std::path::Path, spec: &str) -> PathBuf {
     root.join(".lex").join("kit").join(&org).join(&repo)
 }
 
+/// THE canonical install path for a static kit's ontology TTL, relative to the
+/// repo root: `.lex/ontology/{short}/{short}.ttl`.
+///
+/// This is a CONTRACT, not a guess. A static kit ships `ontology/{short}/{short}.ttl`
+/// and `git lex kit` copies that subtree verbatim into `.lex/ontology/`, so this is
+/// exactly where the file lands (see `kit.rs` install dest + `find_kit_ttl` primary
+/// tier — both MUST agree with this function by construction). Downstream consumers
+/// (e.g. Pool's `locate_kit_copia_ontology`) may rely on this path ALONE; the older
+/// `.lex/kit/{org}/{repo}/` and `{Short}/.kit/` layouts are legacy and are swept
+/// forward by `git lex kit-update`.
+///
+/// Pinned by `canonical_kit_ontology_path_is_stable` — if this formula ever changes,
+/// that test breaks loudly so the move is deliberate (and consumers get re-notified)
+/// rather than silent. (#8 / EDGE-1: git-lex moved this path twice historically,
+/// forcing every consumer to carry a fallback chain. One pinned path ends that.)
+pub fn canonical_kit_ontology_path(root: &std::path::Path, spec: &str) -> PathBuf {
+    let (_, _, short) = resolve_kit_spec(spec);
+    root.join(".lex")
+        .join("ontology")
+        .join(&short)
+        .join(format!("{short}.ttl"))
+}
+
 /// Auto-inject SPARQL prefixes into a query string. Adds standard prefixes
 /// (git:, lex:, fm:, rdf:, rdfs:, owl:, xsd:) plus the content ontology
 /// prefix (o:) and the kit prefix if one is configured.
