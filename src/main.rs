@@ -2578,27 +2578,21 @@ fn run_query(store: &Store, query: &str, store_type: &str, json: bool) {
 }
 
 fn cmd_query(query: String, json: bool) {
-    // QUESTION(w4r3z, Day 38): the in-memory fallback below calls
-    // load_lex_nquads(), yet a fresh `query` right after `save` reported
-    // "0 lex triples" in a live walk — frontmatter facts were absent until
-    // `git lex sync` ran (after which the persistent-store path returned them).
-    // So the documented flow `create → save → query` does NOT surface a doc's
-    // own frontmatter on the first query; the user must `sync` first. Two things
-    // to resolve for the soft-release: (1) is load_lex_nquads() missing
-    // freshly-extracted .spo sidecars that aren't yet compiled into nquads? and
-    // (2) the README's create→save→query example is incomplete without a sync
-    // step (or query should auto-sync / auto-extract). Decide whether query
-    // should transparently pick up sidecars, or the docs should make sync
-    // explicit. Repro: scratch soul-kit repo, create Memory, save, query
-    // `?m a soul:Memory` → 0 until `git lex sync`.
-    // Try persistent store first
-    if let Some(store) = open_store() {
-        run_query(&store, &query, "persistent store", json);
-        return;
-    }
-
-    // Fall back to in-memory
-    eprintln!("No persistent store found, building in-memory (run 'git lex sync' for faster queries)");
+    // B2 FIX (w4r3z, Day 40): `query` now builds the "now" view from the WORKING
+    // TREE every time, so the documented `create → save → query` flow surfaces a
+    // doc's own frontmatter immediately — no `git lex sync` required first.
+    //
+    // The old code queried the persistent store first when it existed. But `save`
+    // writes .spo sidecars WITHOUT recompiling the store (only `sync` does that),
+    // so a fresh doc's facts were invisible until `sync` ran — the README's
+    // headline query returned 0. (The in-memory fallback also missed them: it read
+    // compiled .nq files, which `save` doesn't write either.)
+    //
+    // Fix: always extract the current working tree (git blobs + frontmatter) into a
+    // fresh in-memory store. generate_frontmatter_nquads() reads the live .md files
+    // directly — so this reflects exactly what's on disk now. The persistent store
+    // remains a SYNC/HISTORY artifact (sync/<sha> graphs); the "now" view is always
+    // derived fresh here, trading a little speed for a correct, surprise-free flow.
     let start = Instant::now();
     let store = Store::new().expect("failed to create in-memory store");
 
@@ -2608,8 +2602,19 @@ fn cmd_query(query: String, json: bool) {
         .load_from_reader(RdfFormat::NQuads, Cursor::new(git_nq.as_bytes()))
         .expect("failed to load git triples");
 
+    // The live "now" graph: extract frontmatter + wikilinks straight from the
+    // working-tree .md files (this is what `save` would extract, computed fresh).
+    let (fm_nq, _errs) = generate_frontmatter_nquads();
+    let lex_count = fm_nq.lines().filter(|l| !l.is_empty()).count();
+    if !fm_nq.is_empty() {
+        store
+            .load_from_reader(RdfFormat::NQuads, Cursor::new(fm_nq.as_bytes()))
+            .expect("failed to load frontmatter triples");
+    }
+
+    // Also fold in any compiled .nq already on disk (history/sync graphs a prior
+    // `sync` wrote) so history-aware queries still see the sync/<sha> snapshots.
     let lex_nq = load_lex_nquads();
-    let lex_count = lex_nq.lines().filter(|l| !l.is_empty()).count();
     if !lex_nq.is_empty() {
         store
             .load_from_reader(RdfFormat::NQuads, Cursor::new(lex_nq.as_bytes()))
@@ -2620,7 +2625,10 @@ fn cmd_query(query: String, json: bool) {
     run_query(
         &store,
         &query,
-        &format!("in-memory, loaded {} git + {} lex triples in {:.1}ms", git_count, lex_count, load_ms),
+        &format!(
+            "live working-tree view: {} git + {} frontmatter triples in {:.1}ms",
+            git_count, lex_count, load_ms
+        ),
         json,
     );
 }
