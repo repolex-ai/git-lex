@@ -215,11 +215,38 @@ matters, and it's the strongest argument for `/codewalk` growing a data-flow var
   `copia:Moment` silently *widens* what reaches the shared graph. Every property
   addition is privacy-affecting. (Her §6.)
 - **Verdict: NOT a non-problem. Promote to the TOP of Bucket 1, above B1/EDGE-2.**
-  It's the only finding in either walk where data crosses a trust boundary. Fix
-  (her recommended): compose must produce *art-direction*, never passthrough the
-  transcript; gate treats `prompt`/`sceneNarrative` as sensitive (two-store);
-  redaction canary at LAND. The render/compose fix is **copia-side** (sylkie's), the
-  gate-hardening is **Pool-side**, the ontology-as-boundary discipline is **kit-side**.
+  It's the only finding in either walk where data crosses a trust boundary.
+- **CORRECTION to my first read of the fix-location (pleeb caught it, then I read the
+  code).** I initially said the fix is "copia-side." **Wrong.** copia is a data
+  *consumer* and may not even be running; composition is NOT its job. The real
+  pipeline (verified in source) is:
+  `brief → OpenIris.compose() → render → SEE → Pool`
+  (`copia/spike/worker.py:27`, `spike/__init__.py:11`). `.compose()` lives in
+  **OpenIris** (`openiris/src/openiris/eye.py:1117`), and it is *correct* for the
+  conversation to flow into it — Qwen is *supposed* to make a scene from it. The
+  conversation enters as one labeled block (`_build_compose_prompt`:
+  `CURRENT MOMENT (what's happening now): {conversation}`), alongside MUST-HAVE /
+  CHEVRON / DESCRIPTIONS. **There is no raw passthrough wire in compose().**
+- **So the real mechanism of TZ-1 is subtler than "compose echoes the transcript":**
+  for a bare conversational turn (thin MUST-HAVE, fat CURRENT-MOMENT block), the 8B
+  composer model can **fail to abstract and regurgitate its input** as the output
+  `prompt`. The scar tissue is right there in `eye.py` — the Day-82 fix comment
+  ("the model echoes the instruction instead of writing the scene"), `_strip_think`,
+  the `/no_think` handling — this exact class of "model copies input" was already
+  being fought. TZ-1 is that failure mode landing on the *conversation* block, and
+  the copied bytes get stamped because the eye trusts its own output.
+- **Therefore the fix is the COMPOSE CONTRACT, in OpenIris (sylkie's), not copia:**
+  `compose()` must **guarantee its output is a transformed scene, never its input**.
+  Enforce at the eye: if the composed `prompt` has ≥N% verbatim overlap with the
+  `conversation` block, that's a **failed compose** — retry / reject / fall back,
+  never stamp. (This is sylkie's redaction-canary #3, but enforced at the *eye*, the
+  always-on render organ, not at copia or at LAND.) Plus a stronger `_COMPOSE_SYSTEM`
+  / model-tier so thin-MUST-HAVE turns still abstract — an OpenIris tuning question.
+- **The other two layers are defense-in-depth, downstream of the real fix:**
+  gate-hardening (treat `prompt`/`sceneNarrative` as sensitive, two-store) is
+  **Pool-side**; the ontology-as-boundary discipline is **kit-side**. But **if the
+  compose contract holds, there is no sensitive byte to gate** — OpenIris is the cure,
+  the rest are seatbelts.
 
 ### TZ-2 🔴 — Pool Door write routes, unauthenticated, no fail-closed bind (extends my PC5)
 - **Her finding:** the Door exposes `/queue/{enqueue,claim,complete,fail,reclaim-stale}`
@@ -275,7 +302,10 @@ matters, and it's the strongest argument for `/codewalk` growing a data-flow var
 
 ### Net effect on the triage
 - **One new 🔴🔴 at the very top (TZ-1)** — the only trust-boundary breach; above
-  everything in either original list.
+  everything in either original list. **Fix lives in OpenIris** (the compose
+  contract — output must be a transformed scene, never its conversation input), NOT
+  copia (a consumer that may not be running). Pool gate + kit ontology are
+  defense-in-depth, not the cure.
 - **Two of her findings collapse onto mine and RAISE severity** (TZ-2→PC5 security,
   TZ-4→C6 third witness). Convergence from two lenses = these are the surest fixes.
 - **One new git-lex Bucket-3 line (TZ-3)** folded into the C24/C25 hook work.
