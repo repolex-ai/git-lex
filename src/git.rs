@@ -260,20 +260,21 @@ fn canonical_identity_yml(sha: &str) -> String {
     )
 }
 
-/// Validate SHA-1 hex shape. Accept full (40-char) and short (>=4) — but
-/// the URN form WRITES full. Validation is shape-only.
-// FIXME(w4r3z, Day 38): accepting short SHAs here is an IDENTITY-SPLIT risk.
-// base_uri() builds `urn:soul:<sha>` from whatever this validates. If repo.yml
-// holds a truncated `first_commit:` (short SHA) while identity.yml holds the
-// full one, the three-tier resolution can emit `urn:soul:<short>` from one tier
-// and `urn:soul:<full>` from another → the SAME soul gets TWO different base
-// IRIs, and its subjects silently split across them (queries miss half). For an
-// identity anchor, validation should require EXACTLY 40 hex chars (full SHA-1)
-// — short forms are fine for display but must never become the urn: base.
-// (Also note: this fn is flagged unused by the compiler in some builds — confirm
-// it's actually on the live path before relying on it as the gate.)
+/// Validate a SHA-1 as a SOUL IDENTITY ANCHOR: exactly 40 hex chars.
+///
+/// C6 fix (Day 38): this is the gate inside all three `sha_from_*` readers,
+/// and every one of them feeds `base_uri()`'s `urn:soul:<sha>`. Accepting a
+/// short SHA here was an IDENTITY-SPLIT risk — if `repo.yml` held a truncated
+/// `first_commit:` while `identity.yml` held the full one, the tiers could
+/// emit `urn:soul:<short>` and `urn:soul:<full>` for the SAME soul, splitting
+/// its subjects across two base IRIs (queries miss half). It also crosses the
+/// seam into Pool: `pool sync-from` builds the Moments named-graph IRI from
+/// `identity.yml`'s genesis_sha, so a length disagreement would orphan a
+/// soul's Moments in a differently-named graph (see the git-lex×Pool compare,
+/// EDGE-2 / Pool #110). The anchor MUST be the full 40-hex SHA-1; short forms
+/// are fine for display but must never become the urn: base.
 fn is_valid_sha(s: &str) -> bool {
-    !s.is_empty() && s.len() <= 40 && s.chars().all(|c| c.is_ascii_hexdigit())
+    s.len() == 40 && s.chars().all(|c| c.is_ascii_hexdigit())
 }
 
 /// Pre-genesis / non-git fallback. Returns the OLD `https://host/org/repo`
@@ -370,6 +371,28 @@ mod tests {
     use super::*;
 
     const TEST_SHA: &str = "700c5bd401abcd02abcd03abcd04abcd05abcd06";
+
+    // C6 regression (Day 38): the identity anchor must be EXACTLY 40 hex —
+    // a short SHA must NOT validate, or the same soul can get two base IRIs
+    // (and Pool would orphan its Moments in a differently-named graph).
+    #[test]
+    fn full_40_hex_sha_is_valid() {
+        assert!(is_valid_sha(TEST_SHA));
+        assert_eq!(TEST_SHA.len(), 40);
+    }
+
+    #[test]
+    fn short_sha_is_rejected_as_identity_anchor() {
+        assert!(!is_valid_sha("700c5bd"));        // 7-char short form
+        assert!(!is_valid_sha("700c5bd401abcd")); // 14-char
+    }
+
+    #[test]
+    fn non_hex_and_overlong_are_rejected() {
+        assert!(!is_valid_sha(""));                                          // empty
+        assert!(!is_valid_sha("700c5bd401abcd02abcd03abcd04abcd05abcd0g"));  // 40 with 'g'
+        assert!(!is_valid_sha("700c5bd401abcd02abcd03abcd04abcd05abcd06a")); // 41 hex
+    }
 
     #[test]
     fn canonical_file_is_a_noop() {
