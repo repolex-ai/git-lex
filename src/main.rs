@@ -52,12 +52,12 @@ use crate::kit::{collect_init_variables, fetch_kit_from_github, install_scaffold
 mod spo_events;
 
 #[derive(Parser)]
-#[command(name = "git-lex", about = "Git extensions for knowledge graphs")]
-// TODO(w4r3z, Day 38): no `--version` flag — `git lex --version` errors with
-// "unexpected argument '--version' found". First thing many users try. Add
-// `version = env!("CARGO_PKG_VERSION")` to this #[command(...)] (and consider
-// propagate_version = true so subcommands report it too). Cargo.toml is at
-// 0.0.1 — bump to a real soft-release version when wiring this.
+#[command(
+    name = "git-lex",
+    about = "Git extensions for knowledge graphs",
+    version = env!("CARGO_PKG_VERSION"),
+    propagate_version = true
+)]
 struct Cli {
     #[command(subcommand)]
     command: Commands,
