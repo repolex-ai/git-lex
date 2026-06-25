@@ -267,6 +267,11 @@ fn matches_glob(pattern: &str, name: &str) -> bool {
 /// resumes don't re-date; this is only called for sessions never seen before
 /// on this machine.
 fn today_utc_date() -> String {
+    // TODO(w4r3z, Day 38): shells out to the unix `date` binary for a UTC date —
+    // a needless subprocess AND non-portable (no `date -u` on Windows; ties into
+    // the POSIX-only theme, see hooks.rs). Do it in-process: std::time::SystemTime
+    // → UNIX_EPOCH offset → y/m/d, or pull in `chrono`/`time` (likely already a
+    // transitive dep). Low severity, trivial fix.
     use std::process::Command;
     if let Ok(out) = Command::new("date").args(["-u", "+%Y-%m-%d"]).output() {
         if out.status.success() {

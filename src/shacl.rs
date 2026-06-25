@@ -22,6 +22,16 @@ use git_lex::{find_git_root, resolve_kit_spec};
 
 /// Parse SHACL shapes TTL to extract inline hints for class template comments.
 /// Returns a map of property name → hint string (e.g. "enum: certain, likely, hypothesis, hunch")
+// FIXME(w4r3z, Day 38): DUAL-PARSER smell. This fn hand-scans TTL line-by-line
+// (`starts_with("sh:path ")`, `strip_prefix`, find('(')…) while THIS SAME MODULE
+// loads the same TTL into a real oxigraph Store and queries it with SPARQL
+// (generate_shacl_shapes, ~line 125+). The hand-scanner breaks on any valid TTL
+// that doesn't match its exact line shape: multi-line `sh:in (...)` spanning
+// lines, predicates on the same line as `;`, comments, alternate spacing, or
+// `sh:path` with a full IRI instead of a prefixed name. Since the Store is
+// already in this module, parse hints via SPARQL too (one parse, robust). This
+// is the same hand-rolled-parser-next-to-a-real-one pattern as get_kit (lib.rs)
+// and the two type-emitters (B1) — a recurring soft-release smell across git-lex.
 pub(crate) fn parse_shacl_hints(shapes_ttl: &str) -> HashMap<String, String> {
     let mut hints: HashMap<String, String> = HashMap::new();
     let mut current_path = String::new();

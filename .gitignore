@@ -1,3 +1,4 @@
 /target
 .lex/
 .git/lex/
+.DS_Store

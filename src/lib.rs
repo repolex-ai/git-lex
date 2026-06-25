@@ -44,6 +44,12 @@ pub fn open_store_read_only() -> Option<Store> {
 }
 
 /// Read the kit spec from `.lex/repo.yml`. Returns None if no kit or kit is "none".
+// FIXME(w4r3z, Day 38): hand-rolled YAML parse via `strip_prefix("kit: ")` —
+// brittle: breaks on `kit:  soul` (two spaces), `kit:\tsoul` (tab), a trailing
+// comment (`kit: soul  # ...`), or quoted values. The crate ALREADY depends on
+// serde_yaml (used in extraction); parse repo.yml into a struct once and read
+// fields off it. NOTE: `add_prefixes` below parses repo.yml's `kit:` AGAIN by
+// hand (line ~236) — two independent brittle parsers for the same file. Unify.
 pub fn get_kit() -> Option<String> {
     let root = find_git_root()?;
     let repo_yml = root.join(".lex").join("repo.yml");
@@ -288,6 +294,16 @@ pub fn add_prefixes(query: &str) -> String {
         defaults.push((short, full));
     }
     let defaults = defaults;
+    // FIXME(w4r3z, Day 38): prefix detection is naive substring match —
+    // `query.contains("o:")` matches any token containing "o:" (e.g. another
+    // prefix, or "http://..." inside a literal IRI), so `o:` (the content
+    // ontology, namespaced DIFFERENTLY at /ont/<8charsha>/ vs everyone else's
+    // /ontology/...) gets injected spuriously, and a query using a literal that
+    // happens to contain "git:" pulls in unwanted PREFIXes. Match prefix tokens
+    // on a word boundary (regex `\b<short>` or tokenize), not raw contains().
+    // QUESTION: why does `o:` use /ont/<8-char-sha>/ while identity uses the
+    // FULL sha at urn:soul:<sha>? Two SHA lengths + two ontology roots for the
+    // "same" repo is a latent mismatch worth reconciling for the soft-release.
     let upper = query.to_uppercase();
     let mut prefix_block = String::new();
     for (short, full) in &defaults {

@@ -750,6 +750,39 @@ pub(crate) fn emit_spo_line_nquads(
             // The class segment in dot-notation is already capitalized
             // (e.g. squad.Task.assignedTo) and matches the ontology class
             // name exactly. No case transformation needed.
+            //
+            // FIXME(w4r3z, Day 38): this assumption is NOT enforced, and the
+            // failure is SILENT. If a user writes `soul.memory.category`
+            // (lowercase class segment) instead of `soul.Memory.category`,
+            // we emit `<doc> a soul:memory` — a type IRI for a class that does
+            // not exist in the ontology. No error, SHACL still passes, and the
+            // canonical query `?m a soul:Memory` returns ZERO rows. The doc is
+            // silently invisible to class-typed queries.
+            // Repro (live, Day 38): a soul-kit Memory written with lowercase
+            // dot-notation extracts `a soul:memory`; `SELECT ?m WHERE { ?m a
+            // soul:Memory }` finds nothing, while the same doc with capital
+            // `soul.Memory.*` is found. The README's headline query hit this.
+            // FIX options: (a) validate class_seg against the kit's known
+            // classes and emit a loud error on miss (preferred — fail-loud,
+            // matches the soft-release bar); (b) canonicalize case by looking
+            // up the class in the ontology's class set; (c) at minimum, warn on
+            // a class segment that is not Capitalized. Do NOT silently lowercase
+            // or uppercase — that would mask a real typo. See also the
+            // capitalized-class-folder convention this depends on.
+            // NOTE: the bug is in the FRONTMATTER PREFIX casing, NOT the folder.
+            // A file can sit in a correctly-cased `Soul/Memory/` dir yet carry
+            // `soul.memory.*` frontmatter → still emits the phantom `soul:memory`.
+            // And on a case-INSENSITIVE FS (macOS default) the author can't even
+            // see the mismatch locally — `Soul/memory` and `Soul/Memory` resolve
+            // to the same inode — so this slips past every Mac dev and only bites
+            // on Linux/CI or in the graph. Validate the prefix against the
+            // ontology's class set; the folder being right does not save you.
+            // FIX IS CHEAP: ontology.rs already parses the kit's declared classes
+            // — `get_kit_types(kit)` / `all_classes()` (from sh:targetClass). Both
+            // emitters (here + extraction.rs:frontmatter_to_turtle) should match
+            // class_seg against that set: exact case-correct hit → emit; case-only
+            // mismatch → emit canonical + warn; no match → loud error. The class
+            // list is already in hand, so this is low-effort/high-value for triage.
             let type_key = format!("{}.{}", kit_name, class_seg);
             if emitted_types.insert(type_key) {
                 let type_uri = format!("<https://repolex.ai/ontology/kit/{}/{}>", kit_name, class_seg);

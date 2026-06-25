@@ -11,13 +11,15 @@ in git. git-lex is the index on top.
 ```bash
 git lex create Memory "first-day"     # make a typed document
 git lex save "wrote my first memory"  # commit + extract + validate, one step
+git lex sync                          # build the queryable store from the sidecars
 git lex query "SELECT ?m WHERE { ?m a soul:Memory }"
 ```
 
 > [!WARNING]
 > **Alpha.** git-lex works and is used daily, but it's early and the surface is
 > still moving. Try it on a repo you don't mind re-initializing. Feedback and bug
-> reports are very welcome — that's exactly what this stage is for.
+> reports are very welcome — that's exactly what this stage is for. See
+> [Known limitations](#known-limitations-alpha) before you start.
 
 ---
 
@@ -93,12 +95,21 @@ git lex list                     # see the document types this kit gives you
 git lex create Memory "day-1"    # scaffold a typed Memory document
 # ...edit the new .md file: fill in its frontmatter + body...
 git lex save "first memory"      # stage + extract + validate + commit
+git lex sync                     # build the persistent store from the sidecars
 git lex query "SELECT * WHERE { ?s ?p ?o } LIMIT 10"
 ```
 
 `git lex save` is the everyday command: it stages your changes, runs frontmatter
 extraction and SHACL validation as a pre-commit gate (a bad document blocks the
-commit with a clear error), commits, and updates the graph.
+commit with a clear error), and commits.
+
+> [!NOTE]
+> **Run `git lex sync` before `query` to see your latest frontmatter.** Today,
+> `query` reads a persistent store that `sync` builds from the extraction
+> sidecars; a query run before the first `sync` (or before a `sync` after new
+> edits) will only see git-level facts, not your document's frontmatter. This
+> rough edge is on the soft-release fix list — see
+> [Known limitations](#known-limitations-alpha).
 
 ---
 
@@ -173,6 +184,34 @@ git-lex indexes **text** — Markdown documents and their git history. Its sibli
 blobs, content-addressed, with the same RDF/SPARQL spine plus a vector index for
 similarity search. Together they cover a soul's text and episodic/visual memory.
 You don't need Pool to use git-lex.
+
+---
+
+## Known limitations (Alpha)
+
+git-lex is early. These are the sharp edges we know about and are working on —
+documented here so they don't surprise you on first contact:
+
+- **POSIX only (macOS / Linux).** The commit-time extract+validate gate installs
+  as a `#!/bin/sh` git hook with a unix executable bit. There is no Windows
+  install path yet, so the validation gate won't run on Windows.
+
+- **Run `git lex sync` before `query`.** As noted in the quick start, `query`
+  reads a persistent store built by `sync`; your latest frontmatter isn't
+  queryable until you've synced. We intend to make this transparent.
+
+- **Frontmatter class names are case-sensitive.** The class segment of a
+  dot-notation key must match the ontology's class name *exactly*:
+  `soul.Memory.category` (capital **M**) types the document as `soul:Memory`.
+  Writing `soul.memory.category` (lowercase) currently produces a different,
+  non-existent class — and the document silently won't match a
+  `?x a soul:Memory` query. On a case-insensitive filesystem (macOS default)
+  you may not notice locally. Match the casing in `git lex list`. (This silent
+  failure is a known bug on the fix list, not intended behavior.)
+
+- **`git lex --version` is not wired up yet** (use `git lex --help`).
+
+Found something else? That's exactly what this stage is for — please file it.
 
 ---
 

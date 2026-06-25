@@ -6,6 +6,14 @@
 //! will move in a follow-up phase once their store-access shape settles.
 //!
 //! Peeled out of `main.rs` during modularization. No behavior changes.
+//!
+//! NOTE(w4r3z, Day 38): the "follow-up phase" above NEVER HAPPENED — main.rs is
+//! still 3699 lines and the N-Quad generators still live there. This stale
+//! split is the STRUCTURAL ROOT of the B1 class-casing bug: `frontmatter_to_turtle`
+//! (here, capitalizes first letter) and the nquad-path emitter (nquad.rs:~749,
+//! no transform) are two type-emitters in two files that have DRIFTED apart.
+//! Completing the modularization — one emitter, one casing rule — would dissolve
+//! the bug. Update or remove this comment when that lands.
 
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
@@ -187,6 +195,19 @@ pub(crate) fn frontmatter_to_turtle(filepath: &std::path::Path, root: &std::path
                 let prop_name = segments[1];
 
                 // Infer doc type from class segment (capitalize)
+                // FIXME(w4r3z, Day 38): TWO type-emitting paths DISAGREE on case.
+                // THIS path (frontmatter_to_turtle) capitalizes the first letter:
+                // `soul.memory` → class `Memory`. But nquad.rs:~749 (the OTHER
+                // emitter, on the sync/graph path) does NO transform: `soul.memory`
+                // → `a soul:memory` verbatim. Same frontmatter, different class
+                // casing depending on which path runs — and the GRAPH (nquad path)
+                // is the one the user queries, so `?m a soul:Memory` misses (B1).
+                // Worse: capitalize-first-letter is a GUESS, not a lookup —
+                // `soul.cameraangle` → `Cameraangle`, not the real `CameraAngle`.
+                // Both paths should resolve the class against the kit's actual
+                // class set (case-correct match or loud error), NOT transform or
+                // pass-through. Unify the two emitters on one ontology-validated
+                // rule. This is the root of the silent class-casing footgun.
                 if doc_type.is_none() {
                     let mut c = class_seg.chars();
                     doc_type = Some(match c.next() {

@@ -548,6 +548,15 @@ pub(crate) fn substitute_vars(text: &str, vars: &HashMap<String, String>) -> Str
 /// `../../skill` pointing at the agent's content-area skill folder.
 /// These are infrastructure files the kit owns: .claude/, AGENTS.md, hooks,
 /// skills symlink, etc. Agents don't edit them.
+// NOTE(w4r3z, Day 38): "Agents don't edit them" is the load-bearing assumption.
+// It holds TODAY because the one agent-edited file in .claude/ — settings.json
+// (identity + COPIA_CONFIG) — is special-cased through setup_substrate_claude
+// (main.rs:~720), NOT this always-overwrite path. GUARD-RAIL: if a future kit
+// ever ships settings.json (or any other agent-touched file) in scaffold/, this
+// path would silently clobber the agent's edits on every kit-update — exactly
+// the silent-overwrite-of-user-intent bug class (cf. the Day-37 <slug>@lex.local
+// identity reverts, and the copia COPIA_CONFIG default). Keep agent-editable
+// files OUT of scaffold/, or route them through a drift-aware/merge path.
 pub(crate) fn install_scaffold_files_from(kit_dir: &std::path::Path) -> usize {
     let root = match find_git_root() {
         Some(r) => r,

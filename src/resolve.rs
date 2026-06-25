@@ -114,6 +114,14 @@ pub fn resolve_frontmatter_value(
     }
 
     // Rule 3: bare slug lookup (lowercased to match index convention)
+    // NOTE(w4r3z, Day 38): this lowercases but does NOT trim. The test
+    // `whitespace_only_is_unresolved` claims "lowercased + trimmed to empty"
+    // as its rationale, but "   " stays "   " here (is_empty() is false) and is
+    // Unresolved only because the slug_index has no "   " key — a different
+    // reason than the test states. Harmless today, but the comment/test
+    // rationale is wrong; either trim here (so whitespace truly empties) or fix
+    // the test's stated reason. Low severity; flagging so a maintainer relying
+    // on the comment isn't misled.
     let slug = raw.to_lowercase();
     if slug.is_empty() {
         return ResolveResult::Unresolved(raw.to_string());

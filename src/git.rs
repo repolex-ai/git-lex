@@ -75,6 +75,14 @@ pub(crate) fn get_repo_id() -> String {
 /// Callers MUST use [`iri_join`] (or `<{}/path>` for the legacy form) to
 /// concatenate a path to the base — the URN form requires `:` as the
 /// separator, the legacy form uses `/`. See [`iri_join`] for the rule.
+// QUESTION(w4r3z, Day 38): base_uri() is a READ that WRITES — it calls
+// write_identity_yml_sha() on every invocation (3 sites below). base_uri() is
+// hot (every nquad emit, every query prefix). Two concerns: (1) a save and a
+// query running concurrently could race on identity.yml writes; (2) a read
+// fn with a filesystem side-effect is surprising. Consider writing identity.yml
+// ONCE at init/sync and making base_uri() pure-read. The write-back was likely
+// added to self-heal a missing/legacy identity.yml, but that healing belongs in
+// sync, not in every base_uri() call.
 pub(crate) fn base_uri() -> String {
     if let Some(sha) = sha_from_identity_yml() {
         let _ = write_identity_yml_sha(&sha);
@@ -254,6 +262,16 @@ fn canonical_identity_yml(sha: &str) -> String {
 
 /// Validate SHA-1 hex shape. Accept full (40-char) and short (>=4) — but
 /// the URN form WRITES full. Validation is shape-only.
+// FIXME(w4r3z, Day 38): accepting short SHAs here is an IDENTITY-SPLIT risk.
+// base_uri() builds `urn:soul:<sha>` from whatever this validates. If repo.yml
+// holds a truncated `first_commit:` (short SHA) while identity.yml holds the
+// full one, the three-tier resolution can emit `urn:soul:<short>` from one tier
+// and `urn:soul:<full>` from another → the SAME soul gets TWO different base
+// IRIs, and its subjects silently split across them (queries miss half). For an
+// identity anchor, validation should require EXACTLY 40 hex chars (full SHA-1)
+// — short forms are fine for display but must never become the urn: base.
+// (Also note: this fn is flagged unused by the compiler in some builds — confirm
+// it's actually on the live path before relying on it as the gate.)
 fn is_valid_sha(s: &str) -> bool {
     !s.is_empty() && s.len() <= 40 && s.chars().all(|c| c.is_ascii_hexdigit())
 }

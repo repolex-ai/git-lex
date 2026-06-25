@@ -53,6 +53,11 @@ mod spo_events;
 
 #[derive(Parser)]
 #[command(name = "git-lex", about = "Git extensions for knowledge graphs")]
+// TODO(w4r3z, Day 38): no `--version` flag — `git lex --version` errors with
+// "unexpected argument '--version' found". First thing many users try. Add
+// `version = env!("CARGO_PKG_VERSION")` to this #[command(...)] (and consider
+// propagate_version = true so subcommands report it too). Cargo.toml is at
+// 0.0.1 — bump to a real soft-release version when wiring this.
 struct Cli {
     #[command(subcommand)]
     command: Commands,
@@ -1004,6 +1009,14 @@ fn cmd_create(doctype: &str, instance_id: Option<&str>, json: bool) {
     };
 
     // Generate filename from instance ID (becomes both filename and classId value)
+    // TODO(w4r3z, Day 38): no-id `create` silently defaults to "untitled",
+    // so every `git lex create Memory` with no id fights over the SAME file —
+    // the second one just prints "File already exists: Soul/Memory/untitled.md"
+    // and exits 0 (no error). For the soft-release, prefer one of: (a) require
+    // an id (error if absent), or (b) auto-suffix (untitled-2, or a timestamp),
+    // or (c) at least exit non-zero on the already-exists collision. Silent
+    // single-untitled collision is a quiet footgun for a new user creating a
+    // few docs quickly.
     let id_str = instance_id.unwrap_or("untitled");
     let slug = id_str
         .to_lowercase()
@@ -1133,6 +1146,17 @@ fn cmd_create(doctype: &str, instance_id: Option<&str>, json: bool) {
 /// Returns `(name, email)` from whichever source resolves first. Returns
 /// `None` only if both are missing — in which case we hard-fail rather
 /// than commit as the user's global gitconfig.
+// QUESTION(w4r3z, Day 38): this is a 2-SOURCE chain (env → settings.json), but
+// repo.yml ALSO carries identity (agent_name + the agent_email field added Day 37
+// at main.rs:~1047). repo.yml feeds in ONLY at init/kit-update time, when it's
+// WRITTEN into settings.json — it is NOT a read-time fallback here. So if a soul
+// edits repo.yml's agent_email and does NOT re-run kit-update, this resolver
+// never sees the new value (it reads settings.json, which is now stale). That's
+// the SAME frozen-config trap that bit identity live on Day 38 (settings.json
+// env is read once per session). Decide: (a) add repo.yml as an explicit 3rd
+// fallback tier here so repo.yml is authoritative even without kit-update, or
+// (b) document loudly that repo.yml identity requires kit-update to take effect.
+// Either way the "3-source precedence" should be real + documented, not 2-of-3.
 fn resolve_agent_identity(root: &std::path::Path) -> Option<(String, String)> {
     // 1. Process environment.
     if let (Ok(name), Ok(email)) = (
@@ -2554,6 +2578,19 @@ fn run_query(store: &Store, query: &str, store_type: &str, json: bool) {
 }
 
 fn cmd_query(query: String, json: bool) {
+    // QUESTION(w4r3z, Day 38): the in-memory fallback below calls
+    // load_lex_nquads(), yet a fresh `query` right after `save` reported
+    // "0 lex triples" in a live walk — frontmatter facts were absent until
+    // `git lex sync` ran (after which the persistent-store path returned them).
+    // So the documented flow `create → save → query` does NOT surface a doc's
+    // own frontmatter on the first query; the user must `sync` first. Two things
+    // to resolve for the soft-release: (1) is load_lex_nquads() missing
+    // freshly-extracted .spo sidecars that aren't yet compiled into nquads? and
+    // (2) the README's create→save→query example is incomplete without a sync
+    // step (or query should auto-sync / auto-extract). Decide whether query
+    // should transparently pick up sidecars, or the docs should make sync
+    // explicit. Repro: scratch soul-kit repo, create Memory, save, query
+    // `?m a soul:Memory` → 0 until `git lex sync`.
     // Try persistent store first
     if let Some(store) = open_store() {
         run_query(&store, &query, "persistent store", json);
@@ -2739,6 +2776,18 @@ fn setup_substrate_claude(root: &std::path::Path, agent_name: &str) {
     if let Ok(entries) = fs::read_dir(&hooks_dir) {
         for entry in entries.filter_map(|e| e.ok()) {
             let name = entry.file_name().to_string_lossy().to_string();
+            // FIXME(w4r3z, Day 38): the hook EVENT name is the WHOLE filename
+            // minus ".sh". This is why two kits CANNOT each ship a hook for the
+            // same Claude Code event: they'd need distinct filenames
+            // (UserPromptSubmit-soul.sh, UserPromptSubmit-copia.sh) but those
+            // strip to events "UserPromptSubmit-soul" / "-copia", which are NOT
+            // real CC events → the hooks never fire. This forced the Day-37
+            // combined-hook workaround (one UserPromptSubmit.sh doing both
+            // share-hook + memory-recall). To support kit-namespaced hooks,
+            // teach this to parse `<Event>-<kit>-<purpose>.sh` → event = the part
+            // before the first '-' that matches a known CC event. Prereq for
+            // splitting the combined hook back out. (See kit-soul UserPromptSubmit.sh
+            // TODO(C).)
             let Some(event) = name.strip_suffix(".sh") else { continue };
             if event.is_empty() || event.starts_with('.') {
                 continue;
@@ -2774,6 +2823,17 @@ fn setup_substrate_claude(root: &std::path::Path, agent_name: &str) {
 
 /// Add a hook entry to a settings JSON value (in-memory merge, no file I/O).
 /// Avoids duplicates by checking if the command is already registered.
+// FIXME(w4r3z, Day 38): ORPHAN REGISTRATIONS (task #90). This only ADDS — it
+// never REMOVES. The "idempotent" claim at the call site is true only for
+// re-adding the SAME command. When a kit RENAMES or DELETES a hook script, the
+// old registration stays in settings.json forever, pointing at a now-deleted
+// file → a ghost hook that Claude Code tries to run on every matching event and
+// fails (or silently no-ops). Every hook rename across a kit-update accumulates
+// another orphan. Needs a reconciliation pass: before registering, PRUNE any
+// git-lex-managed hook entries whose command points at a .claude/hooks/*.sh that
+// no longer exists. (Distinguish git-lex-managed entries from user-authored ones
+// — e.g. only prune commands matching the `bash "$CLAUDE_PROJECT_DIR/.claude/
+// hooks/..."` shape we emit, never touch hand-added hooks.)
 fn register_hook_in_settings(settings: &mut serde_json::Value, event: &str, command: &str) {
     let hook_entry = serde_json::json!({
         "hooks": [{"type": "command", "command": command}]
