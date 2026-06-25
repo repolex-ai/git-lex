@@ -11,8 +11,8 @@ in git. git-lex is the index on top.
 ```bash
 git lex create Memory "first-day"     # make a typed document
 git lex save "wrote my first memory"  # commit + extract + validate, one step
-git lex sync                          # build the queryable store from the sidecars
-git lex query "SELECT ?m WHERE { ?m a soul:Memory }"
+git lex query "PREFIX ks: <https://repolex.ai/ontology/kit/soul/>
+               SELECT ?m WHERE { ?m a ks:Memory }"
 ```
 
 > [!WARNING]
@@ -95,7 +95,6 @@ git lex list                     # see the document types this kit gives you
 git lex create Memory "day-1"    # scaffold a typed Memory document
 # ...edit the new .md file: fill in its frontmatter + body...
 git lex save "first memory"      # stage + extract + validate + commit
-git lex sync                     # build the persistent store from the sidecars
 git lex query "SELECT * WHERE { ?s ?p ?o } LIMIT 10"
 ```
 
@@ -103,13 +102,30 @@ git lex query "SELECT * WHERE { ?s ?p ?o } LIMIT 10"
 extraction and SHACL validation as a pre-commit gate (a bad document blocks the
 commit with a clear error), and commits.
 
+`git lex query` reflects your working tree directly — a `create → save → query`
+flow surfaces a new document's frontmatter immediately, no extra step. (`git lex
+sync` exists too, but it's for building the persistent history store, not a
+prerequisite for querying current state — see [How it works](#how-it-works).)
+
+### Querying by class
+
+The frontmatter key `soul.Memory.category: "..."` types the document as a
+**`Memory`** in the `soul` kit. Kit classes live under
+`https://repolex.ai/ontology/kit/<kit>/` — so the class IRI is
+`https://repolex.ai/ontology/kit/soul/Memory`, and to find every Memory:
+
+```bash
+git lex query "PREFIX ks: <https://repolex.ai/ontology/kit/soul/>
+               SELECT ?m WHERE { ?m a ks:Memory }"
+```
+
 > [!NOTE]
-> **Run `git lex sync` before `query` to see your latest frontmatter.** Today,
-> `query` reads a persistent store that `sync` builds from the extraction
-> sidecars; a query run before the first `sync` (or before a `sync` after new
-> edits) will only see git-level facts, not your document's frontmatter. This
-> rough edge is on the soft-release fix list — see
-> [Known limitations](#known-limitations-alpha).
+> **Get the exact class IRI from `git lex list --json`** (the `uri` field). The
+> plain `git lex list` prints a short label like `soul:Memory`, but that `soul:`
+> is display shorthand for the **`…/ontology/kit/soul/`** namespace — *not*
+> `…/ontology/soul/`. If a class query returns nothing, this prefix mismatch is
+> the first thing to check. (Tightening this so the displayed prefix and the
+> query prefix are the same string is on the list.)
 
 ---
 
@@ -120,9 +136,9 @@ commit with a clear error), and commits.
 | `git lex init [--kit <name>]` | Initialize `.lex/` in the current repo. The base kit is always installed; `--kit` adds a domain kit (e.g. `soul`). |
 | `git lex create <Type> [<id>]` | Scaffold a new document from a kit class, with frontmatter stubbed from the ontology. |
 | `git lex save "msg"` | Stage + extract frontmatter + SHACL-validate + commit, in one step. |
-| `git lex query "SPARQL"` | Run a SPARQL query over the whole graph (all commits + files). `--json` for machine output. |
-| `git lex list` | List every document class the repo's installed kits define. `--json` for machine output. |
-| `git lex sync` | Rebuild the SPARQL store from the `.spo` sidecars (the store is derived; this regenerates it). |
+| `git lex query "SPARQL"` | Run a SPARQL query. The "now" view is built from your working tree, so it always reflects current frontmatter (no `sync` needed); history graphs from past `sync`es are queryable too. `--json` for machine output. |
+| `git lex list` | List every document class the repo's installed kits define, each with its full namespace IRI (the prefix to query against). `--json` for machine output. |
+| `git lex sync` | Snapshot the current state into the persistent history store as a commit-tagged graph (RDF 1.2 provenance). Builds the temporal "what was true when" view; not required for querying current state. |
 | `git lex kit-update [<kit>]` | Re-download + reinstall kits. Drift-aware: locally-changed files are preserved and the new version lands beside them as `<file>.kit-latest` to diff (`--force` overwrites, stashing your version first). |
 | `git lex kit-add <org/repo>` | Add an optional kit (the kit's `scope:` must be `optional`). Creates its folders + templates. |
 | `git lex kit-remove <org/repo>` | Remove an optional kit. Asks before deleting any content folders it owns. |
@@ -196,20 +212,12 @@ documented here so they don't surprise you on first contact:
   as a `#!/bin/sh` git hook with a unix executable bit. There is no Windows
   install path yet, so the validation gate won't run on Windows.
 
-- **Run `git lex sync` before `query`.** As noted in the quick start, `query`
-  reads a persistent store built by `sync`; your latest frontmatter isn't
-  queryable until you've synced. We intend to make this transparent.
-
 - **Frontmatter class names are case-sensitive.** The class segment of a
-  dot-notation key must match the ontology's class name *exactly*:
-  `soul.Memory.category` (capital **M**) types the document as `soul:Memory`.
-  Writing `soul.memory.category` (lowercase) currently produces a different,
-  non-existent class — and the document silently won't match a
-  `?x a soul:Memory` query. On a case-insensitive filesystem (macOS default)
-  you may not notice locally. Match the casing in `git lex list`. (This silent
-  failure is a known bug on the fix list, not intended behavior.)
-
-- **`git lex --version` is not wired up yet** (use `git lex --help`).
+  dot-notation key matches the ontology class *exactly*: `soul.Memory.category`
+  (capital **M**) types the document as a `Memory`. If you write a casing that
+  doesn't match a real class, `git lex save` now **warns** and emits the
+  canonical form rather than silently mistyping the document — but the warning is
+  your cue to fix the source. Check the exact names with `git lex list`.
 
 Found something else? That's exactly what this stage is for — please file it.
 
