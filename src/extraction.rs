@@ -194,26 +194,25 @@ pub(crate) fn frontmatter_to_turtle(filepath: &std::path::Path, root: &std::path
                 let class_seg = segments[0];
                 let prop_name = segments[1];
 
-                // Infer doc type from class segment (capitalize)
-                // FIXME(w4r3z, Day 38): TWO type-emitting paths DISAGREE on case.
-                // THIS path (frontmatter_to_turtle) capitalizes the first letter:
-                // `soul.memory` → class `Memory`. But nquad.rs:~749 (the OTHER
-                // emitter, on the sync/graph path) does NO transform: `soul.memory`
-                // → `a soul:memory` verbatim. Same frontmatter, different class
-                // casing depending on which path runs — and the GRAPH (nquad path)
-                // is the one the user queries, so `?m a soul:Memory` misses (B1).
-                // Worse: capitalize-first-letter is a GUESS, not a lookup —
-                // `soul.cameraangle` → `Cameraangle`, not the real `CameraAngle`.
-                // Both paths should resolve the class against the kit's actual
-                // class set (case-correct match or loud error), NOT transform or
-                // pass-through. Unify the two emitters on one ontology-validated
-                // rule. This is the root of the silent class-casing footgun.
+                // Infer doc type from class segment, validated against the
+                // ontology (B1 fix, Day 38). This path used to capitalize the
+                // first letter as a GUESS (`soul.cameraangle` → `Cameraangle`,
+                // not the real `CameraAngle`), while nquad.rs passed the segment
+                // through verbatim — the two emitters disagreed, and the graph
+                // path's phantom `a soul:memory` made `?m a soul:Memory` miss.
+                // Now BOTH call `resolve_class_segment`, the single rule anchored
+                // to the kit's declared classes: exact/case-only hit → canonical
+                // name (warn on case-only), real typo → Err. On Err this doc has
+                // a bad class prefix; we warn and emit nothing for it (return
+                // None) rather than stamp a phantom type.
                 if doc_type.is_none() {
-                    let mut c = class_seg.chars();
-                    doc_type = Some(match c.next() {
-                        None => class_seg.to_string(),
-                        Some(f) => f.to_uppercase().to_string() + c.as_str(),
-                    });
+                    match crate::ontology::resolve_class_segment(kit, class_seg) {
+                        Ok(canonical) => doc_type = Some(canonical),
+                        Err(msg) => {
+                            eprintln!("warning: {msg} (skipping {})", filepath.display());
+                            return None;
+                        }
+                    }
                 }
 
                 // Handle all YAML value types (string, number, bool)

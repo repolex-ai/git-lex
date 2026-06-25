@@ -420,6 +420,86 @@ pub(crate) fn get_kit_types(kit: &str) -> Vec<(String, Vec<(String, String, bool
     }).collect()
 }
 
+/// Resolve a frontmatter class segment against the kit's declared classes.
+///
+/// This is the single validation point that closes the B1 casing footgun
+/// (Day 38): two type-emitters (`nquad.rs` and `extraction.rs`) used to
+/// disagree on case — one passed the segment through verbatim, the other
+/// capitalized the first letter as a *guess* (`cameraangle` → `Cameraangle`,
+/// not the real `CameraAngle`). A lowercase `soul.memory.*` frontmatter thus
+/// emitted a phantom `soul:memory` type and the canonical query
+/// `?m a soul:Memory` silently returned zero rows. Both emitters now call
+/// THIS, so there is one rule, anchored to the ontology the code already
+/// parses (`get_kit_types`).
+///
+/// Returns:
+/// - `Ok(canonical)` on an exact, case-correct hit (the common path).
+/// - `Ok(canonical)` on a case-ONLY mismatch, after emitting a warning to
+///   stderr — we recover to the real class name rather than emit a phantom
+///   type, but we tell the author so they fix the frontmatter.
+/// - `Err(message)` when the segment matches no class in the kit (a real
+///   typo, not just casing) — fail loud, per the soft-release bar. The
+///   message lists the kit's known classes so the fix is obvious.
+///
+/// When the kit declares no classes at all (`get_kit_types` empty — e.g. a
+/// kit with only properties, or shapes not yet generated), validation is
+/// skipped and the segment passes through unchanged, preserving prior
+/// behavior for kits this check can't speak to.
+pub(crate) fn resolve_class_segment(kit: &str, class_seg: &str) -> Result<String, String> {
+    let classes: Vec<String> = get_kit_types(kit).into_iter().map(|(name, _)| name).collect();
+    match resolve_class_against(&classes, class_seg) {
+        ClassMatch::Exact(name) | ClassMatch::PassThrough(name) => Ok(name),
+        ClassMatch::CaseOnly { canonical, given } => {
+            // Recover to the canonical name, but warn loudly so the author
+            // corrects the frontmatter (and so this never silently masks a
+            // future real typo that happens to differ only in case).
+            eprintln!(
+                "warning: frontmatter class segment `{kit}.{given}.…` does not match \
+                 the ontology class casing; using canonical `{kit}.{canonical}.…`. \
+                 Fix the frontmatter prefix to `{canonical}` (class names are \
+                 case-sensitive in the graph)."
+            );
+            Ok(canonical)
+        }
+        ClassMatch::NoMatch => Err(format!(
+            "frontmatter class segment `{class_seg}` is not a class in kit `{kit}`. \
+             Known classes: {}. (Class names are case-sensitive; check the prefix.)",
+            classes.join(", ")
+        )),
+    }
+}
+
+/// The pure decision behind `resolve_class_segment`, split out so the casing
+/// rule is unit-testable without touching disk (B1 regression, Day 38).
+#[derive(Debug, PartialEq)]
+enum ClassMatch {
+    /// Exact, case-correct hit — the common, healthy path.
+    Exact(String),
+    /// Kit declares no classes (shapes absent / property-only kit); we can't
+    /// validate, so pass the segment through unchanged (prior behavior).
+    PassThrough(String),
+    /// Case-only mismatch — recover to `canonical`, warn about `given`.
+    CaseOnly { canonical: String, given: String },
+    /// No class matches even case-insensitively — a real typo.
+    NoMatch,
+}
+
+fn resolve_class_against(classes: &[String], class_seg: &str) -> ClassMatch {
+    if classes.is_empty() {
+        return ClassMatch::PassThrough(class_seg.to_string());
+    }
+    if classes.iter().any(|c| c == class_seg) {
+        return ClassMatch::Exact(class_seg.to_string());
+    }
+    if let Some(canonical) = classes.iter().find(|c| c.eq_ignore_ascii_case(class_seg)) {
+        return ClassMatch::CaseOnly {
+            canonical: canonical.clone(),
+            given: class_seg.to_string(),
+        };
+    }
+    ClassMatch::NoMatch
+}
+
 /// Read the `lex-o:instantiation` annotation for a single class out of
 /// the kit's source ontology TTL. Returns one of `"authored"`,
 /// `"graph-only"`, or `"abstract"`, defaulting to `"authored"` when the
@@ -824,6 +904,63 @@ copia:NocturneActivity a owl:Class ;
         let Ok(content) = fs::read_to_string(&path) else { return };
         assert_eq!(parse_class_okf_type(&content, "pool", "Image"), "Image");
         assert_eq!(parse_class_okf_type(&content, "pool", "Document"), "Document");
+    }
+
+    // B1 regression (Day 38): the class-casing footgun. Two emitters used to
+    // disagree on case — one passed through verbatim (`soul.memory` →
+    // phantom `soul:memory`), one capitalized-first-letter as a guess
+    // (`cameraangle` → `Cameraangle`, not the real `CameraAngle`). Now both
+    // call `resolve_class_segment`, whose pure decision is tested here.
+    #[test]
+    fn class_segment_exact_hit_passes() {
+        let classes = vec!["Memory".to_string(), "Journal".to_string()];
+        assert_eq!(
+            resolve_class_against(&classes, "Memory"),
+            ClassMatch::Exact("Memory".to_string())
+        );
+    }
+
+    #[test]
+    fn class_segment_case_only_mismatch_recovers_to_canonical() {
+        // THE bug: lowercase `memory` must resolve to canonical `Memory`,
+        // not emit a phantom `soul:memory` that `?m a soul:Memory` misses.
+        let classes = vec!["Memory".to_string(), "Journal".to_string()];
+        assert_eq!(
+            resolve_class_against(&classes, "memory"),
+            ClassMatch::CaseOnly { canonical: "Memory".to_string(), given: "memory".to_string() }
+        );
+    }
+
+    #[test]
+    fn class_segment_capitalize_guess_would_have_been_wrong() {
+        // The OTHER emitter's old guess: capitalize-first-letter turns
+        // `cameraangle` into `Cameraangle`, never the real `CameraAngle`.
+        // Validation against the class set fixes the casing properly.
+        let classes = vec!["CameraAngle".to_string()];
+        assert_eq!(
+            resolve_class_against(&classes, "cameraangle"),
+            ClassMatch::CaseOnly {
+                canonical: "CameraAngle".to_string(),
+                given: "cameraangle".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn class_segment_real_typo_is_no_match() {
+        let classes = vec!["Memory".to_string(), "Journal".to_string()];
+        assert_eq!(resolve_class_against(&classes, "Memmory"), ClassMatch::NoMatch);
+    }
+
+    #[test]
+    fn class_segment_empty_classes_passes_through() {
+        // A kit with no declared classes (property-only / shapes absent):
+        // we can't validate, so don't break — pass through unchanged.
+        let classes: Vec<String> = vec![];
+        assert_eq!(
+            resolve_class_against(&classes, "whatever"),
+            ClassMatch::PassThrough("whatever".to_string())
+        );
     }
 }
 
