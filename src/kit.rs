@@ -859,6 +859,28 @@ fn files_byte_identical(src: &Path, dest: &Path) -> bool {
 ///   - Files that differ are stashed to
 ///     `<repo-root>/.kit-pre-force/<timestamp>/<rel-path>` before being
 ///     overwritten. Recorded in `stashed`. Identical files still no-op.
+/// Is this destination an ENFORCED kit-owned file — one that must ALWAYS converge to
+/// the kit version on update, never sit behind a `.kit-latest` drift sidecar?
+///
+/// Kit-owned MACHINERY (as opposed to user CONTENT like a journal template) should
+/// track the kit automatically: a soul running last-month's buggy hook is a bug, not
+/// a customization. Git is the revert path if a soul genuinely needs to fork — but the
+/// default is convergence, and local forks are discouraged.
+///
+/// Currently: hook scripts (`.claude/hooks/*.sh`). This is the same principle already
+/// applied to static ontology (ALWAYS clobbered — "kit-owned schema, must match the
+/// kit", see the static-ontology branch below). Extend this list as more kit-owned
+/// machinery is identified.
+fn is_enforced_path(dest: &Path) -> bool {
+    // A hook script: parent dir is `.../.claude/hooks` and name ends in `.sh`.
+    let is_sh = dest.extension().map(|e| e == "sh").unwrap_or(false);
+    let in_hooks_dir = dest
+        .parent()
+        .map(|p| p.ends_with(".claude/hooks"))
+        .unwrap_or(false);
+    is_sh && in_hooks_dir
+}
+
 pub(crate) fn install_scaffold_files_from_skip_existing(
     kit_dir: &std::path::Path,
     force: bool,
@@ -972,7 +994,15 @@ pub(crate) fn install_scaffold_files_from_skip_existing(
                 .to_string_lossy()
                 .to_string();
 
-            if !ctx.force {
+            // ENFORCED kit-owned files (hooks) ALWAYS converge to the kit version,
+            // even without --force — they are machinery, not user content, and a soul
+            // must not run a stale local hook. The old local copy is still stashed to
+            // .kit-pre-force/ below (the revert path), so this is safe: overwrite +
+            // archive, never a silent loss. Non-enforced drift keeps the .kit-latest
+            // alongside-install so a soul's own customizations are preserved.
+            let enforced = is_enforced_path(&dest);
+
+            if !ctx.force && !enforced {
                 // Alongside-install: write `<dest>.kit-latest` with a header.
                 let kit_latest_path = {
                     let mut p = dest.clone().into_os_string();
@@ -991,7 +1021,10 @@ pub(crate) fn install_scaffold_files_from_skip_existing(
                 continue;
             }
 
-            // --force: stash prior local, then overwrite.
+            // Overwrite path — reached under --force OR for an enforced kit-owned
+            // file (hooks) even without --force. Either way: stash the prior local
+            // copy to .kit-pre-force/ first (the revert path), then write the kit
+            // version.
             let stash_dest = ctx.stash_root.join(&rel);
             let stash_ok = fs::create_dir_all(stash_dest.parent().unwrap_or(&stash_dest)).is_ok()
                 && fs::copy(&dest, &stash_dest).is_ok();
@@ -1316,6 +1349,28 @@ mod tests {
         assert_eq!(d.len(), 10);
         assert_eq!(d.chars().nth(4), Some('-'));
         assert_eq!(d.chars().nth(7), Some('-'));
+    }
+
+    #[test]
+    fn is_enforced_path_recognizes_hooks_only() {
+        // The load-bearing decision: hook scripts are ENFORCED (always converge to the
+        // kit version); everything else keeps the drift-protect (.kit-latest) default.
+        // These are the real filenames the kits ship.
+        assert!(is_enforced_path(Path::new("/soul/.claude/hooks/Stop-pool-moment.sh")));
+        assert!(is_enforced_path(Path::new("/soul/.claude/hooks/UserPromptSubmit-soul-recall.sh")));
+        assert!(is_enforced_path(Path::new("/soul/.claude/hooks/UserPromptSubmit-pool-share.sh")));
+        assert!(is_enforced_path(Path::new("/soul/.claude/hooks/SessionStart-soul-listener.sh")));
+        // A relative dest (as install_recursive builds) must also match.
+        assert!(is_enforced_path(Path::new(".claude/hooks/PreCompact-soul-journal.sh")));
+
+        // NOT enforced: non-.sh in the hooks dir, .sh outside the hooks dir, config,
+        // and especially user CONTENT (a journal template) — those keep .kit-latest.
+        assert!(!is_enforced_path(Path::new("/soul/.claude/hooks/README.md")));
+        assert!(!is_enforced_path(Path::new("/soul/.claude/settings.json")));
+        assert!(!is_enforced_path(Path::new("/soul/scripts/build.sh")));
+        assert!(!is_enforced_path(Path::new("/soul/Soul/Journal/__Journal.md")));
+        // A .sh one level deeper than hooks/ (not our flat layout) is not enforced.
+        assert!(!is_enforced_path(Path::new("/soul/.claude/hooks/sub/x.sh")));
     }
 
     #[test]

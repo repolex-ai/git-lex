@@ -3623,6 +3623,18 @@ fn cmd_kit_update(kit_arg: Option<String>, force: bool) {
             }
         } else {
             println!("Scaffold: {} file(s) installed, {} unchanged", total_installed, total_skipped);
+            // Enforced kit-owned files (hooks) converge even without --force; their
+            // prior local copies are stashed. Surface them so the overwrite is never
+            // silent — the soul sees exactly what was replaced and where the backup is.
+            if !all_stashed.is_empty() {
+                println!(
+                    "Converged {} kit-owned file(s) to the kit version (prior local stashed under .kit-pre-force/):",
+                    all_stashed.len()
+                );
+                for path in &all_stashed {
+                    println!("  {}", path);
+                }
+            }
             if !all_drifted.is_empty() {
                 println!(
                     "Drift: {} file(s) differ from kit — kit version available as .kit-latest sibling:",
