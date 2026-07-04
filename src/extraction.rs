@@ -2,18 +2,15 @@
 //! and the frontmatter-to-Turtle converter used by `cmd create` / `cmd save`.
 //!
 //! The big N-Quad *generators* (`generate_git_nquads`, `generate_frontmatter_nquads`,
-//! `load_lex_nquads`, `compile_extraction_log`) stay in main.rs for now — they
-//! will move in a follow-up phase once their store-access shape settles.
+//! `load_lex_nquads`) live in `nquad.rs`.
 //!
 //! Peeled out of `main.rs` during modularization. No behavior changes.
 //!
-//! NOTE(w4r3z, Day 38): the "follow-up phase" above NEVER HAPPENED — main.rs is
-//! still 3699 lines and the N-Quad generators still live there. This stale
-//! split is the STRUCTURAL ROOT of the B1 class-casing bug: `frontmatter_to_turtle`
-//! (here, capitalizes first letter) and the nquad-path emitter (nquad.rs:~749,
-//! no transform) are two type-emitters in two files that have DRIFTED apart.
-//! Completing the modularization — one emitter, one casing rule — would dissolve
-//! the bug. Update or remove this comment when that lands.
+//! NOTE(w4r3z, Day 48): two type-emitters in two files have DRIFTED apart and are
+//! the STRUCTURAL ROOT of the B1 class-casing bug: `frontmatter_to_turtle` (here,
+//! capitalizes first letter) and the nquad-path emitter (`nquad.rs:~749`, no
+//! transform). Unifying them — one emitter, one casing rule — would dissolve the
+//! bug. Update or remove this comment when that lands.
 
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
