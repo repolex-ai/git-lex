@@ -3832,6 +3832,23 @@ fn cmd_kit_add(kit_spec: String) {
         println!("Recorded '{}' under optional_kits in .lex/repo.yml.", canonical_spec);
     }
 
+    // Register the kit's hooks (and reap any orphans) in the substrate config.
+    // install_scaffold_files_from_skip_existing above copies the hook *files*
+    // to .claude/hooks/, but a hook does nothing until it's registered under
+    // its event in settings.json. setup_substrate_claude is that pass — same
+    // one kit-update runs. Without this, kit-add lands the files but Claude
+    // Code never fires them (the pool-kit gap, Day 50). Identity is per-repo,
+    // not per-kit, so this re-derives the whole hook set from all installed
+    // kits — exactly the convergent behavior we want.
+    if let Some(agent_name) = read_agent_name(&root) {
+        for substrate in harness::active_substrates(&root) {
+            match substrate {
+                harness::Substrate::Claude => setup_substrate_claude(&root, &agent_name),
+                harness::Substrate::Hermes | harness::Substrate::Gemini => {}
+            }
+        }
+    }
+
     println!("Kit '{}' added.", canonical_spec);
 }
 
