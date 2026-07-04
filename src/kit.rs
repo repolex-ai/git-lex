@@ -859,6 +859,80 @@ fn files_byte_identical(src: &Path, dest: &Path) -> bool {
 ///   - Files that differ are stashed to
 ///     `<repo-root>/.kit-pre-force/<timestamp>/<rel-path>` before being
 ///     overwritten. Recorded in `stashed`. Identical files still no-op.
+/// Collect the set of hook filenames (`<name>.sh`) shipped by an installed kit's
+/// `harness/.claude/hooks/` dir. Used by the file-level hook reap to decide which
+/// local hook files are kit-owned (survive) vs orphaned (removed). The caller passes
+/// each installed kit's vendored dir; this unions them across all kits.
+pub(crate) fn kit_shipped_hook_names(kit_dir: &Path) -> Vec<String> {
+    let hooks_src = kit_dir.join("harness").join(".claude").join("hooks");
+    let mut names = Vec::new();
+    if let Ok(entries) = fs::read_dir(&hooks_src) {
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().to_string();
+            if name.ends_with(".sh") {
+                names.push(name);
+            }
+        }
+    }
+    names
+}
+
+/// A local hook file is PERSONAL (protected from the reap) iff its event-namespace
+/// segment is `local` — i.e. `<Event>-local-<purpose>.sh`. This is the escape hatch:
+/// a squaddie's own hook, named `local`, still fires on its event but is never removed
+/// or converged. Anything else must be kit-shipped or it is reaped.
+fn is_local_hook_name(name: &str) -> bool {
+    let Some(stem) = name.strip_suffix(".sh") else { return false };
+    // Second segment (after the event) must be exactly "local".
+    let mut parts = stem.split('-');
+    let _event = parts.next();
+    parts.next() == Some("local")
+}
+
+/// File-level hook reap (the twin of the registration reaper): after kit-update has
+/// installed all kits, remove any `.claude/hooks/*.sh` that is NEITHER shipped by an
+/// installed kit NOR a `<Event>-local-*.sh` personal hook. The removed file is stashed
+/// to `stash_root` first (recoverable; .lex/kit/ is also git-tracked). Returns the list
+/// of reaped rel-paths so the caller can also prune their settings.json registrations.
+///
+/// SAFETY: only call this AFTER every kit has successfully fetched + installed —
+/// kit-update bails hard on any fetch failure before this point, so `kit_hook_names`
+/// is the COMPLETE canonical set. Never reap on a partial fetch (a network blip would
+/// otherwise delete a real hook whose kit just didn't download).
+pub(crate) fn reap_non_kit_non_local_hooks(
+    root: &Path,
+    kit_hook_names: &std::collections::HashSet<String>,
+    stash_root: &Path,
+) -> Vec<String> {
+    let hooks_dir = root.join(".claude").join("hooks");
+    let mut reaped = Vec::new();
+    let Ok(entries) = fs::read_dir(&hooks_dir) else { return reaped };
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().to_string();
+        if !name.ends_with(".sh") {
+            continue; // only manage hook scripts; leave .kit-latest, etc.
+        }
+        // Survives if kit-shipped OR a local personal hook.
+        if kit_hook_names.contains(&name) || is_local_hook_name(&name) {
+            continue;
+        }
+        // Orphan: neither kit-owned nor local → stash then remove.
+        let dest = entry.path();
+        let rel = dest
+            .strip_prefix(root)
+            .unwrap_or(&dest)
+            .to_string_lossy()
+            .to_string();
+        let stash_dest = stash_root.join(&rel);
+        let _ = fs::create_dir_all(stash_dest.parent().unwrap_or(&stash_dest));
+        let _ = fs::copy(&dest, &stash_dest); // best-effort archive
+        if fs::remove_file(&dest).is_ok() {
+            reaped.push(rel);
+        }
+    }
+    reaped
+}
+
 /// Is this destination an ENFORCED kit-owned file — one that must ALWAYS converge to
 /// the kit version on update, never sit behind a `.kit-latest` drift sidecar?
 ///
@@ -1371,6 +1445,60 @@ mod tests {
         assert!(!is_enforced_path(Path::new("/soul/Soul/Journal/__Journal.md")));
         // A .sh one level deeper than hooks/ (not our flat layout) is not enforced.
         assert!(!is_enforced_path(Path::new("/soul/.claude/hooks/sub/x.sh")));
+    }
+
+    #[test]
+    fn is_local_hook_name_only_matches_local_namespace() {
+        assert!(is_local_hook_name("Stop-local-mything.sh"));
+        assert!(is_local_hook_name("UserPromptSubmit-local-scratch.sh"));
+        // kit-namespaced or plain → NOT local (those must be kit-shipped to survive).
+        assert!(!is_local_hook_name("Stop-pool-moment.sh"));
+        assert!(!is_local_hook_name("UserPromptSubmit-soul-recall.sh"));
+        assert!(!is_local_hook_name("Stop.sh"));
+        assert!(!is_local_hook_name("UserPromptSubmit.sh"));
+        // "local" must be the SECOND segment, not buried elsewhere.
+        assert!(!is_local_hook_name("Stop-pool-local.sh"));
+    }
+
+    #[test]
+    fn reap_removes_orphans_keeps_kit_and_local() {
+        let tmp = std::env::temp_dir().join(format!("glx_filereap_{}_{}", std::process::id(), timestamp_now_utc()));
+        let hooks = tmp.join(".claude").join("hooks");
+        std::fs::create_dir_all(&hooks).unwrap();
+        // A kit-shipped hook, a local personal hook, and two orphans (old-named +
+        // a stray). Plus a non-.sh file that must be ignored entirely.
+        std::fs::write(hooks.join("UserPromptSubmit-soul-recall.sh"), b"kit\n").unwrap();
+        std::fs::write(hooks.join("Stop-local-mine.sh"), b"personal\n").unwrap();
+        std::fs::write(hooks.join("UserPromptSubmit.sh"), b"OLD combined\n").unwrap();       // orphan
+        std::fs::write(hooks.join("Stop-copia-moment.sh"), b"OLD renamed\n").unwrap();       // orphan
+        std::fs::write(hooks.join("README.md"), b"not a hook\n").unwrap();                    // ignored
+
+        let mut kit_names = std::collections::HashSet::new();
+        kit_names.insert("UserPromptSubmit-soul-recall.sh".to_string());
+
+        let stash = tmp.join(".kit-pre-force").join("test");
+        let reaped = reap_non_kit_non_local_hooks(&tmp, &kit_names, &stash);
+
+        // Both orphans reaped; kit + local + non-.sh survive.
+        assert_eq!(reaped.len(), 2, "exactly the two orphans reaped");
+        assert!(hooks.join("UserPromptSubmit-soul-recall.sh").exists(), "kit hook survives");
+        assert!(hooks.join("Stop-local-mine.sh").exists(), "local hook survives");
+        assert!(hooks.join("README.md").exists(), "non-.sh untouched");
+        assert!(!hooks.join("UserPromptSubmit.sh").exists(), "old combined hook reaped");
+        assert!(!hooks.join("Stop-copia-moment.sh").exists(), "old renamed hook reaped");
+        // Orphans were stashed (recoverable).
+        assert!(stash.join(".claude/hooks/UserPromptSubmit.sh").exists(), "reaped hook stashed for revert");
+
+        std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    #[test]
+    fn reap_noop_on_empty_or_missing_hooks_dir() {
+        let tmp = std::env::temp_dir().join(format!("glx_filereap_empty_{}_{}", std::process::id(), timestamp_now_utc()));
+        // No .claude/hooks dir at all.
+        let kit_names = std::collections::HashSet::new();
+        let reaped = reap_non_kit_non_local_hooks(&tmp, &kit_names, &tmp.join("stash"));
+        assert!(reaped.is_empty(), "missing hooks dir → no reap, no panic");
     }
 
     #[test]

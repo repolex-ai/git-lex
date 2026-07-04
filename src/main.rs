@@ -3602,14 +3602,38 @@ fn cmd_kit_update(kit_arg: Option<String>, force: bool) {
     let mut total_skipped = 0usize;
     let mut all_drifted: Vec<String> = Vec::new();
     let mut all_stashed: Vec<String> = Vec::new();
+    let mut kit_hook_names: std::collections::HashSet<String> = std::collections::HashSet::new();
     for spec in &kits_to_update {
         let (org, repo, _) = resolve_kit_spec(spec);
         let kit_dir = lex_dir.join("kit").join(&org).join(&repo);
+        for name in crate::kit::kit_shipped_hook_names(&kit_dir) {
+            kit_hook_names.insert(name);
+        }
         let report = install_scaffold_files_from_skip_existing(&kit_dir, force);
         total_installed += report.installed;
         total_skipped += report.skipped;
         all_drifted.extend(report.drifted);
         all_stashed.extend(report.stashed);
+    }
+
+    // File-level hook reap (twin of the registration reap): now that ALL kits fetched
+    // successfully (we bailed above otherwise) and installed, kit_hook_names is the
+    // COMPLETE canonical set. Remove any .claude/hooks/*.sh that is neither kit-shipped
+    // nor a `<Event>-local-*.sh` personal hook — this kills old-named hooks left behind
+    // by a rename (the exact tangle a migrating soul hits: old + new both present +
+    // firing). Removed files are stashed to .kit-pre-force/; their now-dangling
+    // settings.json registrations get pruned by reap_orphan_hook_registrations inside
+    // the setup_substrate_claude pass below (the file is gone → its registration reaps).
+    let hook_stash_root = root.join(".kit-pre-force").join("hooks-reap");
+    let reaped_hooks = crate::kit::reap_non_kit_non_local_hooks(&root, &kit_hook_names, &hook_stash_root);
+    if !reaped_hooks.is_empty() {
+        println!(
+            "Reaped {} non-kit, non-local hook file(s) (must be kit-shipped or named <Event>-local-*.sh); stashed under .kit-pre-force/:",
+            reaped_hooks.len()
+        );
+        for path in &reaped_hooks {
+            println!("  {}", path);
+        }
     }
 
     if total_installed > 0 || total_skipped > 0 || !all_drifted.is_empty() || !all_stashed.is_empty() {
