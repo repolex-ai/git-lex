@@ -2843,6 +2843,19 @@ fn setup_substrate_claude(root: &std::path::Path, agent_name: &str) {
         serde_json::json!({})
     };
 
+    // Kit-managed banner. JSON has no comments, but Claude Code ignores unknown
+    // top-level keys (like `$schema`), so a `_comment` key survives as a visible
+    // in-file warning. It's the sign on the door; the real lock is convergence —
+    // git-lex reconciles the env + hooks blocks on every kit-update, so a hand-edit
+    // gets reverted next update anyway. Re-asserted here on every write.
+    settings["_comment"] = serde_json::json!(
+        "MANAGED BY git-lex — do not hand-edit the env or hooks blocks. They are \
+         converged from your installed kits on every `git lex kit-update` (which runs \
+         automatically at compaction), so local edits will be reverted. Add personal \
+         hooks as `<Event>-local-<purpose>.sh` and configure them in settings.local.json. \
+         Edit this file and you will be eaten by a GRUE. 🦖"
+    );
+
     // Git identity env vars — injected into every Bash tool call.
     // Email source of truth: optional `agent_email:` in .lex/repo.yml
     // (so a soul can use a real public address like their GitHub email).
