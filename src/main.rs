@@ -3688,16 +3688,39 @@ fn cmd_kit_update(kit_arg: Option<String>, force: bool) {
     // Refresh substrate identity for every active substrate. Identity is
     // per-repo, not per-kit, so this runs once after all kit scaffolds are
     // in place. Each substrate gets its own injection pass.
-    if let Some(agent_name) = read_agent_name(&root) {
-        for substrate in harness::active_substrates(&root) {
-            match substrate {
-                harness::Substrate::Claude => setup_substrate_claude(&root, &agent_name),
-                harness::Substrate::Hermes | harness::Substrate::Gemini => {
-                    // Per-substrate identity injection not yet implemented.
-                    // The substrate's sync adapter will surface what shape
-                    // it needs (see harness/<substrate>.rs).
+    //
+    // This pass is what registers hooks + writes the identity env block into
+    // settings.json. It is GATED on read_agent_name — and a soul whose
+    // .lex/repo.yml has no parseable `agent_name:` line (e.g. a repo
+    // hand-maintained since before that field existed) silently gets NONE of
+    // it: kit files converge (separate code path above), but settings.json is
+    // never touched, so deleted hooks stay registered and new hooks never do.
+    // That's a well-dressed-dead: "kit update complete" with a dead hook layer.
+    // The None branch below makes the skip LOUD (prefer-the-crash: a silent
+    // skip of the thing that makes hooks FIRE is exactly the R11 ghost). Found
+    // by w3bl0rd's flinch-audit on the convergence rollout, Day 50.
+    match read_agent_name(&root) {
+        Some(agent_name) => {
+            for substrate in harness::active_substrates(&root) {
+                match substrate {
+                    harness::Substrate::Claude => setup_substrate_claude(&root, &agent_name),
+                    harness::Substrate::Hermes | harness::Substrate::Gemini => {
+                        // Per-substrate identity injection not yet implemented.
+                        // The substrate's sync adapter will surface what shape
+                        // it needs (see harness/<substrate>.rs).
+                    }
                 }
             }
+        }
+        None => {
+            eprintln!(
+                "warning: no `agent_name:` in .lex/repo.yml — SKIPPED substrate setup \
+                 (settings.json hooks + identity env were NOT written/reconciled).\n\
+                 Your hooks will not fire and kit hook changes will not converge until \
+                 this is fixed. Add a line to .lex/repo.yml:\n\
+                 \x20   agent_name: <your-name>\n\
+                 then re-run `git lex kit-update`."
+            );
         }
     }
 
