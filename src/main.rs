@@ -3,7 +3,7 @@ use oxigraph::io::RdfFormat;
 use oxigraph::model::*;
 use oxigraph::store::Store;
 use std::io::Cursor;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, exit};
 use std::time::Instant;
 use std::fs;
@@ -391,6 +391,14 @@ fn cmd_init(directory: Option<String>, kit: Option<String>) {
             fs::write(&gitignore, cc_ignore).ok();
         }
     }
+
+    // Every soul gets the engine runtime dirs (.pool/ .copia/ .weave/) ignored.
+    // These are the per-soul LOCAL state of the three Subtexture engines (Pool,
+    // CoPIA, Weave) — index stores, embeddings, media roots — that must never be
+    // committed. Pushed by git-lex so souls don't hand-maintain it and miss a new
+    // dir (the leak: lUX committed 155 .pool/ files, W4R3Z 11 Pool/oxigraph/, both
+    // because their hand-written .gitignore predated .pool/). Idempotent.
+    ensure_engine_gitignore(&root);
 
     // repo.yml — create if missing, otherwise update the kit: field to
     // match the spec passed to this init run. This matters for re-init:
@@ -3750,6 +3758,14 @@ fn cmd_kit_update(kit_arg: Option<String>, force: bool) {
         }
     }
 
+    // Converge the engine runtime-dir gitignore on every existing soul. Souls
+    // that predate the `.pool/`/`.copia/`/`.weave/` standard hand-wrote their
+    // .gitignore and never got these lines — so their engine index stores leaked
+    // into git (lUX: 155 .pool/ files; W4R3Z: 11 Pool/oxigraph/). Idempotent: adds
+    // the sentinel block once, reports already-tracked files that now match so the
+    // soul can `git rm --cached` them deliberately (never auto-mutates the index).
+    ensure_engine_gitignore(&root);
+
     // Regenerate derived artifacts (shapes, class templates, folder audit)
     // for each kit. Order matches kits_to_update so base goes first.
     for spec in &kits_to_update {
@@ -3759,6 +3775,111 @@ fn cmd_kit_update(kit_arg: Option<String>, force: bool) {
     }
 
     println!("Kit update complete: {} kit(s) refreshed.", kits_to_update.len());
+}
+
+/// The engine runtime dirs every soul must gitignore: the per-soul LOCAL state
+/// of the three Subtexture engines (Pool, CoPIA, Weave). These hold index stores,
+/// embeddings, HNSW indexes, and media roots — heavy, high-churn, machine-local,
+/// never committed. Mirrors the `.pool`/`.copia`/`.weave` standard.
+const ENGINE_GITIGNORE_DIRS: &[&str] = &[".pool/", ".copia/", ".weave/"];
+
+const ENGINE_GITIGNORE_BEGIN: &str = "# >>> git-lex engine runtime (managed) >>>";
+const ENGINE_GITIGNORE_END: &str = "# <<< git-lex engine runtime (managed) <<<";
+
+/// Idempotently ensure the soul repo's root `.gitignore` ignores the engine
+/// runtime dirs (`.pool/`, `.copia/`, `.weave/`). Wrapped in a sentinel block so
+/// re-runs replace-in-place (never duplicate) and a future dir can be added by
+/// editing `ENGINE_GITIGNORE_DIRS` — the next `git lex kit-update` re-emits the
+/// block. Reports (does NOT auto-remove) files already tracked that now match, so
+/// the soul can `git rm --cached` them deliberately — git-lex never mutates the
+/// index on the soul's behalf (Rob's call, Day 51).
+fn ensure_engine_gitignore(root: &Path) {
+    let gitignore = root.join(".gitignore");
+    let existing = fs::read_to_string(&gitignore).unwrap_or_default();
+
+    // Build the managed block.
+    let mut block = String::from(ENGINE_GITIGNORE_BEGIN);
+    block.push('\n');
+    for dir in ENGINE_GITIGNORE_DIRS {
+        block.push_str(dir);
+        block.push('\n');
+    }
+    block.push_str(ENGINE_GITIGNORE_END);
+
+    // Replace an existing managed block in place, or append a fresh one.
+    let new_contents = if let (Some(start), Some(end_idx)) = (
+        existing.find(ENGINE_GITIGNORE_BEGIN),
+        existing.find(ENGINE_GITIGNORE_END),
+    ) {
+        let end = end_idx + ENGINE_GITIGNORE_END.len();
+        let mut s = String::with_capacity(existing.len());
+        s.push_str(&existing[..start]);
+        s.push_str(&block);
+        s.push_str(&existing[end..]);
+        s
+    } else if existing.trim().is_empty() {
+        format!("{block}\n")
+    } else {
+        format!("{}\n\n{}\n", existing.trim_end(), block)
+    };
+
+    if new_contents != existing {
+        if fs::write(&gitignore, &new_contents).is_ok() {
+            println!("Ensured engine runtime dirs are gitignored (.pool/ .copia/ .weave/).");
+        }
+    }
+
+    // Report — but never auto-remove — files already tracked that now match. A
+    // soul that committed its engine state before this ran needs a deliberate
+    // `git rm --cached` (history retained, files stay on disk).
+    report_tracked_engine_paths(root);
+}
+
+/// Print a warning for any git-tracked paths that fall under the engine runtime
+/// dirs, with the exact `git rm --cached` line to untrack them. Read-only: this
+/// never touches the index.
+fn report_tracked_engine_paths(root: &Path) {
+    let out = Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(["ls-files", "-z"])
+        .output();
+    let stdout = match out {
+        Ok(o) if o.status.success() => o.stdout,
+        _ => return,
+    };
+    // Engine dir prefixes to match against tracked paths. Include the legacy
+    // capitalized `Pool/` tree — the pre-`.pool` layout W4R3Z is still on — so
+    // the report catches it too (that whole tree is migrating to `.pool/`).
+    let prefixes: &[&str] = &[".pool/", ".copia/", ".weave/", "Pool/"];
+    let mut hits: std::collections::BTreeMap<&str, usize> = std::collections::BTreeMap::new();
+    for path in stdout.split(|b| *b == 0) {
+        if path.is_empty() {
+            continue;
+        }
+        let p = String::from_utf8_lossy(path);
+        for pre in prefixes {
+            if p.starts_with(pre) {
+                *hits.entry(pre).or_insert(0) += 1;
+                break;
+            }
+        }
+    }
+    if hits.is_empty() {
+        return;
+    }
+    let total: usize = hits.values().sum();
+    eprintln!(
+        "\nwarning: {total} tracked file(s) match engine runtime dirs and should NOT be committed:"
+    );
+    for (pre, n) in &hits {
+        eprintln!("    {pre} ({n} file(s))");
+    }
+    eprintln!("  To untrack (history retained, files stay on disk):");
+    for pre in hits.keys() {
+        eprintln!("    git rm -r --cached {}", pre.trim_end_matches('/'));
+    }
+    eprintln!("  Then commit the removal. (`Pool/` is legacy — migrate it to `.pool/` first.)\n");
 }
 
 // ─── kit-add ─────────────────────────────────────────────────────
@@ -4134,5 +4255,83 @@ mod hook_registration_tests {
         let mut settings = serde_json::json!({"env": {"GIT_AUTHOR_NAME": "w4r3z"}});
         reap_orphan_hook_registrations(&mut settings, std::path::Path::new("/nonexistent"));
         assert!(settings.get("hooks").is_none(), "must not fabricate a hooks block");
+    }
+
+    // ---- ensure_engine_gitignore: the .pool/.copia/.weave runtime-dir push ----
+
+    fn tmp_repo(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "gitlex-engine-ignore-{}-{}",
+            tag,
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn engine_gitignore_appends_to_existing_blocklist() {
+        let dir = tmp_repo("append");
+        fs::write(dir.join(".gitignore"), ".lex/oxigraph/\nRaw/\n").unwrap();
+        ensure_engine_gitignore(&dir);
+        let got = fs::read_to_string(dir.join(".gitignore")).unwrap();
+        // Original lines preserved.
+        assert!(got.contains(".lex/oxigraph/"), "must keep existing entries");
+        assert!(got.contains("Raw/"));
+        // Engine dirs added under the sentinel.
+        assert!(got.contains(ENGINE_GITIGNORE_BEGIN));
+        assert!(got.contains(".pool/"));
+        assert!(got.contains(".copia/"));
+        assert!(got.contains(".weave/"));
+        assert!(got.contains(ENGINE_GITIGNORE_END));
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn engine_gitignore_is_idempotent() {
+        let dir = tmp_repo("idempotent");
+        fs::write(dir.join(".gitignore"), ".lex/oxigraph/\n").unwrap();
+        ensure_engine_gitignore(&dir);
+        let once = fs::read_to_string(dir.join(".gitignore")).unwrap();
+        ensure_engine_gitignore(&dir);
+        ensure_engine_gitignore(&dir);
+        let thrice = fs::read_to_string(dir.join(".gitignore")).unwrap();
+        assert_eq!(once, thrice, "re-running must not duplicate the block");
+        // Exactly one sentinel pair.
+        assert_eq!(thrice.matches(ENGINE_GITIGNORE_BEGIN).count(), 1);
+        assert_eq!(thrice.matches(ENGINE_GITIGNORE_END).count(), 1);
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn engine_gitignore_replaces_block_in_place_on_dir_change() {
+        let dir = tmp_repo("replace");
+        // Simulate an OLD managed block missing a future dir (e.g. only .pool/).
+        let old = format!(
+            "keepme/\n\n{}\n.pool/\n{}\ntail/\n",
+            ENGINE_GITIGNORE_BEGIN, ENGINE_GITIGNORE_END
+        );
+        fs::write(dir.join(".gitignore"), &old).unwrap();
+        ensure_engine_gitignore(&dir);
+        let got = fs::read_to_string(dir.join(".gitignore")).unwrap();
+        // The block is rewritten in place (still one pair), now with all dirs,
+        // and the surrounding non-managed lines are untouched.
+        assert_eq!(got.matches(ENGINE_GITIGNORE_BEGIN).count(), 1);
+        assert!(got.contains(".copia/") && got.contains(".weave/"));
+        assert!(got.contains("keepme/"), "content before the block is preserved");
+        assert!(got.contains("tail/"), "content after the block is preserved");
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn engine_gitignore_creates_file_when_absent() {
+        let dir = tmp_repo("create");
+        // No .gitignore at all.
+        ensure_engine_gitignore(&dir);
+        let got = fs::read_to_string(dir.join(".gitignore")).unwrap();
+        assert!(got.contains(".pool/") && got.contains(".copia/") && got.contains(".weave/"));
+        assert_eq!(got.matches(ENGINE_GITIGNORE_BEGIN).count(), 1);
+        fs::remove_dir_all(&dir).ok();
     }
 }
