@@ -2861,6 +2861,10 @@ fn setup_substrate_claude(root: &std::path::Path, agent_name: &str) {
          converged from your installed kits on every `git lex kit-update` (which runs \
          automatically at compaction), so local edits will be reverted. Add personal \
          hooks as `<Event>-local-<purpose>.sh` and configure them in settings.local.json. \
+         To DISABLE a kit-managed hook locally, add its basename (no .sh) to \
+         `soul.disabledHooks` in settings.local.json (e.g. \
+         {\"soul\":{\"disabledHooks\":[\"UserPromptSubmit-soul-recall\"]}}) — the hook \
+         stays registered but no-ops, and settings.local.json is never converged. \
          Edit this file and you will be eaten by a GRUE. 🦖"
     );
 
@@ -4153,6 +4157,25 @@ mod hook_registration_tests {
         assert_eq!(hook_event_for("README.md"), Ok(None));
         assert_eq!(hook_event_for(".gitkeep"), Ok(None));
         assert_eq!(hook_event_for("notascript"), Ok(None));
+    }
+
+    #[test]
+    fn shared_library_sh_in_hooks_dir_is_rejected_so_the_optout_guard_stays_inline() {
+        // DESIGN LOCK (soul.disabledHooks opt-out, §3.2c): the kit-hook opt-out guard is
+        // duplicated verbatim into every hook script rather than sourced from a shared
+        // `hook-common.sh` / `_hook-guard.sh`. The reason is mechanical, and this test
+        // pins it: any `.sh` in `.claude/hooks/` whose leading segment is not a CC event
+        // is a HARD ERROR here (it would register a hook that never fires — the R11 silent
+        // failure), and is also reaped as a non-kit file. A sourced library can't live in
+        // that dir. So the guard is inlined; do not "DRY it up" into a shared script — that
+        // would crash every kit-update. If you ever DO want a shared lib, it must live
+        // OUTSIDE .claude/hooks/ and both hook_event_for AND the reaper must learn to skip it.
+        assert!(hook_event_for("hook-common.sh").is_err());
+        assert!(hook_event_for("_hook-guard.sh").is_err());
+        // and the error names the offending non-event segment
+        assert!(hook_event_for("hook-common.sh")
+            .unwrap_err()
+            .contains("not a Claude Code event"));
     }
 
     #[test]
