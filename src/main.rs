@@ -130,7 +130,7 @@ enum Commands {
         #[arg(long)]
         json: bool,
     },
-    /// Save changes (add + commit + sync in one command)
+    /// Save changes to git (add + commit; run `git lex sync` to update the store)
     Save {
         /// Commit message
         #[arg(default_value = "git lex save")]
