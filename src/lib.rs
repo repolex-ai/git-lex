@@ -35,7 +35,18 @@ pub fn store_path() -> Option<PathBuf> {
 /// concurrently. The view is a snapshot from open-time and will not reflect
 /// later writes until the store is reopened.
 pub fn open_store_read_only() -> Option<Store> {
-    let path = store_path()?;
+    open_store_read_only_at(&find_git_root()?)
+}
+
+/// Store dir for an EXPLICIT repo root (multi-repo servers) — the single
+/// authority for the `.git/lex/oxigraph` layout.
+pub fn store_path_at(root: &std::path::Path) -> PathBuf {
+    root.join(".git").join("lex").join("oxigraph")
+}
+
+/// [`open_store_read_only`] for an explicit repo root.
+pub fn open_store_read_only_at(root: &std::path::Path) -> Option<Store> {
+    let path = store_path_at(root);
     if path.exists() {
         Store::open_read_only(&path).ok()
     } else {
@@ -247,11 +258,21 @@ pub fn canonical_kit_ontology_path(root: &std::path::Path, spec: &str) -> PathBu
 /// (git:, lex:, fm:, rdf:, rdfs:, owl:, xsd:) plus the content ontology
 /// prefix (o:) and the kit prefix if one is configured.
 pub fn add_prefixes(query: &str) -> String {
+    add_prefixes_at(find_git_root().as_deref(), query)
+}
+
+/// [`add_prefixes`] anchored to an EXPLICIT repo root instead of the process
+/// cwd — the form a multi-repo server (Syrinx) must use so each request gets
+/// the prefixes of the soul it landed on, never the server's own cwd.
+pub fn add_prefixes_at(root: Option<&std::path::Path>, query: &str) -> String {
     // Get first commit SHA for content ontology prefix
-    let first_commit = Command::new("git")
-        .args(["rev-list", "--max-parents=0", "HEAD"])
-        .output()
-        .ok()
+    let first_commit = root
+        .and_then(|r| {
+            Command::new("git")
+                .args(["-C", &r.display().to_string(), "rev-list", "--max-parents=0", "HEAD"])
+                .output()
+                .ok()
+        })
         .filter(|o| o.status.success())
         .map(|o| String::from_utf8_lossy(&o.stdout).trim()[..8].to_string())
         .unwrap_or_default();
@@ -260,7 +281,7 @@ pub fn add_prefixes(query: &str) -> String {
     // Read kit from repo.yml, then pull the kit's prefix+namespace from its
     // installed SHACL shapes file (the runtime source of truth). Shapes live
     // at .lex/ontology/{short}/{short}-shapes.ttl.
-    let kit_prefix = find_git_root().and_then(|r| {
+    let kit_prefix = root.map(|p| p.to_path_buf()).and_then(|r| {
         let content = fs::read_to_string(r.join(".lex").join("repo.yml")).ok()?;
         for line in content.lines() {
             if let Some(kit) = line.strip_prefix("kit: ") {
@@ -422,7 +443,16 @@ pub enum W3cQueryError {
 /// Run `query` against `store` with the standard prefix prologue and the
 /// union default graph, producing W3C-shaped results.
 pub fn w3c_query(store: &Store, query: &str) -> Result<W3cQueryOutcome, W3cQueryError> {
-    let prefixed = add_prefixes(query);
+    w3c_query_at(find_git_root().as_deref(), store, query)
+}
+
+/// [`w3c_query`] anchored to an explicit repo root (multi-repo servers).
+pub fn w3c_query_at(
+    root: Option<&std::path::Path>,
+    store: &Store,
+    query: &str,
+) -> Result<W3cQueryOutcome, W3cQueryError> {
+    let prefixed = add_prefixes_at(root, query);
     let mut parsed = oxigraph::sparql::Query::parse(&prefixed, None)
         .map_err(|e| W3cQueryError::Parse(e.to_string()))?;
     parsed.dataset_mut().set_default_graph_as_union();
