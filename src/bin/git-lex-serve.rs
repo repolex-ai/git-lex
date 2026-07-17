@@ -666,7 +666,7 @@ mod query_server {
     #[openapi(
         info(
             title = "git-lex SPARQL endpoint",
-            description = "W3C SPARQL endpoint over a git-lex soul store. Query language: SPARQL 1.2 (oxigraph rdf-12 — RDF 1.2 triple terms, <<( s p o )>> syntax, verified live) carried over the standard SPARQL 1.1 protocol + results format (1.2 changes the language, not the wire). Queries run against the SYNCED store (run `git lex sync` to refresh); graph names are soul-independent (GRAPH <https://repolex.ai/graph/now>), the vocabulary self-describes in GRAPH <https://repolex.ai/graph/ontology>.",
+            description = "W3C SPARQL endpoint over a git-lex soul store. Query language: SPARQL 1.2 (oxigraph rdf-12 — RDF 1.2 triple terms, <<( s p o )>> syntax, verified live) carried over the standard SPARQL 1.1 protocol + results format (1.2 changes the language, not the wire). Queries run against the SYNCED store (run `git lex sync` to refresh); graph names are soul-independent (GRAPH <https://repolex.ai/git-lex/now>), the vocabulary self-describes in GRAPH <https://repolex.ai/git-lex/ontology>.",
         ),
         paths(sparql_get, sparql_post, health, info),
         components(schemas(HealthResponse, InfoResponse, QueryBody, ErrorBody)),

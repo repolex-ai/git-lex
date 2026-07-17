@@ -896,7 +896,7 @@ pub(crate) fn build_slug_path_indexes(
 
 
 /// Load every installed kit ontology TTL (`.lex/ontology/**/*.ttl`) into the
-/// self-describing ontology graph `<https://repolex.ai/graph/ontology>` of
+/// self-describing ontology graph `<https://repolex.ai/git-lex/ontology>` of
 /// `store` (Day-50: an agent can learn the vocabulary from the store itself).
 /// LOUD but not fatal on a broken TTL. Returns the number of files loaded.
 pub(crate) fn load_ontology_graph(store: &oxigraph::store::Store) -> usize {

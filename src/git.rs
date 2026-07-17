@@ -81,19 +81,21 @@ pub(crate) fn genesis_sha() -> Option<String> {
 // ---------------------------------------------------------------------
 
 /// Graph-container names: soul-independent ABSOLUTE IRIs, identical across
-/// every soul's store — `GRAPH <https://repolex.ai/graph/now>` is the same
+/// every soul's store — `GRAPH <https://repolex.ai/git-lex/now>` is the same
 /// query everywhere. (A literally-bare name like `now` is not a legal IRI:
 /// oxigraph rejects it at the model level and SPARQL won't parse `<now>` —
 /// probed Day-50. Absolute-and-identical is the standard shape that delivers
 /// the portability requirement.)
-pub(crate) const GRAPH_BASE: &str = "https://repolex.ai/graph/";
+pub(crate) const GRAPH_BASE: &str = "https://repolex.ai/git-lex/";
 
 /// The a-box (instance) base for soul-repo subjects. Instances live under
 /// `/resource/` (conventional linked-data a-box/t-box split, Day-50);
 /// vocabulary stays under `https://repolex.ai/ontology/...`.
 pub(crate) const SOUL_RESOURCE_BASE: &str = "https://repolex.ai/resource/soul";
 
-/// Mint a graph-container IRI: `https://repolex.ai/graph/<name>`.
+/// Mint a graph-container IRI: `https://repolex.ai/git-lex/<name>` — named
+/// graphs are namespaced to the system that defines them (Rob, Day-50: no
+/// generic /graph/ segment; a named graph is already known to be a graph).
 pub(crate) fn graph_uri(name: &str) -> String {
     format!("{GRAPH_BASE}{name}")
 }

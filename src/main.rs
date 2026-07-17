@@ -1858,9 +1858,9 @@ fn cmd_sync() {
     // Clear non-sync, non-history graphs (virtual graphs get regenerated).
     // History and meta graphs are persistent — managed by Phase 4.
     for graph_uri in &existing_graphs {
-        if !graph_uri.starts_with("https://repolex.ai/graph/sync/")
-            && graph_uri != "https://repolex.ai/graph/history"
-            && graph_uri != "https://repolex.ai/graph/meta"
+        if !graph_uri.starts_with("https://repolex.ai/git-lex/sync/")
+            && graph_uri != "https://repolex.ai/git-lex/history"
+            && graph_uri != "https://repolex.ai/git-lex/meta"
         {
             if let Ok(graph) = oxigraph::model::NamedNode::new(graph_uri) {
                 // remove (not clear): drops the graph's registration too, so a
@@ -1874,7 +1874,7 @@ fn cmd_sync() {
     // ─── Phase 2b: t-box — load installed kit ontologies into the ontology graph ───
     // The store self-describes (Day-50): an agent with no .ttl files in front
     // of them can learn the vocabulary from the store itself:
-    //   GRAPH <https://repolex.ai/graph/ontology> { ?c a owl:Class }
+    //   GRAPH <https://repolex.ai/git-lex/ontology> { ?c a owl:Class }
     // The graph is cleared by the Phase-2 filter each sync and reloaded here,
     // so it always reflects the currently-installed kits.
     let ontology_count = crate::nquad::load_ontology_graph(&store);
@@ -1905,7 +1905,7 @@ fn cmd_sync() {
     // Find last sync commit (latest /sync/ graph in store)
     let last_sync_commit: Option<String> = {
         let query = format!(
-            "SELECT ?g WHERE {{ GRAPH ?g {{ ?s ?p ?o }} FILTER(STRSTARTS(STR(?g), 'https://repolex.ai/graph/sync/')) }} ORDER BY DESC(STR(?g)) LIMIT 1"
+            "SELECT ?g WHERE {{ GRAPH ?g {{ ?s ?p ?o }} FILTER(STRSTARTS(STR(?g), 'https://repolex.ai/git-lex/sync/')) }} ORDER BY DESC(STR(?g)) LIMIT 1"
         );
         let results = oxigraph::sparql::SparqlEvaluator::new()
             .parse_query(&query)
@@ -2167,7 +2167,7 @@ fn cmd_sync() {
 
     // ─── Phase 3: Stale graph cleanup ───
     // Subsumed by the Phase-2 clear filter: every graph whose name is not a
-    // current https://repolex.ai/graph/... keep-name (sync/history/meta) is
+    // current https://repolex.ai/git-lex/... keep-name (sync/history/meta) is
     // cleared on each sync — including all legacy urn:soul:* graphs and the
     // old `<base>/class/*` + `<base>/frontmatter` projections. Migration off
     // the old naming is therefore automatic on the first new-binary sync.
@@ -2317,7 +2317,7 @@ fn cmd_sync() {
 
     // Count total sync graph triples
     let total_sync: usize = existing_graphs.iter()
-        .filter(|g| g.starts_with("https://repolex.ai/graph/sync/"))
+        .filter(|g| g.starts_with("https://repolex.ai/git-lex/sync/"))
         .count();
 
     println!(
@@ -2325,7 +2325,7 @@ fn cmd_sync() {
         elapsed.as_secs_f64() * 1000.0
     );
     println!("  Virtual: {} git + {} now", git_count, fm_count);
-    println!("  Ontology: {} kit ttl file(s) -> <https://repolex.ai/graph/ontology>", ontology_count);
+    println!("  Ontology: {} kit ttl file(s) -> <https://repolex.ai/git-lex/ontology>", ontology_count);
     if !adaptive_ok.is_empty() || !adaptive_fail.is_empty() {
         println!("  Adaptive shapes: {} built, {} failed", adaptive_ok.len(), adaptive_fail.len());
     }
