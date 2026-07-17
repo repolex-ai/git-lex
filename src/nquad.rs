@@ -895,9 +895,14 @@ pub(crate) fn build_slug_path_indexes(
 
 
 
-/// Load every installed kit ontology TTL (`.lex/ontology/**/*.ttl`) into the
-/// self-describing ontology graph `<https://repolex.ai/git-lex/ontology>` of
-/// `store` (Day-50: an agent can learn the vocabulary from the store itself).
+/// Load every installed kit ontology TTL (`.lex/ontology/**/*.ttl`, EXCLUDING
+/// `-shapes.ttl` SHACL files — Rob: shapes are validation, not vocabulary)
+/// into the self-describing ontology graph
+/// `<https://repolex.ai/git-lex/ontology>` of `store`.
+///
+/// Runs at INIT and KIT-UPDATE only (Rob Day-50): the graph persists in the
+/// store ("stays put") — sync does not touch it, query does not rebuild it.
+/// The graph is cleared first so a kit-update fully refreshes the vocabulary.
 /// LOUD but not fatal on a broken TTL. Returns the number of files loaded.
 pub(crate) fn load_ontology_graph(store: &oxigraph::store::Store) -> usize {
     let Some(root) = find_git_root() else { return 0 };
@@ -905,13 +910,16 @@ pub(crate) fn load_ontology_graph(store: &oxigraph::store::Store) -> usize {
         Ok(g) => g,
         Err(_) => return 0,
     };
+    let _ = store.remove_named_graph(&ontology_graph);
     fn walk_ttl(dir: &std::path::Path, out: &mut Vec<PathBuf>) {
         if let Ok(entries) = fs::read_dir(dir) {
             for entry in entries.filter_map(|e| e.ok()) {
                 let p = entry.path();
                 if p.is_dir() {
                     walk_ttl(&p, out);
-                } else if p.extension().is_some_and(|e| e == "ttl") {
+                } else if p.extension().is_some_and(|e| e == "ttl")
+                    && !p.file_name().is_some_and(|n| n.to_string_lossy().ends_with("-shapes.ttl"))
+                {
                     out.push(p);
                 }
             }

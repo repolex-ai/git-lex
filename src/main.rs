@@ -788,6 +788,14 @@ fn cmd_init(directory: Option<String>, kit: Option<String>) {
         }
     }
 
+    // t-box: load installed kit ontologies into the persistent ontology graph
+    // (init + kit-update only; it stays put across syncs).
+    {
+        let store = open_or_create_store();
+        let n = crate::nquad::load_ontology_graph(&store);
+        println!("Ontology graph: {} kit ttl file(s) loaded", n);
+    }
+
     // Register this repo in the machine-level registry (~/.lex/repos)
     registry_add(&root);
 }
@@ -1837,6 +1845,7 @@ fn cmd_sync() {
         if !graph_uri.starts_with("https://repolex.ai/git-lex/sync/")
             && graph_uri != "https://repolex.ai/git-lex/history"
             && graph_uri != "https://repolex.ai/git-lex/meta"
+            && graph_uri != "https://repolex.ai/git-lex/ontology"
         {
             if let Ok(graph) = oxigraph::model::NamedNode::new(graph_uri) {
                 // remove (not clear): drops the graph's registration too, so a
@@ -1846,14 +1855,6 @@ fn cmd_sync() {
             }
         }
     }
-
-    // ─── Phase 2b: t-box — load installed kit ontologies into the ontology graph ───
-    // The store self-describes (Day-50): an agent with no .ttl files in front
-    // of them can learn the vocabulary from the store itself:
-    //   GRAPH <https://repolex.ai/git-lex/ontology> { ?c a owl:Class }
-    // The graph is cleared by the Phase-2 filter each sync and reloaded here,
-    // so it always reflects the currently-installed kits.
-    let ontology_count = crate::nquad::load_ontology_graph(&store);
 
     // (adaptive shapes already built at top of cmd_sync, before fast-path check)
 
@@ -2301,7 +2302,6 @@ fn cmd_sync() {
         elapsed.as_secs_f64() * 1000.0
     );
     println!("  Virtual: {} git + {} now", git_count, fm_count);
-    println!("  Ontology: {} kit ttl file(s) -> <https://repolex.ai/git-lex/ontology>", ontology_count);
     if !adaptive_ok.is_empty() || !adaptive_fail.is_empty() {
         println!("  Adaptive shapes: {} built, {} failed", adaptive_ok.len(), adaptive_fail.len());
     }
@@ -2515,10 +2515,6 @@ fn cmd_query(query: String, json: bool) {
             .load_from_reader(RdfFormat::NQuads, Cursor::new(fm_nq.as_bytes()))
             .expect("failed to load frontmatter triples");
     }
-
-    // The self-describing ontology graph rides along in the live view too —
-    // vocabulary queries work without a prior sync.
-    let _ = crate::nquad::load_ontology_graph(&store);
 
     // Also fold in any compiled .nq already on disk (history/sync graphs a prior
     // `sync` wrote) so history-aware queries still see the sync/<sha> snapshots.
@@ -3648,6 +3644,14 @@ fn cmd_kit_update(kit_arg: Option<String>, force: bool) {
     }
 
     println!("Kit update complete: {} kit(s) refreshed.", kits_to_update.len());
+
+    // t-box refresh: reload kit ontologies into the persistent ontology graph
+    // (kit vocab may have changed; the graph stays put until the next update).
+    {
+        let store = open_or_create_store();
+        let n = crate::nquad::load_ontology_graph(&store);
+        println!("Ontology graph: {} kit ttl file(s) loaded", n);
+    }
 }
 
 /// The engine runtime dirs every soul must gitignore: the per-soul LOCAL state
@@ -3867,6 +3871,13 @@ fn cmd_kit_add(kit_spec: String) {
     }
 
     println!("Kit '{}' added.", canonical_spec);
+
+    // t-box: the new kit's ontology joins the persistent ontology graph.
+    {
+        let store = open_or_create_store();
+        let n = crate::nquad::load_ontology_graph(&store);
+        println!("Ontology graph: {} kit ttl file(s) loaded", n);
+    }
 }
 
 // ─── kit-remove ──────────────────────────────────────────────────
