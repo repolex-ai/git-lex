@@ -44,6 +44,9 @@ tree-sitter = "0.26"
 tree-sitter-md = { version = "0.5", features = ["parser"] }
 dateparser = "0.3"
 axum = { version = "0.8", features = ["ws"] }
+utoipa = { version = "5", features = ["axum_extras"] }
+form_urlencoded = "1"
+utoipa-swagger-ui = { version = "9", features = ["axum"] }
 tokio-stream = { version = "0.1", features = ["sync"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "sync"] }
 tower = "0.5"

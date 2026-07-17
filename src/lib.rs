@@ -343,3 +343,218 @@ pub fn add_prefixes(query: &str) -> String {
     }
     format!("{}{}", prefix_block, query)
 }
+
+
+// ─── W3C SPARQL query surface (Task 2 Part B) ────────────────────────────────
+// ONE implementation shared by the CLI (`git lex query`) and the protocol
+// endpoint (`git-lex-serve query`) — two SPARQL paths drifting was the bug
+// class this kills.
+
+/// One RDF term → W3C SPARQL 1.1 Query Results JSON object.
+pub fn term_to_json(term: &oxigraph::model::Term) -> serde_json::Value {
+    use oxigraph::model::Term;
+    match term {
+        Term::NamedNode(n) => serde_json::json!({
+            "type": "uri",
+            "value": n.as_str(),
+        }),
+        Term::BlankNode(b) => serde_json::json!({
+            "type": "bnode",
+            "value": b.as_str(),
+        }),
+        Term::Literal(l) => {
+            let mut obj = serde_json::Map::new();
+            obj.insert("type".to_string(), serde_json::Value::String("literal".to_string()));
+            obj.insert("value".to_string(), serde_json::Value::String(l.value().to_string()));
+            if let Some(lang) = l.language() {
+                obj.insert("xml:lang".to_string(), serde_json::Value::String(lang.to_string()));
+            } else {
+                let dt = l.datatype().as_str();
+                // W3C convention: only emit datatype if it's not the implicit xsd:string.
+                if dt != "http://www.w3.org/2001/XMLSchema#string" {
+                    obj.insert("datatype".to_string(), serde_json::Value::String(dt.to_string()));
+                }
+            }
+            serde_json::Value::Object(obj)
+        }
+        // Not standard SPARQL JSON — RDF 1.2 triple terms. Emit as a nested
+        // object with a "triple" type so consumers can detect and parse.
+        Term::Triple(t) => serde_json::json!({
+            "type": "triple",
+            "value": {
+                "subject": term_to_json_subject(&t.subject),
+                "predicate": term_to_json(&oxigraph::model::Term::NamedNode(t.predicate.clone())),
+                "object": term_to_json(&t.object),
+            },
+        }),
+    }
+}
+
+/// Subject terms in this oxigraph version are `NamedOrBlankNode` — no
+/// quoted-triple subjects yet. (RDF 1.2 triple terms are supported as
+/// objects only.)
+pub fn term_to_json_subject(subj: &oxigraph::model::NamedOrBlankNode) -> serde_json::Value {
+    use oxigraph::model::{NamedOrBlankNode, Term};
+    match subj {
+        NamedOrBlankNode::NamedNode(n) => term_to_json(&Term::NamedNode(n.clone())),
+        NamedOrBlankNode::BlankNode(b) => term_to_json(&Term::BlankNode(b.clone())),
+    }
+}
+
+/// Outcome of a W3C protocol query, tagged with the correct media type.
+pub enum W3cQueryOutcome {
+    /// SELECT — `application/sparql-results+json`.
+    Solutions(serde_json::Value),
+    /// ASK — `application/sparql-results+json`.
+    Boolean(serde_json::Value),
+    /// CONSTRUCT/DESCRIBE — `application/n-triples`.
+    Graph(String),
+}
+
+#[derive(Debug)]
+pub enum W3cQueryError {
+    /// Malformed query — the CALLER's error (HTTP 400).
+    Parse(String),
+    /// Evaluation failure — the STORE's error (HTTP 500).
+    Eval(String),
+}
+
+/// Run `query` against `store` with the standard prefix prologue and the
+/// union default graph, producing W3C-shaped results.
+pub fn w3c_query(store: &Store, query: &str) -> Result<W3cQueryOutcome, W3cQueryError> {
+    let prefixed = add_prefixes(query);
+    let mut parsed = oxigraph::sparql::Query::parse(&prefixed, None)
+        .map_err(|e| W3cQueryError::Parse(e.to_string()))?;
+    parsed.dataset_mut().set_default_graph_as_union();
+    let results = store
+        .query(parsed)
+        .map_err(|e| W3cQueryError::Eval(e.to_string()))?;
+    match results {
+        oxigraph::sparql::QueryResults::Solutions(solutions) => {
+            let vars: Vec<String> = solutions
+                .variables()
+                .iter()
+                .map(|v| v.as_str().to_string())
+                .collect();
+            let mut bindings = Vec::new();
+            for sol in solutions {
+                let sol = sol.map_err(|e| W3cQueryError::Eval(e.to_string()))?;
+                let mut row = serde_json::Map::new();
+                for var in &vars {
+                    if let Some(term) = sol.get(var.as_str()) {
+                        row.insert(var.clone(), term_to_json(term));
+                    }
+                }
+                bindings.push(serde_json::Value::Object(row));
+            }
+            Ok(W3cQueryOutcome::Solutions(serde_json::json!({
+                "head": { "vars": vars },
+                "results": { "bindings": bindings },
+            })))
+        }
+        oxigraph::sparql::QueryResults::Boolean(b) => Ok(W3cQueryOutcome::Boolean(
+            serde_json::json!({ "head": {}, "boolean": b }),
+        )),
+        oxigraph::sparql::QueryResults::Graph(triples) => {
+            let mut out = String::new();
+            for t in triples {
+                let t = t.map_err(|e| W3cQueryError::Eval(e.to_string()))?;
+                out.push_str(&t.to_string());
+                out.push_str(" .\n");
+            }
+            Ok(W3cQueryOutcome::Graph(out))
+        }
+    }
+}
+
+// ─── repo.yml list readers (promoted from the binary's kit module so the
+// serve binary can enumerate installed kits — Task 2 Part B) ────────────────
+
+/// Read a top-level YAML list under `key:` from a repo.yml-style file.
+/// Missing file or key = empty list.
+pub fn read_repo_yml_list(path: &std::path::Path, key: &str) -> Vec<String> {
+    let content = match fs::read_to_string(path) {
+        Ok(c) => c,
+        Err(_) => return Vec::new(),
+    };
+    let key_prefix = format!("{}:", key);
+    let mut out = Vec::new();
+    let mut in_list = false;
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') { continue; }
+        if trimmed.starts_with(&key_prefix) {
+            in_list = true;
+            continue;
+        }
+        if in_list {
+            if let Some(rest) = trimmed.strip_prefix('-') {
+                let item = rest.trim().trim_matches('"').trim_matches('\'').to_string();
+                if !item.is_empty() {
+                    out.push(item);
+                }
+            } else {
+                in_list = false;
+            }
+        }
+    }
+    out
+}
+
+/// The `optional_kits:` list from a repo.yml.
+pub fn read_repo_yml_optional_kits(path: &std::path::Path) -> Vec<String> {
+    read_repo_yml_list(path, "optional_kits")
+}
+
+
+#[cfg(test)]
+mod w3c_query_tests {
+    use super::*;
+    use oxigraph::model::{GraphName, Literal, NamedNode, Quad};
+
+    fn store_with_one_fact() -> Store {
+        let store = Store::new().unwrap();
+        store.insert(Quad::new(
+            NamedNode::new("https://repolex.ai/resource/soul/Memory/x.md").unwrap(),
+            NamedNode::new("https://repolex.ai/ontology/git-lex/fm/title").unwrap(),
+            Literal::new_simple_literal("hello"),
+            GraphName::NamedNode(NamedNode::new("https://repolex.ai/graph/now").unwrap()),
+        ).as_ref()).unwrap();
+        store
+    }
+
+    #[test]
+    fn select_produces_w3c_bindings() {
+        let store = store_with_one_fact();
+        match w3c_query(&store, "SELECT ?s ?o WHERE { GRAPH <https://repolex.ai/graph/now> { ?s ?p ?o } }").unwrap() {
+            W3cQueryOutcome::Solutions(v) => {
+                assert_eq!(v["head"]["vars"], serde_json::json!(["s", "o"]));
+                let b = &v["results"]["bindings"][0];
+                assert_eq!(b["s"]["type"], "uri");
+                assert_eq!(b["o"]["type"], "literal");
+                assert_eq!(b["o"]["value"], "hello");
+            }
+            _ => panic!("expected solutions"),
+        }
+    }
+
+    #[test]
+    fn union_default_graph_sees_named_graphs() {
+        // The CLI behavior the endpoint must share: a bare pattern (no GRAPH)
+        // reads the union, so named-graph facts are visible.
+        let store = store_with_one_fact();
+        match w3c_query(&store, "ASK { ?s ?p \"hello\" }").unwrap() {
+            W3cQueryOutcome::Boolean(v) => assert_eq!(v["boolean"], true),
+            _ => panic!("expected boolean"),
+        }
+    }
+
+    #[test]
+    fn malformed_query_is_parse_error() {
+        let store = Store::new().unwrap();
+        match w3c_query(&store, "NOT SPARQL AT ALL") {
+            Err(W3cQueryError::Parse(_)) => {}
+            _ => panic!("expected Parse error (the 400 class)"),
+        }
+    }
+}

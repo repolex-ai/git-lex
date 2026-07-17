@@ -66,34 +66,7 @@ pub(crate) fn read_repo_yml_fields(path: &std::path::Path) -> HashMap<String, St
 /// ```
 ///
 /// The list ends at the first non-list, non-comment, non-blank line.
-fn read_repo_yml_list(path: &std::path::Path, key: &str) -> Vec<String> {
-    let content = match fs::read_to_string(path) {
-        Ok(c) => c,
-        Err(_) => return Vec::new(),
-    };
-    let key_prefix = format!("{}:", key);
-    let mut out = Vec::new();
-    let mut in_list = false;
-    for line in content.lines() {
-        let trimmed = line.trim();
-        if trimmed.is_empty() || trimmed.starts_with('#') { continue; }
-        if trimmed.starts_with(&key_prefix) {
-            in_list = true;
-            continue;
-        }
-        if in_list {
-            if let Some(rest) = trimmed.strip_prefix('-') {
-                let item = rest.trim().trim_matches('"').trim_matches('\'').to_string();
-                if !item.is_empty() {
-                    out.push(item);
-                }
-            } else {
-                in_list = false;
-            }
-        }
-    }
-    out
-}
+pub(crate) use git_lex::read_repo_yml_list;
 
 /// Append an item to a flat YAML list in repo.yml. Creates the list if
 /// missing. Idempotent — no duplicate entries. Preserves all other fields
@@ -221,9 +194,7 @@ fn remove_repo_yml_list_item(
 ///   - repolex-ai/git-lex-kit-innerworld
 ///   - repolex-ai/git-lex-kit-thoughtsmith
 /// ```
-pub(crate) fn read_repo_yml_optional_kits(path: &std::path::Path) -> Vec<String> {
-    read_repo_yml_list(path, "optional_kits")
-}
+pub(crate) use git_lex::read_repo_yml_optional_kits;
 
 /// Read the `substrates:` list from a repo.yml. Returns short substrate
 /// names (e.g. `["claude", "hermes"]`) that the agent has explicitly

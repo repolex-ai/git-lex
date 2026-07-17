@@ -2349,54 +2349,7 @@ fn cmd_sync() {
 #[allow(deprecated)]
 /// Serialize a SPARQL term to W3C SPARQL JSON binding format.
 /// https://www.w3.org/TR/sparql11-results-json/#select-encode-terms
-fn term_to_json(term: &Term) -> serde_json::Value {
-    match term {
-        Term::NamedNode(n) => serde_json::json!({
-            "type": "uri",
-            "value": n.as_str(),
-        }),
-        Term::BlankNode(b) => serde_json::json!({
-            "type": "bnode",
-            "value": b.as_str(),
-        }),
-        Term::Literal(l) => {
-            let mut obj = serde_json::Map::new();
-            obj.insert("type".to_string(), serde_json::Value::String("literal".to_string()));
-            obj.insert("value".to_string(), serde_json::Value::String(l.value().to_string()));
-            if let Some(lang) = l.language() {
-                obj.insert("xml:lang".to_string(), serde_json::Value::String(lang.to_string()));
-            } else {
-                let dt = l.datatype().as_str();
-                // W3C convention: only emit datatype if it's not the implicit xsd:string.
-                if dt != "http://www.w3.org/2001/XMLSchema#string" {
-                    obj.insert("datatype".to_string(), serde_json::Value::String(dt.to_string()));
-                }
-            }
-            serde_json::Value::Object(obj)
-        }
-        // Not standard SPARQL JSON — RDF 1.2 triple terms. Emit as a nested
-        // object with a "triple" type so consumers can detect and parse.
-        Term::Triple(t) => serde_json::json!({
-            "type": "triple",
-            "value": {
-                "subject": term_to_json_subject(&t.subject),
-                "predicate": term_to_json(&Term::NamedNode(t.predicate.clone())),
-                "object": term_to_json(&t.object),
-            },
-        }),
-    }
-}
-
-/// Subject terms in this oxigraph version are `NamedOrBlankNode` — no
-/// quoted-triple subjects yet. (RDF 1.2 triple terms are supported as
-/// objects only.)
-fn term_to_json_subject(subj: &oxigraph::model::NamedOrBlankNode) -> serde_json::Value {
-    use oxigraph::model::NamedOrBlankNode;
-    match subj {
-        NamedOrBlankNode::NamedNode(n) => term_to_json(&Term::NamedNode(n.clone())),
-        NamedOrBlankNode::BlankNode(b) => term_to_json(&Term::BlankNode(b.clone())),
-    }
-}
+use git_lex::{term_to_json, term_to_json_subject};
 
 fn run_query(store: &Store, query: &str, store_type: &str, json: bool) {
     let start = Instant::now();

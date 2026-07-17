@@ -34,6 +34,12 @@ enum Commands {
         #[arg(long, default_value = "7879")]
         port: u16,
     },
+    /// Start the W3C SPARQL protocol endpoint (+ Swagger UI) over the synced store
+    Query {
+        /// Port to listen on
+        #[arg(long, default_value = "7880")]
+        port: u16,
+    },
 }
 
 fn main() {
@@ -41,6 +47,7 @@ fn main() {
     match cli.command {
         Commands::Viz { port } => cmd_viz(port),
         Commands::Listen { port } => cmd_listen(port),
+        Commands::Query { port } => cmd_query_server(port),
     }
 }
 
@@ -499,4 +506,195 @@ async fn run_listen_server(port: u16) {
     let listener = tokio::net::TcpListener::bind(&addr).await.unwrap();
     println!("git-lex-serve listen started on {}", addr);
     axum::serve(listener, app).await.unwrap();
+}
+
+
+// ─── W3C SPARQL protocol endpoint (Task 2 Part B) ───────────────────────────
+//
+// A real SPARQL 1.1 Protocol surface over the SYNCED persistent store:
+//   GET  /sparql?query=…                  (protocol §2.1.1)
+//   POST /sparql   application/sparql-query (raw)      (§2.1.3)
+//   POST /sparql   application/x-www-form-urlencoded query=… (§2.1.2)
+//   POST /sparql   application/json {"query": …}        (convenience)
+// SELECT/ASK → application/sparql-results+json; CONSTRUCT/DESCRIBE →
+// application/n-triples; malformed query → 400 with the parse error;
+// evaluation failure → 500. The store is opened read-only PER REQUEST so
+// every query sees the latest `git lex sync` and never blocks a writer.
+// This is what Pan-in-git-lex-mode and Syrinx speak to. Swagger at /swagger-ui.
+
+mod query_server {
+    use axum::extract::Query as AxQuery;
+    use axum::http::{header, HeaderMap, StatusCode};
+    use axum::response::{IntoResponse, Response};
+    use axum::routing::get;
+    use axum::{Json, Router};
+    use git_lex::{
+        find_git_root, open_store_read_only, read_repo_yml_optional_kits, w3c_query,
+        W3cQueryError, W3cQueryOutcome,
+    };
+    use std::collections::HashMap;
+    use utoipa::{OpenApi, ToSchema};
+    use utoipa_swagger_ui::SwaggerUi;
+
+    #[derive(serde::Serialize, ToSchema)]
+    pub struct HealthResponse {
+        pub ok: bool,
+        pub store: bool,
+        pub version: String,
+    }
+
+    #[derive(serde::Serialize, ToSchema)]
+    pub struct InfoResponse {
+        /// Repo root this endpoint serves.
+        pub root: String,
+        /// The base kit (repo.yml `kit:`), if any.
+        pub kit: Option<String>,
+        /// Installed optional kits (repo.yml `optional_kits:`).
+        pub optional_kits: Vec<String>,
+        pub version: String,
+    }
+
+    #[derive(serde::Deserialize, ToSchema)]
+    pub struct QueryBody {
+        /// SPARQL text. Standard prefixes (rdf/rdfs/owl/xsd, git:/lex:/fm: +
+        /// the installed kit's prefix) are pre-declared.
+        pub query: String,
+    }
+
+    #[derive(serde::Serialize, ToSchema)]
+    pub struct ErrorBody {
+        pub error: String,
+    }
+
+    fn err(status: StatusCode, msg: String) -> Response {
+        (status, Json(ErrorBody { error: msg })).into_response()
+    }
+
+    fn run(query: &str) -> Response {
+        let Some(store) = open_store_read_only() else {
+            return err(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "no synced store found — run `git lex sync` first".to_string(),
+            );
+        };
+        match w3c_query(&store, query) {
+            Ok(W3cQueryOutcome::Solutions(v)) | Ok(W3cQueryOutcome::Boolean(v)) => (
+                [(header::CONTENT_TYPE, "application/sparql-results+json")],
+                v.to_string(),
+            )
+                .into_response(),
+            Ok(W3cQueryOutcome::Graph(nt)) => {
+                ([(header::CONTENT_TYPE, "application/n-triples")], nt).into_response()
+            }
+            Err(W3cQueryError::Parse(e)) => err(StatusCode::BAD_REQUEST, format!("SPARQL parse error: {e}")),
+            Err(W3cQueryError::Eval(e)) => err(StatusCode::INTERNAL_SERVER_ERROR, format!("SPARQL evaluation error: {e}")),
+        }
+    }
+
+    #[utoipa::path(get, path = "/sparql", tag = "sparql",
+        params(("query" = String, Query, description = "SPARQL query text")),
+        responses(
+            (status = 200, description = "W3C application/sparql-results+json (SELECT/ASK) or application/n-triples (CONSTRUCT/DESCRIBE)"),
+            (status = 400, body = ErrorBody, description = "Malformed query"),
+            (status = 503, body = ErrorBody, description = "No synced store")))]
+    async fn sparql_get(AxQuery(params): AxQuery<HashMap<String, String>>) -> Response {
+        match params.get("query") {
+            Some(q) => run(q),
+            None => err(StatusCode::BAD_REQUEST, "missing ?query= parameter".to_string()),
+        }
+    }
+
+    #[utoipa::path(post, path = "/sparql", tag = "sparql",
+        request_body(content = QueryBody,
+            description = "application/sparql-query (raw), application/x-www-form-urlencoded (query=…), or application/json {\"query\": …}"),
+        responses(
+            (status = 200, description = "W3C application/sparql-results+json (SELECT/ASK) or application/n-triples (CONSTRUCT/DESCRIBE)"),
+            (status = 400, body = ErrorBody, description = "Malformed query"),
+            (status = 503, body = ErrorBody, description = "No synced store")))]
+    async fn sparql_post(headers: HeaderMap, body: axum::body::Bytes) -> Response {
+        let ct = headers
+            .get(header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("")
+            .to_ascii_lowercase();
+        let text = String::from_utf8_lossy(&body).to_string();
+        if ct.starts_with("application/sparql-query") {
+            run(&text)
+        } else if ct.starts_with("application/x-www-form-urlencoded") {
+            match form_urlencoded::parse(body.as_ref()).find(|(k, _)| k == "query") {
+                Some((_, q)) => run(&q),
+                None => err(StatusCode::BAD_REQUEST, "missing query= form field".to_string()),
+            }
+        } else if ct.starts_with("application/json") {
+            match serde_json::from_str::<QueryBody>(&text) {
+                Ok(b) => run(&b.query),
+                Err(e) => err(StatusCode::BAD_REQUEST, format!("invalid JSON body: {e}")),
+            }
+        } else {
+            // Bare POST body as query text — pragmatic default.
+            run(&text)
+        }
+    }
+
+    #[utoipa::path(get, path = "/health", tag = "meta",
+        responses((status = 200, body = HealthResponse)))]
+    async fn health() -> Json<HealthResponse> {
+        Json(HealthResponse {
+            ok: true,
+            store: open_store_read_only().is_some(),
+            version: env!("CARGO_PKG_VERSION").to_string(),
+        })
+    }
+
+    #[utoipa::path(get, path = "/info", tag = "meta",
+        responses((status = 200, body = InfoResponse), (status = 503, body = ErrorBody)))]
+    async fn info() -> Response {
+        let Some(root) = find_git_root() else {
+            return err(StatusCode::SERVICE_UNAVAILABLE, "not in a git repo".to_string());
+        };
+        let repo_yml = root.join(".lex").join("repo.yml");
+        Json(InfoResponse {
+            root: root.display().to_string(),
+            kit: git_lex::get_kit(),
+            optional_kits: read_repo_yml_optional_kits(&repo_yml),
+            version: env!("CARGO_PKG_VERSION").to_string(),
+        })
+        .into_response()
+    }
+
+    #[derive(OpenApi)]
+    #[openapi(
+        info(
+            title = "git-lex SPARQL endpoint",
+            description = "W3C SPARQL 1.1 protocol surface over a git-lex soul store. Queries run against the SYNCED store (run `git lex sync` to refresh); graph names are soul-independent (GRAPH <https://repolex.ai/graph/now>), the vocabulary self-describes in GRAPH <https://repolex.ai/graph/ontology>.",
+        ),
+        paths(sparql_get, sparql_post, health, info),
+        components(schemas(HealthResponse, InfoResponse, QueryBody, ErrorBody)),
+        tags(
+            (name = "sparql", description = "SPARQL 1.1 protocol"),
+            (name = "meta", description = "Endpoint identity + kit discovery")
+        )
+    )]
+    pub struct ApiDoc;
+
+    pub fn router() -> Router {
+        Router::new()
+            .route("/sparql", get(sparql_get).post(sparql_post))
+            .route("/health", get(health))
+            .route("/info", get(info))
+            .merge(SwaggerUi::new("/swagger-ui").url("/api-docs/openapi.json", ApiDoc::openapi()))
+    }
+}
+
+fn cmd_query_server(port: u16) {
+    let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
+    rt.block_on(async move {
+        let app = query_server::router();
+        let addr = format!("127.0.0.1:{port}");
+        let listener = tokio::net::TcpListener::bind(&addr)
+            .await
+            .unwrap_or_else(|e| { eprintln!("bind {addr}: {e}"); exit(1) });
+        println!("git-lex SPARQL endpoint on http://{addr}/sparql (swagger at /swagger-ui)");
+        axum::serve(listener, app).await.expect("server error");
+    });
 }
