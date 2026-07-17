@@ -4165,12 +4165,12 @@ mod hook_registration_tests {
     #[test]
     fn engine_gitignore_appends_to_existing_blocklist() {
         let dir = tmp_repo("append");
-        fs::write(dir.join(".gitignore"), ".lex/oxigraph/\nRaw/\n").unwrap();
+        fs::write(dir.join(".gitignore"), ".lex/oxigraph/\ncustom/\n").unwrap();
         ensure_engine_gitignore(&dir);
         let got = fs::read_to_string(dir.join(".gitignore")).unwrap();
         // Original lines preserved.
         assert!(got.contains(".lex/oxigraph/"), "must keep existing entries");
-        assert!(got.contains("Raw/"));
+        assert!(got.contains("custom/"));
         // Engine dirs added under the sentinel.
         assert!(got.contains(ENGINE_GITIGNORE_BEGIN));
         assert!(got.contains(".pool/"));
