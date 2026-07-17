@@ -150,7 +150,7 @@ mod tests {
         m
     }
 
-    const BASE: &str = "https://repolex.ai/resource/soul";
+    const BASE: &str = "https://repolex.ai/soul";
 
     // ─── Rule 1: no wikilinks in frontmatter ──────────────────────────────
 

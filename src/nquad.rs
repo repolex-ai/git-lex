@@ -550,7 +550,7 @@ pub(crate) fn generate_frontmatter_nquads() -> (String, u32) {
         }
 
         // --- Generate N-Quads for oxigraph (now graph) ---
-        // IRI scheme: https://repolex.ai/resource/soul/{path} (Soul/ root maps onto
+        // IRI scheme: https://repolex.ai/soul/{path} (Soul/ root maps onto
         // the namespace root; no soul identity in the subject — Day-50).
         // The IRI mirrors the file path verbatim — no folder capitalization,
         // no folder→class derivation. Classes come from the ontology and from

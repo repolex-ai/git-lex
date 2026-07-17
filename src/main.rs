@@ -1102,7 +1102,7 @@ fn cmd_create(doctype: &str, instance_id: Option<&str>, json: bool) {
 
     fs::write(&filepath, &fm).expect("failed to create document");
 
-    // Document URI = https://repolex.ai/resource/soul/{path} — matches the
+    // Document URI = https://repolex.ai/soul/{path} — matches the
     // scheme used by the nquad generator so the JSON payload matches what the
     // extraction pipeline will produce on the next sync (Day-50: no soul
     // identity in subjects).

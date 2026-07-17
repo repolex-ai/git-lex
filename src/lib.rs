@@ -545,7 +545,7 @@ mod w3c_query_tests {
     fn store_with_one_fact() -> Store {
         let store = Store::new().unwrap();
         store.insert(Quad::new(
-            NamedNode::new("https://repolex.ai/resource/soul/Memory/x.md").unwrap(),
+            NamedNode::new("https://repolex.ai/soul/Memory/x.md").unwrap(),
             NamedNode::new("https://repolex.ai/ontology/git-lex/fm/title").unwrap(),
             Literal::new_simple_literal("hello"),
             GraphName::NamedNode(NamedNode::new("https://repolex.ai/git-lex/now").unwrap()),

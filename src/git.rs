@@ -88,10 +88,10 @@ pub(crate) fn genesis_sha() -> Option<String> {
 /// the portability requirement.)
 pub(crate) const GRAPH_BASE: &str = "https://repolex.ai/git-lex/";
 
-/// The a-box (instance) base for soul-repo subjects. Instances live under
-/// `/resource/` (conventional linked-data a-box/t-box split, Day-50);
-/// vocabulary stays under `https://repolex.ai/ontology/...`.
-pub(crate) const SOUL_RESOURCE_BASE: &str = "https://repolex.ai/resource/soul";
+/// The a-box (instance) base for soul-repo subjects. Subtexture-wide shape
+/// (Rob, Day-50): `https://repolex.ai/<application>/<Class>/<instanceId>` —
+/// no base word; vocabulary stays under `https://repolex.ai/ontology/...`.
+pub(crate) const SOUL_RESOURCE_BASE: &str = "https://repolex.ai/soul";
 
 /// Mint a graph-container IRI: `https://repolex.ai/git-lex/<name>` — named
 /// graphs are namespaced to the system that defines them (Rob, Day-50: no
@@ -103,10 +103,10 @@ pub(crate) fn graph_uri(name: &str) -> String {
 /// Mint an instance-subject IRI under the soul a-box base.
 ///
 /// - Empty path = the Self node: the namespace root itself
-///   (`https://repolex.ai/resource/soul`). Soul identity (genesis SHA) is a
+///   (`https://repolex.ai/soul`). Soul identity (genesis SHA) is a
 ///   FACT about the Self node, never part of any IRI.
 /// - A tracked path under the `Soul/` scaffold root maps onto the namespace
-///   root (`Soul/Memory/foo.md` → `…/resource/soul/Memory/foo.md`) — the
+///   root (`Soul/Memory/foo.md` → `…/soul/Memory/foo.md`) — the
 ///   `Soul/` folder IS the soul namespace, so it doesn't repeat.
 /// - Everything else joins verbatim (`journal/day-1.md`, `commit/<sha>`,
 ///   `entity/<x>~<hash>`, …).
