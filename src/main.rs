@@ -108,7 +108,8 @@ enum Commands {
     Dump,
     /// Sync git data + .lex/*.nq into the persistent store
     Sync,
-    /// List all document classes defined across the repo's installed shapes.
+    /// List all document classes defined across the repo's installed shapes
+    ///
     /// Walks both `.lex/ontology/` (kit-installed) and `_ontology/`
     /// (agent-authored/adaptive) — so `list` sees every class the repo knows,
     /// not just the classes from the configured kit.
@@ -145,7 +146,7 @@ enum Commands {
         /// File to parse
         file: String,
     },
-    /// Remove .lex/ entirely. Content files and git history are preserved.
+    /// Remove .lex/ entirely (content files and git history are preserved).
     Nuke,
     /// Re-download and reinstall the kit without touching content or extractions
     KitUpdate {
@@ -160,7 +161,9 @@ enum Commands {
         #[arg(long)]
         force: bool,
     },
-    /// Add an optional kit to this repo. The kit's `scope:` in kit.yml must
+    /// Add an optional kit to this repo
+    ///
+    /// The kit's `scope:` in kit.yml must
     /// be `optional`. Folders + class templates are created at add-time so
     /// the kit becomes discoverable from `ls`. Tracked in `.lex/repo.yml`'s
     /// `optional_kits:` list and updated by `kit-update`.
@@ -168,7 +171,9 @@ enum Commands {
         /// Kit spec (e.g., `repolex-ai/git-lex-kit-innerworld`).
         kit: String,
     },
-    /// Remove an optional kit from this repo. Scrubs the kit from
+    /// Remove an optional kit from this repo
+    ///
+    /// Scrubs the kit from
     /// `optional_kits:` in repo.yml and deletes `.lex/kit/{org}/{repo}/`.
     /// Will ASK before deleting the kit's content folders (e.g.
     /// `Innerworld/`) — those contain user data.
