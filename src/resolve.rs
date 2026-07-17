@@ -75,7 +75,6 @@ pub enum ResolveResult {
 pub fn resolve_frontmatter_value(
     raw: &str,
     slug_index: &HashMap<String, String>,
-    base: &str,
 ) -> ResolveResult {
     // Rule 1: reject [[wikilinks]]
     if raw.starts_with("[[") || raw.ends_with("]]") {
@@ -110,7 +109,7 @@ pub fn resolve_frontmatter_value(
 
     // Rule 5: path-style values
     if raw.contains('/') || raw.ends_with(".md") {
-        return ResolveResult::Iri(format!("<{}/{}>", base, crate::nquad::uri_encode_path(raw)));
+        return ResolveResult::Iri(format!("<{}>", crate::git::resource_uri(&crate::nquad::uri_encode_path(raw))));
     }
 
     // Rule 3: bare slug lookup (lowercased to match index convention)
@@ -127,7 +126,7 @@ pub fn resolve_frontmatter_value(
         return ResolveResult::Unresolved(raw.to_string());
     }
     if let Some(rel_path) = slug_index.get(&slug) {
-        ResolveResult::Iri(format!("<{}/{}>", base, crate::nquad::uri_encode_path(rel_path)))
+        ResolveResult::Iri(format!("<{}>", crate::git::resource_uri(&crate::nquad::uri_encode_path(rel_path))))
     } else {
         // Rule 7: unresolved → literal, not blank node
         ResolveResult::Unresolved(raw.to_string())
@@ -151,7 +150,7 @@ mod tests {
         m
     }
 
-    const BASE: &str = "https://repolex.ai/test-repo";
+    const BASE: &str = "https://repolex.ai/resource/soul";
 
     // ─── Rule 1: no wikilinks in frontmatter ──────────────────────────────
 
@@ -161,7 +160,7 @@ mod tests {
     #[test]
     fn rejects_wikilink_brackets() {
         let idx = test_index();
-        let result = resolve_frontmatter_value("[[w4r3z]]", &idx, BASE);
+        let result = resolve_frontmatter_value("[[w4r3z]]", &idx);
         assert!(
             matches!(result, ResolveResult::Rejected(_)),
             "[[wikilinks]] must be rejected in frontmatter"
@@ -172,7 +171,7 @@ mod tests {
     #[test]
     fn wikilink_rejection_suggests_bare_slug() {
         let idx = test_index();
-        if let ResolveResult::Rejected(msg) = resolve_frontmatter_value("[[w4r3z]]", &idx, BASE) {
+        if let ResolveResult::Rejected(msg) = resolve_frontmatter_value("[[w4r3z]]", &idx) {
             assert!(msg.contains("w4r3z"), "should suggest the inner slug");
             assert!(msg.contains("bare slug"), "should say 'bare slug'");
         } else {
@@ -186,7 +185,7 @@ mod tests {
     fn rejects_wikilink_even_when_slug_exists() {
         let idx = test_index();
         assert!(matches!(
-            resolve_frontmatter_value("[[kira]]", &idx, BASE),
+            resolve_frontmatter_value("[[kira]]", &idx),
             ResolveResult::Rejected(_)
         ));
     }
@@ -198,7 +197,7 @@ mod tests {
     #[test]
     fn rejects_at_mention() {
         let idx = test_index();
-        let result = resolve_frontmatter_value("@w4r3z", &idx, BASE);
+        let result = resolve_frontmatter_value("@w4r3z", &idx);
         assert!(
             matches!(result, ResolveResult::Rejected(_)),
             "@mentions must be rejected in frontmatter"
@@ -209,7 +208,7 @@ mod tests {
     #[test]
     fn at_mention_rejection_suggests_bare_slug() {
         let idx = test_index();
-        if let ResolveResult::Rejected(msg) = resolve_frontmatter_value("@kira", &idx, BASE) {
+        if let ResolveResult::Rejected(msg) = resolve_frontmatter_value("@kira", &idx) {
             assert!(msg.contains("kira"), "should suggest the inner slug");
         } else {
             panic!("expected Rejected");
@@ -222,7 +221,7 @@ mod tests {
     #[test]
     fn bare_slug_resolves_to_iri() {
         let idx = test_index();
-        let result = resolve_frontmatter_value("w4r3z", &idx, BASE);
+        let result = resolve_frontmatter_value("w4r3z", &idx);
         assert_eq!(
             result,
             ResolveResult::Iri(format!("<{}/agent/w4r3z.md>", BASE))
@@ -234,7 +233,7 @@ mod tests {
     #[test]
     fn bare_slug_is_case_insensitive() {
         let idx = test_index();
-        let result = resolve_frontmatter_value("W4R3Z", &idx, BASE);
+        let result = resolve_frontmatter_value("W4R3Z", &idx);
         assert_eq!(
             result,
             ResolveResult::Iri(format!("<{}/agent/w4r3z.md>", BASE))
@@ -247,7 +246,7 @@ mod tests {
     #[test]
     fn unresolved_slug_returns_literal() {
         let idx = test_index();
-        let result = resolve_frontmatter_value("nobody", &idx, BASE);
+        let result = resolve_frontmatter_value("nobody", &idx);
         assert_eq!(result, ResolveResult::Unresolved("nobody".to_string()));
     }
 
@@ -260,7 +259,7 @@ mod tests {
     fn full_https_iri_passes_through() {
         let idx = test_index();
         let iri = "https://repolex.ai/some/agent/foo";
-        let result = resolve_frontmatter_value(iri, &idx, BASE);
+        let result = resolve_frontmatter_value(iri, &idx);
         assert_eq!(result, ResolveResult::Iri(format!("<{}>", iri)));
     }
 
@@ -269,7 +268,7 @@ mod tests {
     fn full_http_iri_passes_through() {
         let idx = test_index();
         let iri = "http://example.org/entity/bar";
-        let result = resolve_frontmatter_value(iri, &idx, BASE);
+        let result = resolve_frontmatter_value(iri, &idx);
         assert_eq!(result, ResolveResult::Iri(format!("<{}>", iri)));
     }
 
@@ -281,7 +280,7 @@ mod tests {
     fn full_iri_preserves_special_characters() {
         let idx = test_index();
         let iri = "https://repolex.ai/git-lex/goodlux/claude-export/Conversation/4f10a178-c0a4-41c6-b397-655d222d6202";
-        let result = resolve_frontmatter_value(iri, &idx, BASE);
+        let result = resolve_frontmatter_value(iri, &idx);
         assert_eq!(result, ResolveResult::Iri(format!("<{}>", iri)));
     }
 
@@ -291,7 +290,7 @@ mod tests {
     #[test]
     fn path_with_slash_resolves_as_path() {
         let idx = test_index();
-        let result = resolve_frontmatter_value("agent/w4r3z.md", &idx, BASE);
+        let result = resolve_frontmatter_value("agent/w4r3z.md", &idx);
         assert_eq!(
             result,
             ResolveResult::Iri(format!("<{}/agent/w4r3z.md>", BASE))
@@ -302,7 +301,7 @@ mod tests {
     #[test]
     fn dotmd_suffix_resolves_as_path() {
         let idx = test_index();
-        let result = resolve_frontmatter_value("w4r3z.md", &idx, BASE);
+        let result = resolve_frontmatter_value("w4r3z.md", &idx);
         assert_eq!(
             result,
             ResolveResult::Iri(format!("<{}/w4r3z.md>", BASE))
@@ -318,7 +317,7 @@ mod tests {
     fn no_dot_stripping_fallback() {
         let idx = test_index();
         // "w.4.r.3.z" should NOT match "w4r3z" via dot-stripping.
-        let result = resolve_frontmatter_value("w.4.r.3.z", &idx, BASE);
+        let result = resolve_frontmatter_value("w.4.r.3.z", &idx);
         assert_eq!(result, ResolveResult::Unresolved("w.4.r.3.z".to_string()));
     }
 
@@ -331,7 +330,7 @@ mod tests {
     #[test]
     fn unresolved_is_literal_not_blank_node() {
         let idx = test_index();
-        let result = resolve_frontmatter_value("nonexistent", &idx, BASE);
+        let result = resolve_frontmatter_value("nonexistent", &idx);
         // The return type is Unresolved, not some BlankNode variant.
         // The caller emits: <doc> kit:pred "nonexistent" <graph> .
         assert!(matches!(result, ResolveResult::Unresolved(_)));
@@ -343,7 +342,7 @@ mod tests {
     #[test]
     fn empty_string_is_unresolved() {
         let idx = test_index();
-        let result = resolve_frontmatter_value("", &idx, BASE);
+        let result = resolve_frontmatter_value("", &idx);
         assert!(matches!(result, ResolveResult::Unresolved(_)));
     }
 
@@ -351,7 +350,7 @@ mod tests {
     #[test]
     fn whitespace_only_is_unresolved() {
         let idx = test_index();
-        let result = resolve_frontmatter_value("   ", &idx, BASE);
+        let result = resolve_frontmatter_value("   ", &idx);
         assert!(matches!(result, ResolveResult::Unresolved(_)));
     }
 
@@ -360,7 +359,7 @@ mod tests {
     fn rejects_nested_brackets() {
         let idx = test_index();
         assert!(matches!(
-            resolve_frontmatter_value("[[[[w4r3z]]]]", &idx, BASE),
+            resolve_frontmatter_value("[[[[w4r3z]]]]", &idx),
             ResolveResult::Rejected(_)
         ));
     }

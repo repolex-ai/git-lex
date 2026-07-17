@@ -55,73 +55,71 @@ pub(crate) fn get_repo_id() -> String {
     format!("{}/{}", org, repo)
 }
 
-/// Build the repo-level RDF base namespace.
-///
-/// **URN-emitting form (preferred):** `urn:soul:<first-commit-sha>` —
-/// anchored on the soul-repo's genesis commit SHA (immutable across
-/// re-clones, host migrations, SSH alias changes). The same anchor the
-/// `o:` ontology prefix already uses (`lib.rs:222-229`).
-///
-/// **Legacy fallback:** `https://<host>/<org>/<repo>` — for pre-genesis
-/// repos (no first commit yet) or non-git contexts (tests, fixtures).
-/// Squaddies in production stores should never see this form once the
-/// repo has its first commit.
-///
-/// Three-tier SHA resolution, ordered by cost:
-/// 1. `.lex/identity.yml` cache (write-once at init/sync, fastest read)
-/// 2. `.lex/repo.yml` cache (already there for the `o:` ontology prefix)
-/// 3. `git rev-list --max-parents=0 HEAD` (live query — slowest)
-///
-/// Callers MUST use [`iri_join`] (or `<{}/path>` for the legacy form) to
-/// concatenate a path to the base — the URN form requires `:` as the
-/// separator, the legacy form uses `/`. See [`iri_join`] for the rule.
-// QUESTION(w4r3z, Day 38): base_uri() is a READ that WRITES — it calls
-// write_identity_yml_sha() on every invocation (3 sites below). base_uri() is
-// hot (every nquad emit, every query prefix). Two concerns: (1) a save and a
-// query running concurrently could race on identity.yml writes; (2) a read
-// fn with a filesystem side-effect is surprising. Consider writing identity.yml
-// ONCE at init/sync and making base_uri() pure-read. The write-back was likely
-// added to self-heal a missing/legacy identity.yml, but that healing belongs in
-// sync, not in every base_uri() call.
-pub(crate) fn base_uri() -> String {
-    if let Some(sha) = sha_from_identity_yml() {
-        let _ = write_identity_yml_sha(&sha);
-        return format!("urn:soul:{}", sha);
-    }
-    if let Some(sha) = sha_from_repo_yml() {
-        let _ = write_identity_yml_sha(&sha);
-        return format!("urn:soul:{}", sha);
-    }
-    if let Some(sha) = sha_from_git() {
-        let _ = write_identity_yml_sha(&sha);
-        return format!("urn:soul:{}", sha);
-    }
-    legacy_host_derived_base()
+/// Resolve the soul's genesis SHA (three tiers, ordered by cost) and make
+/// sure `.lex/identity.yml` records it. Called ONCE per sync — identity.yml
+/// is the machine-readable identity file downstream consumers (Pool's
+/// boot-skip, federation readers) rely on. This replaces the old
+/// `base_uri()` read-that-writes: IRIs no longer carry the SHA (Day-50);
+/// identity lives here and as a `git:genesisSha` FACT on the repo node.
+pub(crate) fn ensure_identity_yml() -> Option<String> {
+    let sha = genesis_sha()?;
+    let _ = write_identity_yml_sha(&sha);
+    Some(sha)
 }
 
-/// Join a path to a base IRI using the correct separator.
-///
-/// For URN-emitting `urn:soul:<sha>` bases, paths join with `:` to preserve
-/// the bare-IRI-is-Self recursion (`urn:soul:<sha>:Soul/Note/foo`). For
-/// the legacy host-derived form, paths join with `/` (the historical
-/// `https://host/org/repo/Soul/Note/foo` shape).
-///
-/// Both call sites that use this helper get the right thing without
-/// knowing which mode is active. This is the difference between subjects
-/// being addressable across re-clones (URN form) vs identity changing
-/// every time a remote alias changes (legacy).
-///
-/// Empty `path` returns the base verbatim (caller wants the bare Self).
-pub(crate) fn iri_join(base: &str, path: &str) -> String {
-    if path.is_empty() {
-        return base.to_string();
-    }
-    if base.starts_with("urn:") {
-        format!("{}:{}", base, path)
-    } else {
-        format!("{}/{}", base, path)
-    }
+/// The soul's genesis (first-commit) SHA, if resolvable.
+pub(crate) fn genesis_sha() -> Option<String> {
+    sha_from_identity_yml()
+        .or_else(sha_from_repo_yml)
+        .or_else(sha_from_git)
 }
+
+// ---------------------------------------------------------------------
+// Task-2 IRI families (Day-50 decisions): graph names + instance subjects
+// carry NO soul identity. The store is the scope; one query works against
+// every soul's oxigraph.
+// ---------------------------------------------------------------------
+
+/// Graph-container names: soul-independent ABSOLUTE IRIs, identical across
+/// every soul's store — `GRAPH <https://repolex.ai/graph/now>` is the same
+/// query everywhere. (A literally-bare name like `now` is not a legal IRI:
+/// oxigraph rejects it at the model level and SPARQL won't parse `<now>` —
+/// probed Day-50. Absolute-and-identical is the standard shape that delivers
+/// the portability requirement.)
+pub(crate) const GRAPH_BASE: &str = "https://repolex.ai/graph/";
+
+/// The a-box (instance) base for soul-repo subjects. Instances live under
+/// `/resource/` (conventional linked-data a-box/t-box split, Day-50);
+/// vocabulary stays under `https://repolex.ai/ontology/...`.
+pub(crate) const SOUL_RESOURCE_BASE: &str = "https://repolex.ai/resource/soul";
+
+/// Mint a graph-container IRI: `https://repolex.ai/graph/<name>`.
+pub(crate) fn graph_uri(name: &str) -> String {
+    format!("{GRAPH_BASE}{name}")
+}
+
+/// Mint an instance-subject IRI under the soul a-box base.
+///
+/// - Empty path = the Self node: the namespace root itself
+///   (`https://repolex.ai/resource/soul`). Soul identity (genesis SHA) is a
+///   FACT about the Self node, never part of any IRI.
+/// - A tracked path under the `Soul/` scaffold root maps onto the namespace
+///   root (`Soul/Memory/foo.md` → `…/resource/soul/Memory/foo.md`) — the
+///   `Soul/` folder IS the soul namespace, so it doesn't repeat.
+/// - Everything else joins verbatim (`journal/day-1.md`, `commit/<sha>`,
+///   `entity/<x>~<hash>`, …).
+///
+/// NOTE: file-derived subjects keep their extension (`.md`) — joins are by
+/// filename (nquad.rs wikilink resolution + downstream resolvers exact-match
+/// on it); see the Task-2 spec's ON HOLD ruling before ever changing that.
+pub(crate) fn resource_uri(path: &str) -> String {
+    if path.is_empty() {
+        return SOUL_RESOURCE_BASE.to_string();
+    }
+    let tail = path.strip_prefix("Soul/").unwrap_or(path);
+    format!("{SOUL_RESOURCE_BASE}/{tail}")
+}
+
 
 // ---------------------------------------------------------------------
 // SHA resolution (three tiers, ordered by cost)
@@ -277,13 +275,6 @@ fn is_valid_sha(s: &str) -> bool {
     s.len() == 40 && s.chars().all(|c| c.is_ascii_hexdigit())
 }
 
-/// Pre-genesis / non-git fallback. Returns the OLD `https://host/org/repo`
-/// form. Mostly hit during early init (before the first commit lands) or
-/// in non-repo contexts (tests, kit fixtures).
-fn legacy_host_derived_base() -> String {
-    let (host, org, repo) = get_repo_parts();
-    format!("https://{}/{}/{}", host, org, repo)
-}
 
 /// Unescape a git-quoted path.
 /// Git wraps paths with non-ASCII chars in double quotes and uses octal escapes.

@@ -29,7 +29,7 @@ mod kit;
 mod extraction;
 mod raw_mirror;
 
-use crate::git::{auto_commit_snapshot, base_uri, iri_join};
+use crate::git::{auto_commit_snapshot, graph_uri, resource_uri};
 use crate::nquad::{build_slug_path_indexes, emit_spo_line_nquads,
                    generate_frontmatter_nquads, generate_git_nquads,
                    load_lex_nquads, nq_escape, uri_encode_path};
@@ -1102,12 +1102,12 @@ fn cmd_create(doctype: &str, instance_id: Option<&str>, json: bool) {
 
     fs::write(&filepath, &fm).expect("failed to create document");
 
-    // Document URI = {repo base}/{path-relative-to-root}. Matches the scheme
-    // used by the nquad generator so the JSON payload matches what the
-    // extraction pipeline will produce on the next sync.
-    let base = base_uri();
+    // Document URI = https://repolex.ai/resource/soul/{path} — matches the
+    // scheme used by the nquad generator so the JSON payload matches what the
+    // extraction pipeline will produce on the next sync (Day-50: no soul
+    // identity in subjects).
     let rel = filepath.strip_prefix(&root).unwrap_or(&filepath);
-    let uri = format!("{}/{}", base, rel.to_string_lossy().replace('\\', "/"));
+    let uri = resource_uri(&rel.to_string_lossy().replace('\\', "/"));
 
     if json {
         let out = serde_json::json!({
@@ -1763,7 +1763,10 @@ fn cmd_sync() {
     let start = Instant::now();
 
     let root = find_git_root().expect("not a git repo");
-    let base = base_uri();
+    // Identity: resolve + persist the genesis SHA ONCE per sync (identity.yml
+    // is what Pool's boot-skip and federation readers consume). IRIs no longer
+    // carry it — see git.rs Task-2 IRI families.
+    crate::git::ensure_identity_yml();
     let store = open_or_create_store();
 
     // Get current HEAD commit
@@ -1800,7 +1803,7 @@ fn cmd_sync() {
     // Contract this depends on: the oxigraph store is derived. If you've
     // manually mutated it, rebuild via `rm -rf .git/lex/oxigraph`.
     {
-        let sync_graph_uri = format!("{}/sync/{}", base, head_sha);
+        let sync_graph_uri = graph_uri(&format!("sync/{}", head_sha));
         let probe = format!(
             "ASK {{ GRAPH <{}> {{ ?s ?p ?o }} }}",
             sync_graph_uri
@@ -1840,40 +1843,41 @@ fn cmd_sync() {
     // Sync graphs are persistent — never touched.
 
     // Find all existing graph names
-    let existing_graphs: Vec<String> = {
-        let query = "SELECT DISTINCT ?g WHERE { GRAPH ?g { ?s ?p ?o } }";
-        let results = oxigraph::sparql::SparqlEvaluator::new()
-            .parse_query(query)
-            .ok()
-            .and_then(|q| q.on_store(&store).execute().ok());
-        match results {
-            Some(oxigraph::sparql::QueryResults::Solutions(solutions)) => {
-                solutions.filter_map(|s| {
-                    s.ok().and_then(|s| {
-                        s.get("g").map(|t| match t {
-                            Term::NamedNode(n) => n.as_str().to_string(),
-                            _ => String::new(),
-                        })
-                    })
-                }).collect()
-            }
-            _ => Vec::new(),
-            None => Vec::new(),
-        }
-    };
+    // Enumerate via named_graphs(), NOT a GRAPH ?g pattern — a pattern query
+    // only sees graphs holding at least one triple, so an already-empty legacy
+    // graph would linger registered forever.
+    let existing_graphs: Vec<String> = store
+        .named_graphs()
+        .filter_map(|g| g.ok())
+        .map(|g| match g {
+            oxigraph::model::NamedOrBlankNode::NamedNode(n) => n.as_str().to_string(),
+            other => other.to_string(),
+        })
+        .collect();
 
     // Clear non-sync, non-history graphs (virtual graphs get regenerated).
     // History and meta graphs are persistent — managed by Phase 4.
     for graph_uri in &existing_graphs {
-        if !graph_uri.contains("/sync/")
-            && !graph_uri.ends_with("/history")
-            && !graph_uri.ends_with("/meta")
+        if !graph_uri.starts_with("https://repolex.ai/graph/sync/")
+            && graph_uri != "https://repolex.ai/graph/history"
+            && graph_uri != "https://repolex.ai/graph/meta"
         {
             if let Ok(graph) = oxigraph::model::NamedNode::new(graph_uri) {
-                store.clear_graph(&oxigraph::model::GraphName::from(graph)).ok();
+                // remove (not clear): drops the graph's registration too, so a
+                // one-time legacy name (urn:soul:*) doesn't linger as an empty
+                // graph in the store forever.
+                store.remove_named_graph(&graph).ok();
             }
         }
     }
+
+    // ─── Phase 2b: t-box — load installed kit ontologies into the ontology graph ───
+    // The store self-describes (Day-50): an agent with no .ttl files in front
+    // of them can learn the vocabulary from the store itself:
+    //   GRAPH <https://repolex.ai/graph/ontology> { ?c a owl:Class }
+    // The graph is cleared by the Phase-2 filter each sync and reloaded here,
+    // so it always reflects the currently-installed kits.
+    let ontology_count = crate::nquad::load_ontology_graph(&store);
 
     // (adaptive shapes already built at top of cmd_sync, before fast-path check)
 
@@ -1901,7 +1905,7 @@ fn cmd_sync() {
     // Find last sync commit (latest /sync/ graph in store)
     let last_sync_commit: Option<String> = {
         let query = format!(
-            "SELECT ?g WHERE {{ GRAPH ?g {{ ?s ?p ?o }} FILTER(CONTAINS(STR(?g), '/sync/')) }} ORDER BY DESC(STR(?g)) LIMIT 1"
+            "SELECT ?g WHERE {{ GRAPH ?g {{ ?s ?p ?o }} FILTER(STRSTARTS(STR(?g), 'https://repolex.ai/graph/sync/')) }} ORDER BY DESC(STR(?g)) LIMIT 1"
         );
         let results = oxigraph::sparql::SparqlEvaluator::new()
             .parse_query(&query)
@@ -1982,7 +1986,7 @@ fn cmd_sync() {
     };
 
     // Compute delta
-    let sync_graph = format!("<{}>", iri_join(&base, &format!("sync/{}", head_sha)));
+    let sync_graph = format!("<{}>", graph_uri(&format!("sync/{}", head_sha)));
     let mut sync_nq = String::new();
     let mut new_assertions = 0;
     let mut retracted = 0;
@@ -2030,7 +2034,7 @@ fn cmd_sync() {
             let (subject, predicate, object) = (parts[0], parts[1], parts[2]);
 
             // Build entity URIs
-            let subject_uri = format!("<{}>", iri_join(&base, &format!("entity/{}~{}", sanitize_uri_segment(subject), blob_hash)));
+            let subject_uri = format!("<{}>", resource_uri(&format!("entity/{}~{}", sanitize_uri_segment(subject), blob_hash)));
             let predicate_uri = if predicate == "isA" {
                 "<http://www.w3.org/1999/02/22-rdf-syntax-ns#type>".to_string()
             } else if predicate == "hasValue" {
@@ -2040,7 +2044,7 @@ fn cmd_sync() {
             } else if predicate == "linksTo" {
                 "<https://repolex.ai/ontology/git-lex/lex/linksTo>".to_string()
             } else {
-                format!("<{}>", iri_join(&base, &format!("predicate/{}", sanitize_uri_segment(predicate))))
+                format!("<{}>", resource_uri(&format!("predicate/{}", sanitize_uri_segment(predicate))))
             };
             // Determine if object is a literal or entity reference
             // Literals: isA, hasValue, mentions, linksTo, and any predicate where
@@ -2072,7 +2076,7 @@ fn cmd_sync() {
             let object_nq = if is_literal {
                 format!("\"{}\"", nq_escape(object))
             } else {
-                format!("<{}>", iri_join(&base, &format!("entity/{}~{}", sanitize_uri_segment(object), blob_hash)))
+                format!("<{}>", resource_uri(&format!("entity/{}~{}", sanitize_uri_segment(object), blob_hash)))
             };
 
             // The assertion
@@ -2087,7 +2091,7 @@ fn cmd_sync() {
             // Triple term annotation
             let spo_key = format!("{}|{}|{}|{}", source_file, subject, predicate, object);
             let ann_hash = short_hash(&spo_key);
-            let ann_uri = format!("<{}>", iri_join(&base, &format!("ann/{}", ann_hash)));
+            let ann_uri = format!("<{}>", resource_uri(&format!("ann/{}", ann_hash)));
 
             sync_nq.push_str(&format!(
                 "{} <http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies> <<( {} {} {} )>> {} .\n",
@@ -2117,7 +2121,7 @@ fn cmd_sync() {
 
             let spo_key = format!("{}|{}|{}|{}", source_file, subject, predicate, object);
             let ann_hash = short_hash(&spo_key);
-            let ann_uri = format!("<{}>", iri_join(&base, &format!("ann/{}", ann_hash)));
+            let ann_uri = format!("<{}>", resource_uri(&format!("ann/{}", ann_hash)));
 
             sync_nq.push_str(&format!(
                 "{} <https://repolex.ai/ontology/git-lex/lex/retracted> \"true\"^^<http://www.w3.org/2001/XMLSchema#boolean> {} .\n",
@@ -2142,7 +2146,7 @@ fn cmd_sync() {
 
                 let spo_key = format!("{}|{}|{}|{}", source_file, subject, predicate, object);
                 let ann_hash = short_hash(&spo_key);
-                let ann_uri = format!("<{}>", iri_join(&base, &format!("ann/{}", ann_hash)));
+                let ann_uri = format!("<{}>", resource_uri(&format!("ann/{}", ann_hash)));
 
                 sync_nq.push_str(&format!(
                     "{} <https://repolex.ai/ontology/git-lex/lex/retracted> \"true\"^^<http://www.w3.org/2001/XMLSchema#boolean> {} .\n",
@@ -2162,50 +2166,11 @@ fn cmd_sync() {
     }
 
     // ─── Phase 3: Stale graph cleanup ───
-    // Class graphs (`<base>/class/{Name}`) used to be a "current-state data
-    // table" projection — but they were a duplicate of the `now` graph born
-    // from a misunderstanding (we thought `now` was fm-namespace-only). They
-    // are gone. The `now` graph is the single source of current state.
-    //
-    // Also sweeps the legacy `<base>/frontmatter` graph (renamed to `now` in
-    // a prior commit) so existing repos drop the stale snapshot on next sync.
-    //
-    // We sweep both on every sync — cheap, idempotent, handles old data left
-    // over from before the rename + class-graph deletion shipped.
-    let class_prefix = format!("{}/class/", base);
-    let legacy_frontmatter = format!("{}/frontmatter", base);
-    let stale_graphs: Vec<String> = {
-        let q = "SELECT DISTINCT ?g WHERE { GRAPH ?g { ?s ?p ?o } }";
-        match oxigraph::sparql::Query::parse(q, None) {
-            Ok(mut parsed) => {
-                parsed.dataset_mut().set_default_graph_as_union();
-                match store.query(parsed) {
-                    Ok(oxigraph::sparql::QueryResults::Solutions(sols)) => {
-                        sols.flatten().filter_map(|s| {
-                            s.get("g").and_then(|t| match t {
-                                Term::NamedNode(n) => {
-                                    let uri = n.as_str().to_string();
-                                    if uri.starts_with(&class_prefix) || uri == legacy_frontmatter {
-                                        Some(uri)
-                                    } else {
-                                        None
-                                    }
-                                }
-                                _ => None,
-                            })
-                        }).collect()
-                    }
-                    _ => Vec::new(),
-                }
-            }
-            _ => Vec::new(),
-        }
-    };
-    for graph_uri in &stale_graphs {
-        if let Ok(graph_node) = oxigraph::model::NamedNode::new(graph_uri) {
-            store.clear_graph(&oxigraph::model::GraphName::from(graph_node)).ok();
-        }
-    }
+    // Subsumed by the Phase-2 clear filter: every graph whose name is not a
+    // current https://repolex.ai/graph/... keep-name (sync/history/meta) is
+    // cleared on each sync — including all legacy urn:soul:* graphs and the
+    // old `<base>/class/*` + `<base>/frontmatter` projections. Migration off
+    // the old naming is therefore automatic on the first new-binary sync.
 
     // ─── Phase 4: History graph — incremental update ───
     //
@@ -2213,13 +2178,14 @@ fn cmd_sync() {
     // is an ancestor of HEAD, walk only commits since the marker (append).
     // Otherwise fall back to a full rebuild (clear + walk all).
 
-    let history_graph_uri = format!("<{}>", iri_join(&base, "history"));
-    let meta_graph_uri = format!("<{}>", iri_join(&base, "meta"));
+    let history_graph_uri = format!("<{}>", graph_uri("history"));
+    let meta_graph_uri = format!("<{}>", graph_uri("meta"));
 
     // Query the marker
     let marker_query = format!(
-        "SELECT ?commit WHERE {{ GRAPH {} {{ <{}/meta> <https://repolex.ai/ontology/spo/lastHistorySync> ?commit }} }}",
-        meta_graph_uri, base
+        "SELECT ?commit WHERE {{ GRAPH {} {{ <{}> <https://repolex.ai/ontology/spo/lastHistorySync> ?commit }} }}",
+        meta_graph_uri,
+        resource_uri("meta")
     );
     let marker_sha: Option<String> = {
         match oxigraph::sparql::Query::parse(&marker_query, None) {
@@ -2329,7 +2295,6 @@ fn cmd_sync() {
         let stats = spo_events::history_walk_engine(
             &history_commits,
             &store,
-            &base,
             &history_graph_uri,
             &meta_graph_uri,
             &head_sha,
@@ -2352,7 +2317,7 @@ fn cmd_sync() {
 
     // Count total sync graph triples
     let total_sync: usize = existing_graphs.iter()
-        .filter(|g| g.contains("/sync/"))
+        .filter(|g| g.starts_with("https://repolex.ai/graph/sync/"))
         .count();
 
     println!(
@@ -2360,6 +2325,7 @@ fn cmd_sync() {
         elapsed.as_secs_f64() * 1000.0
     );
     println!("  Virtual: {} git + {} now", git_count, fm_count);
+    println!("  Ontology: {} kit ttl file(s) -> <https://repolex.ai/graph/ontology>", ontology_count);
     if !adaptive_ok.is_empty() || !adaptive_fail.is_empty() {
         println!("  Adaptive shapes: {} built, {} failed", adaptive_ok.len(), adaptive_fail.len());
     }
@@ -2375,9 +2341,6 @@ fn cmd_sync() {
     }
     println!("  History: {}", history_summary);
     println!("  Total sync graphs: {}", total_sync + if sync_count > 0 { 1 } else { 0 });
-    if !stale_graphs.is_empty() {
-        println!("  Cleaned up {} stale graph(s)", stale_graphs.len());
-    }
     println!("Store: {}", store_path().unwrap().display());
 }
 
@@ -2623,6 +2586,10 @@ fn cmd_query(query: String, json: bool) {
             .load_from_reader(RdfFormat::NQuads, Cursor::new(fm_nq.as_bytes()))
             .expect("failed to load frontmatter triples");
     }
+
+    // The self-describing ontology graph rides along in the live view too —
+    // vocabulary queries work without a prior sync.
+    let _ = crate::nquad::load_ontology_graph(&store);
 
     // Also fold in any compiled .nq already on disk (history/sync graphs a prior
     // `sync` wrote) so history-aware queries still see the sync/<sha> snapshots.
@@ -3053,8 +3020,7 @@ fn cmd_history_verify(show: usize) {
     let start = Instant::now();
 
     let root = find_git_root().expect("not in a git repo");
-    let base = base_uri();
-    let history_graph = format!("<{}>", iri_join(&base, "history"));
+    let history_graph = format!("<{}>", graph_uri("history"));
 
     let store_path_buf = root.join(".git").join("lex").join("oxigraph");
     let store = match Store::open(&store_path_buf) {
@@ -3180,7 +3146,7 @@ fn cmd_history_verify(show: usize) {
             Err(_) => continue,
         };
         // Reuse the same derivation the walker uses (via spo_events).
-        let doc_uri = match spo_events::doc_uri_from_sidecar(&sidecar_rel, &base) {
+        let doc_uri = match spo_events::doc_uri_from_sidecar(&sidecar_rel) {
             Some(u) => u,
             None => continue,
         };
@@ -3205,7 +3171,6 @@ fn cmd_history_verify(show: usize) {
                 line,
                 &doc_uri,
                 &emit_graph,
-                &base,
                 &source_rel,
                 &slug_index,
                 &path_index,

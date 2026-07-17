@@ -21,14 +21,15 @@ use git_lex::resolve_kit_spec;
 use crate::nquad::uri_encode_path;
 use crate::ontology::{get_object_properties, get_property_datatypes};
 
-/// Resolve a slug to an IRI, using the provided base URI and slug index.
-/// Falls back to an entity URI if the slug is not in the index.
-pub(crate) fn resolve_slug_to_uri(slug: &str, base: &str, slug_index: &HashMap<String, String>) -> String {
+/// Resolve a slug to an IRI under the soul a-box base (Day-50: no soul
+/// identity in subjects). Falls back to an entity URI if the slug is not in
+/// the index.
+pub(crate) fn resolve_slug_to_uri(slug: &str, slug_index: &HashMap<String, String>) -> String {
     if let Some(rel_path) = slug_index.get(slug) {
-        format!("<{}/{}>", base, uri_encode_path(rel_path))
+        format!("<{}>", crate::git::resource_uri(&uri_encode_path(rel_path)))
     } else {
         // No matching file — fall back to entity URI
-        format!("<{}/entity/{}>", base, uri_encode_path(slug))
+        format!("<{}>", crate::git::resource_uri(&format!("entity/{}", uri_encode_path(slug))))
     }
 }
 

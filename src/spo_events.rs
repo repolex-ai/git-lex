@@ -896,7 +896,7 @@ fn read_sidecar_at_commit(sha: &str, sidecar_path: &str) -> Vec<String> {
 /// prefix and the `.{extractor}.spo` suffix.
 ///
 /// Returns the doc URI in `<...>` form, ready to embed in N-Quads.
-pub fn doc_uri_from_sidecar(sidecar_path: &str, base: &str) -> Option<String> {
+pub fn doc_uri_from_sidecar(sidecar_path: &str) -> Option<String> {
     let after_extract = sidecar_path.strip_prefix(".lex/extract/")?;
     let doc_path = if let Some(s) = after_extract.strip_suffix(".fm.spo") {
         s
@@ -907,7 +907,7 @@ pub fn doc_uri_from_sidecar(sidecar_path: &str, base: &str) -> Option<String> {
     } else {
         return None;
     };
-    Some(format!("<{}/{}>", base, crate::nquad::uri_encode_path(doc_path)))
+    Some(format!("<{}>", crate::git::resource_uri(&crate::nquad::uri_encode_path(doc_path))))
 }
 
 /// build the N-Quad lines for the history-graph annotation of a
@@ -930,7 +930,6 @@ pub fn history_annotation(
     op: char,
     commit_sha: &str,
     sidecar_path: &str,
-    base: &str,
     history_graph: &str,
 ) -> Option<Vec<String>> {
     // The triple_nq looks like: `<S> <P> O <G> .`
@@ -951,14 +950,14 @@ pub fn history_annotation(
     let mut hasher = Sha256::new();
     hasher.update(key.as_bytes());
     let hash = format!("{:x}", hasher.finalize());
-    let ann_uri = format!("<{}/spo-ann/{}>", base, &hash[..16]);
+    let ann_uri = format!("<{}>", crate::git::resource_uri(&format!("spo-ann/{}", &hash[..16])));
 
     let added_or_removed = if op == '+' {
         "<https://repolex.ai/ontology/spo/addedIn>"
     } else {
         "<https://repolex.ai/ontology/spo/removedIn>"
     };
-    let commit_uri = format!("<{}/commit/{}>", base, commit_sha);
+    let commit_uri = format!("<{}>", crate::git::resource_uri(&format!("commit/{}", commit_sha)));
 
     Some(vec![
         // The triple term annotation: <ann-uri> rdf:reifies <<( s p o )>>
@@ -1032,11 +1031,10 @@ pub(crate) struct HistoryWalkStats {
 /// If `clear_first` is true, clears the history graph before loading (full
 /// rebuild). If false, appends (incremental sync).
 ///
-/// Returns stats and writes the `lastHistorySync` marker into `<base/meta>`.
+/// Returns stats and writes the `lastHistorySync` marker into the meta graph.
 pub(crate) fn history_walk_engine(
     commits: &[SpikeCommit],
     store: &oxigraph::store::Store,
-    base: &str,
     history_graph: &str,
     meta_graph: &str,
     head_sha: &str,
@@ -1083,7 +1081,7 @@ pub(crate) fn history_walk_engine(
                 continue;
             }
 
-            let doc_uri = match doc_uri_from_sidecar(&ev.path, base) {
+            let doc_uri = match doc_uri_from_sidecar(&ev.path) {
                 Some(u) => u,
                 None => {
                     events_skipped += 1;
@@ -1100,7 +1098,6 @@ pub(crate) fn history_walk_engine(
                 &ev.line,
                 &doc_uri,
                 &scratch_graph,
-                base,
                 &relpath_str,
                 slug_index,
                 path_index,
@@ -1126,7 +1123,6 @@ pub(crate) fn history_walk_engine(
                     ev.op,
                     &c.sha,
                     &ev.path,
-                    base,
                     history_graph,
                 ) {
                     for q in ann_quads {
@@ -1148,7 +1144,7 @@ pub(crate) fn history_walk_engine(
             // Helper closure: read sidecar lines, emit through the shared
             // emitter, annotate each triple with addedIn or removedIn.
             let mut emit_rename_side = |sidecar_path: &str, commit_sha: &str, op: char, lines: &[String]| {
-                let doc_uri = match doc_uri_from_sidecar(sidecar_path, base) {
+                let doc_uri = match doc_uri_from_sidecar(sidecar_path) {
                     Some(u) => u,
                     None => return,
                 };
@@ -1158,7 +1154,7 @@ pub(crate) fn history_walk_engine(
                     let mut emit_buf = String::new();
                     let mut emitted_types: HashSet<String> = HashSet::new();
                     let _errs = crate::nquad::emit_spo_line_nquads(
-                        line, &doc_uri, &scratch_graph, base, &relpath_str,
+                        line, &doc_uri, &scratch_graph, &relpath_str,
                         slug_index, path_index, obj_props, prop_datatypes,
                         &mut emitted_types, &mut emit_buf,
                     );
@@ -1169,7 +1165,7 @@ pub(crate) fn history_walk_engine(
                         .collect();
                     for triple_nq in &triple_nqs {
                         if let Some(ann_quads) = history_annotation(
-                            triple_nq, op, commit_sha, sidecar_path, base, history_graph,
+                            triple_nq, op, commit_sha, sidecar_path, history_graph,
                         ) {
                             for q in ann_quads {
                                 nq_buffer.push_str(&q);
@@ -1223,8 +1219,10 @@ pub(crate) fn history_walk_engine(
         let _ = store.clear_graph(&meta_node);
     }
     let marker_nq = format!(
-        "<{}/meta> <https://repolex.ai/ontology/spo/lastHistorySync> <{}/commit/{}> {} .\n",
-        base, base, head_sha, meta_graph
+        "<{}> <https://repolex.ai/ontology/spo/lastHistorySync> <{}> {} .\n",
+        crate::git::resource_uri("meta"),
+        crate::git::resource_uri(&format!("commit/{}", head_sha)),
+        meta_graph
     );
     let parser = oxigraph::io::RdfParser::from_format(oxigraph::io::RdfFormat::NQuads);
     if let Err(e) = store.load_from_reader(parser, std::io::Cursor::new(marker_nq.as_bytes())) {
