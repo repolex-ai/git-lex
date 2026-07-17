@@ -35,7 +35,7 @@ enum Commands {
         port: u16,
     },
     /// Start the W3C SPARQL protocol endpoint (+ Swagger UI) over the synced store
-    Query {
+    Sparql {
         /// Port to listen on
         #[arg(long, default_value = "7880")]
         port: u16,
@@ -47,7 +47,7 @@ fn main() {
     match cli.command {
         Commands::Viz { port } => cmd_viz(port),
         Commands::Listen { port } => cmd_listen(port),
-        Commands::Query { port } => cmd_query_server(port),
+        Commands::Sparql { port } => cmd_sparql_server(port),
     }
 }
 
@@ -686,7 +686,7 @@ mod query_server {
     }
 }
 
-fn cmd_query_server(port: u16) {
+fn cmd_sparql_server(port: u16) {
     let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
     rt.block_on(async move {
         let app = query_server::router();
