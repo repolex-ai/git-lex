@@ -1508,8 +1508,15 @@ fn cmd_validate() -> bool {
 
     for filepath in &files {
         let ttl = match frontmatter_to_turtle(filepath, &root, &kit) {
-            Some(t) => t,
-            None => continue,
+            Ok(Some(t)) => t,
+            Ok(None) => continue,
+            Err(e) => {
+                eprintln!("  {}: {}", filepath.display(), e);
+                total_files += 1;
+                total_violations += 1;
+                failed_files.push(filepath.display().to_string());
+                continue;
+            }
         };
         total_files += 1;
 
@@ -1884,33 +1891,42 @@ fn cmd_sync() {
 
     // ─── Phase 2: Sync graph — diff sidecars since last sync ───
 
-    // Find last sync commit (latest /sync/ graph in store)
+    // Find last sync commit: the sync graph whose commit is the NEAREST
+    // ancestor of HEAD. Graph names end in commit SHAs, which carry no
+    // ordering — recency must come from git, not string sort (a string-DESC
+    // pick is an arbitrary member of the set, and diffing against an old
+    // base silently loses retractions).
     let last_sync_commit: Option<String> = {
-        let query = format!(
-            "SELECT ?g WHERE {{ GRAPH ?g {{ ?s ?p ?o }} FILTER(STRSTARTS(STR(?g), 'https://repolex.ai/git-lex/sync/')) }} ORDER BY DESC(STR(?g)) LIMIT 1"
-        );
-        let results = oxigraph::sparql::SparqlEvaluator::new()
-            .parse_query(&query)
-            .ok()
-            .and_then(|q| q.on_store(&store).execute().ok());
-        match results {
-            Some(oxigraph::sparql::QueryResults::Solutions(solutions)) => {
-                solutions.filter_map(|s| {
-                    s.ok().and_then(|s| {
-                        s.get("g").and_then(|t| match t {
-                            Term::NamedNode(n) => {
-                                // Extract commit SHA from /sync/{sha}/
-                                let uri = n.as_str();
-                                uri.rfind("/sync/").map(|pos| {
-                                    uri[pos + 6..].trim_end_matches('/').to_string()
-                                })
-                            }
-                            _ => None,
-                        })
-                    })
-                }).next()
-            }
-            _ => None,
+        let sync_shas: HashSet<String> = store
+            .named_graphs()
+            .filter_map(|g| g.ok())
+            .filter_map(|g| match g {
+                oxigraph::model::NamedOrBlankNode::NamedNode(n) => {
+                    let uri = n.as_str();
+                    uri.strip_prefix("https://repolex.ai/git-lex/sync/")
+                        .map(|sha| sha.trim_end_matches('/').to_string())
+                }
+                _ => None,
+            })
+            .collect();
+        if sync_shas.is_empty() {
+            None
+        } else {
+            // Walk HEAD's history newest-first; the first synced commit we
+            // meet is the most recent sync base. Sync graphs from other
+            // branches (non-ancestors) are correctly ignored.
+            Command::new("git")
+                .args(["rev-list", "HEAD"])
+                .current_dir(&root)
+                .output()
+                .ok()
+                .filter(|o| o.status.success())
+                .and_then(|o| {
+                    String::from_utf8_lossy(&o.stdout)
+                        .lines()
+                        .map(|l| l.trim().to_string())
+                        .find(|sha| sync_shas.contains(sha))
+                })
         }
     };
 
@@ -1940,8 +1956,12 @@ fn cmd_sync() {
     // Get sidecars at last sync point (from git history)
     let previous_spo: HashMap<String, String> = if let Some(ref last_sha) = last_sync_commit {
         // List .spo files at that commit
+        // current_dir(&root) on every git call here: ls-tree pathspecs are
+        // cwd-relative, so running sync from a subdirectory without it would
+        // silently see NO previous sidecars and re-assert everything as new.
         let output = Command::new("git")
             .args(["ls-tree", "-r", "--name-only", last_sha, ".lex/extract/"])
+            .current_dir(&root)
             .output();
         let mut prev = HashMap::new();
         if let Ok(o) = output {
@@ -1951,6 +1971,7 @@ fn cmd_sync() {
                     if file_path.ends_with(".spo") {
                         let content = Command::new("git")
                             .args(["show", &format!("{}:{}", last_sha, file_path)])
+                            .current_dir(&root)
                             .output();
                         if let Ok(c) = content {
                             if c.status.success() {
@@ -2000,6 +2021,7 @@ fn cmd_sync() {
         // Get blob hash for this source file
         let blob_hash = Command::new("git")
             .args(["rev-parse", &format!("HEAD:{}", source_file)])
+            .current_dir(&root)
             .output()
             .ok()
             .filter(|o| o.status.success())
@@ -2287,10 +2309,16 @@ fn cmd_sync() {
             history_clear,
             true, // show_progress
         );
-        format!(
-            "{} commit(s), {} events, {} annotations",
-            history_commits.len(), stats.events_seen, stats.events_emitted,
-        )
+        match stats.failed {
+            Some(ref e) => format!(
+                "FAILED ({}) — {} commit(s) not recorded, will retry next sync",
+                e, history_commits.len(),
+            ),
+            None => format!(
+                "{} commit(s), {} events, {} annotations",
+                history_commits.len(), stats.events_seen, stats.events_emitted,
+            ),
+        }
     };
 
     store.flush().expect("failed to flush store");

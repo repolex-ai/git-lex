@@ -136,17 +136,16 @@ git lex query "PREFIX ks: <https://repolex.ai/ontology/kit/soul/>
 | `git lex init [--kit <name>]` | Initialize `.lex/` in the current repo. The base kit is always installed; `--kit` adds a domain kit (e.g. `soul`). |
 | `git lex create <Type> [<id>]` | Scaffold a new document from a kit class, with frontmatter stubbed from the ontology. |
 | `git lex save "msg"` | Stage + extract frontmatter + SHACL-validate + commit, in one step. |
-| `git lex query "SPARQL"` | Run a SPARQL query. The "now" view is built from your working tree, so it always reflects current frontmatter (no `sync` needed); history graphs from past `sync`es are queryable too. `--json` for machine output. |
+| `git lex query "SPARQL"` | Run a SPARQL query over a live view built from your working tree, so it always reflects current frontmatter (no `sync` needed). History/sync graphs live in the persistent store and are served by the SPARQL endpoint (`git lex serve sparql`). `--json` for machine output. |
 | `git lex list` | List every document class the repo's installed kits define, each with its full namespace IRI (the prefix to query against). `--json` for machine output. |
 | `git lex sync` | Snapshot the current state into the persistent history store as a commit-tagged graph (RDF 1.2 provenance). Builds the temporal "what was true when" view; not required for querying current state. |
 | `git lex kit-update [<kit>]` | Re-download + reinstall kits. Drift-aware: locally-changed files are preserved and the new version lands beside them as `<file>.kit-latest` to diff (`--force` overwrites, stashing your version first). |
 | `git lex kit-add <org/repo>` | Add an optional kit (the kit's `scope:` must be `optional`). Creates its folders + templates. |
 | `git lex kit-remove <org/repo>` | Remove an optional kit. Asks before deleting any content folders it owns. |
 | `git lex join <squad-path>` | Join a squad repo — creates a mutual identity binding (a ticket) between you and the squad. |
-| `git lex serve [...]` | Start the local servers (graph visualizer, listener). |
+| `git lex serve <viz\|listen\|sparql>` | Start one local server: `viz` (graph visualizer, 7878), `listen` (SSE relay, 7879), or `sparql` (W3C SPARQL endpoint over the synced store, 7880). |
 | `git lex display "CONSTRUCT ..."` | Run a SPARQL CONSTRUCT and push the result to the running viz server. |
 | `git lex history-verify` | Check the history⇄now invariant — that the temporal graph faithfully reconstructs the current state. |
-| `git lex raw backfill` | One-shot: mirror pre-existing harness session files into `Raw/` (the live mirror runs on every save). |
 | `git lex nuke` | Remove `.lex/` entirely. Your content files and git history are untouched. |
 
 Run `git lex help <subcommand>` for full options on any command.

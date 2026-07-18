@@ -38,6 +38,9 @@ pub(crate) fn uri_encode_path(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for c in s.chars() {
         match c {
+            '%' => out.push_str("%25"),
+            '"' => out.push_str("%22"),
+            '\\' => out.push_str("%5C"),
             ' ' => out.push_str("%20"),
             '<' => out.push_str("%3C"),
             '>' => out.push_str("%3E"),
@@ -61,12 +64,20 @@ pub(crate) fn uri_encode_path(s: &str) -> String {
 }
 
 /// Generate all virtual N-Quads from git (commits, tree, refs).
+///
+/// Every git invocation is anchored to the repo root: ls-tree (and any
+/// pathspec-taking command) is cwd-prefix-sensitive, so an un-anchored call
+/// from a subdirectory silently emits a truncated filetree.
 pub(crate) fn generate_git_nquads() -> String {
     let mut nq = String::new();
+    let Some(git_root) = find_git_root() else {
+        return nq; // not a git repo — nothing to emit
+    };
 
     // Repo node: typed + identity-as-a-fact ALWAYS (genesis SHA lives HERE as
     // data, never in any IRI — Day-50); repo.yml fields fold in when present.
-    if let Some(root) = find_git_root() {
+    {
+        let root = &git_root;
         let repo_uri = format!("<{}>", resource_uri(""));
         let graph = format!("<{}>", graph_uri("repo"));
         nq.push_str(&format!(
@@ -101,6 +112,7 @@ pub(crate) fn generate_git_nquads() -> String {
     // Commits
     let output = Command::new("git")
         .args(["log", "--all", "--format=%H%x00%ae%x00%an%x00%aI%x00%s%x00%P%x00%ce%x00%cn%x00%cI"])
+        .current_dir(&git_root)
         .output();
     if let Ok(o) = output {
         if o.status.success() {
@@ -132,6 +144,7 @@ pub(crate) fn generate_git_nquads() -> String {
     // Tree at HEAD
     let ref_sha = Command::new("git")
         .args(["rev-parse", "HEAD"])
+        .current_dir(&git_root)
         .output()
         .ok()
         .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
@@ -140,6 +153,7 @@ pub(crate) fn generate_git_nquads() -> String {
     if !ref_sha.is_empty() {
         let output = Command::new("git")
             .args(["ls-tree", "-r", "--format=%(objectmode) %(objecttype) %(objectname) %(objectsize)\t%(path)", "HEAD"])
+            .current_dir(&git_root)
             .output();
         if let Ok(o) = output {
             if o.status.success() {
@@ -167,6 +181,7 @@ pub(crate) fn generate_git_nquads() -> String {
     // Branches
     let output = Command::new("git")
         .args(["branch", "-a", "--format=%(refname:short) %(objectname)"])
+        .current_dir(&git_root)
         .output();
     if let Ok(o) = output {
         if o.status.success() {
@@ -187,6 +202,7 @@ pub(crate) fn generate_git_nquads() -> String {
     // Tags
     let output = Command::new("git")
         .args(["tag", "-l", "--format=%(refname:short) %(objectname)"])
+        .current_dir(&git_root)
         .output();
     if let Ok(o) = output {
         if o.status.success() {
@@ -207,6 +223,7 @@ pub(crate) fn generate_git_nquads() -> String {
     // Changesets: which files each commit touched
     let output = Command::new("git")
         .args(["log", "--all", "--format=%H", "--name-status", "--diff-filter=ADMR"])
+        .current_dir(&git_root)
         .output();
     if let Ok(o) = output {
         if o.status.success() {
@@ -322,6 +339,7 @@ pub(crate) fn generate_git_nquads() -> String {
     {
         let head_sha = Command::new("git")
             .args(["rev-parse", "HEAD"])
+            .current_dir(&git_root)
             .output()
             .ok()
             .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
@@ -330,6 +348,7 @@ pub(crate) fn generate_git_nquads() -> String {
 
         let output = Command::new("git")
             .args(["ls-tree", "-r", "--name-only", "HEAD"])
+            .current_dir(&git_root)
             .output();
         if let Ok(o) = output {
             if o.status.success() {
@@ -513,9 +532,15 @@ pub(crate) fn generate_frontmatter_nquads() -> (String, u32) {
             let rest = &content[4..];
             if let Some(end) = rest.find("\n---") {
                 let yaml_str = &rest[..end];
-                if let Ok(yaml) = serde_yaml::from_str::<HashMap<String, serde_yaml::Value>>(yaml_str) {
-                    for (key, value) in &yaml {
-                        flatten_yaml(key, value, &mut spo_lines);
+                match serde_yaml::from_str::<HashMap<String, serde_yaml::Value>>(yaml_str) {
+                    Ok(yaml) => {
+                        for (key, value) in &yaml {
+                            flatten_yaml(key, value, &mut spo_lines);
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!("error: {}: malformed YAML frontmatter: {}", relpath_str, e);
+                        total_errors += 1;
                     }
                 }
                 // Body is everything after the closing ---
@@ -541,12 +566,17 @@ pub(crate) fn generate_frontmatter_nquads() -> (String, u32) {
         spo_lines.sort();
         spo_lines.dedup();
 
-        // Write .spo sidecar (only if there's content)
+        // Write .spo sidecar; when a doc's extractable content goes away its
+        // existing sidecar must go away too, so the sync diff sees the lines
+        // vanish and records retractions (the append-only ledger's only
+        // signal — the now graph rebuilds from files and never notices).
+        let spo_path = extract_dir.join(format!("{}.fm.spo", relpath_str));
         if !spo_lines.is_empty() {
-            let spo_path = extract_dir.join(format!("{}.fm.spo", relpath_str));
             fs::create_dir_all(spo_path.parent().unwrap()).ok();
             let spo_content = spo_lines.join("\n") + "\n";
             fs::write(&spo_path, &spo_content).ok();
+        } else if spo_path.exists() {
+            fs::remove_file(&spo_path).ok();
         }
 
         // --- Generate N-Quads for oxigraph (now graph) ---
@@ -946,4 +976,38 @@ pub(crate) fn load_ontology_graph(store: &oxigraph::store::Store) -> usize {
         }
     }
     loaded
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// Tests
+// ════════════════════════════════════════════════════════════════════════════
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// '%', '"', and '\' are legal in filenames but illegal (or
+    /// escape-significant) in IRIs — unencoded they made a file like
+    /// `100%.md` panic every sync (deep-review HIGH #3). '%' must be
+    /// encoded FIRST so already-encoded output is never double-mangled.
+    #[test]
+    fn uri_encode_path_covers_iri_breaking_chars() {
+        assert_eq!(uri_encode_path("100%.md"), "100%25.md");
+        assert_eq!(uri_encode_path("he\"llo.md"), "he%22llo.md");
+        assert_eq!(uri_encode_path("back\\slash.md"), "back%5Cslash.md");
+        assert_eq!(uri_encode_path("a b.md"), "a%20b.md");
+        // untouched safe chars
+        assert_eq!(uri_encode_path("Soul/Memory/plain-file.md"), "Soul/Memory/plain-file.md");
+    }
+
+    /// Every encoded output must parse as an IRI path segment: round-trip
+    /// through oxigraph's NamedNode to prove the class of panic is closed.
+    #[test]
+    fn uri_encode_path_output_is_valid_iri() {
+        for name in ["100%.md", "he\"llo.md", "back\\slash.md", "sp ace.md", "a{b}|c^d`e[f].md"] {
+            let iri = format!("https://repolex.ai/soul/{}", uri_encode_path(name));
+            oxigraph::model::NamedNode::new(&iri)
+                .unwrap_or_else(|e| panic!("{} → {} not a valid IRI: {}", name, iri, e));
+        }
+    }
 }

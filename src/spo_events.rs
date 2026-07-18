@@ -1023,6 +1023,10 @@ pub(crate) struct HistoryWalkStats {
     pub events_emitted: usize,
     pub events_skipped: usize,
     pub nq_bytes: usize,
+    /// Set when the walk's store writes failed. The lastHistorySync marker is
+    /// NOT advanced in that case, so the next sync re-walks the same commits
+    /// instead of permanently losing their events.
+    pub failed: Option<String>,
 }
 
 /// Core history-walk engine. Takes pre-collected commits and walks their .spo
@@ -1195,12 +1199,29 @@ pub(crate) fn history_walk_engine(
 
     let nq_bytes = nq_buffer.len();
 
+    // A failed store write must NOT advance the lastHistorySync marker: the
+    // marker is the incremental walker's since-point, so advancing it past
+    // unloaded commits loses their events permanently while later syncs
+    // report clean. On failure we return early — next sync retries the walk.
+    let fail = |msg: String| {
+        eprintln!("  History: {} — marker not advanced; next sync will retry", msg);
+        HistoryWalkStats {
+            events_seen,
+            events_emitted,
+            events_skipped,
+            nq_bytes,
+            failed: Some(msg),
+        }
+    };
+
     // Optionally clear the history graph (full rebuild) before loading.
     if clear_first {
         if let Ok(graph_node) = oxigraph::model::NamedNode::new(
             history_graph.trim_start_matches('<').trim_end_matches('>'),
         ) {
-            let _ = store.clear_graph(&graph_node);
+            if let Err(e) = store.clear_graph(&graph_node) {
+                return fail(format!("history graph clear failed: {}", e));
+            }
         }
     }
 
@@ -1208,7 +1229,7 @@ pub(crate) fn history_walk_engine(
     if !nq_buffer.is_empty() {
         let parser = oxigraph::io::RdfParser::from_format(oxigraph::io::RdfFormat::NQuads);
         if let Err(e) = store.load_from_reader(parser, std::io::Cursor::new(nq_buffer.as_bytes())) {
-            eprintln!("  History: load failed: {}", e);
+            return fail(format!("load failed: {}", e));
         }
     }
 
@@ -1234,6 +1255,7 @@ pub(crate) fn history_walk_engine(
         events_emitted,
         events_skipped,
         nq_bytes,
+        failed: None,
     }
 }
 

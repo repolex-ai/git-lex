@@ -163,18 +163,26 @@ pub(crate) fn short_hash(input: &str) -> String {
 /// Read a markdown file with `kit.class.property` frontmatter and emit Turtle
 /// for the document, using the kit's ontology to distinguish ObjectProperty
 /// (→ IRI) from typed/plain literal ranges.
-pub(crate) fn frontmatter_to_turtle(filepath: &std::path::Path, root: &std::path::Path, kit: &str) -> Option<String> {
-    let content = fs::read_to_string(filepath).ok()?;
+/// Returns `Ok(None)` for files that simply aren't kit documents (no
+/// frontmatter, no kit-prefixed keys). Malformed YAML is `Err` — a doc that
+/// TRIED to carry frontmatter and failed must fail validation, not skip it.
+pub(crate) fn frontmatter_to_turtle(filepath: &std::path::Path, root: &std::path::Path, kit: &str) -> Result<Option<String>, String> {
+    let content = fs::read_to_string(filepath)
+        .map_err(|e| format!("cannot read file: {}", e))?;
 
     if !content.starts_with("---\n") && !content.starts_with("---\r\n") {
-        return None;
+        return Ok(None);
     }
 
     let rest = &content[4..];
-    let end = rest.find("\n---")?;
+    let end = match rest.find("\n---") {
+        Some(e) => e,
+        None => return Ok(None),
+    };
     let yaml_str = &rest[..end];
 
-    let yaml: HashMap<String, serde_yaml::Value> = serde_yaml::from_str(yaml_str).ok()?;
+    let yaml: HashMap<String, serde_yaml::Value> = serde_yaml::from_str(yaml_str)
+        .map_err(|e| format!("malformed YAML frontmatter: {}", e))?;
 
     // Find dot notation keys matching this kit: kit.class.property
     // Use the short kit name (e.g., "soul") not the full spec
@@ -208,7 +216,7 @@ pub(crate) fn frontmatter_to_turtle(filepath: &std::path::Path, root: &std::path
                         Ok(canonical) => doc_type = Some(canonical),
                         Err(msg) => {
                             eprintln!("warning: {msg} (skipping {})", filepath.display());
-                            return None;
+                            return Ok(None);
                         }
                     }
                 }
@@ -227,9 +235,12 @@ pub(crate) fn frontmatter_to_turtle(filepath: &std::path::Path, root: &std::path
         }
     }
 
-    let doc_type = doc_type?;
+    let doc_type = match doc_type {
+        Some(t) => t,
+        None => return Ok(None),
+    };
     if kit_props.is_empty() {
-        return None;
+        return Ok(None);
     }
 
     // Prefix name + namespace come from the kit's SHACL shapes file (the
@@ -247,7 +258,8 @@ pub(crate) fn frontmatter_to_turtle(filepath: &std::path::Path, root: &std::path
     let prop_datatypes = get_property_datatypes(kit);
 
     // Build Turtle RDF for this document
-    let relpath = filepath.strip_prefix(root).ok()?;
+    let relpath = filepath.strip_prefix(root)
+        .map_err(|_| format!("file {} is outside repo root", filepath.display()))?;
     let doc_id = relpath.to_string_lossy().replace('/', "_").replace('.', "_");
 
     let mut ttl = String::new();
@@ -297,7 +309,7 @@ pub(crate) fn frontmatter_to_turtle(filepath: &std::path::Path, root: &std::path
     if std::env::var("GIT_LEX_DEBUG_TTL").is_ok() {
         eprintln!("=== TTL for {} ===\n{}", filepath.display(), ttl);
     }
-    Some(ttl)
+    Ok(Some(ttl))
 }
 
 // ─── JSONL session extractor (for claude-code kit) ─────────────
