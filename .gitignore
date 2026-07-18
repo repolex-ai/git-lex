@@ -2,3 +2,9 @@
 .lex/
 .git/lex/
 .DS_Store
+
+# >>> git-lex engine runtime (managed) >>>
+.pool/
+.copia/
+.weave/
+# <<< git-lex engine runtime (managed) <<<

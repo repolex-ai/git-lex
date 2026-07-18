@@ -500,26 +500,20 @@ fn resolve_class_against(classes: &[String], class_seg: &str) -> ClassMatch {
     ClassMatch::NoMatch
 }
 
-/// Read the `lex-o:instantiation` annotation for a single class out of
-/// the kit's source ontology TTL. Returns one of `"authored"`,
-/// `"graph-only"`, or `"abstract"`, defaulting to `"authored"` when the
-/// annotation is absent (which preserves pre-annotation backward
-/// compatibility — older kits without instantiation annotations behave
-/// as if every class were authored, the historical default).
+/// Read the `git-lex:foldered` flag for a single class out of the kit's
+/// source ontology TTL. **Opt-IN**: a class gets a scaffolded folder +
+/// `__ClassName.md` template ONLY when tagged `git-lex:foldered true`.
+/// Absent (or false) = graph-only, no folder — the quiet default never
+/// litters empty folders for vocabulary-only classes (Rob's ruling; the
+/// old lex-o:instantiation opt-out list under-covered copia by 10 classes).
 ///
 /// Reads from the source `.ttl` (e.g. `.lex/ontology/copia/copia.ttl`),
-/// NOT the derived `-shapes.ttl`. The instantiation annotation lives in
-/// OWL; SHACL shapes don't carry it.
+/// NOT the derived `-shapes.ttl` — the flag is authored OWL-side.
 ///
-/// Parser is intentionally string-level (not a full Turtle parse). It
-/// scans for the class declaration line — either `kit:ClassName a owl:Class`
-/// or just `kit:ClassName a` followed by a class-y token — and looks for
-/// `lex-o:instantiation "<value>"` inside the same stanza (until the next
-/// statement-terminating `.`). This matches the conventional shape used
-/// across kit-copia, kit-pool, etc.
-pub(crate) fn get_class_instantiation(kit: &str, class_name: &str) -> String {
-    let default = "authored".to_string();
-    let Some(root) = find_git_root() else { return default };
+/// Parser is intentionally string-level (not a full Turtle parse), same
+/// stanza-scan shape as the type-label lookup below.
+pub(crate) fn get_class_foldered(kit: &str, class_name: &str) -> bool {
+    let Some(root) = find_git_root() else { return false };
     let (_, _, short) = resolve_kit_spec(kit);
     let target = format!("{}.ttl", short);
 
@@ -532,25 +526,18 @@ pub(crate) fn get_class_instantiation(kit: &str, class_name: &str) -> String {
         .or_else(|_| fs::read_to_string(&adaptive_path))
         .unwrap_or_default();
     if content.is_empty() {
-        return default;
+        return false;
     }
-    parse_class_instantiation(&content, &short, class_name)
+    parse_class_foldered(&content, &short, class_name)
 }
 
-/// Look up the OKF type label for a class — used at `git lex create` time to
-/// emit the `type:` field at the top of the YAML frontmatter (per OKF spec
-/// v0.1; the only REQUIRED frontmatter field for OKF compliance).
+/// Look up the display type label for a class — used at `git lex create` time to
+/// emit the `type:` field at the top of the YAML frontmatter.
 ///
-/// Three-fallback chain (per the OKF spec, locked by tr1p 2026-06-18):
-///   1. `lex-o:okfType "<value>"` annotation on the class — kit author's
-///      explicit choice.
-///   2. `rdfs:label "<value>"` — soft-launch path so unannotated kits still
-///      emit a sensible `type:` value from their existing labels.
-///   3. Local-name of the class — final fallback; always exists.
-///
-/// Returns a string in every case (the bottom of the chain is the local-name
-/// itself, which the caller passes in). Never panics.
-pub(crate) fn get_class_okf_type(kit: &str, class_name: &str) -> String {
+/// Two-fallback chain: `rdfs:label` → local-name of the class. Returns a
+/// string in every case; never panics. (The lex-o:okfType head of the old
+/// chain retired with lex-o — Rob's ruling; labels are correct everywhere.)
+pub(crate) fn get_class_type_label(kit: &str, class_name: &str) -> String {
     let Some(root) = find_git_root() else { return class_name.to_string() };
     let (_, _, short) = resolve_kit_spec(kit);
     let target = format!("{}.ttl", short);
@@ -566,17 +553,19 @@ pub(crate) fn get_class_okf_type(kit: &str, class_name: &str) -> String {
     if content.is_empty() {
         return class_name.to_string();
     }
-    parse_class_okf_type(&content, &short, class_name)
+    parse_class_type_label(&content, &short, class_name)
 }
 
-/// Pure parser for the `lex-o:okfType` lookup with full three-fallback chain.
-/// Separated from filesystem I/O so it can be unit-tested directly.
+/// Pure parser for the class type-label lookup (feeds `git lex create`'s
+/// top-of-frontmatter `type:` field). Separated from filesystem I/O so it
+/// can be unit-tested directly.
 ///
-/// Walks the class's stanza looking for `lex-o:okfType "..."` first; if not
-/// present, falls back to the stanza's `rdfs:label "..."`; if neither is
-/// present (or the class isn't declared in this file at all), returns the
-/// class's local-name unchanged.
-fn parse_class_okf_type(content: &str, short: &str, class_name: &str) -> String {
+/// Two-fallback chain: the stanza's `rdfs:label "..."`; if absent (or the
+/// class isn't declared in this file at all), the class's local-name
+/// unchanged. (Formerly a three-step chain headed by `lex-o:okfType` — OKF
+/// was adopted speculatively and retired with lex-o, Rob's ruling; the
+/// label is the correct value for every class.)
+fn parse_class_type_label(content: &str, short: &str, class_name: &str) -> String {
     let kit_prefix = find_kit_prefix(content, short);
     let class_qname = format!("{}:{}", kit_prefix, class_name);
 
@@ -593,18 +582,6 @@ fn parse_class_okf_type(content: &str, short: &str, class_name: &str) -> String 
             }
             continue;
         }
-        // okfType wins.
-        if let Some(idx) = t.find("lex-o:okfType") {
-            let after = &t[idx + "lex-o:okfType".len()..];
-            let after = after.trim_start();
-            if let Some(rest) = after.strip_prefix('"') {
-                if let Some(end) = rest.find('"') {
-                    return rest[..end].to_string();
-                }
-            }
-        }
-        // Capture the label for the fallback — but keep scanning in case
-        // okfType appears later in the stanza.
         if label.is_none() {
             if let Some(idx) = t.find("rdfs:label") {
                 let after = &t[idx + "rdfs:label".len()..];
@@ -649,17 +626,20 @@ fn find_kit_prefix(content: &str, short: &str) -> String {
     short.to_string()
 }
 
-/// Pure parser for the `lex-o:instantiation` annotation lookup.
+/// Pure parser for the `git-lex:foldered` flag lookup.
 /// Separated from filesystem I/O so it can be unit-tested directly.
-fn parse_class_instantiation(content: &str, short: &str, class_name: &str) -> String {
-    let default = "authored".to_string();
+///
+/// Returns true ONLY for an explicit `git-lex:foldered true` (bare Turtle
+/// boolean literal) inside the class's stanza. Anything else — absent flag,
+/// `false`, missing class, empty file — is false (opt-in).
+fn parse_class_foldered(content: &str, short: &str, class_name: &str) -> bool {
     let kit_prefix = find_kit_prefix(content, short);
     let class_qname = format!("{}:{}", kit_prefix, class_name);
 
     // Walk lines looking for the class declaration's stanza. Stanza
     // terminator is a line whose trimmed end is `.` (Turtle's
     // statement terminator). Within the stanza, look for
-    // `lex-o:instantiation "<value>"`.
+    // `git-lex:foldered true`.
     let mut in_stanza = false;
     for line in content.lines() {
         let t = line.trim();
@@ -674,24 +654,20 @@ fn parse_class_instantiation(content: &str, short: &str, class_name: &str) -> St
             }
             continue;
         }
-        // In-stanza: look for the annotation.
-        if let Some(idx) = t.find("lex-o:instantiation") {
-            let after = &t[idx + "lex-o:instantiation".len()..];
-            let after = after.trim_start();
-            if let Some(rest) = after.strip_prefix('"') {
-                if let Some(end) = rest.find('"') {
-                    return rest[..end].to_string();
-                }
-            }
+        // In-stanza: look for the flag. Turtle booleans are bare tokens
+        // (`true`/`false`), not quoted strings.
+        if let Some(idx) = t.find("git-lex:foldered") {
+            let after = t[idx + "git-lex:foldered".len()..].trim_start();
+            return after.starts_with("true");
         }
         // Stanza terminator — a `.` at end of trimmed line, not preceded
         // by `;` (which is the predicate-list continuation marker).
         if t.ends_with('.') && !t.ends_with(" ;") {
-            return default;
+            return false;
         }
     }
 
-    default
+    false
 }
 
 #[cfg(test)]
@@ -700,61 +676,57 @@ mod tests {
 
     const KIT_COPIA_SAMPLE: &str = r#"
 @prefix copia: <https://repolex.ai/ontology/kit/copia/> .
-@prefix lex-o: <https://repolex.ai/ontology/lex-o/> .
+@prefix git-lex: <https://repolex.ai/ontology/git-lex/> .
 @prefix owl: <http://www.w3.org/2002/07/owl#> .
 @prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
 
 copia:Place a owl:Class ;
+    git-lex:foldered true ;
     rdfs:label "Place" ;
-    rdfs:comment "A canon location." .
+    rdfs:comment "Authored — earns a folder." .
 
 copia:Moment a owl:Class ;
-    lex-o:instantiation "graph-only" ;
     rdfs:label "Moment" ;
-    rdfs:comment "Graph-only — never authored as a file." .
+    rdfs:comment "Untagged — graph-only, no folder." .
 
 copia:Depictable a owl:Class ;
-    lex-o:instantiation "abstract" ;
+    git-lex:foldered false ;
     rdfs:label "Depictable" ;
-    rdfs:comment "Abstract — never instantiated directly." .
+    rdfs:comment "Explicit false — same as untagged." .
 "#;
 
     #[test]
-    fn default_when_annotation_absent() {
-        let v = parse_class_instantiation(KIT_COPIA_SAMPLE, "copia", "Place");
-        assert_eq!(v, "authored");
+    fn foldered_true_scaffolds() {
+        assert!(parse_class_foldered(KIT_COPIA_SAMPLE, "copia", "Place"));
     }
 
     #[test]
-    fn reads_graph_only() {
-        let v = parse_class_instantiation(KIT_COPIA_SAMPLE, "copia", "Moment");
-        assert_eq!(v, "graph-only");
+    fn untagged_is_graph_only() {
+        // Opt-IN: absent flag means NO folder (the inverted default —
+        // forgetting the tag never litters empty folders).
+        assert!(!parse_class_foldered(KIT_COPIA_SAMPLE, "copia", "Moment"));
     }
 
     #[test]
-    fn reads_abstract() {
-        let v = parse_class_instantiation(KIT_COPIA_SAMPLE, "copia", "Depictable");
-        assert_eq!(v, "abstract");
+    fn explicit_false_is_graph_only() {
+        assert!(!parse_class_foldered(KIT_COPIA_SAMPLE, "copia", "Depictable"));
     }
 
     #[test]
-    fn default_when_class_missing() {
-        let v = parse_class_instantiation(KIT_COPIA_SAMPLE, "copia", "Nonexistent");
-        assert_eq!(v, "authored");
+    fn missing_class_is_graph_only() {
+        assert!(!parse_class_foldered(KIT_COPIA_SAMPLE, "copia", "Nonexistent"));
     }
 
     #[test]
-    fn default_when_content_empty() {
-        let v = parse_class_instantiation("", "copia", "Moment");
-        assert_eq!(v, "authored");
+    fn empty_content_is_graph_only() {
+        assert!(!parse_class_foldered("", "copia", "Moment"));
     }
 
     #[test]
-    fn does_not_leak_annotation_across_stanzas() {
-        // Place comes first with NO annotation; Moment comes after with
-        // graph-only. Place must NOT pick up Moment's annotation.
-        let v = parse_class_instantiation(KIT_COPIA_SAMPLE, "copia", "Place");
-        assert_eq!(v, "authored");
+    fn does_not_leak_flag_across_stanzas() {
+        // Place (foldered true) comes first; Moment follows untagged.
+        // Moment must NOT pick up Place's flag.
+        assert!(!parse_class_foldered(KIT_COPIA_SAMPLE, "copia", "Moment"));
     }
 
     #[test]
@@ -763,147 +735,109 @@ copia:Depictable a owl:Class ;
         // copia). Make sure the prefix-detect handles that form too.
         let ttl = r#"
 @prefix soul: <https://repolex.ai/ontology/kit/soul/> .
-@prefix lex-o: <https://repolex.ai/ontology/lex-o/> .
+@prefix git-lex: <https://repolex.ai/ontology/git-lex/> .
 
-soul:Self a owl:Class ;
-    lex-o:instantiation "graph-only" ;
-    rdfs:label "Self" .
+soul:Memory a owl:Class ;
+    git-lex:foldered true ;
+    rdfs:label "Memory" .
 "#;
-        let v = parse_class_instantiation(ttl, "soul", "Self");
-        assert_eq!(v, "graph-only");
+        assert!(parse_class_foldered(ttl, "soul", "Memory"));
     }
 
-    // ── OKF type lookup — three-fallback chain ──
+    // ── type-label lookup — label → local-name chain ──
 
-    const KIT_WITH_OKF_TYPES: &str = r#"
+    const KIT_WITH_LABELS: &str = r#"
 @prefix copia: <https://repolex.ai/ontology/kit/copia/> .
-@prefix lex-o: <https://repolex.ai/ontology/lex-o/> .
 @prefix owl: <http://www.w3.org/2002/07/owl#> .
-@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+@prefix rdfs: <https://www.w3.org/2000/01/rdf-schema#> .
 
-# Explicit annotation — wins
+# Label differs from local-name — label wins
 copia:Place a owl:Class ;
-    lex-o:okfType "Place" ;
     rdfs:label "Canon Location" ;
     rdfs:comment "A canon location." .
 
-# No annotation — falls back to rdfs:label
+# Plain label
 copia:Outfit a owl:Class ;
     rdfs:label "Outfit Item" ;
     rdfs:comment "What someone is wearing." .
 
-# Neither annotation nor label — falls back to local-name
+# No label — falls back to local-name
 copia:Bag a owl:Class ;
     rdfs:comment "A grouping." .
 
-# Annotation with a multi-word value (the NocturneActivity case)
+# Multi-word label (the NocturneActivity case)
 copia:NocturneActivity a owl:Class ;
-    lex-o:okfType "Nocturne Activity" ;
     rdfs:label "Nocturne Activity" .
 "#;
 
     #[test]
-    fn okf_explicit_annotation_wins_over_label() {
-        let v = parse_class_okf_type(KIT_WITH_OKF_TYPES, "copia", "Place");
-        // Annotation says "Place"; rdfs:label says "Canon Location".
-        // Annotation wins per the three-fallback chain.
-        assert_eq!(v, "Place");
+    fn type_label_uses_rdfs_label() {
+        let v = parse_class_type_label(KIT_WITH_LABELS, "copia", "Place");
+        assert_eq!(v, "Canon Location");
     }
 
     #[test]
-    fn okf_falls_back_to_rdfs_label_when_no_annotation() {
-        let v = parse_class_okf_type(KIT_WITH_OKF_TYPES, "copia", "Outfit");
-        assert_eq!(v, "Outfit Item");
-    }
-
-    #[test]
-    fn okf_falls_back_to_local_name_when_neither() {
-        let v = parse_class_okf_type(KIT_WITH_OKF_TYPES, "copia", "Bag");
+    fn type_label_falls_back_to_local_name_when_no_label() {
+        let v = parse_class_type_label(KIT_WITH_LABELS, "copia", "Bag");
         assert_eq!(v, "Bag");
     }
 
     #[test]
-    fn okf_falls_back_to_local_name_when_class_missing() {
-        let v = parse_class_okf_type(KIT_WITH_OKF_TYPES, "copia", "Nonexistent");
+    fn type_label_falls_back_to_local_name_when_class_missing() {
+        let v = parse_class_type_label(KIT_WITH_LABELS, "copia", "Nonexistent");
         assert_eq!(v, "Nonexistent");
     }
 
     #[test]
-    fn okf_falls_back_to_local_name_when_content_empty() {
-        let v = parse_class_okf_type("", "copia", "Memory");
+    fn type_label_falls_back_to_local_name_when_content_empty() {
+        let v = parse_class_type_label("", "copia", "Memory");
         assert_eq!(v, "Memory");
     }
 
     #[test]
-    fn okf_multiword_annotation_preserved() {
-        // The NocturneActivity case from the spec — multi-word OKF type
-        // labels are valid (open vocabulary).
-        let v = parse_class_okf_type(KIT_WITH_OKF_TYPES, "copia", "NocturneActivity");
+    fn type_label_multiword_preserved() {
+        let v = parse_class_type_label(KIT_WITH_LABELS, "copia", "NocturneActivity");
         assert_eq!(v, "Nocturne Activity");
     }
 
     #[test]
-    fn okf_does_not_leak_annotation_across_stanzas() {
-        // Place has okfType. Outfit (next stanza, no okfType) must NOT
-        // pick up Place's annotation — must fall back to its own label.
-        let v = parse_class_okf_type(KIT_WITH_OKF_TYPES, "copia", "Outfit");
-        assert_eq!(v, "Outfit Item");
-    }
-
-    #[test]
-    fn okf_does_not_leak_label_across_stanzas() {
+    fn type_label_does_not_leak_label_across_stanzas() {
         // Outfit has rdfs:label. Bag (next stanza, no label) must NOT pick
         // up Outfit's label — must fall back to local-name.
-        let v = parse_class_okf_type(KIT_WITH_OKF_TYPES, "copia", "Bag");
+        let v = parse_class_type_label(KIT_WITH_LABELS, "copia", "Bag");
         assert_eq!(v, "Bag");
     }
 
     #[test]
-    fn okf_parses_real_lex_o_seed_ontology() {
-        // Receipt check that our parser handles the actual lex-o.ttl
-        // shape. lex-o doesn't declare okfType on its own classes (it's the
-        // ontology that DEFINES the annotation property), so this exercises
-        // the rdfs:label fallback.
-        let path = std::path::PathBuf::from("/Users/rob/repos/repolex-ai/lex-o-seed/lex-o.ttl");
-        let Ok(content) = fs::read_to_string(&path) else {
-            // CI / detached test runs may not have this path. Skip cleanly.
-            return;
-        };
-        let v = parse_class_okf_type(&content, "lex-o", "Agent");
-        assert_eq!(v, "Agent", "lex-o:Agent has rdfs:label \"Agent\"");
-    }
-
-    #[test]
-    fn okf_parses_real_kit_soul_with_annotations() {
-        // Receipt check against the live kit-soul ontology that just had
-        // okfType annotations added across all 17 classes. Verifies the
-        // annotation wins over the label (they happen to match for Memory,
-        // but the parser logic is exercised regardless).
+    fn type_label_parses_real_kit_soul() {
+        // Receipt check against the live kit-soul ontology — labels hold
+        // whether or not the retired lex-o annotations are still present
+        // (chain is label → local-name; lex-o is invisible to it).
         let path = std::path::PathBuf::from("/Users/rob/repos/repolex-ai/git-lex-kit-soul/ontology/soul/soul.ttl");
         let Ok(content) = fs::read_to_string(&path) else { return };
-        assert_eq!(parse_class_okf_type(&content, "soul", "Memory"), "Memory");
-        assert_eq!(parse_class_okf_type(&content, "soul", "Decision"), "Decision");
-        assert_eq!(parse_class_okf_type(&content, "soul", "Note"), "Note");
-        assert_eq!(parse_class_okf_type(&content, "soul", "Journal"), "Journal");
+        assert_eq!(parse_class_type_label(&content, "soul", "Memory"), "Memory");
+        assert_eq!(parse_class_type_label(&content, "soul", "Decision"), "Decision");
+        assert_eq!(parse_class_type_label(&content, "soul", "Note"), "Note");
+        assert_eq!(parse_class_type_label(&content, "soul", "Journal"), "Journal");
     }
 
     #[test]
-    fn okf_parses_real_kit_copia_with_multiword_annotation() {
-        // Receipt for the NocturneActivity case — multi-word OKF type
-        // labels survive the round-trip through the real ontology file.
+    fn type_label_parses_real_kit_copia_multiword() {
+        // Receipt for the NocturneActivity case — multi-word labels
+        // survive the round-trip through the real ontology file.
         let path = std::path::PathBuf::from("/Users/rob/repos/repolex-ai/git-lex-kit-copia/ontology/copia/copia.ttl");
         let Ok(content) = fs::read_to_string(&path) else { return };
-        assert_eq!(parse_class_okf_type(&content, "copia", "Place"), "Place");
-        assert_eq!(parse_class_okf_type(&content, "copia", "NocturneActivity"), "Nocturne Activity");
-        assert_eq!(parse_class_okf_type(&content, "copia", "NocturneFeed"), "Nocturne Feed");
+        assert_eq!(parse_class_type_label(&content, "copia", "Place"), "Place");
+        assert_eq!(parse_class_type_label(&content, "copia", "NocturneActivity"), "Nocturne Activity");
+        assert_eq!(parse_class_type_label(&content, "copia", "NocturneFeed"), "Nocturne Feed");
     }
 
     #[test]
-    fn okf_parses_real_kit_pool_with_annotations() {
+    fn type_label_parses_real_kit_pool() {
         let path = std::path::PathBuf::from("/Users/rob/repos/repolex-ai/git-lex-kit-pool/ontology/pool/pool.ttl");
         let Ok(content) = fs::read_to_string(&path) else { return };
-        assert_eq!(parse_class_okf_type(&content, "pool", "Image"), "Image");
-        assert_eq!(parse_class_okf_type(&content, "pool", "Document"), "Document");
+        assert_eq!(parse_class_type_label(&content, "pool", "Image"), "Image");
+        assert_eq!(parse_class_type_label(&content, "pool", "Document"), "Document");
     }
 
     // B1 regression (Day 38): the class-casing footgun. Two emitters used to

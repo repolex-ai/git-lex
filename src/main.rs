@@ -474,11 +474,11 @@ fn cmd_init(directory: Option<String>, kit: Option<String>) {
         if create_folders {
             let mut created: Vec<String> = Vec::new();
             for (type_name, _) in &kit_types {
-                // Instantiation gate (lex-o-seed v0.2): skip graph-only /
-                // abstract classes — they're declared in the ontology but
-                // never authored as files, so they don't earn a folder.
-                let inst = ontology::get_class_instantiation(kit_name, type_name);
-                if inst == "graph-only" || inst == "abstract" {
+                // Foldered gate (git-lex:foldered, opt-IN — Rob's ruling,
+                // replaces lex-o:instantiation): a class earns a scaffolded
+                // folder ONLY when tagged `git-lex:foldered true`. Untagged =
+                // graph-only, no folder.
+                if !ontology::get_class_foldered(kit_name, type_name) {
                     continue;
                 }
                 let type_dir = if let Some(ref base) = folder_base {
@@ -611,11 +611,10 @@ fn cmd_init(directory: Option<String>, kit: Option<String>) {
 
         let tmpl_folder_base = kit_config_str(kit_name, "folder base");
         for (type_name, properties) in &kit_types {
-            // Instantiation gate (lex-o-seed v0.2): graph-only / abstract
-            // classes don't get a `__ClassName.md` template, since they
-            // don't have authored .md files at all.
-            let inst = ontology::get_class_instantiation(kit_name, type_name);
-            if inst == "graph-only" || inst == "abstract" {
+            // Foldered gate (git-lex:foldered, opt-IN): only foldered
+            // classes get a `__ClassName.md` template — untagged classes
+            // have no authored .md files at all.
+            if !ontology::get_class_foldered(kit_name, type_name) {
                 continue;
             }
             let type_dir = if let Some(ref base) = tmpl_folder_base {
@@ -1055,13 +1054,11 @@ fn cmd_create(doctype: &str, instance_id: Option<&str>, json: bool) {
     let mut fm = String::new();
     fm.push_str("---\n");
 
-    // OKF `type:` — emitted first so partial-read parsers get the canonical
-    // type from a top-of-file scan (locked by tr1p 2026-06-18). Three-fallback
-    // chain: `lex-o:okfType` annotation → `rdfs:label` → local-name. The
-    // bottom of the chain always produces a string, so this is always safe
-    // to emit.
-    let okf_type = ontology::get_class_okf_type(&kit, &class_name);
-    fm.push_str(&format!("type: {}\n", okf_type));
+    // `type:` — emitted first so partial-read parsers get the canonical
+    // type from a top-of-file scan (locked by tr1p 2026-06-18). Chain:
+    // `rdfs:label` → local-name; always produces a string, always safe.
+    let type_label = ontology::get_class_type_label(&kit, &class_name);
+    fm.push_str(&format!("type: {}\n", type_label));
 
     for (prop_name, prop_type, _required, comment) in &properties {
         // Property names pass through as-is from the ontology (camelCase).
@@ -3363,14 +3360,12 @@ fn regenerate_kit_artifacts(kit_name: &str, root: &std::path::Path, create_folde
     let folder_base = kit_config_str(kit_name, "folder base");
     let mut templates_updated = 0usize;
     for (type_name, properties) in &kit_types {
-        // Instantiation gate (lex-o-seed v0.2 contract): classes annotated
-        // `graph-only` or `abstract` exist in the ontology / SHACL surface
-        // but should NOT get a folder or `__ClassName.md` template. Default
-        // when absent = "authored" → preserves pre-annotation backward
-        // compatibility for kits like soul/innerworld that haven't adopted
-        // the annotation yet.
-        let inst = ontology::get_class_instantiation(kit_name, type_name);
-        if inst == "graph-only" || inst == "abstract" {
+        // Foldered gate (git-lex:foldered, opt-IN — Rob's ruling, replaces
+        // lex-o:instantiation): classes exist in the ontology / SHACL
+        // surface but get a folder + `__ClassName.md` template ONLY when
+        // tagged `git-lex:foldered true`. The quiet default is graph-only,
+        // so vocabulary classes never litter empty folders.
+        if !ontology::get_class_foldered(kit_name, type_name) {
             continue;
         }
 
