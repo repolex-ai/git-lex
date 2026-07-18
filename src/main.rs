@@ -2088,25 +2088,30 @@ fn cmd_sync() {
 
             // Name triple
             sync_nq.push_str(&format!(
-                "{} <https://repolex.ai/ontology/git-lex/lex/name> \"{}\" {} .\n",
+                "{} <https://repolex.ai/ontology/git-lex/name> \"{}\" {} .\n",
                 subject_uri, nq_escape(subject), sync_graph
             ));
 
-            // Triple term annotation
+            // Triple term annotation (a git:Annotation node — the sync-diff
+            // record of this asserted fact)
             let spo_key = format!("{}|{}|{}|{}", source_file, subject, predicate, object);
             let ann_hash = short_hash(&spo_key);
             let ann_uri = format!("<{}>", resource_uri(&format!("ann/{}", ann_hash)));
 
             sync_nq.push_str(&format!(
+                "{} <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://repolex.ai/ontology/git-lex/git/Annotation> {} .\n",
+                ann_uri, sync_graph
+            ));
+            sync_nq.push_str(&format!(
                 "{} <http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies> <<( {} {} {} )>> {} .\n",
                 ann_uri, subject_uri, predicate_uri, object_nq, sync_graph
             ));
             sync_nq.push_str(&format!(
-                "{} <https://repolex.ai/ontology/git-lex/lex/filePath> \"{}\" {} .\n",
+                "{} <https://repolex.ai/ontology/git-lex/git/path> \"{}\" {} .\n",
                 ann_uri, nq_escape(source_file), sync_graph
             ));
             sync_nq.push_str(&format!(
-                "{} <https://repolex.ai/ontology/git-lex/lex/blobHash> \"{}\" {} .\n",
+                "{} <https://repolex.ai/ontology/git-lex/git/blobHash> \"{}\" {} .\n",
                 ann_uri, nq_escape(&blob_hash), sync_graph
             ));
             sync_nq.push_str(&format!(
@@ -2128,7 +2133,7 @@ fn cmd_sync() {
             let ann_uri = format!("<{}>", resource_uri(&format!("ann/{}", ann_hash)));
 
             sync_nq.push_str(&format!(
-                "{} <https://repolex.ai/ontology/git-lex/lex/retracted> \"true\"^^<http://www.w3.org/2001/XMLSchema#boolean> {} .\n",
+                "{} <https://repolex.ai/ontology/git-lex/git/retracted> \"true\"^^<http://www.w3.org/2001/XMLSchema#boolean> {} .\n",
                 ann_uri, sync_graph
             ));
             retracted += 1;
@@ -2153,7 +2158,7 @@ fn cmd_sync() {
                 let ann_uri = format!("<{}>", resource_uri(&format!("ann/{}", ann_hash)));
 
                 sync_nq.push_str(&format!(
-                    "{} <https://repolex.ai/ontology/git-lex/lex/retracted> \"true\"^^<http://www.w3.org/2001/XMLSchema#boolean> {} .\n",
+                    "{} <https://repolex.ai/ontology/git-lex/git/retracted> \"true\"^^<http://www.w3.org/2001/XMLSchema#boolean> {} .\n",
                     ann_uri, sync_graph
                 ));
                 retracted += 1;
@@ -2944,8 +2949,8 @@ fn register_hook_in_settings(settings: &mut serde_json::Value, event: &str, comm
 /// `emit_spo_line_nquads` (the same function the now-graph builder uses).
 ///
 /// The fair-comparison trick: we don't compare against the full now-graph,
-/// which includes extras like `fm:path` / `git:blobHash` / unconditional
-/// `rdf:type <lex:Document>` that the history walker never sees. Instead we
+/// which includes extras like `git:path` / `git:blobHash` / unconditional
+/// `rdf:type git-lex:Document` that the history walker never sees. Instead we
 /// regenerate the "pure .spo emission" set live and compare against that.
 /// Both sides go through the same emitter → symmetric difference should be
 /// empty if the history walker is faithful.

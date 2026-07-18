@@ -588,16 +588,20 @@ pub(crate) fn generate_frontmatter_nquads() -> (String, u32) {
         // from folder name guessing. Honors "ontology is the single source
         // of truth" — sync stops inventing types the schema does not declare.
         //
-        // No-kit repos get `lex:Document` only (plus the git layer).
+        // No-kit repos get `git-lex:Document` only (plus the git layer).
         // Kit repos get classes their ontology declares, via frontmatter.
+        //
+        // File location is git:path — a git-lex-authored synthetic fact from
+        // the on-disk path, NOT a user frontmatter key; fm: carries ONLY what
+        // the user wrote (the fm firewall).
         let doc_uri = format!("<{}>", resource_uri(&uri_encode_path(&relpath_str)));
 
         nq.push_str(&format!(
-            "{} <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://repolex.ai/ontology/git-lex/lex/Document> {} .\n",
+            "{} <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://repolex.ai/ontology/git-lex/Document> {} .\n",
             doc_uri, graph
         ));
         nq.push_str(&format!(
-            "{} <https://repolex.ai/ontology/git-lex/fm/path> \"{}\" {} .\n",
+            "{} <https://repolex.ai/ontology/git-lex/git/path> \"{}\" {} .\n",
             doc_uri, nq_escape(&relpath_str), graph
         ));
         nq.push_str(&format!(

@@ -149,8 +149,8 @@ fn api_file_for_uri(state: &VizState, uri: Option<&str>) -> serde_json::Value {
     };
 
     let query = format!(
-        "PREFIX fm: <https://repolex.ai/ontology/git-lex/fm/> \
-         SELECT ?path WHERE {{ <{}> fm:path ?path }} LIMIT 1",
+        "PREFIX git: <https://repolex.ai/ontology/git-lex/git/> \
+         SELECT ?path WHERE {{ <{}> git:path ?path }} LIMIT 1",
         uri
     );
     let mut parsed = match oxigraph::sparql::Query::parse(&query, None) {
@@ -173,7 +173,7 @@ fn api_file_for_uri(state: &VizState, uri: Option<&str>) -> serde_json::Value {
     }
     let rel = match rel_path {
         Some(p) => p,
-        None => return serde_json::json!({"error": "no fm:path for this IRI", "uri": uri}),
+        None => return serde_json::json!({"error": "no git:path for this IRI", "uri": uri}),
     };
 
     let abs = state.repo_root.join(&rel);

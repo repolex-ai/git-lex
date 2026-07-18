@@ -257,10 +257,15 @@ pub(crate) fn frontmatter_to_turtle(filepath: &std::path::Path, root: &std::path
     let obj_props = get_object_properties(kit);
     let prop_datatypes = get_property_datatypes(kit);
 
-    // Build Turtle RDF for this document
+    // Build Turtle RDF for this document. Subjects use the same minting
+    // authority as the now-graph (resource_uri) — no urn: anywhere. SHACL
+    // targets by rdf:type, so validation is unaffected; the IRIs just stop
+    // lying about the identity scheme.
     let relpath = filepath.strip_prefix(root)
         .map_err(|_| format!("file {} is outside repo root", filepath.display()))?;
-    let doc_id = relpath.to_string_lossy().replace('/', "_").replace('.', "_");
+    let doc_iri = crate::git::resource_uri(
+        &crate::nquad::uri_encode_path(&relpath.to_string_lossy()),
+    );
 
     let mut ttl = String::new();
     ttl.push_str(&format!("@prefix {}: <{}> .\n", prefix_name, namespace));
@@ -268,7 +273,7 @@ pub(crate) fn frontmatter_to_turtle(filepath: &std::path::Path, root: &std::path
     ttl.push_str("@prefix xsd: <http://www.w3.org/2001/XMLSchema#> .\n\n");
 
     // Declare the document as an instance of the type
-    ttl.push_str(&format!("<urn:doc:{}> a {}:{} .\n", doc_id, prefix_name, doc_type));
+    ttl.push_str(&format!("<{}> a {}:{} .\n", doc_iri, prefix_name, doc_type));
 
     // Add properties
     for (prop_name, value) in &kit_props {
@@ -281,22 +286,23 @@ pub(crate) fn frontmatter_to_turtle(filepath: &std::path::Path, root: &std::path
                     .replace(|c: char| !c.is_alphanumeric() && c != '-', "");
                 if !slug.is_empty() {
                     ttl.push_str(&format!(
-                        "<urn:doc:{}> {}:{} <urn:entity:{}> .\n",
-                        doc_id, prefix_name, prop_name, slug
+                        "<{}> {}:{} <{}> .\n",
+                        doc_iri, prefix_name, prop_name,
+                        crate::git::resource_uri(&format!("entity/{}", slug))
                     ));
                 }
             }
         } else if let Some(datatype) = prop_datatypes.get(prop_name.as_str()) {
             // Typed literal (xsd:integer, xsd:date, etc.)
             ttl.push_str(&format!(
-                "<urn:doc:{}> {}:{} \"{}\"^^<{}> .\n",
-                doc_id, prefix_name, prop_name, value.replace('"', "\\\""), datatype
+                "<{}> {}:{} \"{}\"^^<{}> .\n",
+                doc_iri, prefix_name, prop_name, value.replace('"', "\\\""), datatype
             ));
         } else {
             // Plain string literal
             ttl.push_str(&format!(
-                "<urn:doc:{}> {}:{} \"{}\" .\n",
-                doc_id, prefix_name, prop_name, value.replace('"', "\\\"")
+                "<{}> {}:{} \"{}\" .\n",
+                doc_iri, prefix_name, prop_name, value.replace('"', "\\\"")
             ));
         }
     }
