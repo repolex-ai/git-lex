@@ -400,7 +400,8 @@ fn cmd_init(directory: Option<String>, kit: Option<String>) {
             .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
             .unwrap_or_else(|| "unknown".to_string());
         fs::write(&repo_yml_path, format!(
-            "name: {}\nkit: {}\ncreated: {}\n",
+            "name: {}\nkit: {}\ncreated: {}\n\
+             # build_history_on_sync: true  # builds the temporal history graph on every sync; can be slow on first sync with large repos\n",
             repo_name, kit_spec, today
         )).ok();
     } else {
@@ -2178,11 +2179,57 @@ fn cmd_sync() {
     // old `<base>/class/*` + `<base>/frontmatter` projections. Migration off
     // the old naming is therefore automatic on the first new-binary sync.
 
-    // ─── Phase 4: History graph — incremental update ───
-    //
-    // Read the lastHistorySync marker from <base/meta>. If it exists and
-    // is an ancestor of HEAD, walk only commits since the marker (append).
-    // Otherwise fall back to a full rebuild (clear + walk all).
+    // ─── Phase 4: History graph (config-gated, OFF by default) ───
+    let history_summary: Option<String> = if build_history_on_sync(&root) {
+        Some(sync_history_phase(&root, &store, &head_sha))
+    } else {
+        None
+    };
+
+    store.flush().expect("failed to flush store");
+
+    let elapsed = start.elapsed();
+
+    // Count total sync graph triples
+    let total_sync: usize = existing_graphs.iter()
+        .filter(|g| g.starts_with("https://repolex.ai/git-lex/NamedGraph/sync/"))
+        .count();
+
+    println!(
+        "Synced in {:.1}ms:",
+        elapsed.as_secs_f64() * 1000.0
+    );
+    println!("  Virtual: {} git + {} now", git_count, fm_count);
+    if !adaptive_ok.is_empty() || !adaptive_fail.is_empty() {
+        println!("  Adaptive shapes: {} built, {} failed", adaptive_ok.len(), adaptive_fail.len());
+    }
+    if new_assertions > 0 || retracted > 0 {
+        println!(
+            "  Sync /sync/{}/: +{} assertions, -{} retracted ({} quads)",
+            &head_sha[..8.min(head_sha.len())], new_assertions, retracted, sync_count
+        );
+    } else if last_sync_commit.is_some() {
+        println!("  No new assertions since last sync");
+    } else {
+        println!("  First sync — no previous state");
+    }
+    if let Some(ref history_summary) = history_summary {
+        println!("  History: {}", history_summary);
+    }
+    println!("  Total sync graphs: {}", total_sync + if sync_count > 0 { 1 } else { 0 });
+    println!("Store: {}", store_path().unwrap().display());
+}
+
+/// Phase 4 of sync: the history graph (the context-graph lane). Reads the
+/// lastHistorySync marker; if it is an ancestor of HEAD, walks only newer
+/// commits (append), otherwise falls back to a full rebuild. Returns the
+/// one-line summary for sync output.
+///
+/// Config-gated by `build_history_on_sync: true` in `.lex/repo.yml` —
+/// OFF by default. Safe to gate: the history graph is derived entirely
+/// from git history and can be rebuilt any time by enabling the switch
+/// (slow on the first sync of a large repo, by design).
+fn sync_history_phase(root: &std::path::Path, store: &Store, head_sha: &str) -> String {
 
     let history_graph_uri = format!("<{}>", graph_uri("history"));
     let meta_graph_uri = format!("<{}>", graph_uri("meta"));
@@ -2295,7 +2342,7 @@ fn cmd_sync() {
     walk_md_for_history(&root, &mut md_files);
     let (hist_slug_index, hist_path_index) = build_slug_path_indexes(&root, &md_files);
 
-    let history_summary = if history_commits.is_empty() {
+    if history_commits.is_empty() {
         "up to date".to_string()
     } else {
         let stats = spo_events::history_walk_engine(
@@ -2321,38 +2368,20 @@ fn cmd_sync() {
                 history_commits.len(), stats.events_seen, stats.events_emitted,
             ),
         }
-    };
-
-    store.flush().expect("failed to flush store");
-
-    let elapsed = start.elapsed();
-
-    // Count total sync graph triples
-    let total_sync: usize = existing_graphs.iter()
-        .filter(|g| g.starts_with("https://repolex.ai/git-lex/NamedGraph/sync/"))
-        .count();
-
-    println!(
-        "Synced in {:.1}ms:",
-        elapsed.as_secs_f64() * 1000.0
-    );
-    println!("  Virtual: {} git + {} now", git_count, fm_count);
-    if !adaptive_ok.is_empty() || !adaptive_fail.is_empty() {
-        println!("  Adaptive shapes: {} built, {} failed", adaptive_ok.len(), adaptive_fail.len());
     }
-    if new_assertions > 0 || retracted > 0 {
-        println!(
-            "  Sync /sync/{}/: +{} assertions, -{} retracted ({} quads)",
-            &head_sha[..8.min(head_sha.len())], new_assertions, retracted, sync_count
-        );
-    } else if last_sync_commit.is_some() {
-        println!("  No new assertions since last sync");
-    } else {
-        println!("  First sync — no previous state");
-    }
-    println!("  History: {}", history_summary);
-    println!("  Total sync graphs: {}", total_sync + if sync_count > 0 { 1 } else { 0 });
-    println!("Store: {}", store_path().unwrap().display());
+}
+
+/// Read the `build_history_on_sync` switch from `.lex/repo.yml`.
+/// Absent, or any value other than `true`, means OFF.
+fn build_history_on_sync(root: &std::path::Path) -> bool {
+    fs::read_to_string(root.join(".lex").join("repo.yml"))
+        .map(|c| c.lines().any(|l| {
+            l.trim()
+                .strip_prefix("build_history_on_sync:")
+                .map(|v| v.trim() == "true")
+                .unwrap_or(false)
+        }))
+        .unwrap_or(false)
 }
 
 // add_prefixes imported from git_lex lib

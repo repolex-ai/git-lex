@@ -441,8 +441,14 @@ pub enum W3cQueryError {
     Eval(String),
 }
 
-/// Run `query` against `store` with the standard prefix prologue and the
-/// union default graph, producing W3C-shaped results.
+/// Run `query` against `store` with the standard prefix prologue, producing
+/// W3C-shaped results under STANDARD SPARQL dataset semantics — a bare
+/// `?s ?p ?o` reads exactly the default graph. (The union-default-graph
+/// switch was removed here per the Day-50 respec: it was a hackathon-era
+/// patch over an empty default graph, and against the persistent store it
+/// merged stale sync vintages into every answer. `git lex query`'s live
+/// in-memory view keeps its own union by design — that door is the
+/// git-to-RDF passthrough over its own freshly-built graphs.)
 pub fn w3c_query(store: &Store, query: &str) -> Result<W3cQueryOutcome, W3cQueryError> {
     w3c_query_at(find_git_root().as_deref(), store, query)
 }
@@ -454,9 +460,8 @@ pub fn w3c_query_at(
     query: &str,
 ) -> Result<W3cQueryOutcome, W3cQueryError> {
     let prefixed = add_prefixes_at(root, query);
-    let mut parsed = oxigraph::sparql::Query::parse(&prefixed, None)
+    let parsed = oxigraph::sparql::Query::parse(&prefixed, None)
         .map_err(|e| W3cQueryError::Parse(e.to_string()))?;
-    parsed.dataset_mut().set_default_graph_as_union();
     let results = store
         .query(parsed)
         .map_err(|e| W3cQueryError::Eval(e.to_string()))?;
@@ -570,11 +575,17 @@ mod w3c_query_tests {
     }
 
     #[test]
-    fn union_default_graph_sees_named_graphs() {
-        // The CLI behavior the endpoint must share: a bare pattern (no GRAPH)
-        // reads the union, so named-graph facts are visible.
+    fn bare_pattern_reads_only_the_default_graph() {
+        // Standard SPARQL dataset semantics (union switch removed, Day-50
+        // respec): a bare pattern does NOT see named-graph facts — the
+        // purpose-built default graph is what bare queries read.
         let store = store_with_one_fact();
         match w3c_query(&store, "ASK { ?s ?p \"hello\" }").unwrap() {
+            W3cQueryOutcome::Boolean(v) => assert_eq!(v["boolean"], false),
+            _ => panic!("expected boolean"),
+        }
+        // The same fact IS visible when the graph is named.
+        match w3c_query(&store, "ASK { GRAPH <https://repolex.ai/git-lex/NamedGraph/now> { ?s ?p \"hello\" } }").unwrap() {
             W3cQueryOutcome::Boolean(v) => assert_eq!(v["boolean"], true),
             _ => panic!("expected boolean"),
         }
