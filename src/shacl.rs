@@ -325,10 +325,14 @@ fn generate_shapes_from_store(
 // ─── Kit-based shapes ─────────────────────────────────────────
 
 /// Generate SHACL shapes TTL from a kit ontology using SPARQL queries.
-pub(crate) fn generate_shacl_shapes(kit: &str) -> Option<String> {
-    let store = crate::kit::load_kit_into_store(kit)?;
-    let ttl_path = crate::kit::find_kit_ttl(kit)?;
-    let ttl_content = fs::read_to_string(&ttl_path).ok()?;
+///
+/// `Ok(None)` = kit has no ontology (nothing to generate). `Err` = the
+/// ontology exists but is broken — callers must be LOUD (finding #22).
+pub(crate) fn generate_shacl_shapes(kit: &str) -> Result<Option<String>, String> {
+    let Some(store) = crate::kit::load_kit_into_store(kit)? else { return Ok(None) };
+    let Some(ttl_path) = crate::kit::find_kit_ttl(kit) else { return Ok(None) };
+    let ttl_content = fs::read_to_string(&ttl_path)
+        .map_err(|e| format!("cannot read {}: {}", ttl_path.display(), e))?;
 
     // Find the kit prefix name and namespace from the TTL.
     let (_, _, short) = resolve_kit_spec(kit);
@@ -349,7 +353,7 @@ pub(crate) fn generate_shacl_shapes(kit: &str) -> Option<String> {
         }
     }
 
-    generate_shapes_from_store(&store, &prefix_name, &namespace, kit)
+    Ok(generate_shapes_from_store(&store, &prefix_name, &namespace, kit))
 }
 
 /// Generate and write SHACL shapes for a kit.
@@ -358,16 +362,18 @@ pub(crate) fn generate_shacl_shapes(kit: &str) -> Option<String> {
 /// Output location is chosen to live alongside the source TTL:
 ///   - static kit  → `.lex/ontology/{short}/{short}-shapes.ttl`
 ///   - adaptive kit → `_ontology/{short}/{short}-shapes.ttl`
-pub(crate) fn build_shacl_shapes(kit: &str) -> Option<PathBuf> {
-    let shacl = generate_shacl_shapes(kit)?;
+pub(crate) fn build_shacl_shapes(kit: &str) -> Result<Option<PathBuf>, String> {
+    let Some(shacl) = generate_shacl_shapes(kit)? else { return Ok(None) };
     let (_, _, short) = resolve_kit_spec(kit);
     // Locate the source TTL so we can drop the shapes file next to it.
-    let source_ttl = crate::kit::find_kit_ttl(kit)?;
-    let ontology_dir = source_ttl.parent()?.to_path_buf();
-    fs::create_dir_all(&ontology_dir).ok()?;
+    let Some(source_ttl) = crate::kit::find_kit_ttl(kit) else { return Ok(None) };
+    let Some(ontology_dir) = source_ttl.parent().map(|p| p.to_path_buf()) else { return Ok(None) };
+    fs::create_dir_all(&ontology_dir)
+        .map_err(|e| format!("cannot create {}: {}", ontology_dir.display(), e))?;
     let shapes_path = ontology_dir.join(format!("{}-shapes.ttl", short));
-    fs::write(&shapes_path, &shacl).ok()?;
-    Some(shapes_path)
+    fs::write(&shapes_path, &shacl)
+        .map_err(|e| format!("cannot write {}: {}", shapes_path.display(), e))?;
+    Ok(Some(shapes_path))
 }
 
 // ─── Adaptive shapes (_ontology/) ─────────────────────────────

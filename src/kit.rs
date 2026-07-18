@@ -410,12 +410,21 @@ pub(crate) fn find_kit_ttl(kit: &str) -> Option<PathBuf> {
 }
 
 /// Load a kit TTL into an in-memory oxigraph store for SPARQL querying.
-pub(crate) fn load_kit_into_store(kit: &str) -> Option<Store> {
-    let ttl_path = find_kit_ttl(kit)?;
-    let content = fs::read_to_string(&ttl_path).ok()?;
-    let store = Store::new().ok()?;
-    store.load_from_reader(RdfFormat::Turtle, Cursor::new(content.as_bytes())).ok()?;
-    Some(store)
+///
+/// `Ok(None)` = the kit ships no ontology TTL (legitimate — nothing to
+/// load). `Err` = the TTL exists but could not be read or PARSED — that
+/// must be loud: a silently-skipped broken ontology means no SHACL shapes,
+/// validation "skipped", and object properties emitted as string literals
+/// (the ontology is the trust boundary).
+pub(crate) fn load_kit_into_store(kit: &str) -> Result<Option<Store>, String> {
+    let Some(ttl_path) = find_kit_ttl(kit) else { return Ok(None) };
+    let content = fs::read_to_string(&ttl_path)
+        .map_err(|e| format!("cannot read {}: {}", ttl_path.display(), e))?;
+    let store = Store::new().map_err(|e| format!("store init failed: {}", e))?;
+    store
+        .load_from_reader(RdfFormat::Turtle, Cursor::new(content.as_bytes()))
+        .map_err(|e| format!("TTL parse error in {}: {}", ttl_path.display(), e))?;
+    Ok(Some(store))
 }
 
 // ─── install pipeline ──────────────────────────────────────────

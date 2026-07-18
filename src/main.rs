@@ -408,7 +408,10 @@ fn cmd_init(directory: Option<String>, kit: Option<String>) {
             "name: {}\nkit: {}\ncreated: {}\n\
              # build_history_on_sync: true  # builds the temporal history graph on every sync; can be slow on first sync with large repos\n",
             repo_name, kit_spec, today
-        )).ok();
+        )).unwrap_or_else(|e| {
+            eprintln!("fatal: could not write .lex/repo.yml: {}", e);
+            exit(1);
+        });
     } else {
         // Rewrite the kit: line in the existing repo.yml to match the
         // current spec. Preserves all other fields (name, created,
@@ -429,7 +432,10 @@ fn cmd_init(directory: Option<String>, kit: Option<String>) {
             }
             let mut content = updated_lines.join("\n");
             if !content.ends_with('\n') { content.push('\n'); }
-            fs::write(&repo_yml_path, content).ok();
+            fs::write(&repo_yml_path, content).unwrap_or_else(|e| {
+                eprintln!("fatal: could not update .lex/repo.yml kit binding: {}", e);
+                exit(1);
+            });
         }
     }
 
@@ -465,8 +471,14 @@ fn cmd_init(directory: Option<String>, kit: Option<String>) {
     // Generate SHACL shapes from kit ontology now — both the type-folder
     // loop below and the README generator read shapes via get_kit_types,
     // so shapes must exist before either runs.
-    if let Some(shapes_path) = build_shacl_shapes(kit_name) {
-        println!("SHACL shapes generated: {}", shapes_path.file_name().unwrap_or_default().to_string_lossy());
+    match build_shacl_shapes(kit_name) {
+        Ok(Some(shapes_path)) => println!("SHACL shapes generated: {}", shapes_path.file_name().unwrap_or_default().to_string_lossy()),
+        Ok(None) => {} // kit ships no ontology — nothing to generate
+        Err(e) => {
+            eprintln!("fatal: SHACL shapes generation failed for '{}': {}", kit_name, e);
+            eprintln!("       a broken kit ontology must not install silently — validation would be skipped and object properties would degrade to literals");
+            exit(1);
+        }
     }
 
     // Create type folders from kit ontology.
@@ -688,7 +700,10 @@ fn cmd_init(directory: Option<String>, kit: Option<String>) {
                     updated.push_str(&format!("{}: {}\n", k, v));
                 }
             }
-            fs::write(&repo_yml_path, &updated).ok();
+            fs::write(&repo_yml_path, &updated).unwrap_or_else(|e| {
+                eprintln!("fatal: could not persist init variables to .lex/repo.yml: {}", e);
+                exit(1);
+            });
         }
 
         // Scaffold files already installed above (before type folder creation).
@@ -742,10 +757,18 @@ fn cmd_init(directory: Option<String>, kit: Option<String>) {
     println!("  .lex/kit/         — installed kit");
     println!();
 
-    // Pre-commit hook: extract + validate on every commit.
+    // Pre-commit hook: extract + validate on every commit. This IS the
+    // enforcement gate — if it can't be installed, saying so loudly beats
+    // a repo that silently never validates.
     // Respects core.hooksPath (husky, lefthook, etc.)
-    hooks::install_hook();
-    println!("Installed pre-commit hook (extract + validate on commit)");
+    match hooks::install_hook() {
+        Ok(()) => println!("Installed pre-commit hook (extract + validate on commit)"),
+        Err(e) => {
+            eprintln!("fatal: could not install the pre-commit hook: {}", e);
+            eprintln!("       commits would silently skip extraction + validation — fix and re-run init");
+            exit(1);
+        }
+    }
 
     // NO post-commit hook — sync is manual/background
 
@@ -770,8 +793,13 @@ fn cmd_init(directory: Option<String>, kit: Option<String>) {
             let input = input.trim().to_lowercase();
             if input.is_empty() || input == "y" || input == "yes" {
                 let _ = Command::new("git").args(["add", "."]).status();
-                let _ = Command::new("git").args(["commit", "-m", "Initial content"]).status();
-                println!("Committed existing content.");
+                let committed = Command::new("git").args(["commit", "-m", "Initial content"]).status()
+                    .map(|s| s.success()).unwrap_or(false);
+                if committed {
+                    println!("Committed existing content.");
+                } else {
+                    eprintln!("warning: initial content commit failed — see git output above");
+                }
             }
         }
     }
@@ -791,7 +819,10 @@ fn cmd_init(directory: Option<String>, kit: Option<String>) {
         let existing = fs::read_to_string(&repo_yml_path).unwrap_or_default();
         if !existing.contains("first_commit:") {
             let updated = format!("{}first_commit: {}\n", existing, first_sha);
-            fs::write(&repo_yml_path, &updated).ok();
+            fs::write(&repo_yml_path, &updated).unwrap_or_else(|e| {
+                eprintln!("fatal: could not record first_commit identity in .lex/repo.yml: {}", e);
+                exit(1);
+            });
             let _ = Command::new("git").args(["add", ".lex/repo.yml"]).status();
             let _ = Command::new("git").args(["commit", "-m", "git lex identity"]).status();
             println!("Identity: {}", first_sha);
@@ -1695,8 +1726,16 @@ fn hook_pre_commit() {
     // Phase 1: extraction
     cmd_extract();
 
-    // Stage extraction artifacts
-    let _ = Command::new("git").args(["add", ".lex/extract/"]).status();
+    // Stage extraction artifacts. A failed add would let the commit land
+    // with sidecars that no longer match the .md content — the history
+    // ledger diffs COMMITTED sidecars, so that divergence would be
+    // permanent and silent. Fail the commit instead.
+    let staged = Command::new("git").args(["add", ".lex/extract/"]).status()
+        .map(|s| s.success()).unwrap_or(false);
+    if !staged {
+        eprintln!("fatal: failed to stage extraction artifacts (.lex/extract/)");
+        exit(1);
+    }
 
     // Phase 2: SHACL validation
     if !cmd_validate() {
@@ -1856,7 +1895,9 @@ fn cmd_sync() {
                 // remove (not clear): drops the graph's registration too, so a
                 // one-time legacy name (urn:soul:*) doesn't linger as an empty
                 // graph in the store forever.
-                store.remove_named_graph(&graph).ok();
+                if let Err(e) = store.remove_named_graph(&graph) {
+                    eprintln!("warning: failed to clear graph {}: {} — stale triples may mix with the regeneration", graph_uri, e);
+                }
             }
         }
     }
@@ -3364,9 +3405,15 @@ fn fetch_kit_for_update(kit_spec: &str) -> bool {
 fn regenerate_kit_artifacts(kit_name: &str, root: &std::path::Path, create_folders: bool) {
     let (_, _, short) = resolve_kit_spec(kit_name);
 
-    if let Some(shapes_path) = build_shacl_shapes(kit_name) {
-        println!("  SHACL shapes regenerated: {}",
-            shapes_path.file_name().unwrap_or_default().to_string_lossy());
+    match build_shacl_shapes(kit_name) {
+        Ok(Some(shapes_path)) => println!("  SHACL shapes regenerated: {}",
+            shapes_path.file_name().unwrap_or_default().to_string_lossy()),
+        Ok(None) => {} // kit ships no ontology — nothing to regenerate
+        Err(e) => {
+            eprintln!("fatal: SHACL shapes generation failed for '{}': {}", kit_name, e);
+            eprintln!("       a broken kit ontology must not install silently — fix the kit TTL and re-run");
+            exit(1);
+        }
     }
 
     let kit_types = get_kit_types(kit_name);

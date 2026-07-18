@@ -118,6 +118,14 @@ pub(crate) fn generate_git_nquads() -> String {
         .args(["log", "--all", "--format=%H%x00%ae%x00%an%x00%aI%x00%s%x00%P%x00%ce%x00%cn%x00%cI"])
         .current_dir(&git_root)
         .output();
+    match &output {
+        Ok(o) if !o.status.success() => eprintln!(
+            "warning: git command failed during graph generation — this layer will be EMPTY: {}",
+            String::from_utf8_lossy(&o.stderr).trim()
+        ),
+        Err(e) => eprintln!("warning: could not run git during graph generation — this layer will be EMPTY: {}", e),
+        _ => {}
+    }
     if let Ok(o) = output {
         if o.status.success() {
             let stdout = String::from_utf8_lossy(&o.stdout);
@@ -188,6 +196,14 @@ pub(crate) fn generate_git_nquads() -> String {
             .args(["ls-tree", "-r", "--format=%(objectmode) %(objecttype) %(objectname) %(objectsize)\t%(path)", "HEAD"])
             .current_dir(&git_root)
             .output();
+        match &output {
+            Ok(o) if !o.status.success() => eprintln!(
+                "warning: git command failed during graph generation — this layer will be EMPTY: {}",
+                String::from_utf8_lossy(&o.stderr).trim()
+            ),
+            Err(e) => eprintln!("warning: could not run git during graph generation — this layer will be EMPTY: {}", e),
+            _ => {}
+        }
         if let Ok(o) = output {
             if o.status.success() {
                 let stdout = String::from_utf8_lossy(&o.stdout);
@@ -216,6 +232,14 @@ pub(crate) fn generate_git_nquads() -> String {
         .args(["branch", "-a", "--format=%(refname:short) %(objectname)"])
         .current_dir(&git_root)
         .output();
+    match &output {
+        Ok(o) if !o.status.success() => eprintln!(
+            "warning: git command failed during graph generation — this layer will be EMPTY: {}",
+            String::from_utf8_lossy(&o.stderr).trim()
+        ),
+        Err(e) => eprintln!("warning: could not run git during graph generation — this layer will be EMPTY: {}", e),
+        _ => {}
+    }
     if let Ok(o) = output {
         if o.status.success() {
             let stdout = String::from_utf8_lossy(&o.stdout);
@@ -237,6 +261,14 @@ pub(crate) fn generate_git_nquads() -> String {
         .args(["tag", "-l", "--format=%(refname:short) %(objectname)"])
         .current_dir(&git_root)
         .output();
+    match &output {
+        Ok(o) if !o.status.success() => eprintln!(
+            "warning: git command failed during graph generation — this layer will be EMPTY: {}",
+            String::from_utf8_lossy(&o.stderr).trim()
+        ),
+        Err(e) => eprintln!("warning: could not run git during graph generation — this layer will be EMPTY: {}", e),
+        _ => {}
+    }
     if let Ok(o) = output {
         if o.status.success() {
             let stdout = String::from_utf8_lossy(&o.stdout);
@@ -258,6 +290,14 @@ pub(crate) fn generate_git_nquads() -> String {
         .args(["log", "--all", "--format=%H", "--name-status", "--diff-filter=ADMR"])
         .current_dir(&git_root)
         .output();
+    match &output {
+        Ok(o) if !o.status.success() => eprintln!(
+            "warning: git command failed during graph generation — this layer will be EMPTY: {}",
+            String::from_utf8_lossy(&o.stderr).trim()
+        ),
+        Err(e) => eprintln!("warning: could not run git during graph generation — this layer will be EMPTY: {}", e),
+        _ => {}
+    }
     if let Ok(o) = output {
         if o.status.success() {
             let stdout = String::from_utf8_lossy(&o.stdout);
@@ -384,6 +424,14 @@ pub(crate) fn generate_git_nquads() -> String {
             .args(["ls-tree", "-r", "--name-only", "HEAD"])
             .current_dir(&git_root)
             .output();
+        match &output {
+            Ok(o) if !o.status.success() => eprintln!(
+                "warning: git command failed during graph generation — this layer will be EMPTY: {}",
+                String::from_utf8_lossy(&o.stderr).trim()
+            ),
+            Err(e) => eprintln!("warning: could not run git during graph generation — this layer will be EMPTY: {}", e),
+            _ => {}
+        }
         if let Ok(o) = output {
             if o.status.success() {
                 let stdout = String::from_utf8_lossy(&o.stdout);
@@ -976,7 +1024,9 @@ pub(crate) fn load_ontology_graph(store: &oxigraph::store::Store) -> usize {
         Ok(g) => g,
         Err(_) => return 0,
     };
-    let _ = store.remove_named_graph(&ontology_graph);
+    if let Err(e) = store.remove_named_graph(&ontology_graph) {
+        eprintln!("warning: failed to clear the repo-ontology graph before reload: {} — retired vocabulary may linger", e);
+    }
     fn walk_ttl(dir: &std::path::Path, out: &mut Vec<PathBuf>) {
         if let Ok(entries) = fs::read_dir(dir) {
             for entry in entries.filter_map(|e| e.ok()) {

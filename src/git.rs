@@ -16,7 +16,13 @@ use git_lex::find_git_root;
 /// identity lives here and as a `git:genesisSha` FACT on the repo node.
 pub(crate) fn ensure_identity_yml() -> Option<String> {
     let sha = genesis_sha()?;
-    let _ = write_identity_yml_sha(&sha);
+    // identity.yml is a CROSS-SYSTEM contract file (Pool boot-skip,
+    // federation readers). git-lex itself would recover via the fallback
+    // tiers, so a swallowed write error is invisible in-process while an
+    // external consumer reads a missing/stale file — warn loudly.
+    if let Err(e) = write_identity_yml_sha(&sha) {
+        eprintln!("warning: could not write .lex/identity.yml: {} — downstream consumers (Pool, federation) read this file", e);
+    }
     Some(sha)
 }
 

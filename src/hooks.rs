@@ -91,12 +91,16 @@ fn hooks_dir() -> Option<PathBuf> {
 
 /// Install or update the git-lex managed section in the pre-commit hook.
 /// Preserves any existing user content in the file.
-pub(crate) fn install_hook() {
-    let dir = match hooks_dir() {
-        Some(d) => d,
-        None => return,
-    };
-    fs::create_dir_all(&dir).ok();
+///
+/// Returns Err when the hook could not be installed — the hook IS the
+/// extract+validate enforcement gate, so a swallowed failure here means
+/// every later commit silently skips extraction and SHACL validation.
+/// Callers must surface the error instead of printing success.
+pub(crate) fn install_hook() -> std::io::Result<()> {
+    let dir = hooks_dir().ok_or_else(|| std::io::Error::other(
+        "could not locate .git/hooks (not a git repo?)",
+    ))?;
+    fs::create_dir_all(&dir)?;
 
     let hook_path = dir.join("pre-commit");
     let existing = fs::read_to_string(&hook_path).unwrap_or_default();
@@ -119,17 +123,17 @@ pub(crate) fn install_hook() {
         content
     };
 
-    fs::write(&hook_path, &new_content).ok();
+    fs::write(&hook_path, &new_content)?;
 
     // Ensure executable
     #[cfg(unix)]
     {
-        if let Ok(meta) = fs::metadata(&hook_path) {
-            let mut perms = meta.permissions();
-            perms.set_mode(perms.mode() | 0o111);
-            fs::set_permissions(&hook_path, perms).ok();
-        }
+        let meta = fs::metadata(&hook_path)?;
+        let mut perms = meta.permissions();
+        perms.set_mode(perms.mode() | 0o111);
+        fs::set_permissions(&hook_path, perms)?;
     }
+    Ok(())
 }
 
 /// Remove the git-lex managed section from the pre-commit hook.
