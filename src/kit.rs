@@ -12,8 +12,9 @@
 //!    `collect_init_variables`, `install_scaffold_files_from`,
 //!    `install_scaffold_files_from_skip_existing`: everything that turns
 //!    a kit spec into on-disk scaffolded files.
-//! 4. **Kit lifecycle** — `add_kit`, `remove_kit`: add/remove kits from
-//!    a repo. Stubs for now.
+//! 4. **Kit lifecycle** — fetch/validate/install/remove optional kits
+//!    (`fetch_and_validate_optional_kit`, `remove_kit_install_dir`, and the
+//!    `cmd_kit_add`/`cmd_kit_remove` handlers in `main.rs`).
 
 use oxigraph::io::RdfFormat;
 use oxigraph::store::Store;

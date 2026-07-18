@@ -1,5 +1,6 @@
 //! Extraction helpers — slug/link resolution, YAML flattening, IRI sanitation,
-//! and the frontmatter-to-Turtle converter used by `cmd create` / `cmd save`.
+//! and the frontmatter-to-Turtle converter (`frontmatter_to_turtle`, called by
+//! `cmd_validate` to build the per-file graph SHACL validates).
 //!
 //! The big N-Quad *generators* (`generate_git_nquads`, `generate_frontmatter_nquads`,
 //! `load_lex_nquads`) live in `nquad.rs`.

@@ -7,13 +7,11 @@
 //! Respects `core.hooksPath` (used by husky, lefthook, etc.) — if set, we
 //! write into that directory instead of `.git/hooks/`.
 //!
-//! NOTE(w4r3z, Day 38): this module is POSIX-only. The managed hook is a
-//! `#!/bin/sh` script and the executable bit is set via unix PermissionsExt
-//! under `#[cfg(unix)]` (no Windows branch). So git-lex's commit-time
-//! extract+validate gate does NOT install on Windows — the README's "any git
-//! repo" claim should carry a "POSIX (macOS/Linux) only" caveat for the
-//! soft-release, OR add a Windows hook path (.bat / no exec-bit needed).
-//! TODO: decide scope — document the limitation vs support Windows.
+//! NOTE: this module is POSIX-only. The managed hook is a `#!/bin/sh` script
+//! and the executable bit is set via unix PermissionsExt under `#[cfg(unix)]`
+//! (no Windows branch), so the commit-time extract+validate gate does not
+//! install on Windows. Documented as a platform limitation (macOS/Linux);
+//! a Windows hook path would be additive if ever needed.
 
 use std::fs;
 use std::os::unix::fs::PermissionsExt;

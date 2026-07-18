@@ -30,7 +30,7 @@ files. git-lex doesn't. The four things a knowledge graph needs, git already has
 
 | Knowledge-graph need | git-lex uses |
 |---|---|
-| **Identity** | the repo's first commit — your base URI is `urn:soul:<genesis-sha>` |
+| **Identity** | the repo's genesis (first-commit) SHA — recorded as a fact, not baked into IRIs |
 | **Provenance** | RDF 1.2 triple terms record *which commit* asserted each fact |
 | **History** | git history *is* the temporal graph — query what was true at any point |
 | **Validation** | SHACL shapes (generated from your kit's ontology) run at commit time |
@@ -180,11 +180,16 @@ git-lex keeps a clean split between **what you write**, **the index**, and
 The pipeline on every `git lex save`:
 
 ```
-edit .md  →  extract frontmatter to .spo  →  SHACL validate  →  commit  →  update graph
+edit .md  →  extract frontmatter to .spo  →  SHACL validate  →  commit
                                                   │
                                           (blocks the commit
                                            if a shape fails)
 ```
+
+`save` writes to git only. The persistent SPARQL store is updated by
+`git lex sync` (run where the system needs it, e.g. a hook or on demand) —
+`git lex query` always builds a fresh view from the working tree, so
+querying current state never requires a sync.
 
 Because each fact is tagged (via RDF 1.2 triple terms) with the commit that
 asserted it, the history graph lets you ask not just *what is true* but *what was

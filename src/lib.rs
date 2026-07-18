@@ -31,7 +31,7 @@ pub fn store_path() -> Option<PathBuf> {
 }
 
 /// Open the persistent store in read-only mode. Does not acquire the
-/// RocksDB write lock, so writers (`git lex sync`, `git lex save`) can run
+/// RocksDB write lock, so the writer (`git lex sync`) can run
 /// concurrently. The view is a snapshot from open-time and will not reflect
 /// later writes until the store is reopened.
 pub fn open_store_read_only() -> Option<Store> {
@@ -369,7 +369,7 @@ pub fn add_prefixes_at(root: Option<&std::path::Path>, query: &str) -> String {
 
 // ─── W3C SPARQL query surface (Task 2 Part B) ────────────────────────────────
 // ONE implementation shared by the CLI (`git lex query`) and the protocol
-// endpoint (`git-lex-serve query`) — two SPARQL paths drifting was the bug
+// endpoint (`git lex serve sparql`) — two SPARQL paths drifting was the bug
 // class this kills.
 
 /// One RDF term → W3C SPARQL 1.1 Query Results JSON object.

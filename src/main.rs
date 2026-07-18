@@ -830,7 +830,7 @@ fn cmd_init(directory: Option<String>, kit: Option<String>) {
     }
 
     // t-box: load installed kit ontologies into the persistent ontology graph
-    // (init + kit-update only; it stays put across syncs).
+    // (init, kit-add, kit-update; it stays put across syncs).
     {
         let store = open_or_create_store();
         let n = crate::nquad::load_ontology_graph(&store);
@@ -1250,7 +1250,8 @@ fn cmd_save(message: &str) {
     harness::sync_all(&root);
 
 
-    // Add everything, commit, let hooks handle extract + sync
+    // Add everything, commit; the pre-commit hook handles extract + validate
+    // (NOT sync — the store is updated separately by `git lex sync`)
     let status = Command::new("git")
         .args(["add", "-A"])
         .status();
@@ -2616,8 +2617,9 @@ fn cmd_query(query: String, json: bool) {
             .expect("failed to load frontmatter triples");
     }
 
-    // Also fold in any compiled .nq already on disk (history/sync graphs a prior
-    // `sync` wrote) so history-aware queries still see the sync/<sha> snapshots.
+    // Also fold in any hand-authored `.lex/**/*.nq` files a user dropped in.
+    // (`sync` does NOT write .nq — it writes the persistent oxigraph store;
+    // this is purely for user-supplied static N-Quads.)
     let lex_nq = load_lex_nquads();
     if !lex_nq.is_empty() {
         store
