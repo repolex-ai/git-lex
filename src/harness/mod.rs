@@ -35,16 +35,6 @@ pub enum Substrate {
 }
 
 impl Substrate {
-    /// Canonical lowercase short name. This is what appears in `repo.yml`'s
-    /// `substrates:` list and what `Substrate::parse` accepts.
-    pub fn name(&self) -> &'static str {
-        match self {
-            Substrate::Claude => "claude",
-            Substrate::Hermes => "hermes",
-            Substrate::Gemini => "gemini",
-        }
-    }
-
     /// Parse a substrate name from `repo.yml`. Returns None on unknown
     /// (caller decides whether to warn or skip silently).
     pub fn parse(s: &str) -> Option<Self> {
@@ -152,17 +142,6 @@ pub fn active_substrates(root: &Path) -> Vec<Substrate> {
 pub fn sync_all(root: &Path) {
     for substrate in active_substrates(root) {
         substrate.sync(root);
-    }
-}
-
-/// Back-compat shim — the old single-substrate entrypoint. Maps a string
-/// to a variant and runs only that one substrate's adapter, ignoring the
-/// active-substrate list. Kept so existing call sites that pass an
-/// explicit substrate name still work; new code should call `sync_all`.
-pub fn sync(root: &Path, substrate: &str) {
-    match Substrate::parse(substrate) {
-        Some(s) => s.sync(root),
-        None => eprintln!("harness: unknown substrate '{}'", substrate),
     }
 }
 

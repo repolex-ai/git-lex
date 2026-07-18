@@ -16,13 +16,12 @@ use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
 
-use git_lex::{find_git_root, get_kit};
+use git_lex::find_git_root;
 
 use crate::git::{git_machinery_uri, git_unescape_path, graph_uri, resource_uri};
 use crate::extraction::{flatten_yaml, normalize_wikilink_path,
                         resolve_slug_to_uri};
-use crate::ontology::{get_object_properties, get_property_datatypes,
-                       get_object_properties_all_kits, get_property_datatypes_all_kits};
+use crate::ontology::{get_object_properties_all_kits, get_property_datatypes_all_kits};
 use crate::resolve;
 
 /// Escape a string for use in N-Quads literals.
@@ -521,8 +520,6 @@ pub(crate) fn generate_frontmatter_nquads() -> (String, u32) {
             let entry = tree.get_path(std::path::Path::new(&relpath_str)).ok()?;
             Some(entry.id().to_string())
         }).unwrap_or_default();
-
-        let _short_hash = if blob_hash.len() >= 8 { &blob_hash[..8] } else { &blob_hash };
 
         // --- Frontmatter extraction ---
         let mut spo_lines = Vec::new();

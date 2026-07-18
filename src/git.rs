@@ -8,53 +8,6 @@ use std::process::Command;
 
 use git_lex::find_git_root;
 
-/// Parse the git remote URL into (host, org, repo) components.
-/// Falls back to ("localhost", "local", directory_name) if no remote.
-pub(crate) fn get_repo_parts() -> (String, String, String) {
-    let output = Command::new("git")
-        .args(["remote", "get-url", "origin"])
-        .output();
-    if let Ok(o) = output {
-        if o.status.success() {
-            let url = String::from_utf8_lossy(&o.stdout).trim().to_string();
-            let stripped = url.strip_suffix(".git").unwrap_or(&url);
-
-            // HTTPS: https://github.com/org/repo
-            if stripped.starts_with("https://") || stripped.starts_with("http://") {
-                let without_scheme = stripped.split("://").nth(1).unwrap_or(stripped);
-                let parts: Vec<&str> = without_scheme.splitn(4, '/').collect();
-                if parts.len() >= 3 {
-                    return (parts[0].to_string(), parts[1].to_string(), parts[2].to_string());
-                }
-            }
-
-            // SSH: git@github.com:org/repo
-            if let Some(at_pos) = stripped.find('@') {
-                let after_at = &stripped[at_pos + 1..];
-                if let Some(colon_pos) = after_at.find(':') {
-                    let host = &after_at[..colon_pos];
-                    let path = &after_at[colon_pos + 1..];
-                    let parts: Vec<&str> = path.splitn(2, '/').collect();
-                    if parts.len() == 2 {
-                        return (host.to_string(), parts[0].to_string(), parts[1].to_string());
-                    }
-                }
-            }
-        }
-    }
-    // Fallback
-    let dir_name = find_git_root()
-        .and_then(|p| p.file_name().map(|n| n.to_string_lossy().to_string()))
-        .unwrap_or_else(|| "unknown".to_string());
-    ("localhost".to_string(), "local".to_string(), dir_name)
-}
-
-/// Get the repo identifier (org/name) from the git remote, or fall back to directory name.
-pub(crate) fn get_repo_id() -> String {
-    let (_, org, repo) = get_repo_parts();
-    format!("{}/{}", org, repo)
-}
-
 /// Resolve the soul's genesis SHA (three tiers, ordered by cost) and make
 /// sure `.lex/identity.yml` records it. Called ONCE per sync — identity.yml
 /// is the machine-readable identity file downstream consumers (Pool's

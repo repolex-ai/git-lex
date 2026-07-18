@@ -25,7 +25,7 @@ use std::process::Command;
 use std::time::SystemTime;
 
 use git_lex::{
-    canonical_kit_ontology_path, find_git_root, get_kit, kit_install_dir_for_spec,
+    canonical_kit_ontology_path, find_git_root, kit_install_dir_for_spec,
     resolve_kit_spec,
 };
 
@@ -420,15 +420,6 @@ pub(crate) fn load_kit_into_store(kit: &str) -> Option<Store> {
 
 // ─── install pipeline ──────────────────────────────────────────
 
-/// Install dir for the current repo's kit. Reads repo.yml to find the kit
-/// spec, resolves it, and returns the path. Returns None if no kit is
-/// configured.
-pub(crate) fn kit_install_dir() -> Option<PathBuf> {
-    let root = find_git_root()?;
-    let kit = get_kit()?;
-    Some(kit_install_dir_for_spec(&root, &kit))
-}
-
 /// Fetch a kit tarball from GitHub and extract it into `target_dir`.
 ///
 /// Uses `curl | tar --strip-components=1` so the extract goes straight
@@ -507,15 +498,6 @@ pub(crate) fn collect_init_variables(kit_name: &str, existing: &HashMap<String, 
         if !value.is_empty() {
             out.insert(name, value);
         }
-    }
-    out
-}
-
-/// Substitute `{varname}` template placeholders in text using a variable map.
-pub(crate) fn substitute_vars(text: &str, vars: &HashMap<String, String>) -> String {
-    let mut out = text.to_string();
-    for (k, v) in vars {
-        out = out.replace(&format!("{{{}}}", k), v);
     }
     out
 }
@@ -1165,145 +1147,6 @@ pub(crate) fn install_scaffold_files_from_skip_existing(
     }
 
     report
-}
-
-/// Report from install_asset_files — lists what was installed, what was
-/// skipped because it already existed, and what was overwritten under --force.
-#[derive(Default)]
-pub(crate) struct AssetInstallReport {
-    pub installed: Vec<String>,  // freshly written (destination did not exist)
-    pub skipped: Vec<String>,    // destination already existed, --force not set
-    pub overwritten: Vec<String>, // destination existed and was overwritten under --force
-}
-
-/// Install asset files from the kit into the repo root.
-/// Assets live in .lex/kit/assets/ and mirror the repo structure. They can
-/// target paths anywhere under the repo, including inside .lex/ itself
-/// (e.g. `assets/.lex/www/mykitpage/index.html`).
-///
-/// Behavior differs from scaffold:
-///   - Template processing: `{varname}` placeholders are substituted from
-///     the variable map before writing.
-///   - Default safe mode: if the destination file already exists, skip it
-///     and add to the skipped list. User can re-run with --force to
-///     overwrite.
-///   - Force mode: overwrite existing files. No backup file is written —
-///     git history is the safety net for any lost local edits.
-pub(crate) fn install_asset_files(vars: &HashMap<String, String>, force: bool) -> AssetInstallReport {
-    let mut report = AssetInstallReport::default();
-    let root = match find_git_root() {
-        Some(r) => r,
-        None => return report,
-    };
-
-    let kit_dir = match kit_install_dir() {
-        Some(d) => d,
-        None => return report,
-    };
-    let asset_dir = kit_dir.join("assets");
-    if !asset_dir.exists() {
-        return report;
-    }
-
-    fn install_recursive(
-        src_dir: &std::path::Path,
-        dest_dir: &std::path::Path,
-        vars: &HashMap<String, String>,
-        force: bool,
-        repo_root: &std::path::Path,
-        report: &mut AssetInstallReport,
-    ) {
-        let entries = match fs::read_dir(src_dir) {
-            Ok(e) => e,
-            Err(_) => return,
-        };
-        for entry in entries.flatten() {
-            let src = entry.path();
-            let name = entry.file_name();
-            let dest = dest_dir.join(&name);
-
-            if src.is_dir() {
-                fs::create_dir_all(&dest).ok();
-                install_recursive(&src, &dest, vars, force, repo_root, report);
-                continue;
-            }
-            if !src.is_file() {
-                continue;
-            }
-
-            let rel = dest
-                .strip_prefix(repo_root)
-                .unwrap_or(&dest)
-                .to_string_lossy()
-                .to_string();
-
-            if dest.exists() && !force {
-                report.skipped.push(rel);
-                continue;
-            }
-
-            let content = match fs::read_to_string(&src) {
-                Ok(c) => c,
-                Err(_) => continue,
-            };
-            let processed = substitute_vars(&content, vars);
-            fs::create_dir_all(dest.parent().unwrap_or(&dest)).ok();
-
-            let was_present = dest.exists();
-            if fs::write(&dest, &processed).is_ok() {
-                if was_present {
-                    report.overwritten.push(rel);
-                } else {
-                    report.installed.push(rel);
-                }
-            }
-        }
-    }
-
-    install_recursive(&asset_dir, &root, vars, force, &root, &mut report);
-    report
-}
-
-/// Recursively copy a directory tree, preserving symlinks.
-pub(crate) fn copy_dir_recursive(src: &std::path::Path, dest: &std::path::Path) -> std::io::Result<()> {
-    fs::create_dir_all(dest)?;
-    for entry in fs::read_dir(src)? {
-        let entry = entry?;
-        let src_path = entry.path();
-        let dest_path = dest.join(entry.file_name());
-
-        // Inspect without following symlinks so we can preserve them.
-        let meta = fs::symlink_metadata(&src_path)?;
-        let ft = meta.file_type();
-
-        if ft.is_symlink() {
-            let target = fs::read_link(&src_path)?;
-            // Remove anything existing at dest so we can create the symlink.
-            if dest_path.symlink_metadata().is_ok() {
-                if dest_path.is_dir() && !dest_path.is_symlink() {
-                    let _ = fs::remove_dir_all(&dest_path);
-                } else {
-                    let _ = fs::remove_file(&dest_path);
-                }
-            }
-            #[cfg(unix)]
-            {
-                std::os::unix::fs::symlink(&target, &dest_path)?;
-            }
-            #[cfg(not(unix))]
-            {
-                // Windows: fall back to copying the target (best effort).
-                if src_path.exists() && src_path.is_file() {
-                    fs::copy(&src_path, &dest_path)?;
-                }
-            }
-        } else if ft.is_dir() {
-            copy_dir_recursive(&src_path, &dest_path)?;
-        } else if ft.is_file() {
-            fs::copy(&src_path, &dest_path)?;
-        }
-    }
-    Ok(())
 }
 
 // ─── kit lifecycle ─────────────────────────────────────────────

@@ -38,11 +38,11 @@ use crate::shacl::{build_shacl_shapes, parse_shacl_hints};
 use crate::extraction::{extract_jsonl_sessions, extract_markdown_links, frontmatter_to_turtle,
                         sanitize_uri_segment, short_hash};
 use crate::kit::{collect_init_variables, fetch_kit_from_github, install_scaffold_files_from,
-                 install_scaffold_files_from_skip_existing, ScaffoldInstallReport,
+                 install_scaffold_files_from_skip_existing,
                  kit_config_bool, kit_config_str, read_repo_yml_fields,
                  read_repo_yml_optional_kits, append_optional_kit, remove_optional_kit,
                  fetch_and_validate_optional_kit, remove_kit_install_dir,
-                 KitFetchOutcome, KitScope, read_kit_scope};
+                 KitFetchOutcome};
 
 // .spo event stream — git-aware change detector for .spo sidecars. Used by
 // orphan cleanup (pre-commit hook) and history graph ingest (rebuild +
@@ -816,16 +816,6 @@ fn cmd_init(directory: Option<String>, kit: Option<String>) {
 
 /// Get the persistent store path.
 // store_path and open_store_read_only imported from git_lex lib
-
-/// Open the persistent store, or None if it doesn't exist.
-fn open_store() -> Option<Store> {
-    let path = store_path()?;
-    if path.exists() {
-        Store::open(&path).ok()
-    } else {
-        None
-    }
-}
 
 /// Create or open the persistent store.
 fn open_or_create_store() -> Store {
@@ -2394,7 +2384,7 @@ fn build_history_on_sync(root: &std::path::Path) -> bool {
 #[allow(deprecated)]
 /// Serialize a SPARQL term to W3C SPARQL JSON binding format.
 /// https://www.w3.org/TR/sparql11-results-json/#select-encode-terms
-use git_lex::{term_to_json, term_to_json_subject};
+use git_lex::term_to_json;
 
 fn run_query(store: &Store, query: &str, store_type: &str, json: bool) {
     let start = Instant::now();

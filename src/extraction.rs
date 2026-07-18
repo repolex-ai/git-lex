@@ -70,30 +70,6 @@ pub(crate) fn normalize_wikilink_path(target: &str, source_dir: &str) -> Option<
     Some(joined)
 }
 
-/// True if the byte position `start` in `text` is preceded by a non-word
-/// character (or is at the start of `text`). Used to reject `@mention`
-/// matches that are actually the local-part separator of an email address
-/// (`rob@repolex.ai` should not produce a mention `@repolex.ai`).
-///
-/// "Word char" here means ASCII alphanumeric or `_`, matching the usual
-/// `\b` semantics. We walk back to the previous char boundary so this is
-/// safe on UTF-8 input.
-pub(crate) fn is_word_boundary_before(text: &str, start: usize) -> bool {
-    if start == 0 {
-        return true;
-    }
-    // Step back to the previous char boundary.
-    let mut i = start - 1;
-    while i > 0 && !text.is_char_boundary(i) {
-        i -= 1;
-    }
-    let prev = text[i..].chars().next();
-    match prev {
-        Some(c) => !(c.is_ascii_alphanumeric() || c == '_'),
-        None => true,
-    }
-}
-
 /// Recursively flatten a YAML value into dot-notation `key | hasValue | val` lines.
 /// Used by the frontmatter extractor to produce .spo-compatible rows for nested
 /// YAML mappings and sequences.
@@ -129,11 +105,6 @@ pub(crate) fn flatten_yaml(prefix: &str, value: &serde_yaml::Value, lines: &mut 
         }
         _ => {}
     }
-}
-
-/// True if the given string parses as a syntactically valid IRI.
-pub(crate) fn is_valid_iri(iri: &str) -> bool {
-    oxiri::Iri::parse(iri).is_ok()
 }
 
 /// Sanitize a string for use in a URI path segment.
