@@ -957,7 +957,7 @@ pub fn history_annotation(
     } else {
         "<https://repolex.ai/ontology/spo/removedIn>"
     };
-    let commit_uri = format!("<{}>", crate::git::resource_uri(&format!("commit/{}", commit_sha)));
+    let commit_uri = format!("<{}>", crate::git::git_machinery_uri(&format!("Commit/{}", commit_sha)));
 
     Some(vec![
         // The triple term annotation: <ann-uri> rdf:reifies <<( s p o )>>
@@ -1242,7 +1242,7 @@ pub(crate) fn history_walk_engine(
     let marker_nq = format!(
         "<{}> <https://repolex.ai/ontology/spo/lastHistorySync> <{}> {} .\n",
         crate::git::resource_uri("meta"),
-        crate::git::resource_uri(&format!("commit/{}", head_sha)),
+        crate::git::git_machinery_uri(&format!("Commit/{}", head_sha)),
         meta_graph
     );
     let parser = oxigraph::io::RdfParser::from_format(oxigraph::io::RdfFormat::NQuads);

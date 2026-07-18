@@ -18,7 +18,7 @@ use std::process::Command;
 
 use git_lex::{find_git_root, get_kit};
 
-use crate::git::{git_unescape_path, graph_uri, resource_uri};
+use crate::git::{git_machinery_uri, git_unescape_path, graph_uri, resource_uri};
 use crate::extraction::{flatten_yaml, normalize_wikilink_path,
                         resolve_slug_to_uri};
 use crate::ontology::{get_object_properties, get_property_datatypes,
@@ -123,7 +123,7 @@ pub(crate) fn generate_git_nquads() -> String {
                 if f.len() < 9 { continue; }
                 let (sha, email, name, date, subject, parents) = (f[0], f[1], f[2], f[3], f[4], f[5]);
                 let (committer_email, committer_name, committer_date) = (f[6], f[7], f[8]);
-                let cu = format!("<{}>", resource_uri(&format!("commit/{}", sha)));
+                let cu = format!("<{}>", git_machinery_uri(&format!("Commit/{}", sha)));
                 nq.push_str(&format!("{} <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://repolex.ai/ontology/git-lex/git/Commit> {} .\n", cu, graph));
                 nq.push_str(&format!("{} <https://repolex.ai/ontology/git-lex/git/hexsha> \"{}\" {} .\n", cu, sha, graph));
                 nq.push_str(&format!("{} <https://repolex.ai/ontology/git-lex/git/authorEmail> \"{}\" {} .\n", cu, nq_escape(email), graph));
@@ -134,7 +134,7 @@ pub(crate) fn generate_git_nquads() -> String {
                 nq.push_str(&format!("{} <https://repolex.ai/ontology/git-lex/git/committedDate> \"{}\"^^<http://www.w3.org/2001/XMLSchema#dateTime> {} .\n", cu, committer_date, graph));
                 nq.push_str(&format!("{} <https://repolex.ai/ontology/git-lex/git/message> \"{}\" {} .\n", cu, nq_escape(subject), graph));
                 for parent in parents.split_whitespace() {
-                    let parent_uri = format!("<{}>", resource_uri(&format!("commit/{}", parent)));
+                    let parent_uri = format!("<{}>", git_machinery_uri(&format!("Commit/{}", parent)));
                     nq.push_str(&format!("{} <https://repolex.ai/ontology/git-lex/git/parent> {} {} .\n", cu, parent_uri, graph));
                 }
             }
@@ -166,11 +166,11 @@ pub(crate) fn generate_git_nquads() -> String {
                     let meta: Vec<&str> = parts[0].split_whitespace().collect();
                     if meta.len() < 4 { continue; }
                     let (obj_type, blob_hash, size) = (meta[1], meta[2], meta[3]);
-                    let fu = format!("<{}>", resource_uri(&format!("tree/{}/{}", ref_sha, uri_encode_path(&path))));
+                    let fu = format!("<{}>", git_machinery_uri(&format!("Tree/{}/{}", ref_sha, uri_encode_path(&path))));
                     nq.push_str(&format!("{} <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://repolex.ai/ontology/git-lex/git/Blob> {} .\n", fu, graph));
                     nq.push_str(&format!("{} <https://repolex.ai/ontology/git-lex/git/path> \"{}\" {} .\n", fu, nq_escape(&path), graph));
                     nq.push_str(&format!("{} <https://repolex.ai/ontology/git-lex/git/blobHash> \"{}\" {} .\n", fu, blob_hash, graph));
-                    nq.push_str(&format!("{} <https://repolex.ai/ontology/git-lex/git/blob> <{}> {} .\n", fu, resource_uri(&format!("blob/{}", blob_hash)), graph));
+                    nq.push_str(&format!("{} <https://repolex.ai/ontology/git-lex/git/blob> <{}> {} .\n", fu, git_machinery_uri(&format!("Blob/{}", blob_hash)), graph));
                     nq.push_str(&format!("{} <https://repolex.ai/ontology/git-lex/git/size> \"{}\"^^<http://www.w3.org/2001/XMLSchema#integer> {} .\n", fu, size, graph));
                     nq.push_str(&format!("{} <https://repolex.ai/ontology/git-lex/git/type> \"{}\" {} .\n", fu, obj_type, graph));
                 }
@@ -191,10 +191,10 @@ pub(crate) fn generate_git_nquads() -> String {
                 let parts: Vec<&str> = line.splitn(2, ' ').collect();
                 if parts.len() < 2 { continue; }
                 let (name, sha) = (parts[0], parts[1]);
-                let ru = format!("<{}>", resource_uri(&format!("branch/{}", nq_escape(name))));
+                let ru = format!("<{}>", git_machinery_uri(&format!("Branch/{}", uri_encode_path(name))));
                 nq.push_str(&format!("{} <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://repolex.ai/ontology/git-lex/git/Branch> {} .\n", ru, graph));
                 nq.push_str(&format!("{} <https://repolex.ai/ontology/git-lex/git/shortName> \"{}\" {} .\n", ru, nq_escape(name), graph));
-                nq.push_str(&format!("{} <https://repolex.ai/ontology/git-lex/git/commit> <{}> {} .\n", ru, resource_uri(&format!("commit/{}", sha)), graph));
+                nq.push_str(&format!("{} <https://repolex.ai/ontology/git-lex/git/commit> <{}> {} .\n", ru, git_machinery_uri(&format!("Commit/{}", sha)), graph));
             }
         }
     }
@@ -212,10 +212,10 @@ pub(crate) fn generate_git_nquads() -> String {
                 let parts: Vec<&str> = line.splitn(2, ' ').collect();
                 if parts.len() < 2 { continue; }
                 let (name, sha) = (parts[0], parts[1]);
-                let ru = format!("<{}>", resource_uri(&format!("tag/{}", nq_escape(name))));
+                let ru = format!("<{}>", git_machinery_uri(&format!("Tag/{}", uri_encode_path(name))));
                 nq.push_str(&format!("{} <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://repolex.ai/ontology/git-lex/git/Tag> {} .\n", ru, graph));
                 nq.push_str(&format!("{} <https://repolex.ai/ontology/git-lex/git/shortName> \"{}\" {} .\n", ru, nq_escape(name), graph));
-                nq.push_str(&format!("{} <https://repolex.ai/ontology/git-lex/git/commit> <{}> {} .\n", ru, resource_uri(&format!("commit/{}", sha)), graph));
+                nq.push_str(&format!("{} <https://repolex.ai/ontology/git-lex/git/commit> <{}> {} .\n", ru, git_machinery_uri(&format!("Commit/{}", sha)), graph));
             }
         }
     }
@@ -244,8 +244,8 @@ pub(crate) fn generate_git_nquads() -> String {
                 let status = parts[0];
                 let path = git_unescape_path(parts[1]);
                 let graph = format!("<{}>", graph_uri(&format!("changeset/{}", current_sha)));
-                let change_uri = format!("<{}>", resource_uri(&format!("changeset/{}/{}", current_sha, uri_encode_path(&path))));
-                let commit_uri = format!("<{}>", resource_uri(&format!("commit/{}", current_sha)));
+                let change_uri = format!("<{}>", git_machinery_uri(&format!("Changeset/{}/{}", current_sha, uri_encode_path(&path))));
+                let commit_uri = format!("<{}>", git_machinery_uri(&format!("Commit/{}", current_sha)));
 
                 // Link commit to changeset (in commits graph so joins work)
                 let commits_graph = format!("<{}>", graph_uri("commits"));
@@ -302,7 +302,7 @@ pub(crate) fn generate_git_nquads() -> String {
                         for path in paths.iter().take(max_files) {
                             let blame = repo.blame_file(std::path::Path::new(path), None);
                             if let Ok(blame) = blame {
-                                let file_uri = format!("<{}>", resource_uri(&format!("tree/{}/{}", head_sha, uri_encode_path(path))));
+                                let file_uri = format!("<{}>", git_machinery_uri(&format!("Tree/{}/{}", head_sha, uri_encode_path(path))));
                                 let mut authors_seen = std::collections::HashSet::new();
 
                                 for i in 0..blame.len() {
@@ -381,7 +381,7 @@ pub(crate) fn generate_git_nquads() -> String {
                         _ => None,
                     };
                     if let Some(lang) = lang {
-                        let fu = format!("<{}>", resource_uri(&format!("tree/{}/{}", head_sha, uri_encode_path(path))));
+                        let fu = format!("<{}>", git_machinery_uri(&format!("Tree/{}/{}", head_sha, uri_encode_path(path))));
                         nq.push_str(&format!(
                             "{} <https://repolex.ai/ontology/git-lex/git/language> \"{}\" {} .\n",
                             fu, lang, graph
@@ -639,7 +639,7 @@ pub(crate) fn generate_frontmatter_nquads() -> (String, u32) {
                 let parts: Vec<&str> = line.splitn(2, '\x00').collect();
                 if parts.len() < 2 { continue; }
                 let (sha, message) = (parts[0], parts[1]);
-                let commit_uri = format!("<{}>", resource_uri(&format!("commit/{}", sha)));
+                let commit_uri = format!("<{}>", git_machinery_uri(&format!("Commit/{}", sha)));
 
                 for cap in wikilink_re.captures_iter(message) {
                     let link = &cap[1];

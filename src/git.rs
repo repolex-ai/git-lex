@@ -122,6 +122,19 @@ pub(crate) fn resource_uri(path: &str) -> String {
     format!("{SOUL_RESOURCE_BASE}/{tail}")
 }
 
+/// Mint a git-machinery instance IRI. The universal law applied to the git
+/// parser vocabulary nested under the git-lex application: instance IRI =
+/// t-box IRI minus `ontology/` (trip's namespace-pattern doc, Rob-ruled).
+///
+///   t-box `ontology/git-lex/git/Commit`  →  a-box `git-lex/git/Commit/<sha>`
+///
+/// `path` is `<Class>/<instanceId>` with the Class Capitalized exactly as
+/// declared in git.ttl (`Commit/`, `Blob/`, `Branch/`, `Tag/`, `Tree/`,
+/// `Changeset/`).
+pub(crate) fn git_machinery_uri(path: &str) -> String {
+    format!("https://repolex.ai/git-lex/git/{path}")
+}
+
 
 // ---------------------------------------------------------------------
 // SHA resolution (three tiers, ordered by cost)

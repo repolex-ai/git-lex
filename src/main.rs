@@ -2205,7 +2205,7 @@ fn cmd_sync() {
                             Term::NamedNode(n) => {
                                 // URI is <base/commit/SHA> — extract the SHA
                                 let uri = n.as_str();
-                                uri.rfind("/commit/").map(|pos| uri[pos + 8..].to_string())
+                                uri.rfind("/Commit/").map(|pos| uri[pos + 8..].to_string())
                             }
                             _ => None,
                         })
