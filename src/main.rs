@@ -193,7 +193,12 @@ enum Commands {
         #[arg(long, default_value = "7878")]
         port: u16,
     },
-    /// Start servers (viz, listen). Delegates to git-lex-serve.
+    /// Start ONE local server (pure passthrough to git-lex-serve)
+    ///
+    /// Subcommands: `viz` (graph visualizer, port 7878), `listen` (SSE
+    /// relay, 7879), `sparql` (W3C SPARQL endpoint over the synced store,
+    /// 7880). Each invocation starts exactly one server, e.g.
+    /// `git lex serve sparql`.
     Serve {
         /// Arguments passed through to git-lex-serve
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
