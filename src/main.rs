@@ -1854,10 +1854,10 @@ fn cmd_sync() {
     // Clear non-sync, non-history graphs (virtual graphs get regenerated).
     // History and meta graphs are persistent — managed by Phase 4.
     for graph_uri in &existing_graphs {
-        if !graph_uri.starts_with("https://repolex.ai/git-lex/sync/")
-            && graph_uri != "https://repolex.ai/git-lex/history"
-            && graph_uri != "https://repolex.ai/git-lex/meta"
-            && graph_uri != "https://repolex.ai/git-lex/ontology"
+        if !graph_uri.starts_with("https://repolex.ai/git-lex/NamedGraph/sync/")
+            && graph_uri != "https://repolex.ai/git-lex/NamedGraph/history"
+            && graph_uri != "https://repolex.ai/git-lex/NamedGraph/meta"
+            && graph_uri != "https://repolex.ai/git-lex/NamedGraph/repo-ontology"
         {
             if let Ok(graph) = oxigraph::model::NamedNode::new(graph_uri) {
                 // remove (not clear): drops the graph's registration too, so a
@@ -1903,7 +1903,7 @@ fn cmd_sync() {
             .filter_map(|g| match g {
                 oxigraph::model::NamedOrBlankNode::NamedNode(n) => {
                     let uri = n.as_str();
-                    uri.strip_prefix("https://repolex.ai/git-lex/sync/")
+                    uri.strip_prefix("https://repolex.ai/git-lex/NamedGraph/sync/")
                         .map(|sha| sha.trim_end_matches('/').to_string())
                 }
                 _ => None,
@@ -2332,7 +2332,7 @@ fn cmd_sync() {
 
     // Count total sync graph triples
     let total_sync: usize = existing_graphs.iter()
-        .filter(|g| g.starts_with("https://repolex.ai/git-lex/sync/"))
+        .filter(|g| g.starts_with("https://repolex.ai/git-lex/NamedGraph/sync/"))
         .count();
 
     println!(

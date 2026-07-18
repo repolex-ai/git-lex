@@ -549,7 +549,7 @@ mod w3c_query_tests {
             NamedNode::new("https://repolex.ai/soul/Memory/x.md").unwrap(),
             NamedNode::new("https://repolex.ai/ontology/git-lex/fm/title").unwrap(),
             Literal::new_simple_literal("hello"),
-            GraphName::NamedNode(NamedNode::new("https://repolex.ai/git-lex/now").unwrap()),
+            GraphName::NamedNode(NamedNode::new("https://repolex.ai/git-lex/NamedGraph/now").unwrap()),
         ).as_ref()).unwrap();
         store
     }
@@ -557,7 +557,7 @@ mod w3c_query_tests {
     #[test]
     fn select_produces_w3c_bindings() {
         let store = store_with_one_fact();
-        match w3c_query(&store, "SELECT ?s ?o WHERE { GRAPH <https://repolex.ai/git-lex/now> { ?s ?p ?o } }").unwrap() {
+        match w3c_query(&store, "SELECT ?s ?o WHERE { GRAPH <https://repolex.ai/git-lex/NamedGraph/now> { ?s ?p ?o } }").unwrap() {
             W3cQueryOutcome::Solutions(v) => {
                 assert_eq!(v["head"]["vars"], serde_json::json!(["s", "o"]));
                 let b = &v["results"]["bindings"][0];

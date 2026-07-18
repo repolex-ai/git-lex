@@ -81,21 +81,23 @@ pub(crate) fn genesis_sha() -> Option<String> {
 // ---------------------------------------------------------------------
 
 /// Graph-container names: soul-independent ABSOLUTE IRIs, identical across
-/// every soul's store — `GRAPH <https://repolex.ai/git-lex/now>` is the same
+/// every soul's store — `GRAPH <https://repolex.ai/git-lex/NamedGraph/now>` is the same
 /// query everywhere. (A literally-bare name like `now` is not a legal IRI:
 /// oxigraph rejects it at the model level and SPARQL won't parse `<now>` —
 /// probed Day-50. Absolute-and-identical is the standard shape that delivers
 /// the portability requirement.)
-pub(crate) const GRAPH_BASE: &str = "https://repolex.ai/git-lex/";
+pub(crate) const GRAPH_BASE: &str = "https://repolex.ai/git-lex/NamedGraph/";
 
 /// The a-box (instance) base for soul-repo subjects. Subtexture-wide shape
 /// (Rob, Day-50): `https://repolex.ai/<application>/<Class>/<instanceId>` —
 /// no base word; vocabulary stays under `https://repolex.ai/ontology/...`.
 pub(crate) const SOUL_RESOURCE_BASE: &str = "https://repolex.ai/soul";
 
-/// Mint a graph-container IRI: `https://repolex.ai/git-lex/<name>` — named
-/// graphs are namespaced to the system that defines them (Rob, Day-50: no
-/// generic /graph/ segment; a named graph is already known to be a graph).
+/// Mint a graph name: `https://repolex.ai/git-lex/NamedGraph/<name>`.
+/// Graphs are instances of `git-lex:NamedGraph` (⊑ sd:NamedGraph, kit-base
+/// 72be113) under the universal instance law — the git-lex application's
+/// NamedGraph objects. The ontology graph's instance name is
+/// `repo-ontology` (renamed from `ontology`, Rob Day-50).
 pub(crate) fn graph_uri(name: &str) -> String {
     format!("{GRAPH_BASE}{name}")
 }

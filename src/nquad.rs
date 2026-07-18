@@ -932,7 +932,7 @@ pub(crate) fn build_slug_path_indexes(
 /// Load every installed kit ontology TTL (`.lex/ontology/**/*.ttl`, EXCLUDING
 /// `-shapes.ttl` SHACL files — Rob: shapes are validation, not vocabulary)
 /// into the self-describing ontology graph
-/// `<https://repolex.ai/git-lex/ontology>` of `store`.
+/// `<https://repolex.ai/git-lex/NamedGraph/repo-ontology>` of `store`.
 ///
 /// Runs at INIT and KIT-UPDATE only (Rob Day-50): the graph persists in the
 /// store ("stays put") — sync does not touch it, query does not rebuild it.
@@ -940,7 +940,7 @@ pub(crate) fn build_slug_path_indexes(
 /// LOUD but not fatal on a broken TTL. Returns the number of files loaded.
 pub(crate) fn load_ontology_graph(store: &oxigraph::store::Store) -> usize {
     let Some(root) = find_git_root() else { return 0 };
-    let ontology_graph = match oxigraph::model::NamedNode::new(graph_uri("ontology")) {
+    let ontology_graph = match oxigraph::model::NamedNode::new(graph_uri("repo-ontology")) {
         Ok(g) => g,
         Err(_) => return 0,
     };
