@@ -108,7 +108,12 @@ pub(crate) fn generate_git_nquads() -> String {
         }
     }
 
-    // Commits
+    // Commits — author/committer as git:Actor NODES (the day-one ontology
+    // model, finally implemented; the flat authorName/authorEmail string
+    // props were the admitted stopgap and are retired). One Actor per
+    // distinct email — git's de-facto person key (Rob-ruled instance id) —
+    // so a display-name change stays the same person, and every name a
+    // person has committed under accumulates as git:actorName facts.
     let output = Command::new("git")
         .args(["log", "--all", "--format=%H%x00%ae%x00%an%x00%aI%x00%s%x00%P%x00%ce%x00%cn%x00%cI"])
         .current_dir(&git_root)
@@ -117,6 +122,33 @@ pub(crate) fn generate_git_nquads() -> String {
         if o.status.success() {
             let stdout = String::from_utf8_lossy(&o.stdout);
             let graph = format!("<{}>", graph_uri("commits"));
+
+            // Mint (or fetch) the Actor IRI for a (name, email) signature,
+            // emitting the Actor's own facts once per distinct pair. Empty
+            // email (git allows it) falls back to the name as the id; both
+            // empty → no Actor (the commit simply carries no author link).
+            let mut seen_actor_pairs: HashSet<(String, String)> = HashSet::new();
+            let mut actor_ref = |name: &str, email: &str, nq: &mut String| -> Option<String> {
+                let id = if !email.is_empty() {
+                    uri_encode_path(email)
+                } else if !name.is_empty() {
+                    uri_encode_path(name)
+                } else {
+                    return None;
+                };
+                let au = format!("<{}>", git_machinery_uri(&format!("Actor/{}", id)));
+                if seen_actor_pairs.insert((name.to_string(), email.to_string())) {
+                    nq.push_str(&format!("{} <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://repolex.ai/ontology/git-lex/git/Actor> {} .\n", au, graph));
+                    if !name.is_empty() {
+                        nq.push_str(&format!("{} <https://repolex.ai/ontology/git-lex/git/actorName> \"{}\" {} .\n", au, nq_escape(name), graph));
+                    }
+                    if !email.is_empty() {
+                        nq.push_str(&format!("{} <https://repolex.ai/ontology/git-lex/git/email> \"{}\" {} .\n", au, nq_escape(email), graph));
+                    }
+                }
+                Some(au)
+            };
+
             for line in stdout.lines() {
                 let f: Vec<&str> = line.split('\x00').collect();
                 if f.len() < 9 { continue; }
@@ -125,11 +157,13 @@ pub(crate) fn generate_git_nquads() -> String {
                 let cu = format!("<{}>", git_machinery_uri(&format!("Commit/{}", sha)));
                 nq.push_str(&format!("{} <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://repolex.ai/ontology/git-lex/git/Commit> {} .\n", cu, graph));
                 nq.push_str(&format!("{} <https://repolex.ai/ontology/git-lex/git/hexsha> \"{}\" {} .\n", cu, sha, graph));
-                nq.push_str(&format!("{} <https://repolex.ai/ontology/git-lex/git/authorEmail> \"{}\" {} .\n", cu, nq_escape(email), graph));
-                nq.push_str(&format!("{} <https://repolex.ai/ontology/git-lex/git/authorName> \"{}\" {} .\n", cu, nq_escape(name), graph));
+                if let Some(au) = actor_ref(name, email, &mut nq) {
+                    nq.push_str(&format!("{} <https://repolex.ai/ontology/git-lex/git/author> {} {} .\n", cu, au, graph));
+                }
                 nq.push_str(&format!("{} <https://repolex.ai/ontology/git-lex/git/authoredDate> \"{}\"^^<http://www.w3.org/2001/XMLSchema#dateTime> {} .\n", cu, date, graph));
-                nq.push_str(&format!("{} <https://repolex.ai/ontology/git-lex/git/committerEmail> \"{}\" {} .\n", cu, nq_escape(committer_email), graph));
-                nq.push_str(&format!("{} <https://repolex.ai/ontology/git-lex/git/committerName> \"{}\" {} .\n", cu, nq_escape(committer_name), graph));
+                if let Some(au) = actor_ref(committer_name, committer_email, &mut nq) {
+                    nq.push_str(&format!("{} <https://repolex.ai/ontology/git-lex/git/committer> {} {} .\n", cu, au, graph));
+                }
                 nq.push_str(&format!("{} <https://repolex.ai/ontology/git-lex/git/committedDate> \"{}\"^^<http://www.w3.org/2001/XMLSchema#dateTime> {} .\n", cu, committer_date, graph));
                 nq.push_str(&format!("{} <https://repolex.ai/ontology/git-lex/git/message> \"{}\" {} .\n", cu, nq_escape(subject), graph));
                 for parent in parents.split_whitespace() {
@@ -250,7 +284,8 @@ pub(crate) fn generate_git_nquads() -> String {
                 let commits_graph = format!("<{}>", graph_uri("commits"));
                 nq.push_str(&format!("{} <https://repolex.ai/ontology/git-lex/git/changed> {} {} .\n", commit_uri, change_uri, commits_graph));
 
-                // Change details
+                // Change details (typed — every instance carries its class)
+                nq.push_str(&format!("{} <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://repolex.ai/ontology/git-lex/git/Changeset> {} .\n", change_uri, graph));
                 nq.push_str(&format!("{} <https://repolex.ai/ontology/git-lex/git/path> \"{}\" {} .\n", change_uri, nq_escape(&path), graph));
 
                 let status_label = match status.chars().next() {
