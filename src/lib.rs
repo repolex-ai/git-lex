@@ -346,9 +346,9 @@ pub fn add_prefixes_at(root: Option<&std::path::Path>, query: &str) -> String {
     // /ontology/...) gets injected spuriously, and a query using a literal that
     // happens to contain "git:" pulls in unwanted PREFIXes. Match prefix tokens
     // on a word boundary (regex `\b<short>` or tokenize), not raw contains().
-    // QUESTION: why does `o:` use /ont/<8-char-sha>/ while identity uses the
-    // FULL sha at urn:soul:<sha>? Two SHA lengths + two ontology roots for the
-    // "same" repo is a latent mismatch worth reconciling for the soft-release.
+    // NOTE: `o:` still mints /ont/<8-char-sha>/ — the one SHA-bearing
+    // namespace left after the Day-50 SHA-out (identity is a fact now, not
+    // an IRI). Under review as task #39 (Rob: examine in context).
     let upper = query.to_uppercase();
     let mut prefix_block = String::new();
     for (short, full) in &defaults {

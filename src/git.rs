@@ -230,17 +230,15 @@ fn canonical_identity_yml(sha: &str) -> String {
 
 /// Validate a SHA-1 as a SOUL IDENTITY ANCHOR: exactly 40 hex chars.
 ///
-/// C6 fix (Day 38): this is the gate inside all three `sha_from_*` readers,
-/// and every one of them feeds `base_uri()`'s `urn:soul:<sha>`. Accepting a
-/// short SHA here was an IDENTITY-SPLIT risk — if `repo.yml` held a truncated
-/// `first_commit:` while `identity.yml` held the full one, the tiers could
-/// emit `urn:soul:<short>` and `urn:soul:<full>` for the SAME soul, splitting
-/// its subjects across two base IRIs (queries miss half). It also crosses the
-/// seam into Pool: `pool sync-from` builds the Moments named-graph IRI from
-/// `identity.yml`'s genesis_sha, so a length disagreement would orphan a
-/// soul's Moments in a differently-named graph (see the git-lex×Pool compare,
-/// EDGE-2 / Pool #110). The anchor MUST be the full 40-hex SHA-1; short forms
-/// are fine for display but must never become the urn: base.
+/// C6 fix (Day 38): this is the gate inside all three `sha_from_*` readers.
+/// The genesis SHA is identity data — `.lex/identity.yml` + the
+/// `git:genesisSha` fact (it no longer appears in any IRI, Day-50). A short
+/// SHA here is still an IDENTITY-SPLIT risk across the Pool seam:
+/// `pool sync-from` builds the Moments named-graph IRI from identity.yml's
+/// genesis_sha, so a length disagreement between tiers would orphan a
+/// soul's Moments in a differently-named graph (see the git-lex×Pool
+/// compare, EDGE-2 / Pool #110). The anchor MUST be the full 40-hex SHA-1;
+/// short forms are fine for display only.
 fn is_valid_sha(s: &str) -> bool {
     s.len() == 40 && s.chars().all(|c| c.is_ascii_hexdigit())
 }
