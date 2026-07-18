@@ -552,7 +552,7 @@ fn cmd_init(directory: Option<String>, kit: Option<String>) {
 
                 doc.push_str("## [[wikilinks]]\n\n");
                 doc.push_str("Reference other documents naturally in your text:\n\n");
-                doc.push_str("- `[[Class/id]]` — creates a `lex:linksTo` relationship to that document\n");
+                doc.push_str("- `[[Class/id]]` — creates a `md:linksTo` relationship to that document\n");
                 doc.push_str("- bare `[[some-doc]]` is also accepted (resolved via slug)\n\n");
                 doc.push_str("Wikilinks are extracted automatically from document bodies and commit messages.\n\n");
 
@@ -2047,9 +2047,9 @@ fn cmd_sync() {
             } else if predicate == "hasValue" {
                 format!("<https://repolex.ai/ontology/git-lex/fm/{}>", uri_encode_path(subject))
             } else if predicate == "mentions" {
-                "<https://repolex.ai/ontology/git-lex/lex/mentions>".to_string()
+                "<https://repolex.ai/ontology/git-lex/md/mentions>".to_string()
             } else if predicate == "linksTo" {
-                "<https://repolex.ai/ontology/git-lex/lex/linksTo>".to_string()
+                "<https://repolex.ai/ontology/git-lex/md/linksTo>".to_string()
             } else {
                 format!("<{}>", resource_uri(&format!("predicate/{}", sanitize_uri_segment(predicate))))
             };

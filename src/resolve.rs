@@ -68,7 +68,7 @@ pub enum ResolveResult {
 /// This is the ONLY code path for frontmatter ObjectProperty resolution.
 /// Body-text `[[wikilinks]]` and `@mentions` have their own resolvers
 /// because they serve a different purpose (ambient cross-references in
-/// prose, emitting `lex:linksTo` and `lex:mentions` respectively).
+/// prose, emitting `md:linksTo` and `md:mentions` respectively).
 ///
 /// See the module-level doc comment for the full rule set, and the test
 /// suite below for executable examples of each rule.

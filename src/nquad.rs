@@ -644,7 +644,7 @@ pub(crate) fn generate_frontmatter_nquads() -> (String, u32) {
                 for cap in wikilink_re.captures_iter(message) {
                     let link = &cap[1];
                     nq.push_str(&format!(
-                        "{} <https://repolex.ai/ontology/git-lex/lex/linksTo> \"{}\" {} .\n",
+                        "{} <https://repolex.ai/ontology/git-lex/md/linksTo> \"{}\" {} .\n",
                         commit_uri, nq_escape(link), graph
                     ));
                 }
@@ -708,7 +708,7 @@ pub(crate) fn emit_spo_line_nquads(
     }
 
     if predicate == "linksTo" {
-        // [[wikilink]] → lex:linksTo (resolved) or literal fallback (broken).
+        // [[wikilink]] → md:linksTo (resolved) or literal fallback (broken).
         //
         // Three resolution strategies, tried in order:
         //   1. Path-style — if the target contains `/`, treat it as a path
@@ -756,13 +756,13 @@ pub(crate) fn emit_spo_line_nquads(
 
         if let Some(uri) = link_uri {
             out.push_str(&format!(
-                "{} <https://repolex.ai/ontology/git-lex/lex/linksTo> {} {} .\n",
+                "{} <https://repolex.ai/ontology/git-lex/md/linksTo> {} {} .\n",
                 doc_uri, uri, graph
             ));
         } else {
-            // Unresolved wikilink → flat literal on lex:linksTo.
+            // Unresolved wikilink → flat literal on md:linksTo.
             out.push_str(&format!(
-                "{} <https://repolex.ai/ontology/git-lex/lex/linksTo> \"{}\" {} .\n",
+                "{} <https://repolex.ai/ontology/git-lex/md/linksTo> \"{}\" {} .\n",
                 doc_uri, nq_escape(object), graph
             ));
         }
