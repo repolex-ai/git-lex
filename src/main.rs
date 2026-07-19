@@ -217,6 +217,40 @@ enum Commands {
         #[arg(long, default_value = "10")]
         show: usize,
     },
+    /// [SPIKE] Build the experimental "one graph" temporal model and print
+    /// sample output.
+    ///
+    /// EXPERIMENTAL — this is a spike, not a shipped feature. It exists to
+    /// evaluate a candidate replacement for the current history subsystem. It
+    /// is never invoked by `git lex save` or `git lex sync`.
+    ///
+    /// The one-graph model collapses history + sync + now into a single graph
+    /// (`<.../NamedGraph/one>`) using RDF 1.2 triple-term reification:
+    ///
+    ///     <reifier> rdf:reifies         <<( s p o )>> .
+    ///     <reifier> git-lex:assertedIn  <Commit/SHA> .   (line added)
+    ///     <reifier> git-lex:retractedIn <Commit/SHA> .   (line removed)
+    ///
+    /// "What is true now" is a DERIVED query (a fact whose latest event is an
+    /// assert with no later retract). Facts JOIN to their commit's author/date
+    /// via the existing command-faithful `git:Commit` nodes. Every `.spo` line
+    /// is resolved through the same emitter the now-graph uses — no bespoke
+    /// resolution.
+    ///
+    /// The `assertedIn`/`retractedIn` predicate names are PLACEHOLDERS: the
+    /// final vocabulary is a decision to be made and DECLARED in the ontology
+    /// before any of this ships.
+    ///
+    /// Writes only `<NamedGraph/one>`, which the real sync clears anyway. Run
+    /// with `--clear` to drop that graph and do nothing else.
+    SpikeOnegraph {
+        /// Drop the SPIKE one-graph and exit without rebuilding.
+        #[arg(long)]
+        clear: bool,
+        /// Max rows to print per demonstration query.
+        #[arg(long, default_value = "5")]
+        limit: usize,
+    },
 }
 
 
@@ -2408,6 +2442,185 @@ fn sync_history_phase(root: &std::path::Path, store: &Store, head_sha: &str) -> 
     }
 }
 
+/// SPIKE — build the experimental "one graph" temporal model and print a
+/// sample of its output. See `Commands::SpikeOnegraph` for the full writeup.
+///
+/// This is a self-contained, side-effect-light exploration command:
+///   1. It builds the one-graph into the persistent store's `NamedGraph/one`
+///      graph (a graph the real pipeline never touches), doing a full rebuild
+///      from all of HEAD's history every run.
+///   2. It runs a handful of demonstration queries and prints them so we can
+///      "try the model on for size" against real data.
+///
+/// It does NOT write a sync marker, does NOT alter the `history`/`now`/`sync`
+/// graphs, and is never invoked by `git lex save` or `git lex sync`. The
+/// `one` graph it writes is harmless (any real sync clears non-sync graphs),
+/// but you can drop it explicitly with `--clear`.
+fn cmd_spike_onegraph(clear: bool, limit: usize) {
+    let root = find_git_root().expect("not a git repo");
+    let store = open_or_create_store();
+    let one_graph_uri = format!("<{}>", graph_uri(spo_events::ONEGRAPH_NAME));
+
+    if clear {
+        if let Ok(g) = oxigraph::model::NamedNode::new(graph_uri(spo_events::ONEGRAPH_NAME)) {
+            let _ = store.clear_graph(&g);
+        }
+        println!("Cleared the SPIKE one-graph (<{}>).", graph_uri(spo_events::ONEGRAPH_NAME));
+        return;
+    }
+
+    eprintln!("╔══════════════════════════════════════════════════════════════╗");
+    eprintln!("║  git lex spike-onegraph — EXPERIMENTAL temporal-model spike   ║");
+    eprintln!("║  Not part of sync/save. Writes only <NamedGraph/one>.        ║");
+    eprintln!("╚══════════════════════════════════════════════════════════════╝");
+
+    // Ensure the command-faithful `git:` layer (commits/actors/tree/refs) is
+    // present in the store, so the one-graph's assertedIn/retractedIn commit
+    // IRIs have real `git:Commit` nodes to JOIN to. `git lex query`/`sync`
+    // clears non-sync graphs, so we regenerate it here rather than assume a
+    // prior sync's copy survived. This is the SAME producer `sync` uses.
+    {
+        let git_nq = crate::nquad::generate_git_nquads();
+        if !git_nq.is_empty() {
+            let parser = oxigraph::io::RdfParser::from_format(oxigraph::io::RdfFormat::NQuads);
+            if let Err(e) = store.load_from_reader(parser, std::io::Cursor::new(git_nq.as_bytes())) {
+                eprintln!("  one-graph (SPIKE): git-layer load failed (JOIN queries will be empty): {}", e);
+            }
+        }
+    }
+
+    // Full history, oldest→newest (topological). The one-graph spike always
+    // does a full rebuild — no incremental path.
+    let all_shas = {
+        let out = Command::new("git")
+            .args(["rev-list", "--topo-order", "--reverse", "HEAD"])
+            .current_dir(&root)
+            .output()
+            .expect("git rev-list failed");
+        String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect::<Vec<_>>()
+    };
+    if all_shas.is_empty() {
+        println!("No commits yet. Nothing to build.");
+        return;
+    }
+    let commits = spo_events::collect_commits_from_shas(&all_shas);
+
+    // Same resolver inputs the now-graph and history walker use.
+    let kit_name = get_kit().unwrap_or_default();
+    let obj_props = get_object_properties(&kit_name);
+    let prop_datatypes = get_property_datatypes(&kit_name);
+    let mut md_files = Vec::new();
+    fn walk_md(dir: &std::path::Path, files: &mut Vec<PathBuf>) {
+        if let Ok(entries) = fs::read_dir(dir) {
+            for entry in entries.filter_map(|e| e.ok()) {
+                let path = entry.path();
+                let name = entry.file_name().to_string_lossy().to_string();
+                if name.starts_with('.') { continue; }
+                if path.is_dir() { walk_md(&path, files); }
+                else if name.ends_with(".md") || name.ends_with(".txt") { files.push(path); }
+            }
+        }
+    }
+    walk_md(&root, &mut md_files);
+    let (slug_index, path_index) = build_slug_path_indexes(&root, &md_files);
+
+    let (seen, emitted) = spo_events::onegraph_walk_engine(
+        &commits,
+        &store,
+        &one_graph_uri,
+        &slug_index,
+        &path_index,
+        &obj_props,
+        &prop_datatypes,
+        true, // show_progress
+    );
+
+    println!(
+        "\nBuilt SPIKE one-graph: {} commit(s), {} event(s) seen, {} annotation(s) emitted.",
+        commits.len(), seen, emitted
+    );
+
+    spike_onegraph_report(&store, &graph_uri(spo_events::ONEGRAPH_NAME), limit);
+}
+
+/// SPIKE — run demonstration queries over the one-graph and print them.
+/// Kept separate so the query set is easy to read and revise as we evaluate
+/// the model. All queries are read-only.
+fn spike_onegraph_report(store: &Store, one_graph: &str, limit: usize) {
+    let reifies = "http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies";
+    let asserted = "https://repolex.ai/ontology/git-lex/assertedIn";
+    let retracted = "https://repolex.ai/ontology/git-lex/retractedIn";
+
+    let run = |q: &str| -> Vec<Vec<String>> {
+        let mut rows = Vec::new();
+        if let Ok(oxigraph::sparql::QueryResults::Solutions(sols)) = store.query(q) {
+            let vars: Vec<String> = sols.variables().iter().map(|v| v.as_str().to_string()).collect();
+            for s in sols.flatten() {
+                rows.push(vars.iter().map(|v| s.get(v.as_str()).map(|t| t.to_string()).unwrap_or_default()).collect());
+            }
+        }
+        rows
+    };
+    let short = |s: &str| -> String {
+        s.replace("https://repolex.ai/soul/", "soul:")
+            .replace("https://repolex.ai/ontology/git-lex/git/", "git:")
+            .replace("https://repolex.ai/ontology/git-lex/", "git-lex:")
+            .replace("https://repolex.ai/git-lex/git/Commit/", "commit:")
+    };
+
+    println!("\n─── sample assertedIn events (fact → commit) ───");
+    for r in run(&format!(
+        "SELECT ?s ?p ?o ?c WHERE {{ GRAPH <{one_graph}> {{ ?a <{reifies}> <<( ?s ?p ?o )>> . ?a <{asserted}> ?c }} }} LIMIT {limit}"
+    )) {
+        println!("  <<( {} {} {} )>>  assertedIn  {}", short(&r[0]), short(&r[1]), short(&r[2]), short(&r[3]));
+    }
+
+    println!("\n─── sample retractedIn events (removed lines / retired tags) ───");
+    for r in run(&format!(
+        "SELECT ?s ?p ?o ?c WHERE {{ GRAPH <{one_graph}> {{ ?a <{reifies}> <<( ?s ?p ?o )>> . ?a <{retracted}> ?c }} }} LIMIT {limit}"
+    )) {
+        println!("  <<( {} {} {} )>>  retractedIn  {}", short(&r[0]), short(&r[1]), short(&r[2]), short(&r[3]));
+    }
+
+    println!("\n─── NOW view (asserted, never later retracted) — a DERIVED query ───");
+    for r in run(&format!(
+        "SELECT (COUNT(DISTINCT ?tt) AS ?n) WHERE {{ GRAPH <{one_graph}> {{ ?a <{reifies}> ?tt . ?a <{asserted}> ?c . FILTER NOT EXISTS {{ ?b <{reifies}> ?tt . ?b <{retracted}> ?r }} }} }}"
+    )) {
+        println!("  live facts (asserted, no retract): {}", short(&r[0]));
+    }
+    for r in run(&format!(
+        "SELECT (COUNT(DISTINCT ?tt) AS ?n) WHERE {{ GRAPH <{one_graph}> {{ ?a <{reifies}> ?tt }} }}"
+    )) {
+        println!("  distinct facts ever asserted:      {}", short(&r[0]));
+    }
+
+    println!("\n─── JOIN: a fact → its commit's author + date (rides the git: layer) ───");
+    // The commit's authoredDate lives in the `commits` graph, not the one-graph,
+    // so the join pattern must be scoped with GRAPH ?g (not left in the default
+    // graph, which is empty).
+    for r in run(&format!(
+        "SELECT ?p ?o ?date WHERE {{ \
+           GRAPH <{one_graph}> {{ ?a <{reifies}> <<( ?s ?p ?o )>> . ?a <{asserted}> ?c }} \
+           GRAPH ?g {{ ?c <https://repolex.ai/ontology/git-lex/git/authoredDate> ?date }} \
+         }} ORDER BY DESC(?date) LIMIT {limit}"
+    )) {
+        println!("  {} = {}  @ {}", short(&r[0]), short(&r[1]), short(&r[2]));
+    }
+
+    println!("\n─── a fact that CHANGED value across commits (the RDF-1.2 raison d'être) ───");
+    for r in run(&format!(
+        "SELECT ?s ?p (COUNT(DISTINCT ?o) AS ?values) WHERE {{ GRAPH <{one_graph}> {{ ?a <{reifies}> <<( ?s ?p ?o )>> . ?a <{asserted}> ?c }} }} GROUP BY ?s ?p HAVING (COUNT(DISTINCT ?o) > 1) ORDER BY DESC(?values) LIMIT {limit}"
+    )) {
+        println!("  {} {} took {} distinct values over time", short(&r[0]), short(&r[1]), short(&r[2]));
+    }
+
+    println!("\n(SPIKE output — the model is a PROPOSAL, predicate names are placeholders pending Rob's ruling + ontology declaration.)");
+}
+
 /// Read the `build_history_on_sync` switch from `.lex/repo.yml`.
 /// Absent, or any value other than `true`, means OFF.
 fn build_history_on_sync(root: &std::path::Path) -> bool {
@@ -2695,6 +2908,7 @@ fn main() {
         Commands::HistoryVerify { show } => {
             cmd_history_verify(show);
         }
+        Commands::SpikeOnegraph { clear, limit } => cmd_spike_onegraph(clear, limit),
         Commands::Sync => cmd_sync(),
     }
 }

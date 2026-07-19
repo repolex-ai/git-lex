@@ -977,6 +977,232 @@ pub fn history_annotation(
     ])
 }
 
+// ════════════════════════════════════════════════════════════════════════════
+// SPIKE: the "one graph" temporal model (Day 52/53, w4r3z + Rob)
+// ════════════════════════════════════════════════════════════════════════════
+//
+// STATUS: SPIKE. Reachable only via the `git lex spike-onegraph` command, which
+// is documented and clearly labelled as experimental. Nothing here runs during
+// normal `git lex save` / `git lex sync`. This exists to "try on for size" a
+// replacement for the current history subsystem — evaluate the output, then
+// decide (Rob decides) whether it becomes the real model.
+//
+// WHY IT DIFFERS from `history_annotation` above:
+//
+//   The current history graph uses three UNDECLARED cowboy vocabularies
+//   (`spo:addedIn/removedIn/inFile`) and a design that predates RDF 1.2. The
+//   one-graph spike collapses everything into a single graph with a cleaner
+//   temporal annotation:
+//
+//     <reifier> rdf:reifies <<( s p o )>> .
+//     <reifier> git-lex:assertedIn  <Commit/SHA> .   (line added to a .spo)
+//     <reifier> git-lex:retractedIn <Commit/SHA> .   (line removed from a .spo)
+//
+//   Differences from the old model, point by point:
+//     1. ONE graph, not a history graph + N sync graphs + a now graph. The
+//        "now" view is DERIVED by query (a triple whose most-recent event is an
+//        assert, with no later retract, is live).
+//     2. `assertedIn`/`retractedIn` instead of `addedIn`/`removedIn`. These are
+//        PLACEHOLDER predicate names — the final names are Rob's call and must
+//        be DECLARED in the ontology before this model ships. The spike emits
+//        them only so we can look at real output.
+//     3. NO `inFile` annotation. The old model recorded which sidecar the line
+//        came from; the one-graph model treats the Thing (the doc IRI) as the
+//        stable subject and doesn't leak the sidecar path into the graph.
+//     4. The commit object is the EXISTING `git:Commit` IRI that `git lex query`
+//        already emits into the commits graph — so a fact JOINS straight to its
+//        commit's author/date. No new commit/actor emission; we ride the
+//        command-faithful `git:` layer that's already there.
+//
+//   What it SHARES with the real pipeline (deliberately — this is the whole
+//   point of the spike vs. the earlier throwaway prototype): it resolves each
+//   `.spo` line through the SAME `crate::nquad::emit_spo_line_nquads` the
+//   now-graph uses. No naive re-implementation of sidecar-line → triple
+//   resolution. The old prototype's garbage predicates came from skipping this.
+
+/// The one-graph named graph instance IRI. Distinct from the `history` graph so
+/// the spike can be built, inspected, and cleared without touching the real
+/// history subsystem. SPIKE-only.
+pub(crate) const ONEGRAPH_NAME: &str = "one";
+
+/// SPIKE placeholder predicates for the one-graph temporal model. FINAL NAMES
+/// ARE ROB'S CALL and must be declared in the ontology before this model ships;
+/// these strings exist only so the spike produces inspectable output.
+const ONEGRAPH_ASSERTED_IN: &str = "https://repolex.ai/ontology/git-lex/assertedIn";
+const ONEGRAPH_RETRACTED_IN: &str = "https://repolex.ai/ontology/git-lex/retractedIn";
+
+/// SPIKE. Build the one-graph annotation N-Quads for a single resolved triple.
+///
+/// Mirrors `history_annotation`'s parse-the-emitted-N-Quad approach so it reuses
+/// the real emitter's output verbatim, but emits the one-graph shape:
+///
+///     <reifier> rdf:reifies         <<( s p o )>> .
+///     <reifier> git-lex:assertedIn  <Commit/SHA> .   (op == '+')
+///     <reifier> git-lex:retractedIn <Commit/SHA> .   (op == '-')
+///
+/// The reifier IRI is content-addressed over `(op, commit, s, p, o)` — a
+/// deterministic UID, NOT a dedup safety net (a re-emit of the same event is a
+/// walk bug we'd want to surface, not silently swallow). The commit object is
+/// the existing `git:Commit` IRI so facts join to their commit's author/date.
+///
+/// `triple_nq` is one assertion line from `emit_spo_line_nquads`, in N-Quad
+/// form `<S> <P> O <G> .`. Returns None if it can't parse a complete S/P/O.
+pub fn onegraph_annotation(
+    triple_nq: &str,
+    op: char,
+    commit_sha: &str,
+    one_graph: &str,
+) -> Option<Vec<String>> {
+    // Isolate `<S> <P> O` by stripping the trailing graph + period, same as
+    // history_annotation.
+    let trimmed = triple_nq.trim_end_matches('.').trim();
+    let trimmed = trimmed.rsplit_once(' ').map(|(rest, _)| rest)?.trim();
+    let (s, rest) = take_term(trimmed)?;
+    let (p, rest) = take_term(rest.trim())?;
+    let o = rest.trim().to_string();
+    if s.is_empty() || p.is_empty() || o.is_empty() {
+        return None;
+    }
+
+    // Content-addressed reifier IRI. Op is part of the key so an assert and a
+    // later retract of the same (s,p,o) get DISTINCT reifiers (they must, or the
+    // retract would overwrite the assert under set semantics).
+    let key = format!("{}|{}|{}|{}|{}", op, commit_sha, s, p, o);
+    let mut hasher = Sha256::new();
+    hasher.update(key.as_bytes());
+    let hash = format!("{:x}", hasher.finalize());
+    let reifier = format!("<{}>", crate::git::resource_uri(&format!("onegraph-ann/{}", &hash[..16])));
+
+    let event_pred = if op == '+' {
+        ONEGRAPH_ASSERTED_IN
+    } else {
+        ONEGRAPH_RETRACTED_IN
+    };
+    let commit_uri = format!("<{}>", crate::git::git_machinery_uri(&format!("Commit/{}", commit_sha)));
+
+    Some(vec![
+        format!(
+            "{} <http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies> <<( {} {} {} )>> {} .",
+            reifier, s, p, o, one_graph
+        ),
+        format!(
+            "{} <{}> {} {} .",
+            reifier, event_pred, commit_uri, one_graph
+        ),
+    ])
+}
+
+/// SPIKE. Walk pre-collected commits and build the one-graph into `store`.
+///
+/// This is a trimmed sibling of `history_walk_engine`: it uses the identical
+/// resolver (`emit_spo_line_nquads`) and the identical rename handling, but
+/// emits `onegraph_annotation` instead of `history_annotation`, always does a
+/// full rebuild (clears the one graph first — the spike is meant to be re-run),
+/// and writes NO `lastHistorySync` marker (the spike doesn't do incremental).
+///
+/// Returns `(events_seen, events_emitted)` for the summary line.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn onegraph_walk_engine(
+    commits: &[SpikeCommit],
+    store: &oxigraph::store::Store,
+    one_graph: &str,
+    slug_index: &HashMap<String, String>,
+    path_index: &HashSet<String>,
+    obj_props: &HashSet<String>,
+    prop_datatypes: &HashMap<String, String>,
+    show_progress: bool,
+) -> (usize, usize) {
+    let total = commits.len();
+    let mut nq_buffer = String::new();
+    let mut events_seen = 0usize;
+    let mut events_emitted = 0usize;
+
+    // Resolve one .spo line through the real emitter, then wrap each resulting
+    // triple in a one-graph annotation with the given op/commit.
+    let mut annotate_line = |line: &str, sidecar_path: &str, commit_sha: &str, op: char, buf: &mut String| {
+        let doc_uri = match doc_uri_from_sidecar(sidecar_path) {
+            Some(u) => u,
+            None => return 0usize,
+        };
+        let relpath_str = derive_source_document(sidecar_path).unwrap_or_default();
+        let scratch_graph = one_graph.to_string();
+        let mut emit_buf = String::new();
+        let mut emitted_types: HashSet<String> = HashSet::new();
+        let _errs = crate::nquad::emit_spo_line_nquads(
+            line, &doc_uri, &scratch_graph, &relpath_str,
+            slug_index, path_index, obj_props, prop_datatypes,
+            &mut emitted_types, &mut emit_buf,
+        );
+        let mut emitted = 0usize;
+        for triple_nq in emit_buf.lines().filter(|l| !l.trim().is_empty()) {
+            if let Some(quads) = onegraph_annotation(triple_nq, op, commit_sha, one_graph) {
+                for q in quads {
+                    buf.push_str(&q);
+                    buf.push('\n');
+                }
+                emitted += 1;
+            }
+        }
+        emitted
+    };
+
+    for (ci, c) in commits.iter().enumerate() {
+        if show_progress && total > 0 {
+            if ci == 0 { eprint!("  one-graph (SPIKE): walking {} commit(s) ", total); }
+            if (ci + 1) % 10 == 0 || ci == total - 1 {
+                eprint!(".");
+                let _ = std::io::stderr().flush();
+            }
+        }
+
+        let renamed_paths: HashSet<&str> = c.renames.iter().map(|r| r.new_path.as_str()).collect();
+
+        for ev in &c.events {
+            events_seen += 1;
+            if renamed_paths.contains(ev.path.as_str()) {
+                continue; // handled by the rename block below
+            }
+            let op = ev.op; // '+' → assertedIn, '-' → retractedIn
+            events_emitted += annotate_line(&ev.line, &ev.path, &c.sha, op, &mut nq_buffer);
+        }
+
+        // Renames: git suppresses the add/remove pair, so replay old-path lines
+        // as retracts and new-path lines as asserts (same as the history walker).
+        for rename in &c.renames {
+            let old_lines = read_sidecar_at_commit(&c.parent_sha, &rename.old_path);
+            for line in &old_lines {
+                events_emitted += annotate_line(line, &rename.old_path, &c.sha, '-', &mut nq_buffer);
+            }
+            let new_lines = read_sidecar_at_commit(&c.sha, &rename.new_path);
+            for line in &new_lines {
+                events_emitted += annotate_line(line, &rename.new_path, &c.sha, '+', &mut nq_buffer);
+            }
+            events_seen += old_lines.len() + new_lines.len();
+        }
+    }
+
+    if show_progress && total > 0 {
+        eprintln!(" done");
+    }
+
+    // Full rebuild: clear the one graph, then load. SPIKE-only, so we don't
+    // guard against partial-write marker corruption like the history engine —
+    // just rebuild from scratch every run.
+    if let Ok(graph_node) = oxigraph::model::NamedNode::new(
+        one_graph.trim_start_matches('<').trim_end_matches('>'),
+    ) {
+        let _ = store.clear_graph(&graph_node);
+    }
+    if !nq_buffer.is_empty() {
+        let parser = oxigraph::io::RdfParser::from_format(oxigraph::io::RdfFormat::NQuads);
+        if let Err(e) = store.load_from_reader(parser, std::io::Cursor::new(nq_buffer.as_bytes())) {
+            eprintln!("  one-graph (SPIKE): load failed: {}", e);
+        }
+    }
+
+    (events_seen, events_emitted)
+}
+
 /// take one whitespace-separated term from the start of `s`. A term
 /// is either `<...>` (an IRI), or `"..."` possibly with `^^<...>` datatype
 /// suffix, or a bare token. Returns (term, rest).
