@@ -2540,7 +2540,7 @@ fn cmd_spike_onegraph(clear: bool, limit: usize) {
     );
 
     println!(
-        "\nBuilt SPIKE one-graph: {} commit(s), {} event(s) seen, {} annotation(s) emitted.",
+        "\nBuilt SPIKE one-graph: {} commit(s), {} event(s) seen, {} reified event(s) emitted.",
         commits.len(), seen, emitted
     );
 

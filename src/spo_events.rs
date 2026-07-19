@@ -1031,14 +1031,31 @@ pub(crate) const ONEGRAPH_NAME: &str = "one";
 const ONEGRAPH_ASSERTED_IN: &str = "https://repolex.ai/ontology/git-lex/assertedIn";
 const ONEGRAPH_RETRACTED_IN: &str = "https://repolex.ai/ontology/git-lex/retractedIn";
 
-/// SPIKE. Build the one-graph annotation N-Quads for a single resolved triple.
+/// SPIKE. Build the one-graph N-Quads for a single resolved triple event.
 ///
-/// Mirrors `history_annotation`'s parse-the-emitted-N-Quad approach so it reuses
-/// the real emitter's output verbatim, but emits the one-graph shape:
+/// Reuses the real emitter's N-Quad output verbatim (parse-then-rewrap), and
+/// emits the "Option B" one-graph shape — the base fact asserted STANDALONE plus
+/// a reified triple-term carrying the commit event. This matches the agreed
+/// Turtle form:
 ///
+///     s p o .                                        # base fact, asserted standalone
 ///     <reifier> rdf:reifies         <<( s p o )>> .
 ///     <reifier> git-lex:assertedIn  <Commit/SHA> .   (op == '+')
 ///     <reifier> git-lex:retractedIn <Commit/SHA> .   (op == '-')
+///
+/// The standalone base fact is what makes "what is true now" a PLAIN triple
+/// query (`?s ?p ?o`) instead of forcing every reader through the reification.
+/// Because the store is set-semantic, a fact re-added after removal collapses to
+/// one base triple — but each add/remove still gets its own reified event, so
+/// the temporal history is complete and derivable.
+///
+/// NOTE (spike simplification): a `-` (retract) event emits the base fact too.
+/// A single named graph can't hold "the fact once existed" AND "the fact is not
+/// live now" as the same plain triple; resolving that (retract removes the base
+/// triple, or the now-view is always derived from the latest event) is an open
+/// modeling question for Rob. For the spike we keep the base triple present on
+/// both events so the reification audit trail is symmetric, and the DERIVED
+/// now-view (asserted-with-no-later-retract) remains the authoritative "now".
 ///
 /// The reifier IRI is content-addressed over `(op, commit, s, p, o)` — a
 /// deterministic UID, NOT a dedup safety net (a re-emit of the same event is a
@@ -1047,7 +1064,7 @@ const ONEGRAPH_RETRACTED_IN: &str = "https://repolex.ai/ontology/git-lex/retract
 ///
 /// `triple_nq` is one assertion line from `emit_spo_line_nquads`, in N-Quad
 /// form `<S> <P> O <G> .`. Returns None if it can't parse a complete S/P/O.
-pub fn onegraph_annotation(
+pub fn onegraph_event(
     triple_nq: &str,
     op: char,
     commit_sha: &str,
@@ -1071,7 +1088,10 @@ pub fn onegraph_annotation(
     let mut hasher = Sha256::new();
     hasher.update(key.as_bytes());
     let hash = format!("{:x}", hasher.finalize());
-    let reifier = format!("<{}>", crate::git::resource_uri(&format!("onegraph-ann/{}", &hash[..16])));
+    // Reifier IRI. The `reifier/` path segment is a PLACEHOLDER (naming is
+    // Rob's call); nothing references the reifier by name — queries bind it via
+    // the rdf:reifies pattern. Deliberately NOT the old `spo-ann/<hash>` shape.
+    let reifier = format!("<{}>", crate::git::resource_uri(&format!("reifier/{}", &hash[..16])));
 
     let event_pred = if op == '+' {
         ONEGRAPH_ASSERTED_IN
@@ -1081,10 +1101,15 @@ pub fn onegraph_annotation(
     let commit_uri = format!("<{}>", crate::git::git_machinery_uri(&format!("Commit/{}", commit_sha)));
 
     Some(vec![
+        // 1) the base fact, asserted STANDALONE (Option B) — makes "now" a
+        //    plain-triple query without going through the reification.
+        format!("{} {} {} {} .", s, p, o, one_graph),
+        // 2) the reified event: <reifier> rdf:reifies <<( s p o )>>
         format!(
             "{} <http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies> <<( {} {} {} )>> {} .",
             reifier, s, p, o, one_graph
         ),
+        // 3) the commit event hanging off the reifier
         format!(
             "{} <{}> {} {} .",
             reifier, event_pred, commit_uri, one_graph
@@ -1096,7 +1121,7 @@ pub fn onegraph_annotation(
 ///
 /// This is a trimmed sibling of `history_walk_engine`: it uses the identical
 /// resolver (`emit_spo_line_nquads`) and the identical rename handling, but
-/// emits `onegraph_annotation` instead of `history_annotation`, always does a
+/// emits `onegraph_event` per resolved triple, always does a
 /// full rebuild (clears the one graph first — the spike is meant to be re-run),
 /// and writes NO `lastHistorySync` marker (the spike doesn't do incremental).
 ///
@@ -1118,7 +1143,7 @@ pub(crate) fn onegraph_walk_engine(
     let mut events_emitted = 0usize;
 
     // Resolve one .spo line through the real emitter, then wrap each resulting
-    // triple in a one-graph annotation with the given op/commit.
+    // triple in a one-graph reified event with the given op/commit.
     let mut annotate_line = |line: &str, sidecar_path: &str, commit_sha: &str, op: char, buf: &mut String| {
         let doc_uri = match doc_uri_from_sidecar(sidecar_path) {
             Some(u) => u,
@@ -1135,7 +1160,7 @@ pub(crate) fn onegraph_walk_engine(
         );
         let mut emitted = 0usize;
         for triple_nq in emit_buf.lines().filter(|l| !l.trim().is_empty()) {
-            if let Some(quads) = onegraph_annotation(triple_nq, op, commit_sha, one_graph) {
+            if let Some(quads) = onegraph_event(triple_nq, op, commit_sha, one_graph) {
                 for q in quads {
                     buf.push_str(&q);
                     buf.push('\n');
@@ -1166,15 +1191,28 @@ pub(crate) fn onegraph_walk_engine(
             events_emitted += annotate_line(&ev.line, &ev.path, &c.sha, op, &mut nq_buffer);
         }
 
-        // Renames: git suppresses the add/remove pair, so replay old-path lines
-        // as retracts and new-path lines as asserts (same as the history walker).
+        // Renames. The subject of every emitted triple is the STABLE Thing IRI
+        // (path-normalized — a file move does NOT change it; the SOUL.md-move
+        // principle). So a PURE rename (content identical) must churn NOTHING:
+        // retracting then re-asserting the same (Thing, p, o) is a spurious
+        // event pair that corrupts the temporal record.
+        //
+        // Therefore we diff old vs new sidecar LINES and only emit for lines
+        // that genuinely changed: a line present at the old path but gone at the
+        // new path is a real retract; a line new at this commit is a real
+        // assert; a line present in BOTH is a pure move → no event.
         for rename in &c.renames {
             let old_lines = read_sidecar_at_commit(&c.parent_sha, &rename.old_path);
-            for line in &old_lines {
+            let new_lines = read_sidecar_at_commit(&c.sha, &rename.new_path);
+            let old_set: HashSet<&str> = old_lines.iter().map(|s| s.as_str()).collect();
+            let new_set: HashSet<&str> = new_lines.iter().map(|s| s.as_str()).collect();
+
+            // removed content → retract (present old, absent new)
+            for line in old_lines.iter().filter(|l| !new_set.contains(l.as_str())) {
                 events_emitted += annotate_line(line, &rename.old_path, &c.sha, '-', &mut nq_buffer);
             }
-            let new_lines = read_sidecar_at_commit(&c.sha, &rename.new_path);
-            for line in &new_lines {
+            // added content → assert (present new, absent old)
+            for line in new_lines.iter().filter(|l| !old_set.contains(l.as_str())) {
                 events_emitted += annotate_line(line, &rename.new_path, &c.sha, '+', &mut nq_buffer);
             }
             events_seen += old_lines.len() + new_lines.len();
