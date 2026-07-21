@@ -241,12 +241,23 @@ pub(crate) fn generate_git2_nquads() -> String {
         };
         let _ = walk.push_glob("*"); // all refs (branches, tags, remotes)
         let _ = walk.push_head(); // detached HEAD safety
-        for oid in walk.flatten() {
+        // Topological, oldest-first: parents always precede children, so the
+        // enumeration position IS the commit's ordinal (1 = genesis).
+        let _ = walk.set_sorting(git2::Sort::TOPOLOGICAL | git2::Sort::REVERSE);
+        for (idx, oid) in walk.flatten().enumerate() {
             let Ok(commit) = repo.find_commit(oid) else { continue };
             let sha = oid.to_string();
             let cu = format!("<{}>", git2_uri(&format!("Commit/{sha}")));
             nq.push_str(&format!("{cu} {RDF_TYPE} <{GIT2_NS}Commit> {graph} .\n"));
             nq.push_str(&format!("{cu} <{GIT2_NS}id> \"{sha}\" {graph} .\n"));
+            // git2:ordinalDerived (git2.ttl v0.3.0, Rob-ruled): DERIVED — git
+            // does not number commits. The position in the topological walk,
+            // stamped at generation; the ordering authority for
+            // latest-event-wins, where author dates can tie or lie.
+            nq.push_str(&format!(
+                "{cu} <{GIT2_NS}ordinalDerived> \"{}\"^^<{XSD_INTEGER}> {graph} .\n",
+                idx + 1
+            ));
             if let Some(summary) = commit.summary() {
                 nq.push_str(&format!("{cu} <{GIT2_NS}summary> \"{}\" {graph} .\n", nq_escape(summary)));
             }
@@ -424,6 +435,33 @@ mod tests {
         );
     }
 
+    /// Ordinals: every commit gets exactly one, they're unique, and they run
+    /// 1..=N with parents before children (genesis = 1).
+    #[test]
+    fn ordinals_are_unique_and_dense() {
+        let nq = generate_git2_nquads();
+        if nq.is_empty() {
+            return; // not in a git repo
+        }
+        let ordinals: Vec<i64> = nq
+            .lines()
+            .filter(|l| l.contains("ordinalDerived>"))
+            .filter_map(|l| l.split('"').nth(1))
+            .filter_map(|v| v.parse().ok())
+            .collect();
+        let commits = nq
+            .lines()
+            .filter(|l| l.contains("git2/Commit>") && l.contains("22-rdf-syntax-ns#type"))
+            .count();
+        assert_eq!(ordinals.len(), commits, "exactly one ordinal per commit");
+        let mut sorted = ordinals.clone();
+        sorted.sort_unstable();
+        sorted.dedup();
+        assert_eq!(sorted.len(), ordinals.len(), "ordinals must be unique");
+        assert_eq!(sorted.first(), Some(&1), "genesis commit is ordinal 1");
+        assert_eq!(sorted.last(), Some(&(commits as i64)), "ordinals are dense 1..=N");
+    }
+
     /// Structural: every commit carries exactly one author + one committer
     /// link, and every signature IRI derives from its commit + role.
     #[test]
@@ -454,7 +492,7 @@ mod tests {
             "Repository", "Commit", "Signature", "IndexEntry", "Blob", "Branch", "Tag",
             "id", "signatureName", "refName", "summary", "message", "body",
             "author", "committer", "parent", "file", "email", "path",
-            "seconds", "offsetMinutes", "xsdDateTimeDerived",
+            "seconds", "offsetMinutes", "xsdDateTimeDerived", "ordinalDerived",
             "fileSize", "mode", "blob", "size", "isBinary", "shorthand", "target",
         ];
         // git-lex.ttl terms THIS module may emit (the repo node, v0.6).

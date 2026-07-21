@@ -1020,14 +1020,17 @@ pub fn history_annotation(
 //   now-graph uses. No naive re-implementation of sidecar-line → triple
 //   resolution. The old prototype's garbage predicates came from skipping this.
 
-/// The one-graph named graph instance IRI. Distinct from the `history` graph so
-/// the spike can be built, inspected, and cleared without touching the real
-/// history subsystem. SPIKE-only.
-pub(crate) const ONEGRAPH_NAME: &str = "one";
+/// The one graph's IRI — Rob-ruled 2026-07-21, class authored in git-lex.ttl
+/// v0.7 (`git-lex:LexHistoryGraph ⊑ git-lex:NamedGraph`). A bare per-store
+/// singleton: the SAME IRI in every git-lex repo, so documented/kit-shipped
+/// queries work verbatim everywhere. (A genesisSha-tailed variant was
+/// considered and backed out — which-repo provenance is a FACT on the Repo
+/// node, not something IRIs carry.) Class-in-path per the universal law; NOT
+/// under NamedGraph/ like the machinery graphs.
+pub(crate) const LEXHISTORY_GRAPH_IRI: &str = "https://repolex.ai/git-lex/LexHistoryGraph";
 
-/// SPIKE placeholder predicates for the one-graph temporal model. FINAL NAMES
-/// ARE ROB'S CALL and must be declared in the ontology before this model ships;
-/// these strings exist only so the spike produces inspectable output.
+/// The statement-lifecycle predicates, declared in git-lex.ttl v0.5+
+/// (kit-base 9e6f4bf): domain git-lex:SpoEvent, range git2:Commit.
 const ONEGRAPH_ASSERTED_IN: &str = "https://repolex.ai/ontology/git-lex/assertedIn";
 const ONEGRAPH_RETRACTED_IN: &str = "https://repolex.ai/ontology/git-lex/retractedIn";
 
@@ -1143,6 +1146,7 @@ pub(crate) fn onegraph_walk_engine(
     obj_props: &HashSet<String>,
     prop_datatypes: &HashMap<String, String>,
     show_progress: bool,
+    clear_first: bool,
 ) -> (usize, usize) {
     let total = commits.len();
     let mut nq_buffer = String::new();
@@ -1230,13 +1234,17 @@ pub(crate) fn onegraph_walk_engine(
         eprintln!(" done");
     }
 
-    // Full rebuild: clear the one graph, then load. SPIKE-only, so we don't
-    // guard against partial-write marker corruption like the history engine —
-    // just rebuild from scratch every run.
-    if let Ok(graph_node) = oxigraph::model::NamedNode::new(
-        one_graph.trim_start_matches('<').trim_end_matches('>'),
-    ) {
-        let _ = store.clear_graph(&graph_node);
+    // clear_first = full rebuild (the spike command; also the fallback when an
+    // incremental resume point turns out invalid, e.g. after history rewrite).
+    // clear_first = false is the sync path: the one graph is PERSISTENT and
+    // append-only; sync walks only commits newer than the store's newest and
+    // appends their events.
+    if clear_first {
+        if let Ok(graph_node) = oxigraph::model::NamedNode::new(
+            one_graph.trim_start_matches('<').trim_end_matches('>'),
+        ) {
+            let _ = store.clear_graph(&graph_node);
+        }
     }
     if !nq_buffer.is_empty() {
         let parser = oxigraph::io::RdfParser::from_format(oxigraph::io::RdfFormat::NQuads);

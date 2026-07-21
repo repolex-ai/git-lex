@@ -2460,13 +2460,13 @@ fn sync_history_phase(root: &std::path::Path, store: &Store, head_sha: &str) -> 
 fn cmd_spike_onegraph(clear: bool, limit: usize) {
     let root = find_git_root().expect("not a git repo");
     let store = open_or_create_store();
-    let one_graph_uri = format!("<{}>", graph_uri(spo_events::ONEGRAPH_NAME));
+    let one_graph_uri = format!("<{}>", spo_events::LEXHISTORY_GRAPH_IRI);
 
     if clear {
-        if let Ok(g) = oxigraph::model::NamedNode::new(graph_uri(spo_events::ONEGRAPH_NAME)) {
+        if let Ok(g) = oxigraph::model::NamedNode::new(spo_events::LEXHISTORY_GRAPH_IRI) {
             let _ = store.clear_graph(&g);
         }
-        println!("Cleared the SPIKE one-graph (<{}>).", graph_uri(spo_events::ONEGRAPH_NAME));
+        println!("Cleared the one graph (<{}>).", spo_events::LEXHISTORY_GRAPH_IRI);
         return;
     }
 
@@ -2538,6 +2538,7 @@ fn cmd_spike_onegraph(clear: bool, limit: usize) {
         &obj_props,
         &prop_datatypes,
         true, // show_progress
+        true, // clear_first — the spike command is always a full rebuild
     );
 
     println!(
@@ -2545,7 +2546,7 @@ fn cmd_spike_onegraph(clear: bool, limit: usize) {
         commits.len(), seen, emitted
     );
 
-    spike_onegraph_report(&store, &graph_uri(spo_events::ONEGRAPH_NAME), limit);
+    spike_onegraph_report(&store, spo_events::LEXHISTORY_GRAPH_IRI, limit);
 }
 
 /// SPIKE — run demonstration queries over the one-graph and print them.
