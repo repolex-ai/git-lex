@@ -18,6 +18,8 @@
 //! output, two sinks — the surfaces can never drift.
 //!
 //! Layers emitted, and their named graphs (same graph names as the old layer):
+//!   repo             — the managed-repo node (git-lex:Repo ⊑ git2:Repository,
+//!                      genesisSha + repo.yml facts per git-lex.ttl v0.6)
 //!   commits          — git2:Commit + per-commit git2:Signature records
 //!   refs             — git2:Branch / git2:Tag
 //!   filetree/<head>  — git2:IndexEntry per file at HEAD + git2:Blob nodes
@@ -31,10 +33,8 @@
 //!   - Changesets — ruled dead 2026-07-20 (the one graph subsumes them).
 //!   - DiffDelta/BlameHunk/IndexEntry-at-every-commit — declared in git2.ttl
 //!     (legit library types, kept per Rob's trim rule) but not persisted.
-//!   - The old layer's application-level facts with no git2 home (genesisSha,
-//!     repo.yml folds, language tags, blame author strings) — those need a
-//!     declared git-lex: home before they can be emitted anywhere (ontology is
-//!     the source of truth; see the one-graph build plan, Part 2 cutover).
+//!   - The old layer's language tags + blame author strings — invented,
+//!     write-only, consumer-less; killed at the git2 cutover (Rob-ruled).
 
 use crate::git::graph_uri;
 use crate::nquad::{nq_escape, uri_encode_path};
@@ -47,6 +47,7 @@ pub(crate) fn git2_uri(path: &str) -> String {
 }
 
 const GIT2_NS: &str = "https://repolex.ai/ontology/git-lex/git2/";
+const GITLEX_NS: &str = "https://repolex.ai/ontology/git-lex/";
 const RDF_TYPE: &str = "<http://www.w3.org/1999/02/22-rdf-syntax-ns#type>";
 const XSD_DATETIME: &str = "http://www.w3.org/2001/XMLSchema#dateTime";
 const XSD_INTEGER: &str = "http://www.w3.org/2001/XMLSchema#integer";
@@ -157,6 +158,75 @@ pub(crate) fn generate_git2_nquads() -> String {
             return nq;
         }
     };
+
+    // ---- repo graph: the ONE managed-repository node --------------------
+    // git-lex.ttl v0.6 (kit-base 0bf10d7, Rob-ruled): git-lex:Repo ⊑
+    // git2:Repository — the node carries BOTH types; its IRI derives from
+    // the genesis sha (the repo's stable identity). One property per
+    // repo.yml key (snake_case key → camelCase property). `first_commit` is
+    // NOT a property — it IS genesisSha, computed from git, so the computed
+    // value is emitted and the yml duplicate ignored. List-valued keys
+    // (optional_kits, substrates) emit one triple per value. Unknown keys
+    // are reported loudly, never silently dropped, never emitted undeclared.
+    if let Some(genesis) = crate::git::genesis_sha() {
+        let graph = format!("<{}>", graph_uri("repo"));
+        let ru = format!("<{}>", git2_uri(&format!("Repository/{genesis}")));
+        nq.push_str(&format!("{ru} {RDF_TYPE} <{GITLEX_NS}Repo> {graph} .\n"));
+        nq.push_str(&format!("{ru} {RDF_TYPE} <{GIT2_NS}Repository> {graph} .\n"));
+        nq.push_str(&format!("{ru} <{GITLEX_NS}genesisSha> \"{genesis}\" {graph} .\n"));
+        if let Ok(content) = std::fs::read_to_string(git_root.join(".lex").join("repo.yml")) {
+            let mut current_list: Option<&str> = None;
+            for line in content.lines() {
+                let trimmed = line.trim();
+                if trimmed.is_empty() || trimmed.starts_with('#') {
+                    continue;
+                }
+                if let Some(item) = trimmed.strip_prefix("- ") {
+                    if let Some(prop) = current_list {
+                        let item = item.trim().trim_matches('"');
+                        if !item.is_empty() {
+                            nq.push_str(&format!(
+                                "{ru} <{GITLEX_NS}{prop}> \"{}\" {graph} .\n",
+                                nq_escape(item)
+                            ));
+                        }
+                    }
+                    continue;
+                }
+                let Some(idx) = trimmed.find(':') else { continue };
+                let key = trimmed[..idx].trim();
+                let val = trimmed[idx + 1..].trim().trim_matches('"');
+                current_list = None;
+                match key {
+                    "name" | "kit" | "version" if !val.is_empty() => {
+                        nq.push_str(&format!(
+                            "{ru} <{GITLEX_NS}{key}> \"{}\" {graph} .\n",
+                            nq_escape(val)
+                        ));
+                    }
+                    "agent_name" if !val.is_empty() => {
+                        nq.push_str(&format!("{ru} <{GITLEX_NS}agentName> \"{}\" {graph} .\n", nq_escape(val)));
+                    }
+                    "agent_email" if !val.is_empty() => {
+                        nq.push_str(&format!("{ru} <{GITLEX_NS}agentEmail> \"{}\" {graph} .\n", nq_escape(val)));
+                    }
+                    "created" if !val.is_empty() => {
+                        nq.push_str(&format!(
+                            "{ru} <{GITLEX_NS}created> \"{}\"^^<http://www.w3.org/2001/XMLSchema#date> {graph} .\n",
+                            nq_escape(val)
+                        ));
+                    }
+                    "first_commit" => {} // duplicate of genesisSha (computed) — ignored by ruling
+                    "optional_kits" => current_list = Some("optionalKit"),
+                    "substrates" => current_list = Some("substrate"),
+                    "name" | "kit" | "version" | "agent_name" | "agent_email" | "created" => {} // known key, empty value
+                    other => eprintln!(
+                        "warning: repo.yml key `{other}` has no declared git-lex: property — NOT emitted (declare it or remove it)"
+                    ),
+                }
+            }
+        }
+    }
 
     // ---- commits graph: every commit reachable from any ref (old layer's
     // `git log --all`), plus HEAD for the detached case. ------------------
@@ -381,11 +451,16 @@ mod tests {
     #[test]
     fn emits_only_declared_git2_vocab() {
         const DECLARED: &[&str] = &[
-            "Commit", "Signature", "IndexEntry", "Blob", "Branch", "Tag",
+            "Repository", "Commit", "Signature", "IndexEntry", "Blob", "Branch", "Tag",
             "id", "signatureName", "refName", "summary", "message", "body",
             "author", "committer", "parent", "file", "email", "path",
             "seconds", "offsetMinutes", "xsdDateTimeDerived",
             "fileSize", "mode", "blob", "size", "isBinary", "shorthand", "target",
+        ];
+        // git-lex.ttl terms THIS module may emit (the repo node, v0.6).
+        const GITLEX_DECLARED: &[&str] = &[
+            "Repo", "genesisSha", "name", "kit", "created", "agentName",
+            "agentEmail", "version", "optionalKit", "substrate",
         ];
         let nq = generate_git2_nquads();
         for line in nq.lines() {
@@ -395,6 +470,15 @@ mod tests {
                     assert!(
                         DECLARED.contains(&local),
                         "emitted git2 term not declared in git2.ttl: {local}"
+                    );
+                } else if let Some(rest) = term.strip_prefix(&format!("<{GITLEX_NS}")) {
+                    let local = rest.trim_end_matches('>');
+                    if local.contains('/') {
+                        continue; // a nested namespace (git2/, fm/, md/), not a git-lex: core term
+                    }
+                    assert!(
+                        GITLEX_DECLARED.contains(&local),
+                        "emitted git-lex term not declared in git-lex.ttl: {local}"
                     );
                 }
             }
