@@ -249,7 +249,10 @@ pub(crate) fn frontmatter_to_turtle(filepath: &std::path::Path, root: &std::path
 
     // Add properties
     for (prop_name, value) in &kit_props {
-        if obj_props.contains(prop_name.as_str()) {
+        // Kit+class-qualified lookup — tables key "{kit}/{Class}/{prop}"
+        // (Rob-ruled 2026-07-21; see ontology.rs get_object_properties).
+        let lookup_key = format!("{}/{}/{}", short, doc_type, prop_name);
+        if obj_props.contains(lookup_key.as_str()) {
             // ObjectProperty — resolve each comma-separated value as IRI
             let values: Vec<&str> = value.split(',').map(|v| v.trim()).filter(|v| !v.is_empty()).collect();
             for val in values {
@@ -264,7 +267,7 @@ pub(crate) fn frontmatter_to_turtle(filepath: &std::path::Path, root: &std::path
                     ));
                 }
             }
-        } else if let Some(datatype) = prop_datatypes.get(prop_name.as_str()) {
+        } else if let Some(datatype) = prop_datatypes.get(lookup_key.as_str()) {
             // Typed literal (xsd:integer, xsd:date, etc.)
             ttl.push_str(&format!(
                 "<{}> {}:{} \"{}\"^^<{}> .\n",

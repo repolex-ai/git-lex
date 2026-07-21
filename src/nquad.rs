@@ -455,28 +455,41 @@ pub(crate) fn emit_spo_line_nquads(
             // we warn loudly and SKIP the type emission, so we never write the
             // phantom `a soul:memory`. The doc's properties still emit; only
             // the bad type is withheld until the frontmatter is fixed.
-            match crate::ontology::resolve_class_segment(kit_name, class_seg) {
-                Ok(canonical) => {
-                    let type_key = format!("{}.{}", kit_name, canonical);
-                    if emitted_types.insert(type_key) {
-                        let type_uri = format!(
-                            "<https://repolex.ai/ontology/kit/{}/{}>", kit_name, canonical);
-                        out.push_str(&format!(
-                            "{} <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> {} {} .\n",
-                            doc_uri, type_uri, graph
-                        ));
+            let canonical_class: Option<String> =
+                match crate::ontology::resolve_class_segment(kit_name, class_seg) {
+                    Ok(canonical) => Some(canonical),
+                    Err(msg) => {
+                        eprintln!("warning: {msg} (skipping type emission for this doc)");
+                        None
                     }
-                }
-                Err(msg) => {
-                    eprintln!("warning: {msg} (skipping type emission for this doc)");
+                };
+            if let Some(canonical) = &canonical_class {
+                let type_key = format!("{}.{}", kit_name, canonical);
+                if emitted_types.insert(type_key) {
+                    let type_uri = format!(
+                        "<https://repolex.ai/ontology/kit/{}/{}>", kit_name, canonical);
+                    out.push_str(&format!(
+                        "{} <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> {} {} .\n",
+                        doc_uri, type_uri, graph
+                    ));
                 }
             }
 
             // Property name passes through as-is (camelCase from ontology)
             let kit_predicate = format!("<https://repolex.ai/ontology/kit/{}/{}>", kit_name, prop_seg);
 
+            // Kit+class-qualified lookup (Rob-ruled 2026-07-21): the tables
+            // key "{kit}/{Class}/{prop}", so THIS kit's and class's own
+            // declaration governs how the value is processed. The old
+            // bare-name lookup let any installed kit's same-named property
+            // rewrite the behavior (copia:source, a lineage ObjectProperty,
+            // was comma-splitting soul:source prose citations).
+            let lookup_key = canonical_class
+                .as_ref()
+                .map(|c| format!("{}/{}/{}", kit_name, c, prop_seg));
+
             // Check if this is an ObjectProperty (from ontology) → resolve as IRI
-            if obj_props.contains(prop_seg) {
+            if lookup_key.as_ref().is_some_and(|k| obj_props.contains(k)) {
                 // ObjectProperty: split on commas, resolve each value
                 // via the canonical resolver (see src/resolve.rs).
                 let values: Vec<&str> = object.split(',').map(|s| s.trim()).filter(|s| !s.is_empty()).collect();
@@ -505,8 +518,29 @@ pub(crate) fn emit_spo_line_nquads(
                     }
                 }
             } else {
+                // Used-on-undeclared-class is LOUD, never silent: the property
+                // is declared somewhere in THIS kit but not on this class's
+                // shape — it still emits (as a plain literal), and the drift
+                // is surfaced so the shape or the frontmatter gets fixed.
+                if let Some(key) = &lookup_key {
+                    if !prop_datatypes.contains_key(key) {
+                        let kit_scope = format!("{}/", kit_name);
+                        let prop_tail = format!("/{}", prop_seg);
+                        let declared_elsewhere_in_kit = obj_props
+                            .iter()
+                            .chain(prop_datatypes.keys())
+                            .any(|k| k.starts_with(&kit_scope) && k.ends_with(&prop_tail));
+                        if declared_elsewhere_in_kit {
+                            eprintln!(
+                                "warning: {}: `{}.{}.{}` — property `{}` is not declared on class `{}` in kit `{}` (declared on another class); emitted as a plain literal until the shape or frontmatter is aligned",
+                                relpath_str, kit_name, class_seg, prop_seg, prop_seg,
+                                canonical_class.as_deref().unwrap_or(class_seg), kit_name
+                            );
+                        }
+                    }
+                }
                 // DatatypeProperty: typed literal if ontology specifies a non-string range.
-                if let Some(datatype) = prop_datatypes.get(prop_seg) {
+                if let Some(datatype) = lookup_key.as_ref().and_then(|k| prop_datatypes.get(k)) {
                     out.push_str(&format!(
                         "{} {} \"{}\"^^<{}> {} .\n",
                         doc_uri, kit_predicate, nq_escape(object), datatype, graph

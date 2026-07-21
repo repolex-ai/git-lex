@@ -323,11 +323,17 @@ pub(crate) fn get_kit_namespace(kit_name: &str) -> String {
 /// Property local-names that are object properties (`sh:nodeKind sh:IRI`).
 pub(crate) fn get_object_properties(kit: &str) -> HashSet<String> {
     let parsed = parse_kit_shapes(kit);
+    let (_, _, prefix) = resolve_kit_spec(kit); // the SHORT kit name — the segment frontmatter keys carry
     let mut out = HashSet::new();
     for shape in &parsed.shapes {
         for p in &shape.props {
             if p.is_iri {
-                out.insert(p.name.clone());
+                // Kit+class-qualified key (Rob-ruled 2026-07-21):
+                // "{kit}/{Class}/{prop}". Each kit's and class's OWN
+                // declaration governs its values — a bare-name pool let one
+                // kit's declaration silently rewrite another's (soul:source
+                // prose was comma-split as copia:source lineage edges).
+                out.insert(format!("{}/{}/{}", prefix, shape.class_name, p.name));
             }
         }
     }
@@ -338,12 +344,14 @@ pub(crate) fn get_object_properties(kit: &str) -> HashSet<String> {
 /// Only non-string datatypes are included.
 pub(crate) fn get_property_datatypes(kit: &str) -> HashMap<String, String> {
     let parsed = parse_kit_shapes(kit);
+    let (_, _, prefix) = resolve_kit_spec(kit); // the SHORT kit name — the segment frontmatter keys carry
     let mut out = HashMap::new();
     for shape in &parsed.shapes {
         for p in &shape.props {
             if let Some(dt) = &p.datatype {
                 let full = format!("http://www.w3.org/2001/XMLSchema#{}", dt);
-                out.insert(p.name.clone(), full);
+                // Kit+class-qualified key — see get_object_properties.
+                out.insert(format!("{}/{}/{}", prefix, shape.class_name, p.name), full);
             }
         }
     }
@@ -355,9 +363,11 @@ pub(crate) fn get_property_datatypes(kit: &str) -> HashMap<String, String> {
 /// frontmatter triples so a property declared in an optional kit (e.g.
 /// `copia:firstVisited` typed `xsd:date`) still gets the typed-literal tag.
 ///
-/// Property-name collisions across kits: last-writer-wins (whichever
-/// shapes file `all_shape_files()` returns later in sorted order). Today
-/// no collisions exist; document this contract before introducing one.
+/// Keys are kit+class-qualified — "{kit}/{Class}/{prop}" (Rob-ruled
+/// 2026-07-21) — so same-named properties in different kits/classes can
+/// never collide. (The old bare-name pool was last-writer-wins; the
+/// collision it "documented before introducing" arrived with copia:source
+/// v0.15 and silently rewrote soul:source's behavior.)
 pub(crate) fn get_property_datatypes_all_kits() -> HashMap<String, String> {
     let mut out = HashMap::new();
     for path in all_shape_files() {
@@ -368,11 +378,12 @@ pub(crate) fn get_property_datatypes_all_kits() -> HashMap<String, String> {
             .unwrap_or("")
             .to_string();
         let parsed = parse_shape_file(&content, &short);
+        let prefix = short.clone(); // the SHORT kit name — the segment frontmatter keys carry
         for shape in &parsed.shapes {
             for p in &shape.props {
                 if let Some(dt) = &p.datatype {
                     let full = format!("http://www.w3.org/2001/XMLSchema#{}", dt);
-                    out.insert(p.name.clone(), full);
+                    out.insert(format!("{}/{}/{}", prefix, shape.class_name, p.name), full);
                 }
             }
         }
@@ -394,10 +405,11 @@ pub(crate) fn get_object_properties_all_kits() -> HashSet<String> {
             .unwrap_or("")
             .to_string();
         let parsed = parse_shape_file(&content, &short);
+        let prefix = short.clone(); // the SHORT kit name — the segment frontmatter keys carry
         for shape in &parsed.shapes {
             for p in &shape.props {
                 if p.is_iri {
-                    out.insert(p.name.clone());
+                    out.insert(format!("{}/{}/{}", prefix, shape.class_name, p.name));
                 }
             }
         }
