@@ -294,6 +294,47 @@ async fn run_viz_server(port: u16, www_dir: PathBuf) {
                 }
             }
         }))
+        .route("/api/viz/nodes", get({
+            let state = state.clone();
+            move || {
+                let state = state.clone();
+                async move {
+                    // Render-ready node rows: every typed document in the now
+                    // view (INCLUDING orphans nothing links to), with a
+                    // computed display label — gl:name when present, else the
+                    // IRI tail. No client-side joining or label munging.
+                    let q = "PREFIX gl: <https://repolex.ai/ontology/git-lex/> \
+                        SELECT ?id ?type ?label WHERE { \
+                          GRAPH <https://repolex.ai/git-lex/NamedGraph/now> { \
+                            ?id a ?type . \
+                            OPTIONAL { ?id gl:name ?n } \
+                            BIND(COALESCE(?n, REPLACE(STR(?id), \"^.*/\", \"\")) AS ?label) \
+                          } }";
+                    Json(run_sparql_to_json(&state.store, q))
+                }
+            }
+        }))
+        .route("/api/viz/edges", get({
+            let state = state.clone();
+            move || {
+                let state = state.clone();
+                async move {
+                    // Render-ready edge rows: one row per link, uniform
+                    // columns. `target` is always a STRING (IRI stringified,
+                    // literal as-is); `resolved` says whether it names a real
+                    // node — the JS branches on a boolean column, never on
+                    // RDF term kinds.
+                    let q = "PREFIX md: <https://repolex.ai/ontology/git-lex/md/> \
+                        SELECT ?from ?target ?resolved WHERE { \
+                          GRAPH <https://repolex.ai/git-lex/NamedGraph/now> { \
+                            ?from md:linksTo ?to . \
+                            BIND(STR(?to) AS ?target) \
+                            BIND(ISIRI(?to) AS ?resolved) \
+                          } }";
+                    Json(run_sparql_to_json(&state.store, q))
+                }
+            }
+        }))
         .route("/api/store-info", get({
             let state = state.clone();
             move || {
