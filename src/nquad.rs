@@ -236,7 +236,7 @@ pub(crate) fn generate_frontmatter_nquads() -> (String, u32) {
 
         // Write .spo sidecar; when a doc's extractable content goes away its
         // existing sidecar must go away too, so the sync diff sees the lines
-        // vanish and records retractions (the append-only ledger's only
+        // vanish and records retractions (the one graph's only
         // signal — the now graph rebuilds from files and never notices).
         let spo_path = extract_dir.join(format!("{}.fm.spo", relpath_str));
         if !spo_lines.is_empty() {

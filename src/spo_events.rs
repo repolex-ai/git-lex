@@ -169,7 +169,7 @@ fn build_commit(sha: &str) -> SpikeCommit {
     //
     // Scope narrowed from `*.spo` to `.lex/extract/*.spo` (lux: 2026-04-09) —
     // the old top-level `extraction.log.spo` was a leftover from an earlier
-    // attempt, never part of the real knowledge ledger (removed Day 48).
+    // attempt, never part of the real knowledge graph (removed Day 48).
     // Everything that matters lives under `.lex/extract/` as per-document sidecars with names
     // like `foo.md.fm.spo`, `foo.md.md.spo`, `foo.md.cc.spo`, and future
     // extractors (`gliner.spo`, `haiku.spo`) will follow the same shape.

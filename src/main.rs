@@ -1764,7 +1764,7 @@ fn hook_pre_commit() {
 
     // Stage extraction artifacts. A failed add would let the commit land
     // with sidecars that no longer match the .md content — the history
-    // ledger diffs COMMITTED sidecars, so that divergence would be
+    // history build diffs COMMITTED sidecars, so that divergence would be
     // permanent and silent. Fail the commit instead.
     let staged = Command::new("git").args(["add", ".lex/extract/"]).status()
         .map(|s| s.success()).unwrap_or(false);
