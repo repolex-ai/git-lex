@@ -1879,7 +1879,23 @@ fn cmd_sync() {
             .map(|r| matches!(r, oxigraph::sparql::QueryResults::Boolean(true)))
             .unwrap_or(false);
 
-        if already_synced {
+        // The fast path also requires the one graph to EXIST — an
+        // already-synced store from before the one-graph era (or one whose
+        // graph was cleared) must fall through so the phase builds it.
+        let onegraph_present = {
+            let probe = format!(
+                "ASK {{ GRAPH <{}> {{ ?s ?p ?o }} }}",
+                spo_events::LEXHISTORY_GRAPH_IRI
+            );
+            oxigraph::sparql::SparqlEvaluator::new()
+                .parse_query(&probe)
+                .ok()
+                .and_then(|q| q.on_store(&store).execute().ok())
+                .map(|r| matches!(r, oxigraph::sparql::QueryResults::Boolean(true)))
+                .unwrap_or(false)
+        };
+
+        if already_synced && onegraph_present {
             // Check .lex/extract/ for uncommitted .spo changes
             let dirty = Command::new("git")
                 .args(["status", "--porcelain", "--", ".lex/extract/"])
@@ -1900,6 +1916,37 @@ fn cmd_sync() {
             }
         }
     }
+
+    // ─── One-graph resume point: read BEFORE Phase 1 clears the commits
+    // graph. The resume commit = the commit carrying MAX git2:ordinalDerived
+    // in the PREVIOUS sync's commits graph. No stored marker (Rob-ruled):
+    // the persisted commit data IS the marker — a no-change commit still
+    // lands in the commits graph, so "newest in store" is always the true
+    // high-water mark.
+    let onegraph_resume: Option<String> = {
+        let q = format!(
+            "SELECT ?sha WHERE {{ GRAPH <{}> {{ \
+               ?c <https://repolex.ai/ontology/git-lex/git2/ordinalDerived> ?o ; \
+                  <https://repolex.ai/ontology/git-lex/git2/id> ?sha }} \
+             }} ORDER BY DESC(?o) LIMIT 1",
+            graph_uri("commits")
+        );
+        oxigraph::sparql::SparqlEvaluator::new()
+            .parse_query(&q)
+            .ok()
+            .and_then(|q| q.on_store(&store).execute().ok())
+            .and_then(|r| match r {
+                oxigraph::sparql::QueryResults::Solutions(mut sols) => {
+                    sols.next().and_then(|s| s.ok()).and_then(|s| {
+                        s.get("sha").map(|t| match t {
+                            oxigraph::model::Term::Literal(l) => l.value().to_string(),
+                            other => other.to_string(),
+                        })
+                    })
+                }
+                _ => None,
+            })
+    };
 
     // ─── Phase 1: Clear and regenerate virtual graphs ───
     // Virtual graphs are ephemeral — rebuilt from git every sync.
@@ -1926,6 +1973,10 @@ fn cmd_sync() {
             && graph_uri != "https://repolex.ai/git-lex/NamedGraph/history"
             && graph_uri != "https://repolex.ai/git-lex/NamedGraph/meta"
             && graph_uri != "https://repolex.ai/git-lex/NamedGraph/repo-ontology"
+            // The one graph is PERSISTENT + append-only — never cleared by
+            // sync (incremental appends; full rebuild only via the spike
+            // command or an invalid-resume fallback).
+            && graph_uri != spo_events::LEXHISTORY_GRAPH_IRI
         {
             if let Ok(graph) = oxigraph::model::NamedNode::new(graph_uri) {
                 // remove (not clear): drops the graph's registration too, so a
@@ -1958,6 +2009,9 @@ fn cmd_sync() {
             .load_from_reader(RdfFormat::NQuads, Cursor::new(fm_nq.as_bytes()))
             .expect("failed to load frontmatter triples");
     }
+
+    // ─── One-graph phase: append new commits' statement events ───
+    sync_onegraph_phase(&store, &root, onegraph_resume);
 
     // ─── Phase 2: Sync graph — diff sidecars since last sync ───
 
@@ -2457,6 +2511,155 @@ fn sync_history_phase(root: &std::path::Path, store: &Store, head_sha: &str) -> 
 /// graphs, and is never invoked by `git lex save` or `git lex sync`. The
 /// `one` graph it writes is harmless (any real sync clears non-sync graphs),
 /// but you can drop it explicitly with `--clear`.
+/// Sync phase: build the one graph (https://repolex.ai/git-lex/LexHistoryGraph)
+/// — base facts + SpoEvents, appended INCREMENTALLY.
+///
+/// `resume_sha` = the newest commit in the store's previous commits graph
+/// (by git2:ordinalDerived), read before Phase 1 cleared it. Commits newer
+/// than it (`rev-list ^resume HEAD`) get their .spo events appended. No
+/// resume (first build) or an invalid resume (history rewritten) = LOUD
+/// full rebuild.
+///
+/// Every run ends with the structural integrity check (Rob-ruled: id
+/// collisions and XOR violations fail loud, never silently dedup).
+fn sync_onegraph_phase(store: &Store, root: &std::path::Path, resume_sha: Option<String>) {
+    let one_graph_uri = format!("<{}>", spo_events::LEXHISTORY_GRAPH_IRI);
+
+    // Which commits are new?
+    let commit_exists = |sha: &str| -> bool {
+        Command::new("git")
+            .args(["cat-file", "-e", &format!("{sha}^{{commit}}")])
+            .current_dir(root)
+            .status()
+            .map(|st| st.success())
+            .unwrap_or(false)
+    };
+    let rev_list = |range: &[&str]| -> Vec<String> {
+        let mut args = vec!["rev-list", "--topo-order", "--reverse"];
+        args.extend_from_slice(range);
+        Command::new("git")
+            .args(&args)
+            .current_dir(root)
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+            .map(|o| {
+                String::from_utf8_lossy(&o.stdout)
+                    .lines()
+                    .map(|l| l.trim().to_string())
+                    .filter(|l| !l.is_empty())
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+
+    let (shas, full_rebuild) = match &resume_sha {
+        Some(sha) if commit_exists(sha) => {
+            let exclude = format!("^{sha}");
+            (rev_list(&[exclude.as_str(), "HEAD"]), false)
+        }
+        Some(sha) => {
+            eprintln!(
+                "warning: one-graph resume commit {sha} no longer exists (history rewritten?) — FULL one-graph rebuild"
+            );
+            (rev_list(&["HEAD"]), true)
+        }
+        None => (rev_list(&["HEAD"]), true),
+    };
+
+    if !shas.is_empty() {
+        let commits = spo_events::collect_commits_from_shas(&shas);
+
+        // Same resolver inputs the now-graph emitter uses — ALL installed
+        // kits (base + optionals), so one-graph facts resolve identically to
+        // now-view facts (single-kit lookups were the old drift source).
+        let obj_props = crate::ontology::get_object_properties_all_kits();
+        let prop_datatypes = crate::ontology::get_property_datatypes_all_kits();
+        let mut md_files = Vec::new();
+        fn walk_md(dir: &std::path::Path, files: &mut Vec<PathBuf>) {
+            if let Ok(entries) = fs::read_dir(dir) {
+                for entry in entries.filter_map(|e| e.ok()) {
+                    let path = entry.path();
+                    let name = entry.file_name().to_string_lossy().to_string();
+                    if name.starts_with('.') { continue; }
+                    if path.is_dir() { walk_md(&path, files); }
+                    else if name.ends_with(".md") || name.ends_with(".txt") { files.push(path); }
+                }
+            }
+        }
+        walk_md(root, &mut md_files);
+        let (slug_index, path_index) = build_slug_path_indexes(root, &md_files);
+
+        let (seen, emitted) = spo_events::onegraph_walk_engine(
+            &commits,
+            store,
+            &one_graph_uri,
+            &slug_index,
+            &path_index,
+            &obj_props,
+            &prop_datatypes,
+            false, // show_progress — sync prints its own phase summary
+            full_rebuild, // clear_first only on a full rebuild
+        );
+        println!(
+            "One graph: {} {} commit(s), {} event(s) seen, {} emitted.",
+            if full_rebuild { "full rebuild —" } else { "appended" },
+            commits.len(),
+            seen,
+            emitted
+        );
+    } else {
+        println!("One graph: up to date.");
+    }
+
+    // Discovery typing (default graph, idempotent): the graph's NamedGraph
+    // object, dual-typed — the store does no inference, so both the class and
+    // its NamedGraph parent are stated explicitly.
+    let typing = format!(
+        "<{g}> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://repolex.ai/ontology/git-lex/LexHistoryGraph> .\n\
+         <{g}> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://repolex.ai/ontology/git-lex/NamedGraph> .\n",
+        g = spo_events::LEXHISTORY_GRAPH_IRI
+    );
+    if let Err(e) = store.load_from_reader(RdfFormat::NQuads, Cursor::new(typing.as_bytes())) {
+        eprintln!("warning: one-graph discovery typing failed to load: {e}");
+    }
+
+    // Structural integrity (runs EVERY build): each SpoEvent has exactly one
+    // statement (rdf:reifies) and exactly one direction. A violation means a
+    // 16-hex id collision or an emitter bug — LOUD, never silently deduped.
+    let integrity = format!(
+        "SELECT (COUNT(DISTINCT ?e) AS ?bad) WHERE {{ GRAPH <{}> {{ \
+           {{ ?e <https://repolex.ai/ontology/git-lex/assertedIn> ?a ; \
+                <https://repolex.ai/ontology/git-lex/retractedIn> ?r }} \
+           UNION \
+           {{ ?e <http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies> ?t1 , ?t2 . FILTER(?t1 != ?t2) }} \
+           UNION \
+           {{ ?e <https://repolex.ai/ontology/git-lex/assertedIn> ?c1 , ?c2 . FILTER(?c1 != ?c2) }} \
+           UNION \
+           {{ ?e <https://repolex.ai/ontology/git-lex/retractedIn> ?d1 , ?d2 . FILTER(?d1 != ?d2) }} \
+        }} }}",
+        spo_events::LEXHISTORY_GRAPH_IRI
+    );
+    let bad = oxigraph::sparql::SparqlEvaluator::new()
+        .parse_query(&integrity)
+        .ok()
+        .and_then(|q| q.on_store(store).execute().ok())
+        .and_then(|r| match r {
+            oxigraph::sparql::QueryResults::Solutions(mut sols) => sols
+                .next()
+                .and_then(|s| s.ok())
+                .and_then(|s| s.get("bad").map(|t| t.to_string())),
+            _ => None,
+        })
+        .and_then(|v| v.split('"').nth(1).and_then(|n| n.parse::<u64>().ok()))
+        .unwrap_or(0);
+    if bad > 0 {
+        eprintln!(
+            "ERROR: one-graph integrity check FAILED — {bad} SpoEvent node(s) violate one-statement/one-direction (16-hex id collision or emitter bug). The graph is NOT trustworthy until this is resolved."
+        );
+    }
+}
+
 fn cmd_spike_onegraph(clear: bool, limit: usize) {
     let root = find_git_root().expect("not a git repo");
     let store = open_or_create_store();
