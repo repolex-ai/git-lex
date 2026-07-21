@@ -2607,7 +2607,7 @@ fn spike_onegraph_report(store: &Store, one_graph: &str, limit: usize) {
         "SELECT ?p ?o ?date WHERE {{ \
            GRAPH <{one_graph}> {{ ?a <{reifies}> <<( ?s ?p ?o )>> . ?a <{asserted}> ?c }} \
            GRAPH ?g {{ ?c <https://repolex.ai/ontology/git-lex/git2/author> ?sig . \
-                       ?sig <https://repolex.ai/ontology/git-lex/git2/when> ?date }} \
+                       ?sig <https://repolex.ai/ontology/git-lex/git2/xsdDateTimeDerived> ?date }} \
          }} ORDER BY DESC(?date) LIMIT {limit}"
     )) {
         println!("  {} = {}  @ {}", short(&r[0]), short(&r[1]), short(&r[2]));

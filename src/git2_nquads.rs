@@ -56,10 +56,12 @@ const XSD_BOOLEAN: &str = "http://www.w3.org/2001/XMLSchema#boolean";
 /// `xsd:dateTime` string WITH the original timezone offset preserved,
 /// e.g. `2026-07-19T14:08:37-07:00`.
 ///
-/// WHY derived: git2's native representation is the raw pair; the ontology
-/// carries the converted form (clearly marked derived there, Rob-ruled
-/// 2026-07-21) because every consumer of this graph sorts and filters on
-/// time and xsd:dateTime is what SPARQL understands natively.
+/// This computes `git2:xsdDateTimeDerived` — the ONE derived (non-library)
+/// value in the git2 vocabulary, and its name carries that status (Rob-ruled,
+/// git2.ttl v0.2.0). The raw pair (`git2:seconds`/`git2:offsetMinutes`) is
+/// what git itself stores; this conversion exists because every consumer of
+/// the graph sorts and filters on time, and xsd:dateTime is what SPARQL
+/// understands natively.
 ///
 /// Date math is the standard civil-from-days algorithm (Howard Hinnant,
 /// public domain) — no external date dependency.
@@ -98,6 +100,9 @@ fn encode_path(path: &str) -> String {
 
 /// Emit one Signature record: the per-commit value object, exactly as git2
 /// models it. `role` is "author" or "committer" (the two accessors on Commit).
+/// NOTE: the Signature instance-IRI shape (commit + role) is W4R3Z's derived
+/// proposal, flagged to Rob and NOT yet confirmed — don't build new consumers
+/// against the exact path shape until his yes lands.
 fn emit_signature(
     nq: &mut String,
     graph: &str,
@@ -117,9 +122,20 @@ fn emit_signature(
             nq.push_str(&format!("{su} <{GIT2_NS}email> \"{}\" {graph} .\n", nq_escape(email)));
         }
     }
+    // Time (git2.ttl v0.2.0, Rob-ruled): the raw pair is library-native (what
+    // git stores in the commit bytes); the dateTime is git-lex's DERIVATION
+    // and its property name says so. git2:when is retired — never emit it.
     let when = sig.when();
     nq.push_str(&format!(
-        "{su} <{GIT2_NS}when> \"{}\"^^<{XSD_DATETIME}> {graph} .\n",
+        "{su} <{GIT2_NS}seconds> \"{}\"^^<{XSD_INTEGER}> {graph} .\n",
+        when.seconds()
+    ));
+    nq.push_str(&format!(
+        "{su} <{GIT2_NS}offsetMinutes> \"{}\"^^<{XSD_INTEGER}> {graph} .\n",
+        when.offset_minutes()
+    ));
+    nq.push_str(&format!(
+        "{su} <{GIT2_NS}xsdDateTimeDerived> \"{}\"^^<{XSD_DATETIME}> {graph} .\n",
         git2_time_to_datetime(when.seconds(), when.offset_minutes())
     ));
     su
@@ -366,7 +382,8 @@ mod tests {
         const DECLARED: &[&str] = &[
             "Commit", "Signature", "IndexEntry", "Blob", "Branch", "Tag",
             "id", "signatureName", "refName", "summary", "message", "body",
-            "author", "committer", "parent", "file", "email", "when", "path",
+            "author", "committer", "parent", "file", "email", "path",
+            "seconds", "offsetMinutes", "xsdDateTimeDerived",
             "fileSize", "mode", "blob", "size", "isBinary", "shorthand", "target",
         ];
         let nq = generate_git2_nquads();
