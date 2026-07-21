@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, exit};
 use std::time::Instant;
 use std::fs;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use tree_sitter;
 
 // Shared utilities (also used by git-lex-serve)
@@ -32,14 +32,12 @@ mod kit;
 mod extraction;
 
 use crate::git::{auto_commit_snapshot, graph_uri, resource_uri};
-use crate::nquad::{build_slug_path_indexes, emit_spo_line_nquads,
-                   generate_frontmatter_nquads,
-                   load_lex_nquads, nq_escape, uri_encode_path};
+use crate::nquad::{build_slug_path_indexes, generate_frontmatter_nquads,
+                   load_lex_nquads};
 use crate::ontology::{get_kit_prefix_name, get_kit_types,
                       get_object_properties, get_property_datatypes};
 use crate::shacl::{build_shacl_shapes, parse_shacl_hints};
-use crate::extraction::{extract_jsonl_sessions, extract_markdown_links, frontmatter_to_turtle,
-                        sanitize_uri_segment, short_hash};
+use crate::extraction::{extract_jsonl_sessions, extract_markdown_links, frontmatter_to_turtle};
 use crate::kit::{collect_init_variables, fetch_kit_from_github, install_scaffold_files_from,
                  install_scaffold_files_from_skip_existing,
                  kit_config_bool, kit_config_str, read_repo_yml_fields,
@@ -206,19 +204,6 @@ enum Commands {
         /// Arguments passed through to git-lex-serve
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
-    },
-    /// Verify the history==now equivalence invariant.
-    ///
-    /// Reconstructs the set of "live at HEAD" triples from the history
-    /// graph (addedIn minus removedIn per reified triple term) and compares
-    /// it against the set produced by evaluating the current .spo files
-    /// through the same emitter. Reports symmetric difference. A clean run
-    /// means the history walker is a faithful mirror of the now-graph
-    /// emission pipeline.
-    HistoryVerify {
-        /// Print the first N mismatched triples on each side
-        #[arg(long, default_value = "10")]
-        show: usize,
     },
     /// [SPIKE] Build the experimental "one graph" temporal model and print
     /// sample output.
@@ -448,8 +433,7 @@ fn cmd_init(directory: Option<String>, kit: Option<String>) {
             .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
             .unwrap_or_else(|| "unknown".to_string());
         fs::write(&repo_yml_path, format!(
-            "name: {}\nkit: {}\ncreated: {}\n\
-             # build_history_on_sync: true  # builds the temporal history graph on every sync; can be slow on first sync with large repos\n",
+            "name: {}\nkit: {}\ncreated: {}\n",
             repo_name, kit_spec, today
         )).unwrap_or_else(|e| {
             eprintln!("fatal: could not write .lex/repo.yml: {}", e);
@@ -1868,17 +1852,16 @@ fn cmd_sync() {
     }
 
     // ─── Fast path: already-synced no-op ───
-    // If a /sync/{HEAD_SHA}/ graph already exists AND the extract dir is
-    // clean (no uncommitted .spo changes), every phase of sync would be a
-    // no-op that rebuilds identical state. Skip the whole thing.
+    // If the commits graph already contains HEAD (the previous sync reached
+    // this commit) AND the extract dir is clean (no uncommitted .spo
+    // changes), every phase of sync would rebuild identical state. Skip.
     //
     // Contract this depends on: the oxigraph store is derived. If you've
     // manually mutated it, rebuild via `rm -rf .git/lex/oxigraph`.
     {
-        let sync_graph_uri = graph_uri(&format!("sync/{}", head_sha));
         let probe = format!(
-            "ASK {{ GRAPH <{}> {{ ?s ?p ?o }} }}",
-            sync_graph_uri
+            "ASK {{ GRAPH <{}> {{ <https://repolex.ai/git-lex/git2/Commit/{}> ?p ?o }} }}",
+            graph_uri("commits"), head_sha
         );
         let already_synced = oxigraph::sparql::SparqlEvaluator::new()
             .parse_query(&probe)
@@ -1977,13 +1960,13 @@ fn cmd_sync() {
     // Clear non-sync, non-history graphs (virtual graphs get regenerated).
     // History and meta graphs are persistent — managed by Phase 4.
     for graph_uri in &existing_graphs {
-        if !graph_uri.starts_with("https://repolex.ai/git-lex/NamedGraph/sync/")
-            && graph_uri != "https://repolex.ai/git-lex/NamedGraph/history"
-            && graph_uri != "https://repolex.ai/git-lex/NamedGraph/meta"
-            && graph_uri != "https://repolex.ai/git-lex/NamedGraph/repo-ontology"
-            // The one graph is PERSISTENT + append-only — never cleared by
-            // sync (incremental appends; full rebuild only via the spike
-            // command or an invalid-resume fallback).
+        // Keep-list: the one graph (persistent, append-only — incremental
+        // appends; full rebuild only via the spike command or an
+        // invalid-resume fallback) and the repo-ontology graph (loaded at
+        // init/kit-update, "stays put"). EVERYTHING else is derived and
+        // regenerated — including the retired sync/<sha>, history, and meta
+        // families, which this sweep removes from pre-cutover stores.
+        if graph_uri != "https://repolex.ai/git-lex/NamedGraph/repo-ontology"
             && graph_uri != spo_events::LEXHISTORY_GRAPH_IRI
         {
             if let Ok(graph) = oxigraph::model::NamedNode::new(graph_uri) {
@@ -2006,530 +1989,45 @@ fn cmd_sync() {
         .load_from_reader(RdfFormat::NQuads, Cursor::new(git_nq.as_bytes()))
         .expect("failed to load git triples");
 
-    // Regenerate frontmatter + wikilink triples
+    // Extraction: generate_frontmatter_nquads WRITES the .spo sidecars (the
+    // one graph's source) and derives the working-tree now view. The now
+    // view is NO LONGER loaded into the store (Rob-ruled: the now graph
+    // died as a store product — the one graph's base layer is current
+    // state). The derived text is discarded; the extraction side effect is
+    // what sync needs. (Splitting extraction from emission is a refactor
+    // deferred until the direct query path's disposition is ruled — the
+    // same function serves `git lex query`.)
     let (fm_nq, fm_errors) = generate_frontmatter_nquads();
     if fm_errors > 0 {
-        eprintln!("warning: {} frontmatter error(s) during sync — graph may be incomplete", fm_errors);
+        eprintln!("warning: {} frontmatter error(s) during sync — extraction may be incomplete", fm_errors);
     }
     let fm_count = fm_nq.lines().filter(|l| !l.is_empty()).count();
-    if !fm_nq.is_empty() {
-        store
-            .load_from_reader(RdfFormat::NQuads, Cursor::new(fm_nq.as_bytes()))
-            .expect("failed to load frontmatter triples");
-    }
 
     // ─── One-graph phase: append new commits' statement events ───
     sync_onegraph_phase(&store, &root, onegraph_resume);
 
-    // ─── Phase 2: Sync graph — diff sidecars since last sync ───
-
-    // Find last sync commit: the sync graph whose commit is the NEAREST
-    // ancestor of HEAD. Graph names end in commit SHAs, which carry no
-    // ordering — recency must come from git, not string sort (a string-DESC
-    // pick is an arbitrary member of the set, and diffing against an old
-    // base silently loses retractions).
-    let last_sync_commit: Option<String> = {
-        let sync_shas: HashSet<String> = store
-            .named_graphs()
-            .filter_map(|g| g.ok())
-            .filter_map(|g| match g {
-                oxigraph::model::NamedOrBlankNode::NamedNode(n) => {
-                    let uri = n.as_str();
-                    uri.strip_prefix("https://repolex.ai/git-lex/NamedGraph/sync/")
-                        .map(|sha| sha.trim_end_matches('/').to_string())
-                }
-                _ => None,
-            })
-            .collect();
-        if sync_shas.is_empty() {
-            None
-        } else {
-            // Walk HEAD's history newest-first; the first synced commit we
-            // meet is the most recent sync base. Sync graphs from other
-            // branches (non-ancestors) are correctly ignored.
-            Command::new("git")
-                .args(["rev-list", "HEAD"])
-                .current_dir(&root)
-                .output()
-                .ok()
-                .filter(|o| o.status.success())
-                .and_then(|o| {
-                    String::from_utf8_lossy(&o.stdout)
-                        .lines()
-                        .map(|l| l.trim().to_string())
-                        .find(|sha| sync_shas.contains(sha))
-                })
-        }
-    };
-
-    // Get all current .spo sidecars
-    let extract_dir = root.join(".lex").join("extract");
-    let mut current_spo: HashMap<String, String> = HashMap::new(); // filepath → content
-
-    fn collect_spo(dir: &std::path::Path, base_dir: &std::path::Path, map: &mut HashMap<String, String>) {
-        if let Ok(entries) = fs::read_dir(dir) {
-            for entry in entries.filter_map(|e| e.ok()) {
-                let path = entry.path();
-                if path.is_dir() {
-                    collect_spo(&path, base_dir, map);
-                } else if path.extension().is_some_and(|e| e == "spo") {
-                    if let Ok(content) = fs::read_to_string(&path) {
-                        let rel = path.strip_prefix(base_dir).unwrap_or(&path);
-                        map.insert(rel.to_string_lossy().to_string(), content);
-                    }
-                }
-            }
-        }
-    }
-    if extract_dir.exists() {
-        collect_spo(&extract_dir, &extract_dir, &mut current_spo);
-    }
-
-    // Get sidecars at last sync point (from git history)
-    let previous_spo: HashMap<String, String> = if let Some(ref last_sha) = last_sync_commit {
-        // List .spo files at that commit
-        // current_dir(&root) on every git call here: ls-tree pathspecs are
-        // cwd-relative, so running sync from a subdirectory without it would
-        // silently see NO previous sidecars and re-assert everything as new.
-        let output = Command::new("git")
-            .args(["ls-tree", "-r", "--name-only", last_sha, ".lex/extract/"])
-            .current_dir(&root)
-            .output();
-        let mut prev = HashMap::new();
-        if let Ok(o) = output {
-            if o.status.success() {
-                let stdout = String::from_utf8_lossy(&o.stdout);
-                for file_path in stdout.lines() {
-                    if file_path.ends_with(".spo") {
-                        let content = Command::new("git")
-                            .args(["show", &format!("{}:{}", last_sha, file_path)])
-                            .current_dir(&root)
-                            .output();
-                        if let Ok(c) = content {
-                            if c.status.success() {
-                                let rel = file_path.strip_prefix(".lex/extract/").unwrap_or(file_path);
-                                prev.insert(rel.to_string(), String::from_utf8_lossy(&c.stdout).to_string());
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        prev
-    } else {
-        HashMap::new() // First sync — everything is new
-    };
-
-    // Compute delta
-    let sync_graph = format!("<{}>", graph_uri(&format!("sync/{}", head_sha)));
-    let mut sync_nq = String::new();
-    let mut new_assertions = 0;
-    let mut retracted = 0;
-
-    // New/changed assertions
-    for (spo_file, content) in &current_spo {
-        let prev_content = previous_spo.get(spo_file).map(|s| s.as_str()).unwrap_or("");
-        let current_lines: HashSet<&str> = content.lines().filter(|l| !l.is_empty() && !l.starts_with('#')).collect();
-        let prev_lines: HashSet<&str> = prev_content.lines().filter(|l| !l.is_empty() && !l.starts_with('#')).collect();
-
-        // Derive source file from spo path
-        let source_file = spo_file
-            .strip_suffix(".fm.spo")
-            .or_else(|| {
-                // For model-named files: strip .{model}.spo
-                if let Some(pos) = spo_file.rfind(".spo") {
-                    let without_spo = &spo_file[..pos];
-                    if let Some(ext_pos) = without_spo.rfind('.') {
-                        let maybe_ext = &without_spo[ext_pos + 1..];
-                        if maybe_ext.len() > 3 || maybe_ext == "fm" {
-                            return Some(&without_spo[..ext_pos]);
-                        }
-                    }
-                }
-                None
-            })
-            .unwrap_or(spo_file);
-
-        // Get blob hash for this source file
-        let blob_hash = Command::new("git")
-            .args(["rev-parse", &format!("HEAD:{}", source_file)])
-            .current_dir(&root)
-            .output()
-            .ok()
-            .filter(|o| o.status.success())
-            .map(|o| {
-                let h = String::from_utf8_lossy(&o.stdout).trim().to_string();
-                h[..8.min(h.len())].to_string()
-            })
-            .unwrap_or_default();
-
-        // New lines = new assertions
-        for line in current_lines.difference(&prev_lines) {
-            let parts: Vec<&str> = line.splitn(3, " | ").collect();
-            if parts.len() < 3 { continue; }
-            let (subject, predicate, object) = (parts[0], parts[1], parts[2]);
-
-            // Build entity URIs
-            let subject_uri = format!("<{}>", resource_uri(&format!("entity/{}~{}", sanitize_uri_segment(subject), blob_hash)));
-            let predicate_uri = if predicate == "isA" {
-                "<http://www.w3.org/1999/02/22-rdf-syntax-ns#type>".to_string()
-            } else if predicate == "hasValue" {
-                format!("<https://repolex.ai/ontology/git-lex/fm/{}>", uri_encode_path(subject))
-            } else if predicate == "mentions" {
-                "<https://repolex.ai/ontology/git-lex/md/mentions>".to_string()
-            } else if predicate == "linksTo" {
-                "<https://repolex.ai/ontology/git-lex/md/linksTo>".to_string()
-            } else {
-                format!("<{}>", resource_uri(&format!("predicate/{}", sanitize_uri_segment(predicate))))
-            };
-            // Determine if object is a literal or entity reference
-            // Literals: isA, hasValue, mentions, linksTo, and any predicate where
-            // the object looks like a value (numbers, timestamps, paths, URLs, or
-            // contains special chars that aren't entity-name-like)
-            let is_literal = predicate == "isA"
-                || predicate == "hasValue"
-                || predicate == "mentions"
-                || predicate == "linksTo"
-                || object.contains('/')
-                || object.contains(':')
-                || object.contains(' ')
-                || object.parse::<f64>().is_ok()
-                || object.starts_with("20")  // timestamps like 2026-03-26T...
-                || predicate.ends_with("Count")
-                || predicate.ends_with("Time")
-                || predicate.ends_with("Date")
-                || predicate.ends_with("Version")
-                || predicate.ends_with("Id")
-                || predicate.ends_with("Status")
-                || predicate.ends_with("Branch")
-                || predicate == "cwd"
-                || predicate == "ccVersion"
-                || predicate == "sessionId"
-                || predicate == "toolUsage"
-                || predicate == "project"
-                || object.starts_with("-")  // dash-encoded paths like -Users-rob-repos
-                || object.starts_with("http");
-            let object_nq = if is_literal {
-                format!("\"{}\"", nq_escape(object))
-            } else {
-                format!("<{}>", resource_uri(&format!("entity/{}~{}", sanitize_uri_segment(object), blob_hash)))
-            };
-
-            // The assertion
-            sync_nq.push_str(&format!("{} {} {} {} .\n", subject_uri, predicate_uri, object_nq, sync_graph));
-
-            // Name triple
-            sync_nq.push_str(&format!(
-                "{} <https://repolex.ai/ontology/git-lex/name> \"{}\" {} .\n",
-                subject_uri, nq_escape(subject), sync_graph
-            ));
-
-            // Triple term annotation (a git:Annotation node — the sync-diff
-            // record of this asserted fact)
-            let spo_key = format!("{}|{}|{}|{}", source_file, subject, predicate, object);
-            let ann_hash = short_hash(&spo_key);
-            let ann_uri = format!("<{}>", resource_uri(&format!("ann/{}", ann_hash)));
-
-            sync_nq.push_str(&format!(
-                "{} <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://repolex.ai/ontology/git-lex/git/Annotation> {} .\n",
-                ann_uri, sync_graph
-            ));
-            sync_nq.push_str(&format!(
-                "{} <http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies> <<( {} {} {} )>> {} .\n",
-                ann_uri, subject_uri, predicate_uri, object_nq, sync_graph
-            ));
-            sync_nq.push_str(&format!(
-                "{} <https://repolex.ai/ontology/git-lex/git/path> \"{}\" {} .\n",
-                ann_uri, nq_escape(source_file), sync_graph
-            ));
-            sync_nq.push_str(&format!(
-                "{} <https://repolex.ai/ontology/git-lex/git/blobHash> \"{}\" {} .\n",
-                ann_uri, nq_escape(&blob_hash), sync_graph
-            ));
-            sync_nq.push_str(&format!(
-                "{} <https://repolex.ai/ontology/git-lex/git/commitId> \"{}\" {} .\n",
-                ann_uri, nq_escape(&head_sha), sync_graph
-            ));
-
-            new_assertions += 1;
-        }
-
-        // Removed lines = retractions
-        for line in prev_lines.difference(&current_lines) {
-            let parts: Vec<&str> = line.splitn(3, " | ").collect();
-            if parts.len() < 3 { continue; }
-            let (subject, predicate, object) = (parts[0], parts[1], parts[2]);
-
-            let spo_key = format!("{}|{}|{}|{}", source_file, subject, predicate, object);
-            let ann_hash = short_hash(&spo_key);
-            let ann_uri = format!("<{}>", resource_uri(&format!("ann/{}", ann_hash)));
-
-            sync_nq.push_str(&format!(
-                "{} <https://repolex.ai/ontology/git-lex/git/retracted> \"true\"^^<http://www.w3.org/2001/XMLSchema#boolean> {} .\n",
-                ann_uri, sync_graph
-            ));
-            retracted += 1;
-        }
-    }
-
-    // Handle deleted files (in previous but not in current)
-    for (spo_file, content) in &previous_spo {
-        if !current_spo.contains_key(spo_file) {
-            // Entire file deleted — retract all its assertions
-            let source_file = spo_file
-                .strip_suffix(".fm.spo")
-                .unwrap_or(spo_file);
-
-            for line in content.lines().filter(|l| !l.is_empty() && !l.starts_with('#')) {
-                let parts: Vec<&str> = line.splitn(3, " | ").collect();
-                if parts.len() < 3 { continue; }
-                let (subject, predicate, object) = (parts[0], parts[1], parts[2]);
-
-                let spo_key = format!("{}|{}|{}|{}", source_file, subject, predicate, object);
-                let ann_hash = short_hash(&spo_key);
-                let ann_uri = format!("<{}>", resource_uri(&format!("ann/{}", ann_hash)));
-
-                sync_nq.push_str(&format!(
-                    "{} <https://repolex.ai/ontology/git-lex/git/retracted> \"true\"^^<http://www.w3.org/2001/XMLSchema#boolean> {} .\n",
-                    ann_uri, sync_graph
-                ));
-                retracted += 1;
-            }
-        }
-    }
-
-    // Load sync graph into oxigraph
-    let sync_count = sync_nq.lines().filter(|l| !l.is_empty()).count();
-    if !sync_nq.is_empty() {
-        store
-            .load_from_reader(RdfFormat::NQuads, Cursor::new(sync_nq.as_bytes()))
-            .expect("failed to load sync graph");
-    }
-
-    // ─── Phase 3: Stale graph cleanup ───
-    // Subsumed by the Phase-2 clear filter: every graph whose name is not a
-    // current https://repolex.ai/git-lex/... keep-name (sync/history/meta) is
-    // cleared on each sync — including all legacy urn:soul:* graphs and the
-    // old `<base>/class/*` + `<base>/frontmatter` projections. Migration off
-    // the old naming is therefore automatic on the first new-binary sync.
-
-    // ─── Phase 4: History graph (config-gated, OFF by default) ───
-    let history_summary: Option<String> = if build_history_on_sync(&root) {
-        Some(sync_history_phase(&root, &store, &head_sha))
-    } else {
-        None
-    };
+    // ─── Stale graph cleanup ───
+    // Subsumed by the Phase-1 clear filter: every graph not on the keep-list
+    // (the one graph + repo-ontology) is removed each sync — including the
+    // RETIRED families (sync/<sha>, history, meta, changeset/, blame/) and
+    // all legacy urn:soul:* names. Migration off every old layout is
+    // automatic on the first new-binary sync.
 
     store.flush().expect("failed to flush store");
 
     let elapsed = start.elapsed();
 
-    // Count total sync graph triples
-    let total_sync: usize = existing_graphs.iter()
-        .filter(|g| g.starts_with("https://repolex.ai/git-lex/NamedGraph/sync/"))
-        .count();
-
     println!(
         "Synced in {:.1}ms:",
         elapsed.as_secs_f64() * 1000.0
     );
-    println!("  Virtual: {} git + {} now", git_count, fm_count);
+    println!("  git2 layer: {} quads; extracted: {} now-view facts", git_count, fm_count);
     if !adaptive_ok.is_empty() || !adaptive_fail.is_empty() {
         println!("  Adaptive shapes: {} built, {} failed", adaptive_ok.len(), adaptive_fail.len());
     }
-    if new_assertions > 0 || retracted > 0 {
-        println!(
-            "  Sync /sync/{}/: +{} assertions, -{} retracted ({} quads)",
-            &head_sha[..8.min(head_sha.len())], new_assertions, retracted, sync_count
-        );
-    } else if last_sync_commit.is_some() {
-        println!("  No new assertions since last sync");
-    } else {
-        println!("  First sync — no previous state");
-    }
-    if let Some(ref history_summary) = history_summary {
-        println!("  History: {}", history_summary);
-    }
-    println!("  Total sync graphs: {}", total_sync + if sync_count > 0 { 1 } else { 0 });
     println!("Store: {}", store_path().unwrap().display());
 }
 
-/// Phase 4 of sync: the history graph (the context-graph lane). Reads the
-/// lastHistorySync marker; if it is an ancestor of HEAD, walks only newer
-/// commits (append), otherwise falls back to a full rebuild. Returns the
-/// one-line summary for sync output.
-///
-/// Config-gated by `build_history_on_sync: true` in `.lex/repo.yml` —
-/// OFF by default. Safe to gate: the history graph is derived entirely
-/// from git history and can be rebuilt any time by enabling the switch
-/// (slow on the first sync of a large repo, by design).
-fn sync_history_phase(root: &std::path::Path, store: &Store, head_sha: &str) -> String {
-
-    let history_graph_uri = format!("<{}>", graph_uri("history"));
-    let meta_graph_uri = format!("<{}>", graph_uri("meta"));
-
-    // Query the marker
-    let marker_query = format!(
-        "SELECT ?commit WHERE {{ GRAPH {} {{ <{}> <https://repolex.ai/ontology/spo/lastHistorySync> ?commit }} }}",
-        meta_graph_uri,
-        resource_uri("meta")
-    );
-    let marker_sha: Option<String> = {
-        match oxigraph::sparql::Query::parse(&marker_query, None) {
-            Ok(parsed) => match store.query(parsed) {
-                Ok(oxigraph::sparql::QueryResults::Solutions(solutions)) => {
-                    solutions.flatten().filter_map(|s| {
-                        s.get("commit").and_then(|t| match t {
-                            Term::NamedNode(n) => {
-                                // URI is <base/commit/SHA> — extract the SHA
-                                let uri = n.as_str();
-                                uri.rfind("/Commit/").map(|pos| uri[pos + 8..].to_string())
-                            }
-                            _ => None,
-                        })
-                    }).next()
-                }
-                _ => None,
-            },
-            _ => None,
-        }
-    };
-
-    // Decide full rebuild vs incremental
-    let (history_commits, history_clear) = if let Some(ref marker) = marker_sha {
-        // Check if marker is an ancestor of HEAD
-        let is_ancestor = Command::new("git")
-            .args(["merge-base", "--is-ancestor", marker, "HEAD"])
-            .output()
-            .map(|o| o.status.success())
-            .unwrap_or(false);
-
-        if marker == &head_sha {
-            // Already up to date
-            (Vec::new(), false)
-        } else if is_ancestor {
-            // Incremental: walk only new commits
-            let new_shas = spo_events::rev_list_range(marker);
-            if new_shas.is_empty() {
-                (Vec::new(), false)
-            } else {
-                eprintln!("  History: incremental — {} new commit(s) since {}", new_shas.len(), &marker[..8.min(marker.len())]);
-                let commits = spo_events::collect_commits_from_shas(&new_shas);
-                (commits, false) // append, do not clear
-            }
-        } else {
-            // Marker not reachable from HEAD (rebase/amend) — full rebuild
-            eprintln!("  History: lastHistorySync marker {} is not an ancestor of HEAD — falling back to full rebuild. This may take a moment.", &marker[..8.min(marker.len())]);
-            let all_shas = {
-                let out = Command::new("git")
-                    .args(["rev-list", "--topo-order", "--reverse", "HEAD"])
-                    .output()
-                    .expect("git rev-list failed");
-                String::from_utf8_lossy(&out.stdout)
-                    .lines()
-                    .map(|s| s.trim().to_string())
-                    .filter(|s| !s.is_empty())
-                    .collect::<Vec<_>>()
-            };
-            let commits = spo_events::collect_commits_from_shas(&all_shas);
-            (commits, true) // clear first
-        }
-    } else {
-        // No marker — first-time history build
-        eprintln!("  History: no lastHistorySync marker found — falling back to full rebuild. This may take a moment.");
-        let all_shas = {
-            let out = Command::new("git")
-                .args(["rev-list", "--topo-order", "--reverse", "HEAD"])
-                .output()
-                .expect("git rev-list failed");
-            String::from_utf8_lossy(&out.stdout)
-                .lines()
-                .map(|s| s.trim().to_string())
-                .filter(|s| !s.is_empty())
-                .collect::<Vec<_>>()
-        };
-        let commits = spo_events::collect_commits_from_shas(&all_shas);
-        (commits, true) // clear first
-    };
-
-    // Load ontology helpers for the history emitter
-    let kit_name = get_kit().unwrap_or_default();
-    let hist_obj_props = get_object_properties(&kit_name);
-    let hist_prop_datatypes = get_property_datatypes(&kit_name);
-
-    // Build slug/path indexes (same as now-graph builder)
-    fn walk_md_for_history(dir: &std::path::Path, files: &mut Vec<PathBuf>) {
-        if let Ok(entries) = fs::read_dir(dir) {
-            for entry in entries.filter_map(|e| e.ok()) {
-                let path = entry.path();
-                let name = entry.file_name().to_string_lossy().to_string();
-                if name.starts_with('.') { continue; }
-                if path.is_dir() {
-                    walk_md_for_history(&path, files);
-                } else if name.ends_with(".md") || name.ends_with(".txt") {
-                    files.push(path);
-                }
-            }
-        }
-    }
-    let mut md_files = Vec::new();
-    walk_md_for_history(&root, &mut md_files);
-    let (hist_slug_index, hist_path_index) = build_slug_path_indexes(&root, &md_files);
-
-    if history_commits.is_empty() {
-        "up to date".to_string()
-    } else {
-        let stats = spo_events::history_walk_engine(
-            &history_commits,
-            &store,
-            &history_graph_uri,
-            &meta_graph_uri,
-            &head_sha,
-            &hist_slug_index,
-            &hist_path_index,
-            &hist_obj_props,
-            &hist_prop_datatypes,
-            history_clear,
-            true, // show_progress
-        );
-        match stats.failed {
-            Some(ref e) => format!(
-                "FAILED ({}) — {} commit(s) not recorded, will retry next sync",
-                e, history_commits.len(),
-            ),
-            None => format!(
-                "{} commit(s), {} events, {} annotations",
-                history_commits.len(), stats.events_seen, stats.events_emitted,
-            ),
-        }
-    }
-}
-
-/// SPIKE — build the experimental "one graph" temporal model and print a
-/// sample of its output. See `Commands::SpikeOnegraph` for the full writeup.
-///
-/// This is a self-contained, side-effect-light exploration command:
-///   1. It builds the one-graph into the persistent store's `NamedGraph/one`
-///      graph (a graph the real pipeline never touches), doing a full rebuild
-///      from all of HEAD's history every run.
-///   2. It runs a handful of demonstration queries and prints them so we can
-///      "try the model on for size" against real data.
-///
-/// It does NOT write a sync marker, does NOT alter the `history`/`now`/`sync`
-/// graphs, and is never invoked by `git lex save` or `git lex sync`. The
-/// `one` graph it writes is harmless (any real sync clears non-sync graphs),
-/// but you can drop it explicitly with `--clear`.
-/// Sync phase: build the one graph (https://repolex.ai/git-lex/LexHistoryGraph)
-/// — base facts + SpoEvents, appended INCREMENTALLY.
-///
-/// `resume_sha` = the newest commit in the store's previous commits graph
-/// (by git2:ordinalDerived), read before Phase 1 cleared it. Commits newer
-/// than it (`rev-list ^resume HEAD`) get their .spo events appended. No
-/// resume (first build) or an invalid resume (history rewritten) = LOUD
-/// full rebuild.
-///
-/// Every run ends with the structural integrity check (Rob-ruled: id
-/// collisions and XOR violations fail loud, never silently dedup).
 fn sync_onegraph_phase(store: &Store, root: &std::path::Path, resume_sha: Option<String>) {
     let one_graph_uri = format!("<{}>", spo_events::LEXHISTORY_GRAPH_IRI);
 
@@ -2834,25 +2332,6 @@ fn spike_onegraph_report(store: &Store, one_graph: &str, limit: usize) {
 
     println!("\n(SPIKE output — the model is a PROPOSAL, predicate names are placeholders pending Rob's ruling + ontology declaration.)");
 }
-
-/// Read the `build_history_on_sync` switch from `.lex/repo.yml`.
-/// Absent, or any value other than `true`, means OFF.
-fn build_history_on_sync(root: &std::path::Path) -> bool {
-    fs::read_to_string(root.join(".lex").join("repo.yml"))
-        .map(|c| c.lines().any(|l| {
-            l.trim()
-                .strip_prefix("build_history_on_sync:")
-                .map(|v| v.trim() == "true")
-                .unwrap_or(false)
-        }))
-        .unwrap_or(false)
-}
-
-// add_prefixes imported from git_lex lib
-
-#[allow(deprecated)]
-/// Serialize a SPARQL term to W3C SPARQL JSON binding format.
-/// https://www.w3.org/TR/sparql11-results-json/#select-encode-terms
 use git_lex::term_to_json;
 
 fn run_query(store: &Store, query: &str, store_type: &str, json: bool) {
@@ -3118,9 +2597,6 @@ fn main() {
                 }
                 _ => {}
             }
-        }
-        Commands::HistoryVerify { show } => {
-            cmd_history_verify(show);
         }
         Commands::Verify => {
             let store = open_or_create_store();
@@ -3439,265 +2915,6 @@ fn register_hook_in_settings(settings: &mut serde_json::Value, event: &str, comm
         event_hooks.push(hook_entry);
     }
 }
-
-/// Verify the history==now equivalence invariant.
-///
-/// Reconstructs "live at HEAD" from the history graph by counting addedIn
-/// minus removedIn per reified triple term, then compares that set against
-/// the triples produced by running the current `.spo` sidecars through
-/// `emit_spo_line_nquads` (the same function the now-graph builder uses).
-///
-/// The fair-comparison trick: we don't compare against the full now-graph,
-/// which includes extras like `git:path` / `git:blobHash` / unconditional
-/// `rdf:type git-lex:Document` that the history walker never sees. Instead we
-/// regenerate the "pure .spo emission" set live and compare against that.
-/// Both sides go through the same emitter → symmetric difference should be
-/// empty if the history walker is faithful.
-fn cmd_history_verify(show: usize) {
-    let start = Instant::now();
-
-    let root = find_git_root().expect("not in a git repo");
-    let history_graph = format!("<{}>", graph_uri("history"));
-
-    let store_path_buf = root.join(".git").join("lex").join("oxigraph");
-    let store = match Store::open(&store_path_buf) {
-        Ok(s) => s,
-        Err(e) => {
-            eprintln!("history-verify: failed to open store at {}: {}", store_path_buf.display(), e);
-            exit(1);
-        }
-    };
-
-    // ─── Step 1: Reconstruct "live at HEAD" from history graph ───
-    //
-    // Each reified triple (S,P,O) may have multiple annotations across commits:
-    // `addedIn` events put it into the working set, `removedIn` events take it
-    // back out. A triple is live at HEAD if (count of addedIn) > (count of
-    // removedIn). We aggregate per (S,P,O) and keep the net-positive ones.
-    //
-    // The SPARQL: iterate annotations, pull the triple-term's S/P/O out, plus
-    // the addedIn/removedIn predicate. GROUP BY (S,P,O) and sum.
-    let reconstruct_query = format!(r#"
-        SELECT ?s ?p ?o
-               (SUM(IF(?op = <https://repolex.ai/ontology/spo/addedIn>, 1, 0)) AS ?added)
-               (SUM(IF(?op = <https://repolex.ai/ontology/spo/removedIn>, 1, 0)) AS ?removed)
-        WHERE {{
-            GRAPH {} {{
-                ?ann <http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies> <<( ?s ?p ?o )>> .
-                ?ann ?op ?commit .
-                FILTER(?op IN (<https://repolex.ai/ontology/spo/addedIn>,
-                              <https://repolex.ai/ontology/spo/removedIn>))
-            }}
-        }}
-        GROUP BY ?s ?p ?o
-    "#, history_graph);
-
-    let mut history_live: HashSet<String> = HashSet::new();
-    let results = oxigraph::sparql::SparqlEvaluator::new()
-        .parse_query(&reconstruct_query)
-        .ok()
-        .and_then(|q| q.on_store(&store).execute().ok());
-    match results {
-        Some(oxigraph::sparql::QueryResults::Solutions(sols)) => {
-            for sol in sols.flatten() {
-                let s = sol.get("s").map(term_to_nq).unwrap_or_default();
-                let p = sol.get("p").map(term_to_nq).unwrap_or_default();
-                let o = sol.get("o").map(term_to_nq).unwrap_or_default();
-                let added = sol.get("added").and_then(term_int).unwrap_or(0);
-                let removed = sol.get("removed").and_then(term_int).unwrap_or(0);
-                if added > removed {
-                    history_live.insert(format!("{} {} {}", s, p, o));
-                }
-            }
-        }
-        _ => {
-            eprintln!("history-verify: reconstruct query failed (is the history graph populated? run `git lex sync` first)");
-            exit(1);
-        }
-    }
-
-    // ─── Step 2: Regenerate the "pure .spo emission" set ───
-    //
-    // Walk all .md/.txt files like generate_frontmatter_nquads does, build the
-    // slug/path indexes, then for each current `.spo` sidecar run each line
-    // through emit_spo_line_nquads and collect the resulting triples.
-    fn walk_md(dir: &std::path::Path, files: &mut Vec<PathBuf>) {
-        if let Ok(entries) = fs::read_dir(dir) {
-            for entry in entries.filter_map(|e| e.ok()) {
-                let path = entry.path();
-                let name = entry.file_name().to_string_lossy().to_string();
-                if name.starts_with('.') { continue; }
-                if path.is_dir() {
-                    walk_md(&path, files);
-                } else if name.ends_with(".md") || name.ends_with(".txt") {
-                    files.push(path);
-                }
-            }
-        }
-    }
-    let mut md_files = Vec::new();
-    walk_md(&root, &mut md_files);
-    let (slug_index, path_index) = build_slug_path_indexes(&root, &md_files);
-
-    let kit = match get_kit() {
-        Some(k) => k,
-        None => {
-            eprintln!("history-verify: no kit configured in .lex/repo.yml");
-            exit(1);
-        }
-    };
-    let obj_props = get_object_properties(&kit);
-    let prop_datatypes = get_property_datatypes(&kit);
-
-    // Graph tag used when emitting — must match what the walker uses so the
-    // triple-term contents compare byte-for-byte. The walker uses history_graph
-    // as the scratch graph, and the reified triple-term drops the graph name
-    // when it reifies (triple terms are 3-tuples, not 4). So the graph tag
-    // here is irrelevant to set membership; we just need SOMETHING syntactically
-    // valid. Use history_graph for consistency.
-    let emit_graph = history_graph.clone();
-
-    let extract_dir = root.join(".lex").join("extract");
-    let mut current_spo_triples: HashSet<String> = HashSet::new();
-    fn walk_spo(dir: &std::path::Path, found: &mut Vec<PathBuf>) {
-        if let Ok(entries) = fs::read_dir(dir) {
-            for entry in entries.filter_map(|e| e.ok()) {
-                let p = entry.path();
-                if p.is_dir() {
-                    walk_spo(&p, found);
-                } else if p.extension().is_some_and(|e| e == "spo") {
-                    found.push(p);
-                }
-            }
-        }
-    }
-    let mut spo_files: Vec<PathBuf> = Vec::new();
-    if extract_dir.exists() {
-        walk_spo(&extract_dir, &mut spo_files);
-    }
-
-    for spo_path in &spo_files {
-        // Derive sidecar relpath (from repo root) and doc URI.
-        let sidecar_rel = match spo_path.strip_prefix(&root) {
-            Ok(p) => p.to_string_lossy().to_string(),
-            Err(_) => continue,
-        };
-        // Reuse the same derivation the walker uses (via spo_events).
-        let doc_uri = match spo_events::doc_uri_from_sidecar(&sidecar_rel) {
-            Some(u) => u,
-            None => continue,
-        };
-        // Derive the source document relpath for the emitter (for source_dir
-        // in wikilink resolution).
-        let source_rel = spo_events::derive_source_document(&sidecar_rel).unwrap_or_default();
-
-        let content = match fs::read_to_string(spo_path) {
-            Ok(c) => c,
-            Err(_) => continue,
-        };
-        let mut emitted_types: HashSet<String> = HashSet::new();
-        for line in content.lines() {
-            // Do NOT trim — `.spo` lines with empty object values end in
-            // " | " (trailing space), and trimming would chop that to " |"
-            // which fails the 3-field split inside emit_spo_line_nquads.
-            // Blank/comment filtering uses the trimmed view only for the check.
-            let check = line.trim_start();
-            if check.is_empty() || check.starts_with('#') { continue; }
-            let mut buf = String::new();
-            let _errs = emit_spo_line_nquads(
-                line,
-                &doc_uri,
-                &emit_graph,
-                &source_rel,
-                &slug_index,
-                &path_index,
-                &obj_props,
-                &prop_datatypes,
-                &mut emitted_types,
-                &mut buf,
-            );
-            for out_line in buf.lines() {
-                let out_line = out_line.trim();
-                if out_line.is_empty() { continue; }
-                // Drop the graph tag and trailing period to get "S P O".
-                // N-Quad shape is "S P O G ." — we want the first three terms.
-                let trimmed = out_line.trim_end_matches('.').trim();
-                let without_graph = match trimmed.rsplit_once(' ') {
-                    Some((rest, _g)) => rest.trim().to_string(),
-                    None => continue,
-                };
-                current_spo_triples.insert(without_graph);
-            }
-        }
-    }
-
-    // ─── Step 3: Symmetric difference ───
-    let only_history: Vec<&String> = history_live.difference(&current_spo_triples).collect();
-    let only_current: Vec<&String> = current_spo_triples.difference(&history_live).collect();
-    let matched = history_live.intersection(&current_spo_triples).count();
-
-    let elapsed = start.elapsed();
-    println!("history-verify — equivalence report");
-    println!("───────────────────────────────────");
-    println!("history graph:     {} triples reconstructed as live at HEAD", history_live.len());
-    println!("current .spo:      {} triples emitted from sidecars", current_spo_triples.len());
-    println!("matched:           {}", matched);
-    println!("only in history:   {}", only_history.len());
-    println!("only in current:   {}", only_current.len());
-    println!("elapsed:           {:?}", elapsed);
-
-    if !only_history.is_empty() {
-        println!("\nonly-in-history (first {}):", show.min(only_history.len()));
-        for t in only_history.iter().take(show) {
-            println!("  - {}", t);
-        }
-    }
-    if !only_current.is_empty() {
-        println!("\nonly-in-current (first {}):", show.min(only_current.len()));
-        for t in only_current.iter().take(show) {
-            println!("  + {}", t);
-        }
-    }
-
-    if only_history.is_empty() && only_current.is_empty() {
-        println!("\n✓ history == now. the equivalence invariant holds.");
-    } else {
-        println!("\n✗ history and current differ by {} triple(s).",
-                 only_history.len() + only_current.len());
-    }
-}
-
-/// Serialize an oxigraph Term to its canonical N-Quad form.
-fn term_to_nq(t: &Term) -> String {
-    match t {
-        Term::NamedNode(n) => format!("<{}>", n.as_str()),
-        Term::BlankNode(b) => format!("_:{}", b.as_str()),
-        Term::Literal(l) => {
-            let value = l.value();
-            let escaped = nq_escape(value);
-            if let Some(lang) = l.language() {
-                format!("\"{}\"@{}", escaped, lang)
-            } else {
-                let dt = l.datatype();
-                if dt.as_str() == "http://www.w3.org/2001/XMLSchema#string" {
-                    format!("\"{}\"", escaped)
-                } else {
-                    format!("\"{}\"^^<{}>", escaped, dt.as_str())
-                }
-            }
-        }
-        Term::Triple(t) => format!("<< {} {} {} >>", t.subject, t.predicate, t.object),
-    }
-}
-
-/// Parse a Literal Term as an integer (for SPARQL SUM results).
-fn term_int(t: &Term) -> Option<i64> {
-    match t {
-        Term::Literal(l) => l.value().parse().ok(),
-        _ => None,
-    }
-}
-
 fn cmd_nuke() {
     let root = find_git_root().expect("not in a git repo");
     let lex_dir = root.join(".lex");

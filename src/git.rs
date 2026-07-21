@@ -82,21 +82,6 @@ pub(crate) fn resource_uri(path: &str) -> String {
     let tail = path.strip_prefix("Soul/").unwrap_or(path);
     format!("{SOUL_RESOURCE_BASE}/{tail}")
 }
-
-/// Mint a git-machinery instance IRI. The universal law applied to the git
-/// parser vocabulary nested under the git-lex application: instance IRI =
-/// t-box IRI minus `ontology/` (trip's namespace-pattern doc, Rob-ruled).
-///
-///   t-box `ontology/git-lex/git/Commit`  →  a-box `git-lex/git/Commit/<sha>`
-///
-/// `path` is `<Class>/<instanceId>` with the Class Capitalized exactly as
-/// declared in git.ttl (`Commit/`, `Blob/`, `Branch/`, `Tag/`, `Tree/`,
-/// `Changeset/`).
-pub(crate) fn git_machinery_uri(path: &str) -> String {
-    format!("https://repolex.ai/git-lex/git/{path}")
-}
-
-
 // ---------------------------------------------------------------------
 // SHA resolution (three tiers, ordered by cost)
 // ---------------------------------------------------------------------
@@ -248,49 +233,6 @@ fn canonical_identity_yml(sha: &str) -> String {
 fn is_valid_sha(s: &str) -> bool {
     s.len() == 40 && s.chars().all(|c| c.is_ascii_hexdigit())
 }
-
-
-/// Unescape a git-quoted path.
-/// Git wraps paths with non-ASCII chars in double quotes and uses octal escapes.
-/// e.g. "message/list_messages-\342\200\224-foo.md" → message/list_messages-—-foo.md
-pub(crate) fn git_unescape_path(s: &str) -> String {
-    let s = if s.starts_with('"') && s.ends_with('"') && s.len() >= 2 {
-        &s[1..s.len() - 1]
-    } else {
-        return s.to_string();
-    };
-    let mut result = Vec::new();
-    let bytes = s.as_bytes();
-    let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] == b'\\' && i + 1 < bytes.len() {
-            match bytes[i + 1] {
-                b'n' => { result.push(b'\n'); i += 2; }
-                b't' => { result.push(b'\t'); i += 2; }
-                b'r' => { result.push(b'\r'); i += 2; }
-                b'\\' => { result.push(b'\\'); i += 2; }
-                b'"' => { result.push(b'"'); i += 2; }
-                // Octal escape: \NNN
-                d if d.is_ascii_digit() && i + 3 < bytes.len()
-                    && bytes[i + 2].is_ascii_digit()
-                    && bytes[i + 3].is_ascii_digit() =>
-                {
-                    let octal = (d - b'0') as u32 * 64
-                        + (bytes[i + 2] - b'0') as u32 * 8
-                        + (bytes[i + 3] - b'0') as u32;
-                    result.push(octal as u8);
-                    i += 4;
-                }
-                _ => { result.push(bytes[i]); i += 1; }
-            }
-        } else {
-            result.push(bytes[i]);
-            i += 1;
-        }
-    }
-    String::from_utf8_lossy(&result).into_owned()
-}
-
 /// Stage and commit the working tree as a snapshot before a destructive
 /// operation (e.g. `nuke`). The commit message includes `reason`.
 ///

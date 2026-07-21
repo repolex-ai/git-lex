@@ -13,7 +13,6 @@
 //! transform). Unifying them — one emitter, one casing rule — would dissolve the
 //! bug. Update or remove this comment when that lands.
 
-use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::fs;
 
@@ -107,31 +106,6 @@ pub(crate) fn flatten_yaml(prefix: &str, value: &serde_yaml::Value, lines: &mut 
         _ => {}
     }
 }
-
-/// Sanitize a string for use in a URI path segment.
-/// Removes/replaces characters that would make an invalid IRI.
-pub(crate) fn sanitize_uri_segment(s: &str) -> String {
-    s.chars()
-        .map(|c| match c {
-            'a'..='z' | 'A'..='Z' | '0'..='9' | '-' | '_' | '.' => c,
-            ' ' | ':' | '/' | '\\' | '<' | '>' | '{' | '}' | '|' | '^' | '`' | '[' | ']' | '#' | '?' | '@' => '-',
-            _ if c.is_alphanumeric() => c,
-            _ => '-',
-        })
-        .collect::<String>()
-        .replace("--", "-")
-        .trim_matches('-')
-        .to_string()
-}
-
-/// Generate a short deterministic hash from a string (16 hex chars).
-pub(crate) fn short_hash(input: &str) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(input.as_bytes());
-    let result = hasher.finalize();
-    hex::encode(&result[..8]) // 16 hex chars
-}
-
 /// Read a markdown file with `kit.class.property` frontmatter and emit Turtle
 /// for the document, using the kit's ontology to distinguish ObjectProperty
 /// (→ IRI) from typed/plain literal ranges.
