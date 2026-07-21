@@ -85,6 +85,29 @@ enum Commands {
     /// Examples:
     ///   git lex query "SELECT * WHERE { ?s ?p ?o } LIMIT 10"
     ///   git lex query "SELECT ?path WHERE { ?f git2:path ?path }"
+    /// Show a document's CURRENT facts (the materialized now view).
+    ///
+    /// The canned "what is true about this thing right now" query. THING
+    /// matches by substring against document IRIs — a path
+    /// (Soul/Journal/day-1.md), a filename stem (day-52), or any fragment.
+    /// Reads the one graph's base layer, so it works on any synced store.
+    Show {
+        /// Document to show (substring match on the IRI)
+        thing: String,
+    },
+    /// Show a document's statement HISTORY — every assert/retract event with
+    /// its commit, author, and date, oldest first (like `git log` for facts).
+    ///
+    /// The canned temporal query over the one graph. THING matches by
+    /// substring against document IRIs; omit it for the most recent events
+    /// across the whole repo.
+    Log {
+        /// Document to trace (substring match; omit for repo-wide recent events)
+        thing: Option<String>,
+        /// Maximum events to print
+        #[arg(long, default_value = "40")]
+        limit: usize,
+    },
     Query {
         /// The SPARQL query string
         query: String,
@@ -2013,6 +2036,25 @@ fn cmd_sync() {
     // all legacy urn:soul:* names. Migration off every old layout is
     // automatic on the first new-binary sync.
 
+    // ─── Materialize the now VIEW ───
+    // NamedGraph/now = the one graph's base layer (current facts), copied
+    // out as a standalone graph each sync. This is a VIEW in the ruled sense
+    // ("'now' is a view — a query, OR A MATERIALIZED GRAPH, derived from the
+    // one graph"): derived, disposable, rebuilt every sync, never edited.
+    // It exists so downstream consumers (Syrinx, viz, agents) can query
+    // current state as plain triples without filtering event machinery.
+    {
+        let update = "PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>              PREFIX gl: <https://repolex.ai/ontology/git-lex/>              DROP SILENT GRAPH <https://repolex.ai/git-lex/NamedGraph/now> ;              INSERT { GRAPH <https://repolex.ai/git-lex/NamedGraph/now> { ?s ?p ?o } }              WHERE { GRAPH <https://repolex.ai/git-lex/LexHistoryGraph> { ?s ?p ?o .                        FILTER NOT EXISTS { ?s a gl:SpoEvent }                        FILTER(?p != rdf:reifies) } }";
+        match oxigraph::sparql::SparqlEvaluator::new().parse_update(update) {
+            Ok(u) => {
+                if let Err(e) = u.on_store(&store).execute() {
+                    eprintln!("warning: now-view materialization failed: {e}");
+                }
+            }
+            Err(e) => eprintln!("warning: now-view update did not parse: {e}"),
+        }
+    }
+
     store.flush().expect("failed to flush store");
 
     let elapsed = start.elapsed();
@@ -2334,6 +2376,56 @@ fn spike_onegraph_report(store: &Store, one_graph: &str, limit: usize) {
 }
 use git_lex::term_to_json;
 
+/// `git lex show <thing>` — current facts for matching documents, from the
+/// one graph's base layer (works on any synced store; no derivation).
+fn cmd_show(thing: &str) {
+    let store = open_or_create_store();
+    let q = format!(
+        "PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> \
+         PREFIX gl: <https://repolex.ai/ontology/git-lex/> \
+         SELECT ?doc ?property ?value WHERE {{ \
+           GRAPH <{one}> {{ ?doc ?property ?value . \
+             FILTER NOT EXISTS {{ ?doc a gl:SpoEvent }} \
+             FILTER(?property != rdf:reifies) \
+             FILTER(CONTAINS(STR(?doc), \"{thing}\")) }} \
+         }} ORDER BY ?doc ?property",
+        one = spo_events::LEXHISTORY_GRAPH_IRI,
+        thing = thing.replace('\\', "").replace('"', "")
+    );
+    run_query(&store, &q, "one graph (current facts)", false);
+}
+
+/// `git lex log [<thing>]` — the statement history: every assert/retract
+/// event joined to its commit's author + date, in commit order.
+fn cmd_log(thing: Option<&str>, limit: usize) {
+    let store = open_or_create_store();
+    let subject_filter = match thing {
+        Some(t) => format!("FILTER(CONTAINS(STR(?doc), \"{}\"))", t.replace('\\', "").replace('"', "")),
+        None => String::new(),
+    };
+    let order = if thing.is_some() { "ASC(?ordinal)" } else { "DESC(?ordinal)" };
+    let q = format!(
+        "PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> \
+         PREFIX gl: <https://repolex.ai/ontology/git-lex/> \
+         PREFIX g2: <https://repolex.ai/ontology/git-lex/git2/> \
+         SELECT ?when ?event ?doc ?property ?value ?author WHERE {{ \
+           GRAPH <{one}> {{ \
+             {{ ?e rdf:reifies <<( ?doc ?property ?value )>> ; gl:assertedIn ?c . BIND(\"ASSERT\" AS ?event) }} \
+             UNION \
+             {{ ?e rdf:reifies <<( ?doc ?property ?value )>> ; gl:retractedIn ?c . BIND(\"RETRACT\" AS ?event) }} \
+             {subject_filter} \
+           }} \
+           GRAPH <https://repolex.ai/git-lex/NamedGraph/commits> {{ \
+             ?c g2:ordinalDerived ?ordinal ; g2:author ?sig . \
+             ?sig g2:xsdDateTimeDerived ?when . \
+             OPTIONAL {{ ?sig g2:signatureName ?author }} \
+           }} \
+         }} ORDER BY {order} ?doc ?property LIMIT {limit}",
+        one = spo_events::LEXHISTORY_GRAPH_IRI,
+    );
+    run_query(&store, &q, "one graph (statement history)", false);
+}
+
 fn run_query(store: &Store, query: &str, store_type: &str, json: bool) {
     let start = Instant::now();
     let prefixed = add_prefixes(query);
@@ -2555,6 +2647,8 @@ fn main() {
         Commands::Create { doctype, instance_id, json } => cmd_create(&doctype, instance_id.as_deref(), json),
         Commands::List { json } => cmd_list(json),
         Commands::Save { message } => cmd_save(&message),
+        Commands::Show { thing } => cmd_show(&thing),
+        Commands::Log { thing, limit } => cmd_log(thing.as_deref(), limit),
         Commands::Query { query, json } => cmd_query(query, json),
         Commands::Dump => {
             let git_nq = crate::git2_nquads::generate_git2_nquads();
