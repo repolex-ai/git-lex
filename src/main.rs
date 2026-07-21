@@ -23,6 +23,7 @@ mod harness;
 mod git;
 mod hooks;
 mod git2_nquads;
+mod legacy_spo;
 mod nquad;
 mod ontology;
 mod shacl;

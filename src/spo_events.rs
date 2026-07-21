@@ -1175,17 +1175,49 @@ pub(crate) fn onegraph_walk_engine(
     // == triple-set semantics). Also counts lines in / lines dropped by the
     // resolver (a line yielding zero triples) — the completeness accounting
     // foundation (BUG 4).
-    let resolve_sidecar_at = |commit: &str, sidecar_path: &str| -> (HashSet<String>, usize, usize) {
+    // Per-reason drop accounting (BUG 4): every sidecar line either yields
+    // triples or is counted under exactly one drop reason. Nothing vanishes
+    // silently. Classification happens WALKER-SIDE — the shared emitter
+    // (`emit_spo_line_nquads`, also serving the now view + `git lex query`)
+    // is deliberately untouched; lines it drops for its own reasons land in
+    // `resolver_other` until a conscious cross-surface change is ruled.
+    #[derive(Default)]
+    struct DropAccounting {
+        lines_in: usize,
+        retired_body_extract: usize, // BUG 3 — quarantined legacy shim (legacy_spo)
+        malformed_shape: usize,      // not exactly 3 ` | `-separated fields
+        empty_object: usize,         // third field empty/whitespace
+        resolver_other: usize,       // dropped inside the shared emitter
+    }
+    let mut acct = DropAccounting::default();
+
+    let mut resolve_sidecar_at = |commit: &str, sidecar_path: &str, acct: &mut DropAccounting| -> HashSet<String> {
         let Some(doc_uri) = doc_uri_from_sidecar(sidecar_path) else {
-            return (HashSet::new(), 0, 0);
+            return HashSet::new();
         };
         let relpath_str = derive_source_document(sidecar_path).unwrap_or_default();
         let lines = read_sidecar_at_commit(commit, sidecar_path);
-        let lines_in = lines.len();
+        acct.lines_in += lines.len();
         let mut triples: HashSet<String> = HashSet::new();
-        let mut dropped = 0usize;
         let mut emitted_types: HashSet<String> = HashSet::new();
         for line in &lines {
+            // Quarantined legacy formats first (never reach the emitter).
+            if crate::legacy_spo::is_retired_body_extract_line(line) {
+                acct.retired_body_extract += 1;
+                continue;
+            }
+            // Shape pre-checks, mirroring the emitter's own silent drops so
+            // they're COUNTED here (the emitter still guards for its other
+            // callers).
+            let fields: Vec<&str> = line.split(" | ").collect();
+            if fields.len() != 3 {
+                acct.malformed_shape += 1;
+                continue;
+            }
+            if fields[2].trim().is_empty() {
+                acct.empty_object += 1;
+                continue;
+            }
             let mut emit_buf = String::new();
             let _errs = crate::nquad::emit_spo_line_nquads(
                 line, &doc_uri, one_graph, &relpath_str,
@@ -1198,14 +1230,11 @@ pub(crate) fn onegraph_walk_engine(
                 any = true;
             }
             if !any {
-                dropped += 1;
+                acct.resolver_other += 1;
             }
         }
-        (triples, lines_in, dropped)
+        triples
     };
-
-    let mut lines_in_total = 0usize;
-    let mut lines_dropped_total = 0usize;
 
     for (ci, c) in commits.iter().enumerate() {
         if show_progress && total > 0 {
@@ -1233,16 +1262,10 @@ pub(crate) fn onegraph_walk_engine(
         let mut old_triples: HashSet<String> = HashSet::new();
         let mut new_triples: HashSet<String> = HashSet::new();
         for path in &old_side {
-            let (t, li, ld) = resolve_sidecar_at(&c.parent_sha, path);
-            lines_in_total += li;
-            lines_dropped_total += ld;
-            old_triples.extend(t);
+            old_triples.extend(resolve_sidecar_at(&c.parent_sha, path, &mut acct));
         }
         for path in &new_side {
-            let (t, li, ld) = resolve_sidecar_at(&c.sha, path);
-            lines_in_total += li;
-            lines_dropped_total += ld;
-            new_triples.extend(t);
+            new_triples.extend(resolve_sidecar_at(&c.sha, path, &mut acct));
         }
 
         // The diff of resolved worlds IS the event stream for this commit.
@@ -1262,10 +1285,15 @@ pub(crate) fn onegraph_walk_engine(
         }
     }
 
-    if lines_dropped_total > 0 {
+    // Completeness accounting, itemized by reason (BUG 4). Loud whenever any
+    // line was dropped; which reasons should hard-fail is Rob's pending call.
+    let dropped_total = acct.retired_body_extract + acct.malformed_shape
+        + acct.empty_object + acct.resolver_other;
+    if dropped_total > 0 {
         eprintln!(
-            "  one-graph accounting: {} sidecar line(s) read across walked versions, {} line(s) dropped by the resolver (yielded no triple) — see BUG 4 for the itemized-by-reason work",
-            lines_in_total, lines_dropped_total
+            "  one-graph accounting: {} line(s) read, {} dropped — retired-body-extract(@): {}, malformed-shape: {}, empty-object: {}, resolver-other: {}",
+            acct.lines_in, dropped_total, acct.retired_body_extract,
+            acct.malformed_shape, acct.empty_object, acct.resolver_other
         );
     }
 
