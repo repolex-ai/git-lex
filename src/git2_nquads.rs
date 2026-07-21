@@ -100,9 +100,10 @@ fn encode_path(path: &str) -> String {
 
 /// Emit one Signature record: the per-commit value object, exactly as git2
 /// models it. `role` is "author" or "committer" (the two accessors on Commit).
-/// NOTE: the Signature instance-IRI shape (commit + role) is W4R3Z's derived
-/// proposal, flagged to Rob and NOT yet confirmed — don't build new consumers
-/// against the exact path shape until his yes lands.
+/// IRI shape (Rob-ruled 2026-07-21, final): Signature/<full-40-sha>-<role> —
+/// the FULL commit sha, no truncation, so the segment matches the Commit IRI
+/// exactly and the join is obvious. Two nodes per commit always, even when
+/// author and committer are byte-identical values.
 fn emit_signature(
     nq: &mut String,
     graph: &str,
@@ -110,7 +111,7 @@ fn emit_signature(
     role: &str,
     sig: &git2::Signature<'_>,
 ) -> String {
-    let su = format!("<{}>", git2_uri(&format!("Signature/{}/{}", commit_sha, role)));
+    let su = format!("<{}>", git2_uri(&format!("Signature/{}-{}", commit_sha, role)));
     nq.push_str(&format!("{su} {RDF_TYPE} <{GIT2_NS}Signature> {graph} .\n"));
     if let Some(name) = sig.name() {
         if !name.is_empty() {
