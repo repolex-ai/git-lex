@@ -1105,21 +1105,25 @@ pub fn onegraph_event(
     let commit_uri = format!("<{}>", crate::git2_nquads::git2_uri(&format!("Commit/{}", commit_sha)));
 
     Some(vec![
-        // 1) the base fact, asserted STANDALONE (Option B, Rob-ruled) — makes
-        //    "now" a plain-triple query without going through the reification.
-        format!("{} {} {} {} .", s, p, o, one_graph),
-        // 2) the event's class (git-lex:SpoEvent — machine-derived, validated
+        // The event carries NO base fact: events are pure history. The base
+        // (plain-triple) layer is the MATERIALIZED NOW — maintained by the
+        // walk engine as true final state (insert on net-assert, REMOVE on
+        // net-retract), per the ruled contract: "'now' is a view … of the
+        // latest assertions that have not been retracted." An unconditional
+        // base fact here was the defect that let retracted values linger as
+        // plain triples.
+        // 1) the event's class (git-lex:SpoEvent — machine-derived, validated
         //    by the emitter's integrity checks, not the save-time gate)
         format!(
             "{} <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://repolex.ai/ontology/git-lex/SpoEvent> {} .",
             event, one_graph
         ),
-        // 3) which statement this event chronicles: <event> rdf:reifies <<( s p o )>>
+        // 2) which statement this event chronicles: <event> rdf:reifies <<( s p o )>>
         format!(
             "{} <http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies> <<( {} {} {} )>> {} .",
             event, s, p, o, one_graph
         ),
-        // 4) the commit event: assertedIn XOR retractedIn (never both)
+        // 3) the commit event: assertedIn XOR retractedIn (never both)
         format!(
             "{} <{}> {} {} .",
             event, event_pred, commit_uri, one_graph
@@ -1190,6 +1194,9 @@ pub(crate) fn onegraph_walk_engine(
         resolver_other: usize,       // dropped inside the shared emitter
     }
     let mut acct = DropAccounting::default();
+
+    // Net base-layer effect per triple across this walk (last op wins).
+    let mut base_final: HashMap<String, char> = HashMap::new();
 
     let mut resolve_sidecar_at = |commit: &str, sidecar_path: &str, acct: &mut DropAccounting| -> HashSet<String> {
         let Some(doc_uri) = doc_uri_from_sidecar(sidecar_path) else {
@@ -1269,11 +1276,15 @@ pub(crate) fn onegraph_walk_engine(
         }
 
         // The diff of resolved worlds IS the event stream for this commit.
+        // base_final tracks each touched triple's NET state across this walk
+        // (commits are processed oldest→newest, so the last op wins) — it
+        // becomes the base-layer mutation set after the walk.
         for line in old_triples.difference(&new_triples) {
             events_seen += 1;
             if let Some(quads) = onegraph_event(line, '-', &c.sha, one_graph) {
                 for q in quads { nq_buffer.push_str(&q); nq_buffer.push('\n'); }
                 events_emitted += 1;
+                base_final.insert(line.clone(), '-');
             }
         }
         for line in new_triples.difference(&old_triples) {
@@ -1281,7 +1292,33 @@ pub(crate) fn onegraph_walk_engine(
             if let Some(quads) = onegraph_event(line, '+', &c.sha, one_graph) {
                 for q in quads { nq_buffer.push_str(&q); nq_buffer.push('\n'); }
                 events_emitted += 1;
+                base_final.insert(line.clone(), '+');
             }
+        }
+    }
+
+    // ─── Base layer = the MATERIALIZED NOW (ruled contract) ───
+    // net-assert → the plain triple is (re)asserted alongside its events;
+    // net-retract → the plain triple is REMOVED from the graph (on a full
+    // rebuild the graph was just cleared, so there is nothing to remove).
+    for (line, op) in &base_final {
+        match op {
+            '+' => {
+                nq_buffer.push_str(line);
+                nq_buffer.push('\n');
+            }
+            '-' if !clear_first => {
+                // Parse the single N-Quads line into a Quad and remove it.
+                let parser = oxigraph::io::RdfParser::from_format(oxigraph::io::RdfFormat::NQuads);
+                let mut line_owned = line.clone();
+                line_owned.push('\n');
+                for quad in parser.for_reader(std::io::Cursor::new(line_owned.into_bytes())).flatten() {
+                    if let Err(e) = store.remove(&quad) {
+                        eprintln!("  one-graph: base-layer retract removal failed: {e}");
+                    }
+                }
+            }
+            _ => {}
         }
     }
 

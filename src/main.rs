@@ -24,6 +24,7 @@ mod git;
 mod hooks;
 mod git2_nquads;
 mod legacy_spo;
+mod verify;
 mod nquad;
 mod ontology;
 mod shacl;
@@ -239,12 +240,18 @@ enum Commands {
     /// is resolved through the same emitter the now-graph uses — no bespoke
     /// resolution.
     ///
-    /// The `assertedIn`/`retractedIn` predicate names are PLACEHOLDERS: the
-    /// final vocabulary is a decision to be made and DECLARED in the ontology
-    /// before any of this ships.
-    ///
-    /// Writes only `<NamedGraph/one>`, which the real sync clears anyway. Run
-    /// with `--clear` to drop that graph and do nothing else.
+    /// The vocabulary is DECLARED (git-lex.ttl: SpoEvent, assertedIn,
+    /// retractedIn) and the graph is the real one
+    /// (`git-lex/LexHistoryGraph`) — this command is now a full-rebuild
+    /// tool over the same engine sync uses incrementally. Run with
+    /// `--clear` to drop the graph and do nothing else.
+    /// Run the data-quality verification suite against the persistent store
+    /// (read-only). Checks: every governed predicate/class is declared in the
+    /// store's own ontology graph; one-graph structural integrity (one
+    /// statement + one direction per SpoEvent, no dangling commit joins);
+    /// zero known-junk predicate families. Exits non-zero on any failure.
+    Verify,
+
     SpikeOnegraph {
         /// Drop the SPIKE one-graph and exit without rebuilding.
         #[arg(long)]
@@ -3114,6 +3121,13 @@ fn main() {
         }
         Commands::HistoryVerify { show } => {
             cmd_history_verify(show);
+        }
+        Commands::Verify => {
+            let store = open_or_create_store();
+            let failures = crate::verify::run_verify(&store);
+            if failures > 0 {
+                exit(1);
+            }
         }
         Commands::SpikeOnegraph { clear, limit } => cmd_spike_onegraph(clear, limit),
         Commands::Sync => cmd_sync(),
