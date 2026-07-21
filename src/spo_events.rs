@@ -1153,81 +1153,120 @@ pub(crate) fn onegraph_walk_engine(
     let mut events_seen = 0usize;
     let mut events_emitted = 0usize;
 
-    // Resolve one .spo line through the real emitter, then wrap each resulting
-    // triple in a one-graph reified event with the given op/commit.
-    let mut annotate_line = |line: &str, sidecar_path: &str, commit_sha: &str, op: char, buf: &mut String| {
-        let doc_uri = match doc_uri_from_sidecar(sidecar_path) {
-            Some(u) => u,
-            None => return 0usize,
+    // ─── Resolved-set diffing (BUG 1 fix, Rob-ruled; the contract is in the
+    // SpoEvent class comment: "diffed as RESOLVED sets per commit") ───
+    //
+    // Per commit we resolve the FULL old and new content of every touched
+    // sidecar through the real emitter, and diff the RESOLVED TRIPLE SETS —
+    // never raw .spo lines. Events exist only for triples that genuinely
+    // entered or left the resolved world in this commit. This kills, by
+    // construction, every raw-line artifact the triage documented:
+    //   - pure file moves (stable Thing IRI): identical sets → ZERO events;
+    //   - prefix recases (soul.friend. → soul.Friend.) resolving to the same
+    //     triples: identical sets → ZERO events (the m4rq no-op churn);
+    //   - value reorders / duplicate values: set semantics → ZERO events;
+    //   - IRI-changing moves (type/case changes): honest retract-at-old +
+    //     assert-at-new (different Things by design — the m4rq type ruling).
+    // No rename special-casing: renames only pair old→new paths for content
+    // fetching; the sets carry all the semantics.
+
+    // Resolve one sidecar's full content at a commit into the set of its
+    // resolved triple-quad lines (graph term constant, so line-set semantics
+    // == triple-set semantics). Also counts lines in / lines dropped by the
+    // resolver (a line yielding zero triples) — the completeness accounting
+    // foundation (BUG 4).
+    let resolve_sidecar_at = |commit: &str, sidecar_path: &str| -> (HashSet<String>, usize, usize) {
+        let Some(doc_uri) = doc_uri_from_sidecar(sidecar_path) else {
+            return (HashSet::new(), 0, 0);
         };
         let relpath_str = derive_source_document(sidecar_path).unwrap_or_default();
-        let scratch_graph = one_graph.to_string();
-        let mut emit_buf = String::new();
+        let lines = read_sidecar_at_commit(commit, sidecar_path);
+        let lines_in = lines.len();
+        let mut triples: HashSet<String> = HashSet::new();
+        let mut dropped = 0usize;
         let mut emitted_types: HashSet<String> = HashSet::new();
-        let _errs = crate::nquad::emit_spo_line_nquads(
-            line, &doc_uri, &scratch_graph, &relpath_str,
-            slug_index, path_index, obj_props, prop_datatypes,
-            &mut emitted_types, &mut emit_buf,
-        );
-        let mut emitted = 0usize;
-        for triple_nq in emit_buf.lines().filter(|l| !l.trim().is_empty()) {
-            if let Some(quads) = onegraph_event(triple_nq, op, commit_sha, one_graph) {
-                for q in quads {
-                    buf.push_str(&q);
-                    buf.push('\n');
-                }
-                emitted += 1;
+        for line in &lines {
+            let mut emit_buf = String::new();
+            let _errs = crate::nquad::emit_spo_line_nquads(
+                line, &doc_uri, one_graph, &relpath_str,
+                slug_index, path_index, obj_props, prop_datatypes,
+                &mut emitted_types, &mut emit_buf,
+            );
+            let mut any = false;
+            for triple_nq in emit_buf.lines().filter(|l| !l.trim().is_empty()) {
+                triples.insert(triple_nq.to_string());
+                any = true;
+            }
+            if !any {
+                dropped += 1;
             }
         }
-        emitted
+        (triples, lines_in, dropped)
     };
+
+    let mut lines_in_total = 0usize;
+    let mut lines_dropped_total = 0usize;
 
     for (ci, c) in commits.iter().enumerate() {
         if show_progress && total > 0 {
-            if ci == 0 { eprint!("  one-graph (SPIKE): walking {} commit(s) ", total); }
+            if ci == 0 { eprint!("  one-graph: walking {} commit(s) ", total); }
             if (ci + 1) % 10 == 0 || ci == total - 1 {
                 eprint!(".");
                 let _ = std::io::stderr().flush();
             }
         }
 
-        let renamed_paths: HashSet<&str> = c.renames.iter().map(|r| r.new_path.as_str()).collect();
-
+        // Touched sidecars, old side vs new side. Renames pair old→new;
+        // everything else appears under the same path on both sides (git
+        // show simply fails → empty content for the added/deleted side).
+        let mut old_side: HashSet<&str> = HashSet::new();
+        let mut new_side: HashSet<&str> = HashSet::new();
         for ev in &c.events {
+            old_side.insert(ev.path.as_str());
+            new_side.insert(ev.path.as_str());
+        }
+        for r in &c.renames {
+            old_side.insert(r.old_path.as_str());
+            new_side.insert(r.new_path.as_str());
+        }
+
+        let mut old_triples: HashSet<String> = HashSet::new();
+        let mut new_triples: HashSet<String> = HashSet::new();
+        for path in &old_side {
+            let (t, li, ld) = resolve_sidecar_at(&c.parent_sha, path);
+            lines_in_total += li;
+            lines_dropped_total += ld;
+            old_triples.extend(t);
+        }
+        for path in &new_side {
+            let (t, li, ld) = resolve_sidecar_at(&c.sha, path);
+            lines_in_total += li;
+            lines_dropped_total += ld;
+            new_triples.extend(t);
+        }
+
+        // The diff of resolved worlds IS the event stream for this commit.
+        for line in old_triples.difference(&new_triples) {
             events_seen += 1;
-            if renamed_paths.contains(ev.path.as_str()) {
-                continue; // handled by the rename block below
+            if let Some(quads) = onegraph_event(line, '-', &c.sha, one_graph) {
+                for q in quads { nq_buffer.push_str(&q); nq_buffer.push('\n'); }
+                events_emitted += 1;
             }
-            let op = ev.op; // '+' → assertedIn, '-' → retractedIn
-            events_emitted += annotate_line(&ev.line, &ev.path, &c.sha, op, &mut nq_buffer);
         }
-
-        // Renames. The subject of every emitted triple is the STABLE Thing IRI
-        // (path-normalized — a file move does NOT change it; the SOUL.md-move
-        // principle). So a PURE rename (content identical) must churn NOTHING:
-        // retracting then re-asserting the same (Thing, p, o) is a spurious
-        // event pair that corrupts the temporal record.
-        //
-        // Therefore we diff old vs new sidecar LINES and only emit for lines
-        // that genuinely changed: a line present at the old path but gone at the
-        // new path is a real retract; a line new at this commit is a real
-        // assert; a line present in BOTH is a pure move → no event.
-        for rename in &c.renames {
-            let old_lines = read_sidecar_at_commit(&c.parent_sha, &rename.old_path);
-            let new_lines = read_sidecar_at_commit(&c.sha, &rename.new_path);
-            let old_set: HashSet<&str> = old_lines.iter().map(|s| s.as_str()).collect();
-            let new_set: HashSet<&str> = new_lines.iter().map(|s| s.as_str()).collect();
-
-            // removed content → retract (present old, absent new)
-            for line in old_lines.iter().filter(|l| !new_set.contains(l.as_str())) {
-                events_emitted += annotate_line(line, &rename.old_path, &c.sha, '-', &mut nq_buffer);
+        for line in new_triples.difference(&old_triples) {
+            events_seen += 1;
+            if let Some(quads) = onegraph_event(line, '+', &c.sha, one_graph) {
+                for q in quads { nq_buffer.push_str(&q); nq_buffer.push('\n'); }
+                events_emitted += 1;
             }
-            // added content → assert (present new, absent old)
-            for line in new_lines.iter().filter(|l| !old_set.contains(l.as_str())) {
-                events_emitted += annotate_line(line, &rename.new_path, &c.sha, '+', &mut nq_buffer);
-            }
-            events_seen += old_lines.len() + new_lines.len();
         }
+    }
+
+    if lines_dropped_total > 0 {
+        eprintln!(
+            "  one-graph accounting: {} sidecar line(s) read across walked versions, {} line(s) dropped by the resolver (yielded no triple) — see BUG 4 for the itemized-by-reason work",
+            lines_in_total, lines_dropped_total
+        );
     }
 
     if show_progress && total > 0 {
