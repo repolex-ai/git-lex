@@ -31,7 +31,7 @@ mod extraction;
 
 use crate::git::{auto_commit_snapshot, graph_uri, resource_uri};
 use crate::nquad::{build_slug_path_indexes, emit_spo_line_nquads,
-                   generate_frontmatter_nquads, generate_git_nquads,
+                   generate_frontmatter_nquads,
                    load_lex_nquads, nq_escape, uri_encode_path};
 use crate::ontology::{get_kit_prefix_name, get_kit_types,
                       get_object_properties, get_property_datatypes};
@@ -84,7 +84,7 @@ enum Commands {
     ///
     /// Examples:
     ///   git lex query "SELECT * WHERE { ?s ?p ?o } LIMIT 10"
-    ///   git lex query "SELECT ?file WHERE { ?file git:language 'markdown' }"
+    ///   git lex query "SELECT ?path WHERE { ?f git2:path ?path }"
     Query {
         /// The SPARQL query string
         query: String,
@@ -1940,8 +1940,8 @@ fn cmd_sync() {
 
     // (adaptive shapes already built at top of cmd_sync, before fast-path check)
 
-    // Regenerate git virtual triples
-    let git_nq = generate_git_nquads();
+    // Regenerate the git2 machinery layer (commits/signatures/refs/filetree)
+    let git_nq = crate::git2_nquads::generate_git2_nquads();
     let git_count = git_nq.lines().count();
     store
         .load_from_reader(RdfFormat::NQuads, Cursor::new(git_nq.as_bytes()))
@@ -2475,13 +2475,13 @@ fn cmd_spike_onegraph(clear: bool, limit: usize) {
     eprintln!("║  Not part of sync/save. Writes only <NamedGraph/one>.        ║");
     eprintln!("╚══════════════════════════════════════════════════════════════╝");
 
-    // Ensure the command-faithful `git:` layer (commits/actors/tree/refs) is
-    // present in the store, so the one-graph's assertedIn/retractedIn commit
-    // IRIs have real `git:Commit` nodes to JOIN to. `git lex query`/`sync`
-    // clears non-sync graphs, so we regenerate it here rather than assume a
-    // prior sync's copy survived. This is the SAME producer `sync` uses.
+    // Ensure the git2 machinery layer (commits/signatures/refs) is present in
+    // the store, so the one-graph's assertedIn/retractedIn commit IRIs have
+    // real `git2:Commit` nodes to JOIN to. `git lex query`/`sync` clears
+    // non-sync graphs, so we regenerate it here rather than assume a prior
+    // sync's copy survived. This is the SAME producer `sync` uses.
     {
-        let git_nq = crate::nquad::generate_git_nquads();
+        let git_nq = crate::git2_nquads::generate_git2_nquads();
         if !git_nq.is_empty() {
             let parser = oxigraph::io::RdfParser::from_format(oxigraph::io::RdfFormat::NQuads);
             if let Err(e) = store.load_from_reader(parser, std::io::Cursor::new(git_nq.as_bytes())) {
@@ -2599,14 +2599,15 @@ fn spike_onegraph_report(store: &Store, one_graph: &str, limit: usize) {
         println!("  distinct facts ever asserted:      {}", short(&r[0]));
     }
 
-    println!("\n─── JOIN: a fact → its commit's author + date (rides the git: layer) ───");
-    // The commit's authoredDate lives in the `commits` graph, not the one-graph,
-    // so the join pattern must be scoped with GRAPH ?g (not left in the default
-    // graph, which is empty).
+    println!("\n─── JOIN: a fact → its commit's author + date (rides the git2 layer) ───");
+    // The commit's time lives on its author Signature (git2:author → git2:when)
+    // in the `commits` graph, not the one-graph, so the join pattern must be
+    // scoped with GRAPH ?g (not left in the default graph, which is empty).
     for r in run(&format!(
         "SELECT ?p ?o ?date WHERE {{ \
            GRAPH <{one_graph}> {{ ?a <{reifies}> <<( ?s ?p ?o )>> . ?a <{asserted}> ?c }} \
-           GRAPH ?g {{ ?c <https://repolex.ai/ontology/git-lex/git/authoredDate> ?date }} \
+           GRAPH ?g {{ ?c <https://repolex.ai/ontology/git-lex/git2/author> ?sig . \
+                       ?sig <https://repolex.ai/ontology/git-lex/git2/when> ?date }} \
          }} ORDER BY DESC(?date) LIMIT {limit}"
     )) {
         println!("  {} = {}  @ {}", short(&r[0]), short(&r[1]), short(&r[2]));
@@ -2815,7 +2816,7 @@ fn cmd_query(query: String, json: bool) {
     let start = Instant::now();
     let store = Store::new().expect("failed to create in-memory store");
 
-    let git_nq = generate_git_nquads();
+    let git_nq = crate::git2_nquads::generate_git2_nquads();
     let git_count = git_nq.lines().count();
     store
         .load_from_reader(RdfFormat::NQuads, Cursor::new(git_nq.as_bytes()))
@@ -2865,7 +2866,7 @@ fn main() {
         Commands::Save { message } => cmd_save(&message),
         Commands::Query { query, json } => cmd_query(query, json),
         Commands::Dump => {
-            let git_nq = generate_git_nquads();
+            let git_nq = crate::git2_nquads::generate_git2_nquads();
             let (fm_nq, _) = generate_frontmatter_nquads();
             let lex_nq = load_lex_nquads();
             print!("{}{}{}", git_nq, fm_nq, lex_nq);

@@ -1088,31 +1088,38 @@ pub fn onegraph_event(
     let mut hasher = Sha256::new();
     hasher.update(key.as_bytes());
     let hash = format!("{:x}", hasher.finalize());
-    // Reifier IRI. The `reifier/` path segment is a PLACEHOLDER (naming is
-    // Rob's call); nothing references the reifier by name — queries bind it via
-    // the rdf:reifies pattern. Deliberately NOT the old `spo-ann/<hash>` shape.
-    let reifier = format!("<{}>", crate::git::resource_uri(&format!("reifier/{}", &hash[..16])));
+    // The SpoEvent node (git-lex.ttl, Rob-ruled 2026-07-21): a first-class
+    // Thing — one temporal event in a statement's lifecycle. Its IRI derives
+    // under the universal law (t-box minus `ontology/`), and its id is the
+    // event's composite identity (triple + commit + direction), encoded.
+    let event = format!("<https://repolex.ai/git-lex/SpoEvent/{}>", &hash[..16]);
 
     let event_pred = if op == '+' {
         ONEGRAPH_ASSERTED_IN
     } else {
         ONEGRAPH_RETRACTED_IN
     };
-    let commit_uri = format!("<{}>", crate::git::git_machinery_uri(&format!("Commit/{}", commit_sha)));
+    let commit_uri = format!("<{}>", crate::git2_nquads::git2_uri(&format!("Commit/{}", commit_sha)));
 
     Some(vec![
-        // 1) the base fact, asserted STANDALONE (Option B) — makes "now" a
-        //    plain-triple query without going through the reification.
+        // 1) the base fact, asserted STANDALONE (Option B, Rob-ruled) — makes
+        //    "now" a plain-triple query without going through the reification.
         format!("{} {} {} {} .", s, p, o, one_graph),
-        // 2) the reified event: <reifier> rdf:reifies <<( s p o )>>
+        // 2) the event's class (git-lex:SpoEvent — machine-derived, validated
+        //    by the emitter's integrity checks, not the save-time gate)
+        format!(
+            "{} <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://repolex.ai/ontology/git-lex/SpoEvent> {} .",
+            event, one_graph
+        ),
+        // 3) which statement this event chronicles: <event> rdf:reifies <<( s p o )>>
         format!(
             "{} <http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies> <<( {} {} {} )>> {} .",
-            reifier, s, p, o, one_graph
+            event, s, p, o, one_graph
         ),
-        // 3) the commit event hanging off the reifier
+        // 4) the commit event: assertedIn XOR retractedIn (never both)
         format!(
             "{} <{}> {} {} .",
-            reifier, event_pred, commit_uri, one_graph
+            event, event_pred, commit_uri, one_graph
         ),
     ])
 }
