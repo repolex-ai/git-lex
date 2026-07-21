@@ -148,32 +148,44 @@ fn api_file_for_uri(state: &VizState, uri: Option<&str>) -> serde_json::Value {
         _ => return serde_json::json!({"error": "missing 'uri' query parameter"}),
     };
 
-    let query = format!(
-        "PREFIX git: <https://repolex.ai/ontology/git-lex/git/> \
-         SELECT ?path WHERE {{ <{}> git:path ?path }} LIMIT 1",
-        uri
-    );
-    let mut parsed = match oxigraph::sparql::Query::parse(&query, None) {
-        Ok(p) => p,
-        Err(e) => return serde_json::json!({"error": format!("query parse error: {}", e)}),
+    // The doc IRI is a deterministic function of the file path
+    // (resource_uri: percent-encode, strip the scaffold "Soul/" prefix) —
+    // so the path is DERIVED back from the IRI, no store query. The old
+    // implementation asked the retired git: layer for git:path, which died
+    // at the git2 cutover (w3bl0rd's live-confirmed bug, 2026-07-21).
+    let tail = match uri.strip_prefix("https://repolex.ai/soul/") {
+        Some(t) if !t.is_empty() => t,
+        _ => return serde_json::json!({"error": "not a document IRI (expected https://repolex.ai/soul/<path>)", "uri": uri}),
     };
-    parsed.dataset_mut().set_default_graph_as_union();
-    let results = match state.store.query(parsed) {
-        Ok(r) => r,
-        Err(e) => return serde_json::json!({"error": format!("query error: {}", e)}),
-    };
-    let mut rel_path: Option<String> = None;
-    if let oxigraph::sparql::QueryResults::Solutions(sols) = results {
-        for sol in sols.flatten() {
-            if let Some(Term::Literal(l)) = sol.get("path") {
-                rel_path = Some(l.value().to_string());
-                break;
+    // Percent-decode the IRI tail back to a filesystem path.
+    let decoded = {
+        let mut out = Vec::new();
+        let b = tail.as_bytes();
+        let mut i = 0;
+        while i < b.len() {
+            if b[i] == b'%' && i + 2 < b.len() {
+                if let Ok(byte) = u8::from_str_radix(&tail[i + 1..i + 3], 16) {
+                    out.push(byte);
+                    i += 3;
+                    continue;
+                }
             }
+            out.push(b[i]);
+            i += 1;
         }
-    }
-    let rel = match rel_path {
-        Some(p) => p,
-        None => return serde_json::json!({"error": "no git:path for this IRI", "uri": uri}),
+        String::from_utf8_lossy(&out).to_string()
+    };
+    // The scaffold root doesn't repeat in the IRI: try the bare path, then
+    // under Soul/ (the same normalization resource_uri applies forward).
+    let rel = if state.repo_root.join(&decoded).exists() {
+        decoded
+    } else {
+        let scaffolded = format!("Soul/{}", decoded);
+        if state.repo_root.join(&scaffolded).exists() {
+            scaffolded
+        } else {
+            return serde_json::json!({"error": "no file for this IRI", "uri": uri, "tried": [decoded, format!("Soul/…")]});
+        }
     };
 
     let abs = state.repo_root.join(&rel);
@@ -320,14 +332,22 @@ async fn run_viz_server(port: u16, www_dir: PathBuf) {
                 let state = state.clone();
                 async move {
                     // Render-ready edge rows: one row per link, uniform
-                    // columns. `target` is always a STRING (IRI stringified,
-                    // literal as-is); `resolved` says whether it names a real
-                    // node — the JS branches on a boolean column, never on
-                    // RDF term kinds.
+                    // columns + a `predicate` column for per-predicate
+                    // coloring (w3bl0rd's contract, 2026-07-21). Covers
+                    // md:linksTo AND every kit object-property whose object
+                    // is doc-shaped or a slug — anything connecting
+                    // documents. `target` is always a STRING; `resolved` is
+                    // a boolean — the JS branches on columns, never on RDF
+                    // term kinds.
                     let q = "PREFIX md: <https://repolex.ai/ontology/git-lex/md/> \
-                        SELECT ?from ?target ?resolved WHERE { \
+                        SELECT ?from ?predicate ?target ?resolved WHERE { \
                           GRAPH <https://repolex.ai/git-lex/NamedGraph/now> { \
-                            ?from md:linksTo ?to . \
+                            { ?from md:linksTo ?to . BIND(STR(md:linksTo) AS ?predicate) } \
+                            UNION \
+                            { ?from ?p ?to . \
+                              FILTER(STRSTARTS(STR(?p), \"https://repolex.ai/ontology/kit/\")) \
+                              FILTER(isIRI(?to) && STRSTARTS(STR(?to), \"https://repolex.ai/soul/\")) \
+                              BIND(STR(?p) AS ?predicate) } \
                             BIND(STR(?to) AS ?target) \
                             BIND(ISIRI(?to) AS ?resolved) \
                           } }";
