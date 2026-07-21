@@ -294,6 +294,27 @@ async fn run_viz_server(port: u16, www_dir: PathBuf) {
                 }
             }
         }))
+        .route("/api/store-info", get({
+            let state = state.clone();
+            move || {
+                let state = state.clone();
+                async move {
+                    // Snapshot of the store's graph inventory. The post-Part-5
+                    // store shape: the one graph (statement history + current
+                    // base facts), the git2 machinery graphs, the ontology
+                    // graph, and the derived now view.
+                    let q = "SELECT ?g (COUNT(*) AS ?n) WHERE { GRAPH ?g { ?s ?p ?o } } \
+                             GROUP BY ?g ORDER BY DESC(?n)";
+                    let graphs = run_sparql_to_json(&state.store, q);
+                    Json(serde_json::json!({
+                        "graphs": graphs,
+                        "one_graph": "https://repolex.ai/git-lex/LexHistoryGraph",
+                        "now_view": "https://repolex.ai/git-lex/NamedGraph/now",
+                        "model": "one-graph (RDF 1.2 SpoEvents; now = materialized view of the base layer)",
+                    }))
+                }
+            }
+        }))
         .route("/api/push", post({
             let state = state.clone();
             move |Json(payload): Json<serde_json::Value>| {
@@ -666,7 +687,7 @@ mod query_server {
     #[openapi(
         info(
             title = "git-lex SPARQL endpoint",
-            description = "W3C SPARQL endpoint over a git-lex soul store. Query language: SPARQL 1.2 (oxigraph rdf-12 — RDF 1.2 triple terms, <<( s p o )>> syntax, verified live) carried over the standard SPARQL 1.1 protocol + results format (1.2 changes the language, not the wire). Queries run against the SYNCED store (run `git lex sync` to refresh); graph names are soul-independent (GRAPH <https://repolex.ai/git-lex/NamedGraph/now>), the vocabulary self-describes in GRAPH <https://repolex.ai/git-lex/NamedGraph/repo-ontology>.",
+            description = "W3C SPARQL endpoint over a git-lex soul store. Query language: SPARQL 1.2 (oxigraph rdf-12 — RDF 1.2 triple terms, <<( s p o )>> syntax, verified live) carried over the standard SPARQL 1.1 protocol + results format (1.2 changes the language, not the wire). Queries run against the SYNCED store (run `git lex sync` to refresh). The ONE GRAPH <https://repolex.ai/git-lex/LexHistoryGraph> holds current base facts alongside their full statement history (git-lex:SpoEvent, assertedIn/retractedIn -> git2:Commit); <https://repolex.ai/git-lex/NamedGraph/now> is the derived current-state view (plain triples, no event machinery); the vocabulary self-describes in GRAPH <https://repolex.ai/git-lex/NamedGraph/repo-ontology>.",
         ),
         paths(sparql_get, sparql_post, health, info),
         components(schemas(HealthResponse, InfoResponse, QueryBody, ErrorBody)),
