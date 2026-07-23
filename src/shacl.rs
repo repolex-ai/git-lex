@@ -334,24 +334,12 @@ pub(crate) fn generate_shacl_shapes(kit: &str) -> Result<Option<String>, String>
     let ttl_content = fs::read_to_string(&ttl_path)
         .map_err(|e| format!("cannot read {}: {}", ttl_path.display(), e))?;
 
-    // Find the kit prefix name and namespace from the TTL.
+    // Kit prefix name + namespace come from the TTL's own declaration
+    // (matched by prefix NAME via the shared scanner — namespace migrations
+    // are a TTL edit, not a code change). Conventional fallback otherwise.
     let (_, _, short) = resolve_kit_spec(kit);
-    let kit_ns_pattern = format!("/kit/{}/", short);
-    let mut prefix_name = short.clone();
-    let mut namespace = format!("https://repolex.ai/ontology/kit/{}/", short);
-    for line in ttl_content.lines() {
-        if line.starts_with("@prefix ") && line.contains(&kit_ns_pattern) {
-            if let Some(colon_pos) = line[8..].find(':') {
-                prefix_name = line[8..8 + colon_pos].trim().to_string();
-            }
-            if let Some(start) = line.find('<') {
-                if let Some(end) = line.find('>') {
-                    namespace = line[start + 1..end].to_string();
-                }
-            }
-            break;
-        }
-    }
+    let (prefix_name, namespace) = git_lex::extract_kit_prefix(&ttl_content, &short)
+        .unwrap_or_else(|| (short.clone(), git_lex::conventional_kit_namespace(&short)));
 
     Ok(generate_shapes_from_store(&store, &prefix_name, &namespace, kit))
 }

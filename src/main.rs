@@ -2152,6 +2152,7 @@ fn sync_onegraph_phase(store: &Store, root: &std::path::Path, resume_sha: Option
         // now-view facts (single-kit lookups were the old drift source).
         let obj_props = crate::ontology::get_object_properties_all_kits();
         let prop_datatypes = crate::ontology::get_property_datatypes_all_kits();
+        let kit_namespaces = crate::ontology::get_kit_namespaces_all_kits();
         let mut md_files = Vec::new();
         fn walk_md(dir: &std::path::Path, files: &mut Vec<PathBuf>) {
             if let Ok(entries) = fs::read_dir(dir) {
@@ -2175,6 +2176,7 @@ fn sync_onegraph_phase(store: &Store, root: &std::path::Path, resume_sha: Option
             &path_index,
             &obj_props,
             &prop_datatypes,
+            &kit_namespaces,
             false, // show_progress — sync prints its own phase summary
             full_rebuild, // clear_first only on a full rebuild
         ) {
@@ -2316,6 +2318,7 @@ fn cmd_spike_onegraph(clear: bool, limit: usize) {
     // disagree about the same sidecar line).
     let obj_props = crate::ontology::get_object_properties_all_kits();
     let prop_datatypes = crate::ontology::get_property_datatypes_all_kits();
+    let kit_namespaces = crate::ontology::get_kit_namespaces_all_kits();
     let mut md_files = Vec::new();
     fn walk_md(dir: &std::path::Path, files: &mut Vec<PathBuf>) {
         if let Ok(entries) = fs::read_dir(dir) {
@@ -2339,6 +2342,7 @@ fn cmd_spike_onegraph(clear: bool, limit: usize) {
         &path_index,
         &obj_props,
         &prop_datatypes,
+        &kit_namespaces,
         true, // show_progress
         true, // clear_first — this command is always a full rebuild
     ) {

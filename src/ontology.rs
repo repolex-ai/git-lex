@@ -165,33 +165,19 @@ struct ShapeFile {
 fn parse_shape_file(content: &str, short_hint: &str) -> ShapeFile {
     let mut out = ShapeFile::default();
 
-    // Find the kit namespace prefix. Prefer `/kit/{short}/` if we have a
-    // hint; otherwise take the first non-standard prefix we encounter.
-    let kit_ns_pattern = format!("/kit/{}/", short_hint);
-    for line in content.lines() {
-        let t = line.trim();
-        if !t.starts_with("@prefix ") { continue; }
-        // Match either the hinted kit namespace, or any non-boilerplate one.
-        let is_kit = t.contains(&kit_ns_pattern);
-        let is_boilerplate = t.contains("/shacl#")
-            || t.contains("XMLSchema")
-            || t.contains("rdf-schema")
-            || t.contains("22-rdf-syntax-ns");
-        if is_kit || (!is_boilerplate && out.prefix_name.is_empty()) {
-            if let Some(colon) = t[8..].find(':') {
-                out.prefix_name = t[8..8 + colon].trim().to_string();
-            }
-            if let Some(start) = t.find('<') {
-                if let Some(end) = t.find('>') {
-                    out.namespace = t[start + 1..end].to_string();
-                }
-            }
-            if is_kit { break; }
+    // Kit prefix + namespace come from the file's own declaration — matched
+    // by prefix NAME via the single shared scanner (git_lex::extract_kit_prefix),
+    // so a kit's namespace can migrate with a one-line TTL edit and this
+    // parser follows. Conventional fallback only when nothing declares.
+    match git_lex::extract_kit_prefix(content, short_hint) {
+        Some((name, ns)) => {
+            out.prefix_name = name;
+            out.namespace = ns;
         }
-    }
-    if out.prefix_name.is_empty() {
-        out.prefix_name = short_hint.to_string();
-        out.namespace = format!("https://repolex.ai/ontology/kit/{}/", short_hint);
+        None => {
+            out.prefix_name = short_hint.to_string();
+            out.namespace = git_lex::conventional_kit_namespace(short_hint);
+        }
     }
 
     // Walk shapes. State machine: when we see `sh:targetClass`, start a new
@@ -395,6 +381,27 @@ pub(crate) fn get_property_datatypes_all_kits() -> HashMap<String, String> {
 /// file. Returns the set of property local-names that are `sh:nodeKind sh:IRI`
 /// (object properties / references), so the extractor can emit them as IRIs
 /// instead of literals.
+/// Map of short kit name → declared namespace, for EVERY installed kit.
+/// This is what the emitters consult so predicate/class IRIs follow each
+/// kit's own `@prefix` declaration (namespace migrations = TTL edit only).
+/// Kits with no readable declaration fall back to the conventional pattern.
+pub(crate) fn get_kit_namespaces_all_kits() -> HashMap<String, String> {
+    let mut out = HashMap::new();
+    for path in all_shape_files() {
+        let Ok(content) = fs::read_to_string(&path) else { continue };
+        let short = path.file_stem()
+            .and_then(|s| s.to_str())
+            .and_then(|s| s.strip_suffix("-shapes"))
+            .unwrap_or("")
+            .to_string();
+        if short.is_empty() { continue; }
+        let (_, ns) = git_lex::extract_kit_prefix(&content, &short)
+            .unwrap_or_else(|| (short.clone(), git_lex::conventional_kit_namespace(&short)));
+        out.insert(short, ns);
+    }
+    out
+}
+
 pub(crate) fn get_object_properties_all_kits() -> HashSet<String> {
     let mut out = HashSet::new();
     for path in all_shape_files() {

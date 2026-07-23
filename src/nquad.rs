@@ -24,7 +24,8 @@ use git_lex::find_git_root;
 use crate::git::{graph_uri, resource_uri};
 use crate::extraction::{flatten_yaml, normalize_wikilink_path,
                         resolve_slug_to_uri};
-use crate::ontology::{get_object_properties_all_kits, get_property_datatypes_all_kits};
+use crate::ontology::{get_kit_namespaces_all_kits, get_object_properties_all_kits,
+                       get_property_datatypes_all_kits};
 use crate::resolve;
 
 /// Write a sidecar (or its `.meta`) file, failing the process on error.
@@ -159,6 +160,7 @@ pub(crate) fn generate_frontmatter_nquads() -> (String, u32) {
     // e.g. copia:firstVisited (xsd:date) emitted as untyped string.
     let obj_props = get_object_properties_all_kits();
     let prop_datatypes = get_property_datatypes_all_kits();
+    let kit_namespaces = get_kit_namespaces_all_kits();
 
     // Open git repo for blob hash lookups
     let repo = git2::Repository::discover(".").ok();
@@ -320,6 +322,7 @@ pub(crate) fn generate_frontmatter_nquads() -> (String, u32) {
                 &path_index,
                 &obj_props,
                 &prop_datatypes,
+                &kit_namespaces,
                 &mut emitted_types,
                 &mut nq,
             );
@@ -379,6 +382,7 @@ pub(crate) fn emit_spo_line_nquads(
     path_index: &HashSet<String>,
     obj_props: &HashSet<String>,
     prop_datatypes: &HashMap<String, String>,
+    kit_namespaces: &HashMap<String, String>,
     emitted_types: &mut HashSet<String>,
     out: &mut String,
 ) -> u32 {
@@ -493,11 +497,19 @@ pub(crate) fn emit_spo_line_nquads(
                         None
                     }
                 };
+            // The kit's namespace comes from its installed TTL declaration
+            // (get_kit_namespaces_all_kits); the conventional pattern is only
+            // the no-declaration fallback. This is what lets a kit's
+            // namespace migrate with a TTL edit and no emitter change.
+            let kit_ns = kit_namespaces
+                .get(kit_name)
+                .cloned()
+                .unwrap_or_else(|| git_lex::conventional_kit_namespace(kit_name));
+
             if let Some(canonical) = &canonical_class {
                 let type_key = format!("{}.{}", kit_name, canonical);
                 if emitted_types.insert(type_key) {
-                    let type_uri = format!(
-                        "<https://repolex.ai/ontology/kit/{}/{}>", kit_name, canonical);
+                    let type_uri = format!("<{}{}>", kit_ns, canonical);
                     out.push_str(&format!(
                         "{} <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> {} {} .\n",
                         doc_uri, type_uri, graph
@@ -506,7 +518,7 @@ pub(crate) fn emit_spo_line_nquads(
             }
 
             // Property name passes through as-is (camelCase from ontology)
-            let kit_predicate = format!("<https://repolex.ai/ontology/kit/{}/{}>", kit_name, prop_seg);
+            let kit_predicate = format!("<{}{}>", kit_ns, prop_seg);
 
             // Kit+class-qualified lookup (Rob-ruled 2026-07-21): the tables
             // key "{kit}/{Class}/{prop}", so THIS kit's and class's own
@@ -723,6 +735,52 @@ pub(crate) fn load_ontology_graph(store: &oxigraph::store::Store) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The emitter's predicate/class namespace comes from the kit's own TTL
+    /// declaration (via the kit_namespaces map), NOT a hardcoded pattern —
+    /// so a kit namespace migration is a TTL edit, no emitter change. A kit
+    /// with no installed declaration falls back to the conventional pattern.
+    #[test]
+    fn emitter_follows_declared_kit_namespace() {
+        let empty_idx: HashMap<String, String> = HashMap::new();
+        let empty_paths: HashSet<String> = HashSet::new();
+        let obj_props: HashSet<String> = HashSet::new();
+        let datatypes: HashMap<String, String> = HashMap::new();
+        let mut namespaces: HashMap<String, String> = HashMap::new();
+        // The flip case: soul declares the migrated (kit-less) namespace.
+        namespaces.insert("soul".into(), "https://repolex.ai/ontology/soul/".into());
+
+        let mut types = HashSet::new();
+        let mut out = String::new();
+        emit_spo_line_nquads(
+            "soul.Journal.soulDay | hasValue | 55",
+            "<https://repolex.ai/soul/Journal/day-1.md>",
+            "<https://repolex.ai/git-lex/NamedGraph/now>",
+            "Journal/day-1.md",
+            &empty_idx, &empty_paths, &obj_props, &datatypes, &namespaces,
+            &mut types, &mut out,
+        );
+        assert!(
+            out.contains("<https://repolex.ai/ontology/soul/soulDay>"),
+            "predicate must follow the declared namespace, got: {out}"
+        );
+        assert!(!out.contains("/ontology/kit/soul/"), "retired pattern leaked: {out}");
+
+        // No declaration for this kit → conventional fallback.
+        let mut out2 = String::new();
+        emit_spo_line_nquads(
+            "copia.Being.beingName | hasValue | selkie",
+            "<https://repolex.ai/soul/friend/selkie.md>",
+            "<https://repolex.ai/git-lex/NamedGraph/now>",
+            "friend/selkie.md",
+            &empty_idx, &empty_paths, &obj_props, &datatypes, &namespaces,
+            &mut types, &mut out2,
+        );
+        assert!(
+            out2.contains("<https://repolex.ai/ontology/kit/copia/beingName>"),
+            "undeclared kit must use the conventional fallback, got: {out2}"
+        );
+    }
 
     /// '%', '"', and '\' are legal in filenames but illegal (or
     /// escape-significant) in IRIs — unencoded they made a file like

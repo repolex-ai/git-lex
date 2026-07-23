@@ -76,6 +76,59 @@ pub fn get_kit() -> Option<String> {
     None
 }
 
+// ─── Kit namespace derivation (ONE authority) ──────────────────
+
+/// The conventional kit namespace, used ONLY as a fallback when no installed
+/// TTL declares one (e.g. a fresh repo before kit files land). Everywhere
+/// else the kit's own `@prefix` declaration is the authority — this function
+/// is the single place the convention is written down.
+pub fn conventional_kit_namespace(short: &str) -> String {
+    format!("https://repolex.ai/ontology/kit/{}/", short)
+}
+
+/// Find a kit's own prefix declaration in TTL content. Returns
+/// `(prefix_name, namespace)`.
+///
+/// Primary rule: the `@prefix` whose NAME equals the short kit name
+/// (`@prefix soul: <...>` for kit `soul`). Matching by NAME — not by
+/// namespace pattern — is what makes a namespace migration a one-line TTL
+/// edit: every consumer (emitters, shapes generation, query prefix
+/// injection) derives whatever the TTL declares, so the declaration can
+/// move without touching code. (The old scanners matched the literal
+/// `/kit/{short}/` substring and would have silently fallen back to the
+/// retired pattern the moment a TTL migrated.)
+///
+/// Fallback rule: the first `@prefix` that isn't W3C boilerplate or the
+/// base `git-lex:`/`git2:` namespaces — for kits whose prefix name differs
+/// from their short name.
+pub fn extract_kit_prefix(content: &str, short: &str) -> Option<(String, String)> {
+    let mut fallback: Option<(String, String)> = None;
+    for line in content.lines() {
+        let t = line.trim();
+        let Some(rest) = t.strip_prefix("@prefix ") else { continue };
+        let Some(colon) = rest.find(':') else { continue };
+        let name = rest[..colon].trim();
+        let after = &rest[colon + 1..];
+        let (Some(s), Some(e)) = (after.find('<'), after.find('>')) else { continue };
+        if s >= e { continue; }
+        let ns = after[s + 1..e].to_string();
+        if name == short {
+            return Some((name.to_string(), ns));
+        }
+        let is_boilerplate = ns.contains("/shacl#")
+            || ns.contains("XMLSchema")
+            || ns.contains("rdf-schema")
+            || ns.contains("22-rdf-syntax-ns")
+            || ns.contains("/owl#")
+            || name == "git-lex"
+            || name == "git2";
+        if !is_boilerplate && fallback.is_none() {
+            fallback = Some((name.to_string(), ns));
+        }
+    }
+    fallback
+}
+
 // ─── Machine-level registry (~/.lex/repos) ───────��─────────────
 
 /// Path to the machine-level registry file: `~/.lex/repos`.
@@ -293,31 +346,18 @@ pub fn add_prefixes_at(root: Option<&std::path::Path>, query: &str) -> String {
                     .join("ontology")
                     .join(&short)
                     .join(format!("{}-shapes.ttl", short));
-                let kit_ns_pattern = format!("/kit/{}/", short);
                 if let Ok(ttl) = fs::read_to_string(&shapes_path) {
-                    for tline in ttl.lines() {
-                        let tline = tline.trim();
-                        if tline.starts_with("@prefix ") && tline.contains(&kit_ns_pattern) {
-                            if let Some(colon_pos) = tline[8..].find(':') {
-                                let pname = tline[8..8 + colon_pos].trim();
-                                let ns_start = tline.find('<');
-                                let ns_end = tline.find('>');
-                                let ns = match (ns_start, ns_end) {
-                                    (Some(s), Some(e)) if s < e => tline[s + 1..e].to_string(),
-                                    _ => format!("https://repolex.ai/ontology/kit/{}/", short),
-                                };
-                                return Some((
-                                    format!("{}:", pname),
-                                    format!("PREFIX {}: <{}>", pname, ns),
-                                ));
-                            }
-                        }
+                    if let Some((pname, ns)) = extract_kit_prefix(&ttl, &short) {
+                        return Some((
+                            format!("{}:", pname),
+                            format!("PREFIX {}: <{}>", pname, ns),
+                        ));
                     }
                 }
-                // Fallback: use short kit name as prefix
+                // Fallback: no installed declaration — conventional pattern.
                 return Some((
                     format!("{}:", short),
-                    format!("PREFIX {}: <https://repolex.ai/ontology/kit/{}/>", short, short),
+                    format!("PREFIX {}: <{}>", short, conventional_kit_namespace(&short)),
                 ));
             }
         }
@@ -598,5 +638,52 @@ mod w3c_query_tests {
             Err(W3cQueryError::Parse(_)) => {}
             _ => panic!("expected Parse error (the 400 class)"),
         }
+    }
+}
+
+#[cfg(test)]
+mod kit_prefix_tests {
+    use super::*;
+
+    #[test]
+    fn name_match_wins_over_declaration_order() {
+        // copia.ttl declares git-lex: and soul: BEFORE its own copia: —
+        // the kit's own prefix must win by NAME, not by position.
+        let ttl = "@prefix git-lex: <https://repolex.ai/ontology/git-lex/> .\n\
+                   @prefix soul:  <https://repolex.ai/ontology/kit/soul/> .\n\
+                   @prefix copia: <https://repolex.ai/ontology/kit/copia/> .\n";
+        assert_eq!(
+            extract_kit_prefix(ttl, "copia"),
+            Some(("copia".into(), "https://repolex.ai/ontology/kit/copia/".into()))
+        );
+    }
+
+    #[test]
+    fn migrated_namespace_is_followed() {
+        // THE flip test: when a kit's TTL moves off the kit/ tier, every
+        // consumer derives the new namespace with zero code changes.
+        let ttl = "@prefix soul: <https://repolex.ai/ontology/soul/> .\n";
+        assert_eq!(
+            extract_kit_prefix(ttl, "soul"),
+            Some(("soul".into(), "https://repolex.ai/ontology/soul/".into()))
+        );
+    }
+
+    #[test]
+    fn no_declaration_yields_none_boilerplate_ignored() {
+        let ttl = "@prefix sh:  <http://www.w3.org/ns/shacl#> .\n\
+                   @prefix xsd: <http://www.w3.org/2001/XMLSchema#> .\n\
+                   @prefix git-lex: <https://repolex.ai/ontology/git-lex/> .\n";
+        assert_eq!(extract_kit_prefix(ttl, "soul"), None);
+    }
+
+    #[test]
+    fn differing_prefix_name_falls_back_to_first_non_boilerplate() {
+        let ttl = "@prefix xsd: <http://www.w3.org/2001/XMLSchema#> .\n\
+                   @prefix myk: <https://example.org/vocab/> .\n";
+        assert_eq!(
+            extract_kit_prefix(ttl, "mykit"),
+            Some(("myk".into(), "https://example.org/vocab/".into()))
+        );
     }
 }

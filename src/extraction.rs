@@ -201,7 +201,7 @@ pub(crate) fn frontmatter_to_turtle(
     let mut namespace = crate::ontology::get_kit_namespace(kit);
     if namespace.is_empty() {
         let (_, _, short) = resolve_kit_spec(kit);
-        namespace = format!("https://repolex.ai/ontology/kit/{}/", short);
+        namespace = git_lex::conventional_kit_namespace(&short);
     }
 
     // Build ObjectProperty set and datatype map for proper literal emission

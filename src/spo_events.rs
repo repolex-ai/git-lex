@@ -1090,6 +1090,7 @@ pub(crate) fn onegraph_walk_engine(
     path_index: &HashSet<String>,
     obj_props: &HashSet<String>,
     prop_datatypes: &HashMap<String, String>,
+    kit_namespaces: &HashMap<String, String>,
     show_progress: bool,
     clear_first: bool,
 ) -> Result<(usize, usize), String> {
@@ -1196,7 +1197,7 @@ pub(crate) fn onegraph_walk_engine(
             acct.resolver_errors += crate::nquad::emit_spo_line_nquads(
                 line, &doc_uri, one_graph, &relpath_str,
                 slug_index, path_index, obj_props, prop_datatypes,
-                &mut emitted_types, &mut emit_buf,
+                kit_namespaces, &mut emitted_types, &mut emit_buf,
             );
             let mut any = false;
             for triple_nq in emit_buf.lines().filter(|l| !l.trim().is_empty()) {
