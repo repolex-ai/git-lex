@@ -818,16 +818,17 @@ fn decode_git_quoted_path(raw: &str) -> String {
 ///
 /// Unknown `.spo` suffixes return `None` rather than producing a garbage
 /// source path.
+///
+/// Suffix knowledge lives in `SPO_EXTRACTOR_SUFFIXES` alone — a new extractor
+/// added there is automatically recognized here (and by `doc_uri_from_sidecar`,
+/// which derives from this). The `.lex/extract/` prefix is REQUIRED: only
+/// paths under it are sidecars (the diff-tree pathspec guarantees it), and a
+/// prefix-less path is not a sidecar we know how to attribute.
 pub(crate) fn derive_source_document(sidecar_rel_path: &str) -> Option<String> {
-    // Strip the `.lex/extract/` prefix first so the returned path is relative
-    // to the repo root.
-    let after_extract = sidecar_rel_path
-        .strip_prefix(".lex/extract/")
-        .unwrap_or(sidecar_rel_path);
-
-    // Try known extractor suffixes in longest-first order.
-    for suffix in &[".fm.spo", ".md.spo", ".cc.spo"] {
-        if let Some(base) = after_extract.strip_suffix(suffix) {
+    let after_extract = sidecar_rel_path.strip_prefix(".lex/extract/")?;
+    for suffix in SPO_EXTRACTOR_SUFFIXES {
+        let full = format!(".{}.spo", suffix);
+        if let Some(base) = after_extract.strip_suffix(full.as_str()) {
             return Some(base.to_string());
         }
     }
@@ -836,21 +837,41 @@ pub(crate) fn derive_source_document(sidecar_rel_path: &str) -> Option<String> {
 
 /// Read a sidecar file's content at a specific git commit.
 /// Returns the non-empty, non-comment lines (the SPO lines).
-fn read_sidecar_at_commit(sha: &str, sidecar_path: &str) -> Vec<String> {
+///
+/// "Path absent at this commit" is a NORMAL outcome — the added/deleted side
+/// of a diff resolves against a commit where the file doesn't exist — and
+/// returns `Ok(empty)`. Every OTHER git failure is an ERROR: treating it as
+/// absence would let a transient failure fabricate history (an empty old side
+/// reads as "everything was added", an empty new side as "everything was
+/// removed" — assert/retract events manufactured into the one graph).
+fn read_sidecar_at_commit(sha: &str, sidecar_path: &str) -> Result<Vec<String>, String> {
     let spec = format!("{}:{}", sha, sidecar_path);
     let out = Command::new("git")
         .args(["show", &spec])
-        .output();
-    match out {
-        Ok(o) if o.status.success() => {
-            String::from_utf8_lossy(&o.stdout)
-                .lines()
-                .filter(|l| !l.is_empty() && !l.starts_with('#'))
-                .map(|l| l.to_string())
-                .collect()
-        }
-        _ => Vec::new(),
+        .output()
+        .map_err(|e| format!("git show {spec}: spawn failed: {e}"))?;
+    if out.status.success() {
+        return Ok(String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .filter(|l| !l.is_empty() && !l.starts_with('#'))
+            .map(|l| l.to_string())
+            .collect());
     }
+    // `git show` failed. Absence is the only failure we accept as empty;
+    // disambiguate with ls-tree: exit 0 + empty output = path not in that
+    // tree, anything else = a real git failure that must not read as empty.
+    let probe = Command::new("git")
+        .args(["ls-tree", sha, "--", sidecar_path])
+        .output()
+        .map_err(|e| format!("git ls-tree {sha} -- {sidecar_path}: spawn failed: {e}"))?;
+    if probe.status.success() && probe.stdout.iter().all(|b| b.is_ascii_whitespace()) {
+        return Ok(Vec::new());
+    }
+    Err(format!(
+        "git show {spec} failed ({}): {}",
+        out.status,
+        String::from_utf8_lossy(&out.stderr).trim()
+    ))
 }
 
 /// Derive a doc URI for a sidecar path. The sidecar path is the `.spo` file
@@ -859,18 +880,11 @@ fn read_sidecar_at_commit(sha: &str, sidecar_path: &str) -> Vec<String> {
 /// prefix and the `.{extractor}.spo` suffix.
 ///
 /// Returns the doc URI in `<...>` form, ready to embed in N-Quads.
+/// Thin wrapper over `derive_source_document` — ONE place knows the
+/// sidecar-path shape.
 pub fn doc_uri_from_sidecar(sidecar_path: &str) -> Option<String> {
-    let after_extract = sidecar_path.strip_prefix(".lex/extract/")?;
-    let doc_path = if let Some(s) = after_extract.strip_suffix(".fm.spo") {
-        s
-    } else if let Some(s) = after_extract.strip_suffix(".md.spo") {
-        s
-    } else if let Some(s) = after_extract.strip_suffix(".cc.spo") {
-        s
-    } else {
-        return None;
-    };
-    Some(format!("<{}>", crate::git::resource_uri(&crate::nquad::uri_encode_path(doc_path))))
+    let doc_path = derive_source_document(sidecar_path)?;
+    Some(format!("<{}>", crate::git::resource_uri(&crate::nquad::uri_encode_path(&doc_path))))
 }
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -1023,15 +1037,16 @@ pub fn onegraph_event(
     ])
 }
 
-/// SPIKE. Walk pre-collected commits and build the one-graph into `store`.
+/// Walk pre-collected commits and build the one graph into `store`. This is
+/// the PRODUCTION history engine — `git lex sync` runs it incrementally
+/// (`clear_first = false`, appending events for commits newer than the
+/// store's resume point) and the full-rebuild command runs it with
+/// `clear_first = true`. It resolves every `.spo` line through the same
+/// `emit_spo_line_nquads` the query surface uses.
 ///
-/// This is a trimmed sibling of `history_walk_engine`: it uses the identical
-/// resolver (`emit_spo_line_nquads`) and the identical rename handling, but
-/// emits `onegraph_event` per resolved triple, always does a
-/// full rebuild (clears the one graph first — the spike is meant to be re-run),
-/// and writes NO `lastHistorySync` marker (the spike doesn't do incremental).
-///
-/// Returns `(events_seen, events_emitted)` for the summary line.
+/// Returns `(events_seen, events_emitted)` for the summary line, or an error
+/// if git or the store failed anywhere — a partial walk must never report
+/// success, because the one graph is the system of record.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn onegraph_walk_engine(
     commits: &[SpikeCommit],
@@ -1043,7 +1058,7 @@ pub(crate) fn onegraph_walk_engine(
     prop_datatypes: &HashMap<String, String>,
     show_progress: bool,
     clear_first: bool,
-) -> (usize, usize) {
+) -> Result<(usize, usize), String> {
     let total = commits.len();
     let mut nq_buffer = String::new();
     let mut events_seen = 0usize;
@@ -1084,18 +1099,41 @@ pub(crate) fn onegraph_walk_engine(
         malformed_shape: usize,      // not exactly 3 ` | `-separated fields
         empty_object: usize,         // third field empty/whitespace
         resolver_other: usize,       // dropped inside the shared emitter
+        unknown_suffix: usize,       // sidecar with an undeclared extractor suffix
+        resolver_errors: u32,        // errors reported by the shared emitter
     }
     let mut acct = DropAccounting::default();
+    // Unknown-suffix sidecars warn once per path (the walk visits the same
+    // path once per touching commit — repeating the warning is noise).
+    let mut warned_unknown: HashSet<String> = HashSet::new();
 
     // Net base-layer effect per triple across this walk (last op wins).
     let mut base_final: HashMap<String, char> = HashMap::new();
 
-    let mut resolve_sidecar_at = |commit: &str, sidecar_path: &str, acct: &mut DropAccounting| -> HashSet<String> {
-        let Some(doc_uri) = doc_uri_from_sidecar(sidecar_path) else {
-            return HashSet::new();
+    let mut resolve_sidecar_at = |commit: &str,
+                                  sidecar_path: &str,
+                                  acct: &mut DropAccounting,
+                                  warned_unknown: &mut HashSet<String>|
+     -> Result<HashSet<String>, String> {
+        // Unknown extractor suffix: counted and warned, never silent (the
+        // BUG-4 contract). The diff-tree pathspec matches ALL
+        // `.lex/extract/**.spo`, so a sidecar from an extractor this binary
+        // doesn't know contributes nothing — that must be visible.
+        let Some(relpath_str) = derive_source_document(sidecar_path) else {
+            acct.unknown_suffix += 1;
+            if warned_unknown.insert(sidecar_path.to_string()) {
+                eprintln!(
+                    "  one-graph: sidecar with unknown extractor suffix NOT walked: {sidecar_path} (known: {})",
+                    SPO_EXTRACTOR_SUFFIXES.join(", ")
+                );
+            }
+            return Ok(HashSet::new());
         };
-        let relpath_str = derive_source_document(sidecar_path).unwrap_or_default();
-        let lines = read_sidecar_at_commit(commit, sidecar_path);
+        let doc_uri = format!(
+            "<{}>",
+            crate::git::resource_uri(&crate::nquad::uri_encode_path(&relpath_str))
+        );
+        let lines = read_sidecar_at_commit(commit, sidecar_path)?;
         acct.lines_in += lines.len();
         let mut triples: HashSet<String> = HashSet::new();
         let mut emitted_types: HashSet<String> = HashSet::new();
@@ -1118,7 +1156,10 @@ pub(crate) fn onegraph_walk_engine(
                 continue;
             }
             let mut emit_buf = String::new();
-            let _errs = crate::nquad::emit_spo_line_nquads(
+            // Emitter errors are COUNTED (a line can yield some triples AND
+            // errors — e.g. one rejected value among several); the now path
+            // counts the same errors, so the walk must too.
+            acct.resolver_errors += crate::nquad::emit_spo_line_nquads(
                 line, &doc_uri, one_graph, &relpath_str,
                 slug_index, path_index, obj_props, prop_datatypes,
                 &mut emitted_types, &mut emit_buf,
@@ -1132,7 +1173,7 @@ pub(crate) fn onegraph_walk_engine(
                 acct.resolver_other += 1;
             }
         }
-        triples
+        Ok(triples)
     };
 
     for (ci, c) in commits.iter().enumerate() {
@@ -1145,8 +1186,10 @@ pub(crate) fn onegraph_walk_engine(
         }
 
         // Touched sidecars, old side vs new side. Renames pair old→new;
-        // everything else appears under the same path on both sides (git
-        // show simply fails → empty content for the added/deleted side).
+        // everything else appears under the same path on both sides (a path
+        // absent at a commit resolves to a verified-empty set — see
+        // read_sidecar_at_commit: absence is checked, never assumed from a
+        // failed `git show`).
         let mut old_side: HashSet<&str> = HashSet::new();
         let mut new_side: HashSet<&str> = HashSet::new();
         for ev in &c.events {
@@ -1161,10 +1204,16 @@ pub(crate) fn onegraph_walk_engine(
         let mut old_triples: HashSet<String> = HashSet::new();
         let mut new_triples: HashSet<String> = HashSet::new();
         for path in &old_side {
-            old_triples.extend(resolve_sidecar_at(&c.parent_sha, path, &mut acct));
+            old_triples.extend(
+                resolve_sidecar_at(&c.parent_sha, path, &mut acct, &mut warned_unknown)
+                    .map_err(|e| format!("commit {} (old side): {e}", c.sha))?,
+            );
         }
         for path in &new_side {
-            new_triples.extend(resolve_sidecar_at(&c.sha, path, &mut acct));
+            new_triples.extend(
+                resolve_sidecar_at(&c.sha, path, &mut acct, &mut warned_unknown)
+                    .map_err(|e| format!("commit {} (new side): {e}", c.sha))?,
+            );
         }
 
         // The diff of resolved worlds IS the event stream for this commit.
@@ -1201,13 +1250,20 @@ pub(crate) fn onegraph_walk_engine(
             }
             '-' if !clear_first => {
                 // Parse the single N-Quads line into a Quad and remove it.
+                // Both failure modes are hard errors: a malformed line here
+                // is OUR OWN emitter's output gone wrong, and a failed
+                // remove leaves a retracted fact live in the base layer —
+                // either way the materialized now would silently lie.
                 let parser = oxigraph::io::RdfParser::from_format(oxigraph::io::RdfFormat::NQuads);
                 let mut line_owned = line.clone();
                 line_owned.push('\n');
-                for quad in parser.for_reader(std::io::Cursor::new(line_owned.into_bytes())).flatten() {
-                    if let Err(e) = store.remove(&quad) {
-                        eprintln!("  one-graph: base-layer retract removal failed: {e}");
-                    }
+                for quad in parser.for_reader(std::io::Cursor::new(line_owned.into_bytes())) {
+                    let quad = quad.map_err(|e| {
+                        format!("base-layer retract: emitter produced an unparseable line ({e}): {line}")
+                    })?;
+                    store
+                        .remove(&quad)
+                        .map_err(|e| format!("base-layer retract removal failed: {e}"))?;
                 }
             }
             _ => {}
@@ -1218,11 +1274,12 @@ pub(crate) fn onegraph_walk_engine(
     // line was dropped; which reasons should hard-fail is Rob's pending call.
     let dropped_total = acct.retired_body_extract + acct.malformed_shape
         + acct.empty_object + acct.resolver_other;
-    if dropped_total > 0 {
+    if dropped_total > 0 || acct.unknown_suffix > 0 || acct.resolver_errors > 0 {
         eprintln!(
-            "  one-graph accounting: {} line(s) read, {} dropped — retired-body-extract(@): {}, malformed-shape: {}, empty-object: {}, resolver-other: {}",
+            "  one-graph accounting: {} line(s) read, {} dropped — retired-body-extract(@): {}, malformed-shape: {}, empty-object: {}, resolver-other: {}, unknown-suffix sidecar(s): {}, resolver error(s): {}",
             acct.lines_in, dropped_total, acct.retired_body_extract,
-            acct.malformed_shape, acct.empty_object, acct.resolver_other
+            acct.malformed_shape, acct.empty_object, acct.resolver_other,
+            acct.unknown_suffix, acct.resolver_errors
         );
     }
 
@@ -1235,21 +1292,27 @@ pub(crate) fn onegraph_walk_engine(
     // clear_first = false is the sync path: the one graph is PERSISTENT and
     // append-only; sync walks only commits newer than the store's newest and
     // appends their events.
+    //
+    // Every store operation from here down is a hard error: this graph is the
+    // system of record, and "printed a warning but reported success" was the
+    // defect class that let a build fail invisibly (review finding A2).
     if clear_first {
-        if let Ok(graph_node) = oxigraph::model::NamedNode::new(
+        let graph_node = oxigraph::model::NamedNode::new(
             one_graph.trim_start_matches('<').trim_end_matches('>'),
-        ) {
-            let _ = store.clear_graph(&graph_node);
-        }
+        )
+        .map_err(|e| format!("one-graph IRI is not a valid named node: {e}"))?;
+        store
+            .clear_graph(&graph_node)
+            .map_err(|e| format!("one-graph clear (full rebuild) failed: {e}"))?;
     }
     if !nq_buffer.is_empty() {
         let parser = oxigraph::io::RdfParser::from_format(oxigraph::io::RdfFormat::NQuads);
-        if let Err(e) = store.load_from_reader(parser, std::io::Cursor::new(nq_buffer.as_bytes())) {
-            eprintln!("  one-graph (SPIKE): load failed: {}", e);
-        }
+        store
+            .load_from_reader(parser, std::io::Cursor::new(nq_buffer.as_bytes()))
+            .map_err(|e| format!("one-graph event load failed: {e}"))?;
     }
 
-    (events_seen, events_emitted)
+    Ok((events_seen, events_emitted))
 }
 
 /// take one whitespace-separated term from the start of `s`. A term
@@ -1632,13 +1695,52 @@ mod tests {
     }
 
     #[test]
-    fn handles_sidecar_path_without_extract_prefix() {
-        // If the path isn't under .lex/extract/, strip_prefix returns the
-        // original. `.fm.spo` still strips correctly, leaving `foo.md`.
+    fn rejects_sidecar_path_without_extract_prefix() {
+        // Only paths under .lex/extract/ are sidecars (the diff-tree
+        // pathspec guarantees the prefix on every real input); a prefix-less
+        // path can't be attributed to a source document.
+        assert_eq!(derive_source_document("foo.md.fm.spo"), None);
+    }
+
+    #[test]
+    fn future_extractor_suffixes_already_derive() {
+        // gliner/haiku are declared in SPO_EXTRACTOR_SUFFIXES; the moment an
+        // extractor ships, its history walks without touching this code.
         assert_eq!(
-            derive_source_document("foo.md.fm.spo"),
-            Some("foo.md".to_string())
+            derive_source_document(".lex/extract/notes/a.md.gliner.spo"),
+            Some("notes/a.md".to_string())
         );
+    }
+
+    // ─── read_sidecar_at_commit: absence vs failure ─────────────────────
+    // These run against the checkout's own repo (same self-skip pattern as
+    // the git2_nquads parity tests) — they need a real git to disambiguate.
+
+    fn in_git_checkout() -> bool {
+        Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false)
+    }
+
+    #[test]
+    fn absent_path_at_commit_is_verified_empty() {
+        if !in_git_checkout() { return; }
+        let got = read_sidecar_at_commit("HEAD", "no/such/file.md.fm.spo");
+        assert_eq!(got, Ok(Vec::new()));
+    }
+
+    #[test]
+    fn bad_commit_is_an_error_not_empty() {
+        if !in_git_checkout() { return; }
+        // A garbage sha must NOT read as "file absent" — that ambiguity is
+        // how transient git failures fabricate history events.
+        let got = read_sidecar_at_commit(
+            "0000000000000000000000000000000000000000",
+            "no/such/file.md.fm.spo",
+        );
+        assert!(got.is_err(), "expected Err, got {got:?}");
     }
 
 }

@@ -34,8 +34,7 @@ mod extraction;
 use crate::git::{auto_commit_snapshot, graph_uri, resource_uri};
 use crate::nquad::{build_slug_path_indexes, generate_frontmatter_nquads,
                    load_lex_nquads};
-use crate::ontology::{get_kit_prefix_name, get_kit_types,
-                      get_object_properties, get_property_datatypes};
+use crate::ontology::{get_kit_prefix_name, get_kit_types};
 use crate::shacl::{build_shacl_shapes, parse_shacl_hints};
 use crate::extraction::{extract_jsonl_sessions, extract_markdown_links, frontmatter_to_turtle};
 use crate::kit::{collect_init_variables, fetch_kit_from_github, install_scaffold_files_from,
@@ -2048,10 +2047,16 @@ fn cmd_sync() {
         match oxigraph::sparql::SparqlEvaluator::new().parse_update(update) {
             Ok(u) => {
                 if let Err(e) = u.on_store(&store).execute() {
-                    eprintln!("warning: now-view materialization failed: {e}");
+                    // A stale now view silently lies to every downstream
+                    // consumer (Syrinx, viz, agents) — fail the sync.
+                    eprintln!("ERROR: now-view materialization failed: {e}");
+                    std::process::exit(1);
                 }
             }
-            Err(e) => eprintln!("warning: now-view update did not parse: {e}"),
+            Err(e) => {
+                eprintln!("ERROR: now-view update did not parse (binary bug): {e}");
+                std::process::exit(1);
+            }
         }
     }
 
@@ -2082,23 +2087,33 @@ fn sync_onegraph_phase(store: &Store, root: &std::path::Path, resume_sha: Option
             .map(|st| st.success())
             .unwrap_or(false)
     };
+    // A rev-list failure must NOT read as "no new commits" — that would make
+    // sync print "up to date" over a range it never walked. Fail the sync.
     let rev_list = |range: &[&str]| -> Vec<String> {
         let mut args = vec!["rev-list", "--topo-order", "--reverse"];
         args.extend_from_slice(range);
-        Command::new("git")
+        let out = Command::new("git")
             .args(&args)
             .current_dir(root)
             .output()
-            .ok()
-            .filter(|o| o.status.success())
-            .map(|o| {
-                String::from_utf8_lossy(&o.stdout)
-                    .lines()
-                    .map(|l| l.trim().to_string())
-                    .filter(|l| !l.is_empty())
-                    .collect()
-            })
-            .unwrap_or_default()
+            .unwrap_or_else(|e| {
+                eprintln!("ERROR: git rev-list spawn failed: {e}");
+                std::process::exit(1);
+            });
+        if !out.status.success() {
+            eprintln!(
+                "ERROR: git rev-list {:?} failed ({}): {}",
+                range,
+                out.status,
+                String::from_utf8_lossy(&out.stderr).trim()
+            );
+            std::process::exit(1);
+        }
+        String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .map(|l| l.trim().to_string())
+            .filter(|l| !l.is_empty())
+            .collect()
     };
 
     let (shas, full_rebuild) = match &resume_sha {
@@ -2138,7 +2153,7 @@ fn sync_onegraph_phase(store: &Store, root: &std::path::Path, resume_sha: Option
         walk_md(root, &mut md_files);
         let (slug_index, path_index) = build_slug_path_indexes(root, &md_files);
 
-        let (seen, emitted) = spo_events::onegraph_walk_engine(
+        let (seen, emitted) = match spo_events::onegraph_walk_engine(
             &commits,
             store,
             &one_graph_uri,
@@ -2148,7 +2163,16 @@ fn sync_onegraph_phase(store: &Store, root: &std::path::Path, resume_sha: Option
             &prop_datatypes,
             false, // show_progress — sync prints its own phase summary
             full_rebuild, // clear_first only on a full rebuild
-        );
+        ) {
+            Ok(counts) => counts,
+            Err(e) => {
+                // The resume point is unchanged (events load at the end of the
+                // walk), so the next sync retries this same commit range.
+                eprintln!("ERROR: one-graph build failed: {e}");
+                eprintln!("Sync aborted; the one graph was not updated for this commit range. Fix the cause and re-run `git lex sync`.");
+                std::process::exit(1);
+            }
+        };
         println!(
             "One graph: {} {} commit(s), {} event(s) seen, {} emitted.",
             if full_rebuild { "full rebuild —" } else { "appended" },
@@ -2169,7 +2193,8 @@ fn sync_onegraph_phase(store: &Store, root: &std::path::Path, resume_sha: Option
         g = spo_events::LEXHISTORY_GRAPH_IRI
     );
     if let Err(e) = store.load_from_reader(RdfFormat::NQuads, Cursor::new(typing.as_bytes())) {
-        eprintln!("warning: one-graph discovery typing failed to load: {e}");
+        eprintln!("ERROR: one-graph discovery typing failed to load: {e}");
+        std::process::exit(1);
     }
 
     // Structural integrity (runs EVERY build): each SpoEvent has exactly one
@@ -2188,6 +2213,9 @@ fn sync_onegraph_phase(store: &Store, root: &std::path::Path, resume_sha: Option
         }} }}",
         spo_events::LEXHISTORY_GRAPH_IRI
     );
+    // The check itself failing to run is ALSO a failure — an unverified graph
+    // must not report a successful sync (`unwrap_or(0)` here used to turn a
+    // broken query into a silent pass).
     let bad = oxigraph::sparql::SparqlEvaluator::new()
         .parse_query(&integrity)
         .ok()
@@ -2199,12 +2227,19 @@ fn sync_onegraph_phase(store: &Store, root: &std::path::Path, resume_sha: Option
                 .and_then(|s| s.get("bad").map(|t| t.to_string())),
             _ => None,
         })
-        .and_then(|v| v.split('"').nth(1).and_then(|n| n.parse::<u64>().ok()))
-        .unwrap_or(0);
-    if bad > 0 {
-        eprintln!(
-            "ERROR: one-graph integrity check FAILED — {bad} SpoEvent node(s) violate one-statement/one-direction (16-hex id collision or emitter bug). The graph is NOT trustworthy until this is resolved."
-        );
+        .and_then(|v| v.split('"').nth(1).and_then(|n| n.parse::<u64>().ok()));
+    match bad {
+        None => {
+            eprintln!("ERROR: one-graph integrity check could not run (query failed) — the graph is unverified.");
+            std::process::exit(1);
+        }
+        Some(bad) if bad > 0 => {
+            eprintln!(
+                "ERROR: one-graph integrity check FAILED — {bad} SpoEvent node(s) violate one-statement/one-direction (16-hex id collision or emitter bug). The graph is NOT trustworthy until this is resolved."
+            );
+            std::process::exit(1);
+        }
+        _ => {}
     }
 }
 
@@ -2261,10 +2296,12 @@ fn cmd_spike_onegraph(clear: bool, limit: usize) {
     }
     let commits = spo_events::collect_commits_from_shas(&all_shas);
 
-    // Same resolver inputs the now-graph and history walker use.
-    let kit_name = get_kit().unwrap_or_default();
-    let obj_props = get_object_properties(&kit_name);
-    let prop_datatypes = get_property_datatypes(&kit_name);
+    // Same resolver inputs sync uses — ALL installed kits, so a full rebuild
+    // resolves lines identically to sync's incremental appends (single-kit
+    // lookups here were a drift source: the rebuild and the appends could
+    // disagree about the same sidecar line).
+    let obj_props = crate::ontology::get_object_properties_all_kits();
+    let prop_datatypes = crate::ontology::get_property_datatypes_all_kits();
     let mut md_files = Vec::new();
     fn walk_md(dir: &std::path::Path, files: &mut Vec<PathBuf>) {
         if let Ok(entries) = fs::read_dir(dir) {
@@ -2280,7 +2317,7 @@ fn cmd_spike_onegraph(clear: bool, limit: usize) {
     walk_md(&root, &mut md_files);
     let (slug_index, path_index) = build_slug_path_indexes(&root, &md_files);
 
-    let (seen, emitted) = spo_events::onegraph_walk_engine(
+    let (seen, emitted) = match spo_events::onegraph_walk_engine(
         &commits,
         &store,
         &one_graph_uri,
@@ -2289,11 +2326,18 @@ fn cmd_spike_onegraph(clear: bool, limit: usize) {
         &obj_props,
         &prop_datatypes,
         true, // show_progress
-        true, // clear_first — the spike command is always a full rebuild
-    );
+        true, // clear_first — this command is always a full rebuild
+    ) {
+        Ok(counts) => counts,
+        Err(e) => {
+            eprintln!("ERROR: one-graph rebuild failed: {e}");
+            eprintln!("The store was not updated. Fix the cause and re-run.");
+            std::process::exit(1);
+        }
+    };
 
     println!(
-        "\nBuilt SPIKE one-graph: {} commit(s), {} event(s) seen, {} reified event(s) emitted.",
+        "\nBuilt one graph: {} commit(s), {} event(s) seen, {} reified event(s) emitted.",
         commits.len(), seen, emitted
     );
 
