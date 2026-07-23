@@ -1520,7 +1520,9 @@ fn cmd_validate() -> bool {
         .collect::<Vec<_>>()
         .join("\n");
 
-    // Find all .md files in the repo
+    // Find all .md files in the repo. `.txt` files ride along for the SLUG
+    // INDEX only (sync's resolver indexes them as link targets, so validate
+    // must too — same index, same resolution); only .md files are validated.
     fn walk_md(dir: &std::path::Path, files: &mut Vec<PathBuf>) {
         if let Ok(entries) = fs::read_dir(dir) {
             for entry in entries.filter_map(|e| e.ok()) {
@@ -1528,7 +1530,7 @@ fn cmd_validate() -> bool {
                 let name = entry.file_name().to_string_lossy().to_string();
                 if name.starts_with('.') { continue; }
                 if path.is_dir() { walk_md(&path, files); }
-                else if name.ends_with(".md") { files.push(path); }
+                else if name.ends_with(".md") || name.ends_with(".txt") { files.push(path); }
             }
         }
     }
@@ -1580,8 +1582,13 @@ fn cmd_validate() -> bool {
     let mut total_violations = 0;
     let mut failed_files = Vec::new();
 
+    // The same slug index sync's emitter resolves against — validate must
+    // judge the exact triples sync will emit (review finding A5).
+    let (slug_index, _path_index) = build_slug_path_indexes(&root, &files);
+
     for filepath in &files {
-        let ttl = match frontmatter_to_turtle(filepath, &root, &kit) {
+        if !filepath.to_string_lossy().ends_with(".md") { continue; }
+        let ttl = match frontmatter_to_turtle(filepath, &root, &kit, &slug_index) {
             Ok(Some(t)) => t,
             Ok(None) => continue,
             Err(e) => {

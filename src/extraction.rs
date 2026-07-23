@@ -22,15 +22,15 @@ use crate::nquad::uri_encode_path;
 use crate::ontology::{get_object_properties, get_property_datatypes};
 
 /// Resolve a slug to an IRI under the soul a-box base (Day-50: no soul
-/// identity in subjects). Falls back to an entity URI if the slug is not in
-/// the index.
+/// identity in subjects). Callers only invoke this on a slug-index HIT —
+/// there is no fallback IRI policy (unresolved values stay literals,
+/// resolve.rs rule 7; the old `entity/<slug>` fallback was the retired
+/// minting policy and was unreachable from every graph-path caller).
 pub(crate) fn resolve_slug_to_uri(slug: &str, slug_index: &HashMap<String, String>) -> String {
-    if let Some(rel_path) = slug_index.get(slug) {
-        format!("<{}>", crate::git::resource_uri(&uri_encode_path(rel_path)))
-    } else {
-        // No matching file — fall back to entity URI
-        format!("<{}>", crate::git::resource_uri(&format!("entity/{}", uri_encode_path(slug))))
-    }
+    let rel_path = slug_index
+        .get(slug)
+        .expect("resolve_slug_to_uri called without a slug_index hit (caller bug)");
+    format!("<{}>", crate::git::resource_uri(&uri_encode_path(rel_path)))
 }
 
 /// Normalize a path-style wikilink target into a relpath that can be matched
@@ -112,7 +112,12 @@ pub(crate) fn flatten_yaml(prefix: &str, value: &serde_yaml::Value, lines: &mut 
 /// Returns `Ok(None)` for files that simply aren't kit documents (no
 /// frontmatter, no kit-prefixed keys). Malformed YAML is `Err` — a doc that
 /// TRIED to carry frontmatter and failed must fail validation, not skip it.
-pub(crate) fn frontmatter_to_turtle(filepath: &std::path::Path, root: &std::path::Path, kit: &str) -> Result<Option<String>, String> {
+pub(crate) fn frontmatter_to_turtle(
+    filepath: &std::path::Path,
+    root: &std::path::Path,
+    kit: &str,
+    slug_index: &HashMap<String, String>,
+) -> Result<Option<String>, String> {
     let content = fs::read_to_string(filepath)
         .map_err(|e| format!("cannot read file: {}", e))?;
 
@@ -227,18 +232,34 @@ pub(crate) fn frontmatter_to_turtle(filepath: &std::path::Path, root: &std::path
         // (Rob-ruled 2026-07-21; see ontology.rs get_object_properties).
         let lookup_key = format!("{}/{}/{}", short, doc_type, prop_name);
         if obj_props.contains(lookup_key.as_str()) {
-            // ObjectProperty — resolve each comma-separated value as IRI
+            // ObjectProperty — resolve each comma-separated value through
+            // the SAME resolver sync's emitter uses (resolve.rs), so
+            // validate judges the exact triples sync will emit. The old
+            // logic here stripped `@`, slugified, and invented `entity/`
+            // IRIs — so an `@mention` PASSED validation and then errored
+            // at save time (review finding A5: two resolution policies).
             let values: Vec<&str> = value.split(',').map(|v| v.trim()).filter(|v| !v.is_empty()).collect();
             for val in values {
-                let slug = val.trim_start_matches('@').to_lowercase()
-                    .replace(' ', "-")
-                    .replace(|c: char| !c.is_alphanumeric() && c != '-', "");
-                if !slug.is_empty() {
-                    ttl.push_str(&format!(
-                        "<{}> {}:{} <{}> .\n",
-                        doc_iri, prefix_name, prop_name,
-                        crate::git::resource_uri(&format!("entity/{}", slug))
-                    ));
+                match crate::resolve::resolve_frontmatter_value(val, slug_index) {
+                    crate::resolve::ResolveResult::Iri(uri) => {
+                        // `uri` arrives in `<...>` form, valid Turtle as-is.
+                        ttl.push_str(&format!(
+                            "<{}> {}:{} {} .\n",
+                            doc_iri, prefix_name, prop_name, uri
+                        ));
+                    }
+                    crate::resolve::ResolveResult::Unresolved(lit) => {
+                        // Unresolved stays a LITERAL (resolve.rs rule 7) so
+                        // a sh:nodeKind sh:IRI shape flags it — validation
+                        // surfaces the problem instead of inventing an IRI.
+                        ttl.push_str(&format!(
+                            "<{}> {}:{} \"{}\" .\n",
+                            doc_iri, prefix_name, prop_name, lit.replace('"', "\\\"")
+                        ));
+                    }
+                    crate::resolve::ResolveResult::Rejected(msg) => {
+                        return Err(format!("{}: {}", prop_name, msg));
+                    }
                 }
             }
         } else if let Some(datatype) = prop_datatypes.get(lookup_key.as_str()) {
