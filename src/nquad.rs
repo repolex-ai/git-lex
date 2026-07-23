@@ -27,6 +27,37 @@ use crate::extraction::{flatten_yaml, normalize_wikilink_path,
 use crate::ontology::{get_object_properties_all_kits, get_property_datatypes_all_kits};
 use crate::resolve;
 
+/// Write a sidecar (or its `.meta`) file, failing the process on error.
+/// A silently unwritten sidecar is a permanent history gap: the committed
+/// sidecar diff is the one graph's ONLY event source, so "couldn't write,
+/// carried on" means facts that never happened as far as history is
+/// concerned (review finding A8).
+pub(crate) fn write_sidecar_loud(path: &std::path::Path, content: &str) {
+    if let Some(parent) = path.parent() {
+        if let Err(e) = fs::create_dir_all(parent) {
+            eprintln!("fatal: failed to create sidecar dir {}: {e}", parent.display());
+            std::process::exit(1);
+        }
+    }
+    if let Err(e) = fs::write(path, content) {
+        eprintln!("fatal: failed to write sidecar {}: {e}", path.display());
+        std::process::exit(1);
+    }
+}
+
+/// Remove a stale sidecar, failing the process on error (already-gone is
+/// fine — that's the desired end state). A stale sidecar that survives
+/// removal keeps its facts alive forever: the sync diff never sees the
+/// lines vanish, so the retraction events never exist (review finding A3).
+pub(crate) fn remove_sidecar_loud(path: &std::path::Path) {
+    if let Err(e) = fs::remove_file(path) {
+        if e.kind() != std::io::ErrorKind::NotFound {
+            eprintln!("fatal: failed to remove stale sidecar {}: {e}", path.display());
+            std::process::exit(1);
+        }
+    }
+}
+
 /// Escape a string for use in N-Quads literals.
 pub(crate) fn nq_escape(s: &str) -> String {
     s.replace('\\', "\\\\")
@@ -240,11 +271,10 @@ pub(crate) fn generate_frontmatter_nquads() -> (String, u32) {
         // signal — the now graph rebuilds from files and never notices).
         let spo_path = extract_dir.join(format!("{}.fm.spo", relpath_str));
         if !spo_lines.is_empty() {
-            fs::create_dir_all(spo_path.parent().unwrap()).ok();
             let spo_content = spo_lines.join("\n") + "\n";
-            fs::write(&spo_path, &spo_content).ok();
+            write_sidecar_loud(&spo_path, &spo_content);
         } else if spo_path.exists() {
-            fs::remove_file(&spo_path).ok();
+            remove_sidecar_loud(&spo_path);
         }
 
         // --- Generate N-Quads for oxigraph (now graph) ---

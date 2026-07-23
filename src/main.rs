@@ -1817,6 +1817,13 @@ fn cmd_extract() {
         for err in &cleanup.errors {
             eprintln!("  error    {}", err);
         }
+        if !cleanup.errors.is_empty() {
+            // An orphan sidecar left behind here keeps its facts alive in
+            // the graph forever (the sync diff never sees the lines vanish).
+            // Fail the commit; fix the state and retry.
+            eprintln!("fatal: sidecar cleanup failed — see errors above");
+            exit(1);
+        }
     }
 
     // Run frontmatter extraction (writes .spo sidecars as a side effect)

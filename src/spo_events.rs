@@ -258,9 +258,14 @@ impl CleanupReport {
 /// automatically.
 const SPO_EXTRACTOR_SUFFIXES: &[&str] = &["fm", "md", "cc", "gliner", "haiku"];
 
-/// Ask git for the staged-but-not-yet-committed change set on `.md` files,
+/// Ask git for the staged-but-not-yet-committed change set on extractable
+/// source files (`.md` AND `.jsonl` — every extension an extractor consumes),
 /// filtered to the tracked content tree (no `.lex/**`). Returns the raw
 /// diff status output, which `parse_staged_md_changes` then parses.
+///
+/// A git FAILURE is an error, never "nothing staged": conflating the two
+/// silently skips orphan cleanup, which is exactly the ghost-triple scenario
+/// this machinery exists to prevent (review finding A6).
 ///
 /// Uses `diff --cached` (index vs HEAD) because this function is called
 /// from the pre-commit hook, where changes have been staged by the hook
@@ -269,7 +274,7 @@ const SPO_EXTRACTOR_SUFFIXES: &[&str] = &["fm", "md", "cc", "gliner", "haiku"];
 ///
 /// `-M50%` turns on rename detection at 50% similarity — same threshold
 /// the diff-tree walker uses, for consistency.
-fn git_staged_md_changes() -> Option<String> {
+fn git_staged_md_changes() -> Result<String, String> {
     let out = Command::new("git")
         .args([
             "diff",
@@ -279,16 +284,21 @@ fn git_staged_md_changes() -> Option<String> {
             "-z",
             "--",
             "*.md",
+            "*.jsonl",
             ":!.lex/",
         ])
         .output()
-        .ok()?;
+        .map_err(|e| format!("git diff --cached spawn failed: {e}"))?;
     if !out.status.success() {
-        return None;
+        return Err(format!(
+            "git diff --cached failed ({}): {}",
+            out.status,
+            String::from_utf8_lossy(&out.stderr).trim()
+        ));
     }
     // `-z` gives NUL-separated records; we want lossy UTF-8 because paths
     // might not be strict UTF-8 but we'll still see them correctly.
-    Some(String::from_utf8_lossy(&out.stdout).into_owned())
+    Ok(String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
 /// Parse the `git diff --cached --name-status -M -z` output into a pair
@@ -473,11 +483,14 @@ pub fn cleanup_sidecars_for_staged_changes() -> CleanupReport {
     }
 
     let raw = match git_staged_md_changes() {
-        Some(r) => r,
-        None => {
-            // No staged .md changes, or git command failed. Either way
-            // nothing to clean up — this is the common case when commits
-            // don't touch the content tree.
+        Ok(r) => r,
+        Err(e) => {
+            // A failed query is NOT "nothing staged" — skipping cleanup on
+            // it would leave orphan sidecars whose facts live forever. The
+            // caller fails the commit on any report error.
+            report.errors.push(format!(
+                "staged-change query failed — cleanup skipped, orphan sidecars may remain: {e}"
+            ));
             if let Some(p) = prev_cwd {
                 let _ = std::env::set_current_dir(p);
             }
@@ -491,6 +504,15 @@ pub fn cleanup_sidecars_for_staged_changes() -> CleanupReport {
         for sidecar in sidecar_paths_for_md(md_path) {
             match git_rm(&sidecar) {
                 Ok(()) => report.deleted.push(sidecar),
+                Err(e) => report.errors.push(e),
+            }
+        }
+        // The jsonl extractor also keeps a `.meta` bookkeeping file next to
+        // its sidecar; a deleted source must take it along.
+        let meta = format!(".lex/extract/{}.meta", md_path);
+        if git_path_is_tracked(&meta) {
+            match git_rm(&meta) {
+                Ok(()) => report.deleted.push(meta),
                 Err(e) => report.errors.push(e),
             }
         }
@@ -531,6 +553,18 @@ pub fn cleanup_sidecars_for_staged_changes() -> CleanupReport {
             }
             match git_mv(&old_sidecar, &new_sidecar) {
                 Ok(()) => report.renamed.push((old_sidecar, new_sidecar)),
+                Err(e) => report.errors.push(e),
+            }
+        }
+        // Move the jsonl extractor's `.meta` bookkeeping file along with a
+        // renamed source (same tracked-in-index rules as the sidecars).
+        let old_meta = format!(".lex/extract/{}.meta", old_md);
+        let new_meta = format!(".lex/extract/{}.meta", new_md);
+        if git_path_is_tracked(&old_meta)
+            && !(git_path_is_tracked(&new_meta) && new_meta != old_meta)
+        {
+            match git_mv(&old_meta, &new_meta) {
+                Ok(()) => report.renamed.push((old_meta, new_meta)),
                 Err(e) => report.errors.push(e),
             }
         }

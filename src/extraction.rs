@@ -484,12 +484,13 @@ pub(crate) fn extract_jsonl_sessions() {
         spo_lines.dedup();
 
         let spo_path = extract_dir.join(format!("{}.cc.spo", relpath_str));
-        fs::create_dir_all(spo_path.parent().unwrap()).ok();
-        fs::write(&spo_path, spo_lines.join("\n") + "\n").ok();
+        crate::nquad::write_sidecar_loud(&spo_path, &(spo_lines.join("\n") + "\n"));
 
         // Write meta for incremental
-        fs::create_dir_all(meta_path.parent().unwrap()).ok();
-        fs::write(&meta_path, format!("last_line: {}\nlast_sync: {}\n", total_lines, last_timestamp)).ok();
+        crate::nquad::write_sidecar_loud(
+            &meta_path,
+            &format!("last_line: {}\nlast_sync: {}\n", total_lines, last_timestamp),
+        );
     }
 }
 
@@ -614,14 +615,18 @@ pub(crate) fn extract_markdown_links() {
             extract_links(inline_root, &content, &mut spo_lines, &file_index, &doc_dir);
         }
 
-        // Write .md.spo sidecar
+        // Write .md.spo sidecar; when a doc's last link goes away its
+        // sidecar must go away too, so the sync diff sees the lines vanish
+        // and records retractions — same contract as the `.fm.spo` path
+        // (a stale sidecar keeps dead links alive in the graph forever).
+        let spo_path = extract_dir.join(format!("{}.md.spo", relpath_str));
         if !spo_lines.is_empty() {
             spo_lines.sort();
             spo_lines.dedup();
-            let spo_path = extract_dir.join(format!("{}.md.spo", relpath_str));
-            fs::create_dir_all(spo_path.parent().unwrap()).ok();
-            fs::write(&spo_path, spo_lines.join("\n") + "\n").ok();
+            crate::nquad::write_sidecar_loud(&spo_path, &(spo_lines.join("\n") + "\n"));
             total_links += spo_lines.len();
+        } else if spo_path.exists() {
+            crate::nquad::remove_sidecar_loud(&spo_path);
         }
     }
 
