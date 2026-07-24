@@ -79,11 +79,13 @@ pub fn get_kit() -> Option<String> {
 // ─── Kit namespace derivation (ONE authority) ──────────────────
 
 /// The conventional kit namespace, used ONLY as a fallback when no installed
-/// TTL declares one (e.g. a fresh repo before kit files land). Everywhere
-/// else the kit's own `@prefix` declaration is the authority — this function
-/// is the single place the convention is written down.
+/// TTL declares one (e.g. frontmatter referencing a kit that isn't
+/// installed). Everywhere else the kit's own `@prefix` declaration is the
+/// authority — this function is the single place the convention is written
+/// down. The convention is the app-tier pattern (`ontology/<short>/`); the
+/// old `ontology/kit/` tier is ruled dead (2026-07-24 flip).
 pub fn conventional_kit_namespace(short: &str) -> String {
-    format!("https://repolex.ai/ontology/kit/{}/", short)
+    format!("https://repolex.ai/ontology/{}/", short)
 }
 
 /// Find a kit's own prefix declaration in TTL content. Returns

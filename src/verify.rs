@@ -26,9 +26,13 @@ use oxigraph::sparql::{QueryResults, SparqlEvaluator};
 use oxigraph::store::Store;
 
 const ONTOLOGY_GRAPH: &str = "https://repolex.ai/git-lex/NamedGraph/repo-ontology";
+// The ENTIRE ontology root is governed: anything the store carries under
+// https://repolex.ai/ontology/ must be declared. This covers both the
+// app-tier kit namespaces (ontology/soul/, ontology/copia/, … — the
+// 2026-07-24 flip off the ruled-dead kit/ tier) and whatever kit/-tier
+// vocab remains quoted in history until each repo's full rebuild.
 const GOVERNED_PREFIXES: &[&str] = &[
-    "https://repolex.ai/ontology/kit/",
-    "https://repolex.ai/ontology/git-lex/",
+    "https://repolex.ai/ontology/",
 ];
 const EXEMPT_PREFIXES: &[&str] = &[
     "https://repolex.ai/ontology/git-lex/fm/", // open by design (fm.ttl)

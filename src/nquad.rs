@@ -777,8 +777,8 @@ mod tests {
             &mut types, &mut out2,
         );
         assert!(
-            out2.contains("<https://repolex.ai/ontology/kit/copia/beingName>"),
-            "undeclared kit must use the conventional fallback, got: {out2}"
+            out2.contains("<https://repolex.ai/ontology/copia/beingName>"),
+            "undeclared kit must use the conventional (app-tier) fallback, got: {out2}"
         );
     }
 
