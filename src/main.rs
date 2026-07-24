@@ -115,13 +115,12 @@ enum Commands {
         #[arg(long)]
         json: bool,
     },
-    /// Extract frontmatter from .md files → write .spo sidecars + compile log
-    #[command(hide = true)]
-    Extract,
-    /// Validate documents against SHACL shapes from the kit ontology
-    #[command(hide = true)]
-    Validate,
-    /// Internal: called by git hooks, not for direct use
+    /// Internal: called by git hooks, not for direct use. `pre-commit` runs
+    /// the fixed save sequence — sidecar cleanup → extraction → staging →
+    /// SHACL validation — failing the commit on any error. This is the ONLY
+    /// entrypoint to that machinery (the old `extract`/`validate` variants
+    /// were vestigial development entrypoints; removed 2026-07-24,
+    /// Rob-ruled).
     #[command(hide = true)]
     Hook {
         /// Hook event name (e.g., pre-commit)
@@ -227,38 +226,20 @@ enum Commands {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
-    /// [SPIKE] Build the experimental "one graph" temporal model and print
-    /// sample output.
+    /// Health-check the database (read-only): confirms the kit vocabularies
+    /// are loaded, every stored property is declared by an ontology, the
+    /// history is well-formed, and current state matches what the history
+    /// says it should be. Exits non-zero on any failure.
     ///
-    /// EXPERIMENTAL — this is a spike, not a shipped feature. It exists to
-    /// evaluate a candidate replacement for the current history subsystem. It
-    /// is never invoked by `git lex save` or `git lex sync`.
-    ///
-    /// The one-graph model collapses history + sync + now into a single graph
-    /// (`<.../NamedGraph/one>`) using RDF 1.2 triple-term reification:
-    ///
-    ///     <reifier> rdf:reifies         <<( s p o )>> .
-    ///     <reifier> git-lex:assertedIn  <Commit/SHA> .   (line added)
-    ///     <reifier> git-lex:retractedIn <Commit/SHA> .   (line removed)
-    ///
-    /// "What is true now" is a DERIVED query (a fact whose latest event is an
-    /// assert with no later retract). Facts JOIN to their commit's author/date
-    /// via the existing command-faithful `git:Commit` nodes. Every `.spo` line
-    /// is resolved through the same emitter the now-graph uses — no bespoke
-    /// resolution.
-    ///
-    /// The vocabulary is DECLARED (git-lex.ttl: SpoEvent, assertedIn,
-    /// retractedIn) and the graph is the real one
-    /// (`git-lex/LexHistoryGraph`) — this command is now a full-rebuild
-    /// tool over the same engine sync uses incrementally. Run with
-    /// `--clear` to drop the graph and do nothing else.
-    /// Run the data-quality verification suite against the persistent store
-    /// (read-only). Checks: every governed predicate/class is declared in the
-    /// store's own ontology graph; one-graph structural integrity (one
-    /// statement + one direction per SpoEvent, no dangling commit joins);
-    /// zero known-junk predicate families. Exits non-zero on any failure.
+    /// TEMPORARY (Rob-ruled 2026-07-24): kept visible as the receipt tool
+    /// for the v1 update/migration; will be REMOVED after the rollout.
     Verify,
 
+    /// Rebuild the history graph from scratch — drops it and re-derives
+    /// every event from the full commit history, using the same engine
+    /// `sync` runs incrementally. Use after a migration (e.g. a namespace
+    /// change) or if `verify` reports corruption. `--clear` drops the
+    /// graph without rebuilding.
     SpikeOnegraph {
         /// Drop the SPIKE one-graph and exit without rebuilding.
         #[arg(long)]
@@ -2717,12 +2698,6 @@ fn main() {
             let (fm_nq, _) = generate_frontmatter_nquads();
             let lex_nq = load_lex_nquads();
             print!("{}{}{}", git_nq, fm_nq, lex_nq);
-        }
-        Commands::Extract => cmd_extract(),
-        Commands::Validate => {
-            if !cmd_validate() {
-                exit(1);
-            }
         }
         Commands::Hook { event } => {
             match event.as_str() {
