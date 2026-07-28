@@ -1876,7 +1876,14 @@ fn sync_onegraph_phase(store: &Store, root: &std::path::Path, resume_sha: Option
     };
 
     if !shas.is_empty() {
-        let commits = spo_events::collect_commits_from_shas(&shas);
+        let commits = match spo_events::collect_commits_from_shas(&shas) {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("ERROR: could not read commit diffs: {e}");
+                eprintln!("Sync aborted; the one graph was not updated. A failing diff usually means repository corruption — run `git fsck`.");
+                std::process::exit(1);
+            }
+        };
 
         // Same resolver inputs the now-graph emitter uses — ALL installed
         // kits (base + optionals), so one-graph facts resolve identically to
