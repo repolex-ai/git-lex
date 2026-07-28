@@ -117,7 +117,8 @@ pub(crate) fn emit_class_templates(kit_name: &str, root: &std::path::Path, creat
             .or_else(|_| fs::read_to_string(&adaptive_p))
             .unwrap_or_default()
     };
-    let shacl_hints = parse_shacl_hints(&shapes_content);
+    let shacl_hints = parse_shacl_hints(&shapes_content, &short);
+    let prefix_name = get_kit_prefix_name(&short);
 
     let folder_base = kit_config_str(kit_name, "folder base");
     let mut templates_updated = 0usize;
@@ -155,7 +156,6 @@ pub(crate) fn emit_class_templates(kit_name: &str, root: &std::path::Path, creat
         tmpl.push_str("---\n");
         for (prop_name, prop_type, _required, _comment) in properties {
             let key = format!("{}.{}.{}", short, type_name, prop_name);
-            let prefix_name = get_kit_prefix_name(&short);
             let hint = shacl_hints.get(&format!("{}:{}", prefix_name, prop_name));
             let comment = match hint {
                 Some(h) => format!(" # {}", h),

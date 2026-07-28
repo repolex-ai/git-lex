@@ -21,85 +21,113 @@ use std::path::PathBuf;
 use git_lex::{find_git_root, resolve_kit_spec};
 
 /// Parse SHACL shapes TTL to extract inline hints for class template comments.
-/// Returns a map of property name → hint string (e.g. "enum: certain, likely, hypothesis, hunch")
-// FIXME(w4r3z, Day 38): DUAL-PARSER smell. This fn hand-scans TTL line-by-line
-// (`starts_with("sh:path ")`, `strip_prefix`, find('(')…) while THIS SAME MODULE
-// loads the same TTL into a real oxigraph Store and queries it with SPARQL
-// (generate_shacl_shapes, ~line 125+). The hand-scanner breaks on any valid TTL
-// that doesn't match its exact line shape: multi-line `sh:in (...)` spanning
-// lines, predicates on the same line as `;`, comments, alternate spacing, or
-// `sh:path` with a full IRI instead of a prefixed name. Since the Store is
-// already in this module, parse hints via SPARQL too (one parse, robust). This
-// is the same hand-rolled-parser-next-to-a-real-one pattern as get_kit (lib.rs)
-// and the two type-emitters (B1) — a recurring soft-release smell across git-lex.
-pub(crate) fn parse_shacl_hints(shapes_ttl: &str) -> HashMap<String, String> {
+/// Returns a map of property qname (`soul:confidence`) → hint string
+/// (e.g. "optional, enum: certain, likely, hypothesis, hunch").
+///
+/// Real Turtle parse + SPARQL over the same in-memory-store approach shape
+/// GENERATION already uses — one Turtle-reading policy, no line scanning.
+/// `short` names the kit so the key prefix can be derived from the file's
+/// own `@prefix` declaration (the ONE shared scanner).
+///
+/// `sh:in` members are walked down the RDF list (rdf:first/rdf:rest), so
+/// enum values keep their declaration order.
+pub(crate) fn parse_shacl_hints(shapes_ttl: &str, short: &str) -> HashMap<String, String> {
     let mut hints: HashMap<String, String> = HashMap::new();
-    let mut current_path = String::new();
-    let mut current_in_values: Vec<String> = Vec::new();
-    let mut current_node_kind = String::new();
-    let mut current_min_count: Option<u32> = None;
+    let (prefix_name, namespace) = git_lex::extract_kit_prefix(shapes_ttl, short)
+        .unwrap_or_else(|| (short.to_string(), git_lex::conventional_kit_namespace(short)));
 
-    for line in shapes_ttl.lines() {
-        let trimmed = line.trim();
+    let store = match crate::kit::load_ttl_str(shapes_ttl, &format!("{} shapes", short)) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("warning: {} — no template hints for kit '{}'", e, short);
+            return hints;
+        }
+    };
 
-        // sh:path soul:confidence ;
-        if trimmed.starts_with("sh:path ") {
-            // Flush previous property
-            if !current_path.is_empty() {
-                let hint = build_shacl_hint(&current_in_values, &current_node_kind, current_min_count);
-                if !hint.is_empty() {
-                    hints.insert(current_path.clone(), hint);
-                }
+    let q = "PREFIX sh: <http://www.w3.org/ns/shacl#>
+             SELECT ?prop ?path ?nodeKind ?minCount ?inList WHERE {
+                 ?prop sh:path ?path .
+                 OPTIONAL { ?prop sh:nodeKind ?nodeKind }
+                 OPTIONAL { ?prop sh:minCount ?minCount }
+                 OPTIONAL { ?prop sh:in ?inList }
+             } ORDER BY ?path";
+    let Ok(oxigraph::sparql::QueryResults::Solutions(sols)) = git_lex::eval_query(&store, q)
+    else { return hints };
+
+    for s in sols.flatten() {
+        let Some(Term::NamedNode(path)) = s.get("path") else { continue };
+        // Key mirrors what the template emitter looks up: `{prefix}:{local}`.
+        // A path outside the kit namespace keeps its full bracketed IRI
+        // (never looked up, but never collides either).
+        let key = match path.as_str().strip_prefix(&namespace) {
+            Some(local) => format!("{}:{}", prefix_name, local),
+            None => format!("<{}>", path.as_str()),
+        };
+
+        let in_values: Vec<String> = match s.get("inList") {
+            Some(list) => rdf_list_literals(&store, list),
+            None => Vec::new(),
+        };
+        let node_kind = match s.get("nodeKind") {
+            Some(Term::NamedNode(nk)) if nk.as_str() == "http://www.w3.org/ns/shacl#IRI" => {
+                "sh:IRI".to_string()
             }
-            current_path = trimmed
-                .strip_prefix("sh:path ").unwrap_or("")
-                .trim_end_matches(|c: char| c == ' ' || c == ';')
-                .to_string();
-            current_in_values.clear();
-            current_node_kind.clear();
-            current_min_count = None;
-        }
+            _ => String::new(),
+        };
+        let min_count: Option<u32> = match s.get("minCount") {
+            Some(Term::Literal(l)) => l.value().parse().ok(),
+            _ => None,
+        };
 
-        // sh:in ( "certain" "likely" "hypothesis" "hunch" ) ;
-        if trimmed.starts_with("sh:in") {
-            // Extract values between ( and )
-            if let Some(start) = trimmed.find('(') {
-                if let Some(end) = trimmed.find(')') {
-                    let values_str = &trimmed[start + 1..end];
-                    current_in_values = values_str
-                        .split('"')
-                        .filter(|s| !s.trim().is_empty())
-                        .map(|s| s.to_string())
-                        .collect();
-                }
-            }
-        }
-
-        // sh:nodeKind sh:IRI ;
-        if trimmed.starts_with("sh:nodeKind") {
-            current_node_kind = trimmed
-                .strip_prefix("sh:nodeKind ").unwrap_or("")
-                .trim_end_matches(|c: char| c == ' ' || c == ';')
-                .to_string();
-        }
-
-        // sh:minCount 1 ;
-        if trimmed.starts_with("sh:minCount") {
-            if let Some(num_str) = trimmed.split_whitespace().nth(1) {
-                current_min_count = num_str.trim_end_matches(|c: char| c == ' ' || c == ';').parse().ok();
-            }
-        }
-    }
-
-    // Flush last property
-    if !current_path.is_empty() {
-        let hint = build_shacl_hint(&current_in_values, &current_node_kind, current_min_count);
+        let hint = build_shacl_hint(&in_values, &node_kind, min_count);
         if !hint.is_empty() {
-            hints.insert(current_path, hint);
+            hints.insert(key, hint);
         }
     }
 
     hints
+}
+
+/// Walk an RDF list (rdf:first/rdf:rest … rdf:nil) collecting literal member
+/// values IN LIST ORDER — SPARQL property paths can't guarantee order, the
+/// chain itself does. Non-literal members are skipped (enum hints are about
+/// literal values). Cycle-guarded.
+fn rdf_list_literals(store: &oxigraph::store::Store, head: &Term) -> Vec<String> {
+    use oxigraph::model::{NamedNodeRef, NamedOrBlankNodeRef};
+    const RDF_FIRST: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#first";
+    const RDF_REST: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#rest";
+    const RDF_NIL: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#nil";
+    let first = NamedNodeRef::new(RDF_FIRST).unwrap();
+    let rest = NamedNodeRef::new(RDF_REST).unwrap();
+
+    let mut out = Vec::new();
+    let mut node = head.clone();
+    let mut seen: HashSet<String> = HashSet::new();
+    loop {
+        let subject = match &node {
+            Term::NamedNode(n) if n.as_str() == RDF_NIL => break,
+            Term::NamedNode(n) => NamedOrBlankNodeRef::from(n.as_ref()),
+            Term::BlankNode(b) => NamedOrBlankNodeRef::from(b.as_ref()),
+            _ => break,
+        };
+        if !seen.insert(node.to_string()) { break; } // cycle guard
+        if let Some(Ok(q)) = store
+            .quads_for_pattern(Some(subject), Some(first), None, None)
+            .next()
+        {
+            if let Term::Literal(l) = q.object {
+                out.push(l.value().to_string());
+            }
+        }
+        match store
+            .quads_for_pattern(Some(subject), Some(rest), None, None)
+            .next()
+        {
+            Some(Ok(q)) => node = q.object,
+            _ => break,
+        }
+    }
+    out
 }
 
 fn build_shacl_hint(in_values: &[String], node_kind: &str, min_count: Option<u32>) -> String {
@@ -412,21 +440,17 @@ pub(crate) fn build_adaptive_shapes() -> (Vec<(PathBuf, PathBuf)>, Vec<(PathBuf,
                 }
             };
 
-            // Load into temp store
-            let store = match oxigraph::store::Store::new() {
+            // Load into temp store — the ONE TTL-text loader.
+            let store = match crate::kit::load_ttl_str(
+                &ttl_content,
+                &ttl_path.display().to_string(),
+            ) {
                 Ok(s) => s,
                 Err(e) => {
-                    failures.push((ttl_path, format!("store error: {}", e)));
+                    failures.push((ttl_path, e));
                     continue;
                 }
             };
-            if let Err(e) = store.load_from_reader(
-                oxigraph::io::RdfFormat::Turtle,
-                std::io::Cursor::new(ttl_content.as_bytes()),
-            ) {
-                failures.push((ttl_path, format!("parse error: {}", e)));
-                continue;
-            }
 
             // Detect prefix and namespace from the TTL.
             //
