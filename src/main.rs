@@ -2353,7 +2353,7 @@ fn spike_onegraph_report(store: &Store, one_graph: &str, limit: usize) {
 
     let run = |q: &str| -> Vec<Vec<String>> {
         let mut rows = Vec::new();
-        if let Ok(oxigraph::sparql::QueryResults::Solutions(sols)) = store.query(q) {
+        if let Ok(oxigraph::sparql::QueryResults::Solutions(sols)) = git_lex::eval_query(store, q) {
             let vars: Vec<String> = sols.variables().iter().map(|v| v.as_str().to_string()).collect();
             for s in sols.flatten() {
                 rows.push(vars.iter().map(|v| s.get(v.as_str()).map(|t| t.to_string()).unwrap_or_default()).collect());
@@ -2473,7 +2473,7 @@ fn run_query(store: &Store, query: &str, store_type: &str, json: bool) {
     let start = Instant::now();
     let prefixed = add_prefixes(query);
 
-    let mut parsed_query = match oxigraph::sparql::Query::parse(&prefixed, None) {
+    let mut parsed_query = match oxigraph::sparql::SparqlEvaluator::new().parse_query(&prefixed) {
         Ok(e) => e,
         Err(e) => {
             if json {
@@ -2486,7 +2486,7 @@ fn run_query(store: &Store, query: &str, store_type: &str, json: bool) {
     };
     parsed_query.dataset_mut().set_default_graph_as_union();
 
-    let results = match store.query(parsed_query) {
+    let results = match parsed_query.on_store(store).execute() {
         Ok(r) => r,
         Err(e) => {
             if json {

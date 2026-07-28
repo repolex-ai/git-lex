@@ -1145,7 +1145,7 @@ pub(crate) fn onegraph_walk_engine(
     // Net base-layer effect per triple across this walk (last op wins).
     let mut base_final: HashMap<String, char> = HashMap::new();
 
-    let mut resolve_sidecar_at = |commit: &str,
+    let resolve_sidecar_at = |commit: &str,
                                   sidecar_path: &str,
                                   acct: &mut DropAccounting,
                                   warned_unknown: &mut HashSet<String>|

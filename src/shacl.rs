@@ -133,7 +133,7 @@ fn generate_shapes_from_store(
     let classes: Vec<String> = {
         let q = "PREFIX owl: <http://www.w3.org/2002/07/owl#>
                  SELECT ?class WHERE { ?class a owl:Class }";
-        match store.query(q) {
+        match git_lex::eval_query(store, q) {
             Ok(oxigraph::sparql::QueryResults::Solutions(sols)) => {
                 sols.filter_map(|s| s.ok().and_then(|s| {
                     s.get("class").map(|t| match t {
@@ -164,7 +164,7 @@ fn generate_shapes_from_store(
                      OPTIONAL { ?prop rdfs:range ?range }
                      OPTIONAL { ?prop rdfs:comment ?comment }
                  } ORDER BY ?domain ?prop";
-        match store.query(q) {
+        match git_lex::eval_query(store, q) {
             Ok(oxigraph::sparql::QueryResults::Solutions(sols)) => {
                 sols.filter_map(|s| s.ok().map(|s| {
                     let term_str = |name: &str| -> String {
@@ -198,7 +198,7 @@ fn generate_shapes_from_store(
                             owl:oneOf ?list .
                      ?list rdf:rest*/rdf:first ?value .
                  } ORDER BY ?dtype ?value";
-        if let Ok(oxigraph::sparql::QueryResults::Solutions(sols)) = store.query(q) {
+        if let Ok(oxigraph::sparql::QueryResults::Solutions(sols)) = git_lex::eval_query(store, q) {
             for s in sols.flatten() {
                 let dtype = s.get("dtype").map(|t| match t {
                     Term::NamedNode(n) => n.as_str().to_string(),
@@ -229,7 +229,7 @@ fn generate_shapes_from_store(
                      { ?restriction owl:cardinality ?card }
                      FILTER(?card >= 1)
                  }";
-        if let Ok(oxigraph::sparql::QueryResults::Solutions(sols)) = store.query(q) {
+        if let Ok(oxigraph::sparql::QueryResults::Solutions(sols)) = git_lex::eval_query(store, q) {
             for s in sols.flatten() {
                 let class = s.get("class").map(|t| match t {
                     Term::NamedNode(n) => n.as_str().to_string(),

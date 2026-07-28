@@ -76,6 +76,21 @@ pub fn get_kit() -> Option<String> {
     None
 }
 
+/// Evaluate a SPARQL query on a store via the current oxigraph API
+/// (`SparqlEvaluator`) — the deprecated `Query::parse` + `Store::query`
+/// pair lived at nine call sites; this is the one replacement.
+pub fn eval_query<'a>(
+    store: &'a Store,
+    q: &str,
+) -> Result<oxigraph::sparql::QueryResults<'a>, String> {
+    oxigraph::sparql::SparqlEvaluator::new()
+        .parse_query(q)
+        .map_err(|e| format!("parse: {e}"))?
+        .on_store(store)
+        .execute()
+        .map_err(|e| format!("eval: {e}"))
+}
+
 // ─── Kit namespace derivation (ONE authority) ──────────────────
 
 /// The conventional kit namespace, used ONLY as a fallback when no installed
@@ -502,10 +517,11 @@ pub fn w3c_query_at(
     query: &str,
 ) -> Result<W3cQueryOutcome, W3cQueryError> {
     let prefixed = add_prefixes_at(root, query);
-    let parsed = oxigraph::sparql::Query::parse(&prefixed, None)
-        .map_err(|e| W3cQueryError::Parse(e.to_string()))?;
-    let results = store
-        .query(parsed)
+    let results = oxigraph::sparql::SparqlEvaluator::new()
+        .parse_query(&prefixed)
+        .map_err(|e| W3cQueryError::Parse(e.to_string()))?
+        .on_store(store)
+        .execute()
         .map_err(|e| W3cQueryError::Eval(e.to_string()))?;
     match results {
         oxigraph::sparql::QueryResults::Solutions(solutions) => {

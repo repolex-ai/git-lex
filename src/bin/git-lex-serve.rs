@@ -76,13 +76,13 @@ struct VizState {
 
 fn run_sparql_to_json(store: &Store, query: &str) -> serde_json::Value {
     let prefixed = add_prefixes(query);
-    let mut parsed = match oxigraph::sparql::Query::parse(&prefixed, None) {
+    let mut parsed = match oxigraph::sparql::SparqlEvaluator::new().parse_query(&prefixed) {
         Ok(p) => p,
         Err(e) => return serde_json::json!({"error": format!("parse error: {}", e)}),
     };
     parsed.dataset_mut().set_default_graph_as_union();
 
-    let results = match store.query(parsed) {
+    let results = match parsed.on_store(store).execute() {
         Ok(r) => r,
         Err(e) => return serde_json::json!({"error": format!("query error: {}", e)}),
     };
