@@ -382,9 +382,12 @@ fn cmd_create(doctype: &str, instance_id: Option<&str>, json: bool) {
         exit(1);
     };
 
+    // Not require_git_root() here: cmd_create's failure paths are all
+    // JSON-aware via `fail` (--json consumers get structured errors), but
+    // the message text matches require_git_root's canonical wording.
     let root = match find_git_root() {
         Some(r) => r,
-        None => fail("not-a-repo", "fatal: not a git repository".to_string()),
+        None => fail("not-a-repo", "fatal: not a git repository (run this inside a repo)".to_string()),
     };
 
     // Resolve the doctype across base + domain + all installed optional kits.
@@ -596,13 +599,7 @@ fn resolve_agent_identity(root: &std::path::Path) -> Option<(String, String)> {
 }
 
 fn cmd_save(message: &str) {
-    let root = match find_git_root() {
-        Some(r) => r,
-        None => {
-            eprintln!("fatal: not in a git repository");
-            exit(1);
-        }
-    };
+    let root = require_git_root();
 
     // Resolve the agent's identity. Tries env first (squad-repo case where
     // the agent's soul session injects GIT_AUTHOR_*) then settings.json
@@ -672,13 +669,7 @@ fn cmd_save(message: &str) {
 fn cmd_validate() -> bool {
     let start = Instant::now();
 
-    let root = match find_git_root() {
-        Some(r) => r,
-        None => {
-            eprintln!("fatal: not a git repository");
-            exit(1);
-        }
-    };
+    let root = require_git_root();
 
     let kit = match get_kit() {
         Some(k) => k,
