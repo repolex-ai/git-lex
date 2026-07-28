@@ -21,6 +21,8 @@ git lex query "PREFIX ks: <https://repolex.ai/ontology/kit/soul/>
 > reports are very welcome — that's exactly what this stage is for. See
 > [Known limitations](#known-limitations-alpha) before you start.
 
+Full documentation lives in [`docs/`](docs/index.md).
+
 ---
 
 ## Why
@@ -75,12 +77,13 @@ git lex --help
 
 ### From a release binary
 
-Download the binary for your platform from the
-[Releases page](https://github.com/repolex-ai/git-lex/releases), put it on your
-`PATH`, and make it executable:
+Download **both** binaries for your platform from the
+[Releases page](https://github.com/repolex-ai/git-lex/releases) — `git-lex`
+(the CLI) and `git-lex-serve` (needed by `git lex serve`) — put them on your
+`PATH`, and make them executable:
 
 ```bash
-chmod +x git-lex && mv git-lex /usr/local/bin/
+chmod +x git-lex git-lex-serve && mv git-lex git-lex-serve /usr/local/bin/
 git lex --help
 ```
 
@@ -96,6 +99,9 @@ git lex create Memory "day-1"    # scaffold a typed Memory document
 # ...edit the new .md file: fill in its frontmatter + body...
 git lex save "first memory"      # stage + extract + validate + commit
 git lex query "SELECT * WHERE { ?s ?p ?o } LIMIT 10"
+git lex sync                     # build the history store, then:
+git lex show day-1               # current facts about a document
+git lex log day-1                # every change to it, with commit + author + date
 ```
 
 `git lex save` is the everyday command: it stages your changes, runs frontmatter
@@ -136,17 +142,19 @@ git lex query "PREFIX ks: <https://repolex.ai/ontology/kit/soul/>
 | `git lex init [--kit <name>]` | Initialize `.lex/` in the current repo. The base kit is always installed; `--kit` adds a domain kit (e.g. `soul`). |
 | `git lex create <Type> [<id>]` | Scaffold a new document from a kit class, with frontmatter stubbed from the ontology. |
 | `git lex save "msg"` | Stage + extract frontmatter + SHACL-validate + commit, in one step. |
-| `git lex query "SPARQL"` | Run a SPARQL query over a live view built from your working tree, so it always reflects current frontmatter (no `sync` needed). History/sync graphs live in the persistent store and are served by the SPARQL endpoint (`git lex serve sparql`). `--json` for machine output. |
+| `git lex query "SPARQL"` | Run a SPARQL query over a live view built from your working tree, so it always reflects current frontmatter (no `sync` needed). History lives in the synced store — query it via `show`/`log` or the SPARQL endpoint (`git lex serve sparql`). `--json` for machine output. |
+| `git lex show <thing>` | Current facts about a document (substring match on its IRI). Reads the synced store. |
+| `git lex log [<thing>]` | The document's fact history — every assert/retract event with its commit, author, and date. Omit `<thing>` for the repo's most recent events. |
 | `git lex list` | List every document class the repo's installed kits define, each with its full namespace IRI (the prefix to query against). `--json` for machine output. |
-| `git lex sync` | Snapshot the current state into the persistent history store as a commit-tagged graph (RDF 1.2 provenance). Builds the temporal "what was true when" view; not required for querying current state. |
+| `git lex sync` | Build/update the persistent store: walks new commits and appends each fact change as an assert/retract event tied to its commit (RDF 1.2 provenance), then refreshes the current-state view. Not required for `query`. |
 | `git lex kit-update [<kit>]` | Re-download + reinstall kits. Drift-aware: locally-changed files are preserved and the new version lands beside them as `<file>.kit-latest` to diff (`--force` overwrites, stashing your version first). |
 | `git lex kit-add <org/repo>` | Add an optional kit (the kit's `scope:` must be `optional`). Creates its folders + templates. |
 | `git lex kit-remove <org/repo>` | Remove an optional kit. Asks before deleting any content folders it owns. |
 | `git lex join <squad-path>` | Join a squad repo — creates a mutual identity binding (a ticket) between you and the squad. |
 | `git lex serve <viz\|listen\|sparql>` | Start one local server: `viz` (graph visualizer, 7878), `listen` (SSE relay, 7879), or `sparql` (W3C SPARQL endpoint over the synced store, 7880). |
 | `git lex display "CONSTRUCT ..."` | Run a SPARQL CONSTRUCT and push the result to the running viz server. |
-| `git lex history-verify` | Check the history⇄now invariant — that the temporal graph faithfully reconstructs the current state. |
-| `git lex nuke` | Remove `.lex/` entirely. Your content files and git history are untouched. |
+| `git lex verify` | Health-check the synced store (read-only): vocabulary declared, history well-formed, current state matches history. Temporary command — will be removed after the v1 rollout. |
+| `git lex nuke` | Remove git-lex from the repo. Your content files and git history are untouched — but note it **commits and pushes** the removal (after snapshotting any uncommitted work). |
 
 Run `git lex help <subcommand>` for full options on any command.
 
@@ -158,13 +166,14 @@ git-lex keeps a clean split between **what you write**, **the index**, and
 **derived data**:
 
 - **Content** — normal Markdown in your repo. Structure goes in YAML frontmatter
-  using dot notation: `soul.memory.confidence: "certain"`. In the body, link
-  documents with `[[wikilinks]]` and `@mentions`.
+  using dot notation: `soul.Memory.confidence: "certain"` (class names are
+  case-sensitive). In the body, link documents with `[[wikilinks]]`.
 
 - **`.lex/`** — the git-*tracked* index. Holds extraction sidecars
   (`.lex/extract/**.spo`), the installed kit(s) (`.lex/kit/`), generated SHACL
-  shapes and ontology (`.lex/ontology/`), your identity (`.lex/identity.yml`,
-  anchored on the genesis commit), and squad bindings (`.lex/tickets/`). It's
+  shapes and ontology (`.lex/ontology/`), repo configuration + identity
+  (`.lex/repo.yml`, anchored on the genesis commit), and squad bindings
+  (`.lex/tickets/`). It's
   checked in, so your graph travels with your repo.
 
 - **`.git/lex/`** — derived data (the oxigraph SPARQL store). Never tracked,
@@ -191,9 +200,10 @@ edit .md  →  extract frontmatter to .spo  →  SHACL validate  →  commit
 `git lex query` always builds a fresh view from the working tree, so
 querying current state never requires a sync.
 
-Because each fact is tagged (via RDF 1.2 triple terms) with the commit that
-asserted it, the history graph lets you ask not just *what is true* but *what was
-true, and when you learned it*.
+Because every fact change is recorded as an event (via RDF 1.2 triple terms)
+tied to the commit that caused it, the synced store answers not just *what is
+true* (`git lex show`) but *what was true, when it changed, and who changed
+it* (`git lex log`).
 
 ---
 
