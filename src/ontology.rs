@@ -377,10 +377,6 @@ pub(crate) fn get_property_datatypes_all_kits() -> HashMap<String, String> {
     out
 }
 
-/// Like `get_object_properties`, but unions across every installed shapes
-/// file. Returns the set of property local-names that are `sh:nodeKind sh:IRI`
-/// (object properties / references), so the extractor can emit them as IRIs
-/// instead of literals.
 /// Map of short kit name → declared namespace, for EVERY installed kit.
 /// This is what the emitters consult so predicate/class IRIs follow each
 /// kit's own `@prefix` declaration (namespace migrations = TTL edit only).
@@ -402,6 +398,10 @@ pub(crate) fn get_kit_namespaces_all_kits() -> HashMap<String, String> {
     out
 }
 
+/// Like `get_object_properties`, but unions across every installed shapes
+/// file. Returns the set of property local-names that are `sh:nodeKind sh:IRI`
+/// (object properties / references), so the extractor can emit them as IRIs
+/// instead of literals.
 pub(crate) fn get_object_properties_all_kits() -> HashSet<String> {
     let mut out = HashSet::new();
     for path in all_shape_files() {

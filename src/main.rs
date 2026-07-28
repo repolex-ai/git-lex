@@ -80,8 +80,9 @@ enum Commands {
     /// union of all graphs by default, so `SELECT * WHERE { ?s ?p ?o }`
     /// finds everything.
     ///
-    /// For history questions ("when did this change?") use `git lex log` —
-    /// history lives in the synced store, which this command does not read.
+    /// For history questions ("when did this change?") query the synced
+    /// store via `git lex serve sparql` — the ready-made history query is
+    /// in docs/queries.md. This command does not read the synced store.
     ///
     /// Examples:
     ///   git lex query "SELECT * WHERE { ?s ?p ?o } LIMIT 10"
@@ -189,8 +190,8 @@ enum Commands {
     /// history is well-formed, and current state matches what the history
     /// says it should be. Exits non-zero on any failure.
     ///
-    /// TEMPORARY (Rob-ruled 2026-07-24): kept visible as the receipt tool
-    /// for the v1 update/migration; will be REMOVED after the rollout.
+    /// Temporary command: it exists to confirm store rebuilds during the
+    /// v1 migration and will be removed in a later release.
     Verify,
 
 }
@@ -524,8 +525,8 @@ fn cmd_init(directory: Option<String>, kit: Option<String>) {
                 doc.push_str("| `git lex save \"msg\"` | Stage all changes, commit, extract frontmatter |\n");
                 doc.push_str("| `git lex sync` | Build/update the knowledge graph from the commit history |\n");
                 doc.push_str("| `git lex query \"...\"` | SPARQL over the working tree (current files + git layer) |\n");
-                doc.push_str("| `git lex show <thing>` | Current facts about a document (synced store) |\n");
-                doc.push_str("| `git lex log [<thing>]` | Fact history — every add/remove with commit, author, date |\n\n");
+                doc.push_str("| `git lex serve viz` | Local web view: activity, graph, history replay |\n");
+                doc.push_str("| `git lex serve sparql` | SPARQL endpoint over the synced store (history queries) |\n\n");
 
                 doc.push_str("## Writing Documents\n\n");
                 doc.push_str("Documents use YAML frontmatter with flat dot notation: `kit.class.property`\n\n");

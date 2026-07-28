@@ -76,7 +76,7 @@ fn count(store: &Store, q: &str) -> u64 {
 /// Every violation prints; nothing is silent.
 pub(crate) fn run_verify(store: &Store) -> usize {
     let mut failures = 0usize;
-    println!("git-lex data-quality verification (Part-4.5 suite)");
+    println!("git-lex store health check");
     println!("──────────────────────────────────────────────────");
 
     // ── Check 0: the ontology graph itself ──────────────────────────────
@@ -241,7 +241,7 @@ pub(crate) fn run_verify(store: &Store) -> usize {
     if base_count == derived_count {
         println!("✓ check 3d: base layer == derived now ({base_count} facts, exact parity)");
     } else {
-        println!("✗ check 3d: base layer ({base_count}) != derived now ({derived_count}) — the materialized now has drifted from the event stream");
+        println!("✗ check 3d: base layer ({base_count}) != derived now ({derived_count}) — current state disagrees with what the history says it should be");
         failures += 1;
     }
 

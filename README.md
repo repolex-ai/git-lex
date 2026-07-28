@@ -140,7 +140,7 @@ git lex query "PREFIX ks: <https://repolex.ai/ontology/kit/soul/>
 | `git lex init [--kit <name>]` | Initialize `.lex/` in the current repo. The base kit is always installed; `--kit` adds a domain kit (e.g. `soul`). |
 | `git lex create <Type> [<id>]` | Scaffold a new document from a kit class, with frontmatter stubbed from the ontology. |
 | `git lex save "msg"` | Stage + extract frontmatter + SHACL-validate + commit, in one step. |
-| `git lex query "SPARQL"` | Run a SPARQL query over a live view built from your working tree, so it always reflects current frontmatter (no `sync` needed). History lives in the synced store — query it via `show`/`log` or the SPARQL endpoint (`git lex serve sparql`). `--json` for machine output. |
+| `git lex query "SPARQL"` | Run a SPARQL query over a live view built from your working tree, so it always reflects current frontmatter (no `sync` needed). History lives in the synced store — query it via the SPARQL endpoint (`git lex serve sparql`; ready-made history query in [docs/queries.md](docs/queries.md)). `--json` for machine output. |
 | `git lex list` | List every document class the repo's installed kits define, each with its full namespace IRI (the prefix to query against). `--json` for machine output. |
 | `git lex sync` | Build/update the persistent store: walks new commits and appends each fact change as an assert/retract event tied to its commit (RDF 1.2 provenance), then refreshes the current-state view. Not required for `query`. |
 | `git lex kit-update [<kit>]` | Re-download + reinstall kits. Drift-aware: locally-changed files are preserved and the new version lands beside them as `<file>.kit-latest` to diff (`--force` overwrites, stashing your version first). |

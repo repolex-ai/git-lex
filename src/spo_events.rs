@@ -10,7 +10,6 @@ use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::Write;
-use std::path::PathBuf;
 use std::process::Command;
 
 
@@ -67,24 +66,7 @@ pub struct SpikeCommit {
 // Layer 1: git runner (thin wrappers around shelling out)
 // ════════════════════════════════════════════════════════════════════════════
 
-/// Find the git repo root by asking git. Duplicated from main.rs to keep the
-/// module self-contained; if this spike graduates to a real feature we can
-/// promote a shared helper to a `util` module.
-fn find_git_root() -> Option<PathBuf> {
-    let output = Command::new("git")
-        .args(["rev-parse", "--show-toplevel"])
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    let s = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    if s.is_empty() {
-        None
-    } else {
-        Some(PathBuf::from(s))
-    }
-}
+use git_lex::find_git_root;
 /// Collect commit metadata + diff events for a list of SHAs.
 pub(crate) fn collect_commits_from_shas(shas: &[String]) -> Vec<SpikeCommit> {
     shas.iter().map(|sha| build_commit(sha)).collect()
@@ -599,7 +581,7 @@ pub fn cleanup_sidecars_for_staged_changes() -> CleanupReport {
 /// Returns `(events, renames)`. Pure function, unit-tested below.
 ///
 /// Phase 2 (2026-04-11): introduced by w4r3z for orphan cleanup + history
-/// ingest. Also fixes the quoted-path blind spot the spike sweeper found —
+/// ingest. Also fixes the quoted-path blind spot an early full-history sweep found —
 /// git quotes non-ASCII paths in `diff --git` header lines and the old
 /// parser was recording the escaped bytes. `decode_git_quoted_path` below
 /// handles the C-style escape syntax git uses.
@@ -768,7 +750,7 @@ fn split_git_diff_header_paths(rest: &str) -> Option<(String, String)> {
 /// as-is — this makes the function safe to call unconditionally.
 ///
 /// Pure function, unit-tested below. Fixes the QuotedDiffPath blind spot
-/// the spike sweeper flagged: 179 findings in the squad repo history from
+/// an early full-history sweep flagged: 179 findings in the squad repo history from
 /// message files with em-dashes in filenames.
 fn decode_git_quoted_path(raw: &str) -> String {
     if !(raw.starts_with('"') && raw.ends_with('"') && raw.len() >= 2) {
@@ -913,43 +895,25 @@ fn read_sidecar_at_commit(sha: &str, sidecar_path: &str) -> Result<Vec<String>, 
 }
 
 // ════════════════════════════════════════════════════════════════════════════
-// SPIKE: the "one graph" temporal model (Day 52/53, w4r3z + Rob)
+// The one graph — the PRODUCTION history model
 // ════════════════════════════════════════════════════════════════════════════
 //
-// STATUS: SPIKE. Reachable only via the `git lex spike-onegraph` command, which
-// is documented and clearly labelled as experimental. Nothing here runs during
-// normal `git lex save` / `git lex sync`. This exists to "try on for size" a
-// replacement for the current history subsystem — evaluate the output, then
-// decide (Rob decides) whether it becomes the real model.
+// Every save's fact changes are recorded as events in a single persistent
+// graph (`LexHistoryGraph`), one event per statement per direction:
 //
-// THE MODEL (formerly contrasted with the retired history walker, whose
-//   undeclared `spo:` vocabulary + pre-RDF-1.2 design died in Part 5):
+//     <event> rdf:reifies          <<( s p o )>> .
+//     <event> git-lex:assertedIn   <git2:Commit/SHA> .   (fact became true)
+//     <event> git-lex:retractedIn  <git2:Commit/SHA> .   (fact stopped being true)
 //
-//     <reifier> rdf:reifies <<( s p o )>> .
-//     <reifier> git-lex:assertedIn  <Commit/SHA> .   (line added to a .spo)
-//     <reifier> git-lex:retractedIn <Commit/SHA> .   (line removed from a .spo)
+// `git lex sync` runs the walk engine below incrementally; a full rebuild
+// (delete .git/lex, sync) re-derives the whole graph from commit history.
+// The graph's BASE LAYER is current state (net-asserted facts as plain
+// triples), maintained by the walk engine and copied out as NamedGraph/now
+// each sync. Events join to their commit's author/date via the git2: layer.
 //
-//   Differences from the old model, point by point:
-//     1. ONE graph, not a history graph + N sync graphs + a now graph. The
-//        "now" view is DERIVED by query (a triple whose most-recent event is an
-//        assert, with no later retract, is live).
-//     2. `assertedIn`/`retractedIn` instead of `addedIn`/`removedIn`. These are
-//        PLACEHOLDER predicate names — the final names are Rob's call and must
-//        be DECLARED in the ontology before this model ships. The spike emits
-//        them only so we can look at real output.
-//     3. NO `inFile` annotation. The old model recorded which sidecar the line
-//        came from; the one-graph model treats the Thing (the doc IRI) as the
-//        stable subject and doesn't leak the sidecar path into the graph.
-//     4. The commit object is the EXISTING `git:Commit` IRI that `git lex query`
-//        already emits into the commits graph — so a fact JOINS straight to its
-//        commit's author/date. No new commit/actor emission; we ride the
-//        command-faithful `git:` layer that's already there.
-//
-//   What it SHARES with the real pipeline (deliberately — this is the whole
-//   point of the spike vs. the earlier throwaway prototype): it resolves each
-//   `.spo` line through the SAME `crate::nquad::emit_spo_line_nquads` the
-//   now-graph uses. No naive re-implementation of sidecar-line → triple
-//   resolution. The old prototype's garbage predicates came from skipping this.
+// Every `.spo` line resolves through the SAME `emit_spo_line_nquads` the
+// query surface uses — one resolver, no drift between history and query.
+// Predicates (assertedIn/retractedIn, SpoEvent) are DECLARED in git-lex.ttl.
 
 /// The one graph's IRI — Rob-ruled 2026-07-21, class authored in git-lex.ttl
 /// v0.7 (`git-lex:LexHistoryGraph ⊑ git-lex:NamedGraph`). A bare per-store
@@ -965,7 +929,7 @@ pub(crate) const LEXHISTORY_GRAPH_IRI: &str = "https://repolex.ai/git-lex/LexHis
 const ONEGRAPH_ASSERTED_IN: &str = "https://repolex.ai/ontology/git-lex/assertedIn";
 const ONEGRAPH_RETRACTED_IN: &str = "https://repolex.ai/ontology/git-lex/retractedIn";
 
-/// SPIKE. Build the one-graph N-Quads for a single resolved triple event.
+/// Build the one-graph N-Quads for a single resolved triple event.
 ///
 /// Reuses the real emitter's N-Quad output verbatim (parse-then-rewrap), and
 /// emits the "Option B" one-graph shape — the base fact asserted STANDALONE plus
@@ -983,13 +947,9 @@ const ONEGRAPH_RETRACTED_IN: &str = "https://repolex.ai/ontology/git-lex/retract
 /// one base triple — but each add/remove still gets its own reified event, so
 /// the temporal history is complete and derivable.
 ///
-/// NOTE (spike simplification): a `-` (retract) event emits the base fact too.
-/// A single named graph can't hold "the fact once existed" AND "the fact is not
-/// live now" as the same plain triple; resolving that (retract removes the base
-/// triple, or the now-view is always derived from the latest event) is an open
-/// modeling question for Rob. For the spike we keep the base triple present on
-/// both events so the reification audit trail is symmetric, and the DERIVED
-/// now-view (asserted-with-no-later-retract) remains the authoritative "now".
+/// Events carry NO base fact — the base (plain-triple) layer is maintained
+/// separately by the walk engine as true final state (insert on net-assert,
+/// remove on net-retract).
 ///
 /// The reifier IRI is content-addressed over `(op, commit, s, p, o)` — a
 /// deterministic UID, NOT a dedup safety net (a re-emit of the same event is a
@@ -1317,7 +1277,7 @@ pub(crate) fn onegraph_walk_engine(
         eprintln!(" done");
     }
 
-    // clear_first = full rebuild (the spike command; also the fallback when an
+    // clear_first = full rebuild (store deleted/rebuilt; also the fallback when an
     // incremental resume point turns out invalid, e.g. after history rewrite).
     // clear_first = false is the sync path: the one graph is PERSISTENT and
     // append-only; sync walks only commits newer than the store's newest and
