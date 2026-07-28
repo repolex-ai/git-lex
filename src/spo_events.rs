@@ -243,8 +243,9 @@ const SPO_EXTRACTOR_SUFFIXES: &[&str] = &["fm", "md", "cc", "gliner", "haiku"];
 ///
 /// `-M50%` turns on rename detection at 50% similarity — same threshold
 /// the diff-tree walker uses, for consistency.
-fn git_staged_md_changes() -> Result<String, String> {
+fn git_staged_md_changes(root: &std::path::Path) -> Result<String, String> {
     let out = Command::new("git")
+        .current_dir(root)
         .args([
             "diff",
             "--cached",
@@ -343,11 +344,11 @@ pub fn parse_staged_md_changes(raw: &str) -> (Vec<String>, Vec<(String, String)>
 /// Returns paths relative to the repo root, suitable for passing to
 /// `git rm` / `git mv` (both of which accept repo-relative paths when
 /// run from the repo root).
-fn sidecar_paths_for_md(md_path: &str) -> Vec<String> {
+fn sidecar_paths_for_md(root: &std::path::Path, md_path: &str) -> Vec<String> {
     let mut out = Vec::new();
     for suffix in SPO_EXTRACTOR_SUFFIXES {
         let rel = format!(".lex/extract/{}.{}.spo", md_path, suffix);
-        if git_path_is_tracked(&rel) {
+        if git_path_is_tracked(root, &rel) {
             out.push(rel);
         }
     }
@@ -361,8 +362,9 @@ fn sidecar_paths_for_md(md_path: &str) -> Vec<String> {
 /// Why not `Path::exists()`? Because on macOS APFS (case-insensitive by
 /// default), the filesystem answer is wrong for case-only rename cases.
 /// Git's index is always case-exact, so asking git gives us the truth.
-fn git_path_is_tracked(path: &str) -> bool {
+fn git_path_is_tracked(root: &std::path::Path, path: &str) -> bool {
     Command::new("git")
+        .current_dir(root)
         .args(["ls-files", "--error-unmatch", "--", path])
         .output()
         .map(|o| o.status.success())
@@ -373,8 +375,9 @@ fn git_path_is_tracked(path: &str) -> bool {
 /// mirror. We use `-f` because the file may already be deleted from the
 /// working tree (if the agent manually cleaned it up) but still tracked
 /// in the index; `git rm -f` handles both cases.
-fn git_rm(path: &str) -> Result<(), String> {
+fn git_rm(root: &std::path::Path, path: &str) -> Result<(), String> {
     let out = Command::new("git")
+        .current_dir(root)
         .args(["rm", "-f", "--", path])
         .output()
         .map_err(|e| format!("git rm failed to spawn: {}", e))?;
@@ -391,15 +394,16 @@ fn git_rm(path: &str) -> Result<(), String> {
 /// Run `git mv <old> <new>`, creating the destination directory if needed.
 /// Used to move a .spo mirror from its old path to the new one when the
 /// source .md is renamed.
-fn git_mv(old: &str, new: &str) -> Result<(), String> {
+fn git_mv(root: &std::path::Path, old: &str, new: &str) -> Result<(), String> {
     // Ensure the destination parent directory exists — git mv doesn't
     // auto-create intermediate dirs.
-    if let Some(parent) = std::path::Path::new(new).parent() {
+    if let Some(parent) = root.join(new).parent() {
         if !parent.as_os_str().is_empty() {
             fs::create_dir_all(parent).ok();
         }
     }
     let out = Command::new("git")
+        .current_dir(root)
         .args(["mv", "--", old, new])
         .output()
         .map_err(|e| format!("git mv failed to spawn: {}", e))?;
@@ -440,18 +444,10 @@ pub fn cleanup_sidecars_for_staged_changes() -> CleanupReport {
         }
     };
 
-    // Must run `git` commands from the repo root so relative paths resolve
-    // correctly. Save and restore cwd so we don't surprise the caller.
-    let prev_cwd = std::env::current_dir().ok();
-    if std::env::set_current_dir(&root).is_err() {
-        report.errors.push(format!(
-            "failed to cd to repo root at {}",
-            root.display()
-        ));
-        return report;
-    }
-
-    let raw = match git_staged_md_changes() {
+    // Every git call runs with current_dir(root) — no process-global cwd
+    // mutation (the old save/cd/restore dance was fragile and leaked repo-
+    // relative behavior into every other subprocess while active).
+    let raw = match git_staged_md_changes(&root) {
         Ok(r) => r,
         Err(e) => {
             // A failed query is NOT "nothing staged" — skipping cleanup on
@@ -460,9 +456,6 @@ pub fn cleanup_sidecars_for_staged_changes() -> CleanupReport {
             report.errors.push(format!(
                 "staged-change query failed — cleanup skipped, orphan sidecars may remain: {e}"
             ));
-            if let Some(p) = prev_cwd {
-                let _ = std::env::set_current_dir(p);
-            }
             return report;
         }
     };
@@ -470,8 +463,8 @@ pub fn cleanup_sidecars_for_staged_changes() -> CleanupReport {
     let (deleted_mds, renamed_mds) = parse_staged_md_changes(&raw);
 
     for md_path in &deleted_mds {
-        for sidecar in sidecar_paths_for_md(md_path) {
-            match git_rm(&sidecar) {
+        for sidecar in sidecar_paths_for_md(&root, md_path) {
+            match git_rm(&root, &sidecar) {
                 Ok(()) => report.deleted.push(sidecar),
                 Err(e) => report.errors.push(e),
             }
@@ -479,8 +472,8 @@ pub fn cleanup_sidecars_for_staged_changes() -> CleanupReport {
         // The jsonl extractor also keeps a `.meta` bookkeeping file next to
         // its sidecar; a deleted source must take it along.
         let meta = format!(".lex/extract/{}.meta", md_path);
-        if git_path_is_tracked(&meta) {
-            match git_rm(&meta) {
+        if git_path_is_tracked(&root, &meta) {
+            match git_rm(&root, &meta) {
                 Ok(()) => report.deleted.push(meta),
                 Err(e) => report.errors.push(e),
             }
@@ -506,21 +499,21 @@ pub fn cleanup_sidecars_for_staged_changes() -> CleanupReport {
         for suffix in SPO_EXTRACTOR_SUFFIXES {
             let old_sidecar = format!(".lex/extract/{}.{}.spo", old_md, suffix);
             let new_sidecar = format!(".lex/extract/{}.{}.spo", new_md, suffix);
-            if !git_path_is_tracked(&old_sidecar) {
+            if !git_path_is_tracked(&root, &old_sidecar) {
                 continue;
             }
             // Skip only if the destination is ALREADY TRACKED IN THE
             // INDEX (separately from old_sidecar). A case-only rename
             // where old and new paths resolve to the same inode on APFS
             // is still a legitimate rename we want to do.
-            if git_path_is_tracked(&new_sidecar) && new_sidecar != old_sidecar {
+            if git_path_is_tracked(&root, &new_sidecar) && new_sidecar != old_sidecar {
                 report.errors.push(format!(
                     "skipping rename of {}: destination {} is already tracked",
                     old_sidecar, new_sidecar
                 ));
                 continue;
             }
-            match git_mv(&old_sidecar, &new_sidecar) {
+            match git_mv(&root, &old_sidecar, &new_sidecar) {
                 Ok(()) => report.renamed.push((old_sidecar, new_sidecar)),
                 Err(e) => report.errors.push(e),
             }
@@ -529,18 +522,14 @@ pub fn cleanup_sidecars_for_staged_changes() -> CleanupReport {
         // renamed source (same tracked-in-index rules as the sidecars).
         let old_meta = format!(".lex/extract/{}.meta", old_md);
         let new_meta = format!(".lex/extract/{}.meta", new_md);
-        if git_path_is_tracked(&old_meta)
-            && !(git_path_is_tracked(&new_meta) && new_meta != old_meta)
+        if git_path_is_tracked(&root, &old_meta)
+            && !(git_path_is_tracked(&root, &new_meta) && new_meta != old_meta)
         {
-            match git_mv(&old_meta, &new_meta) {
+            match git_mv(&root, &old_meta, &new_meta) {
                 Ok(()) => report.renamed.push((old_meta, new_meta)),
                 Err(e) => report.errors.push(e),
             }
         }
-    }
-
-    if let Some(p) = prev_cwd {
-        let _ = std::env::set_current_dir(p);
     }
 
     report
