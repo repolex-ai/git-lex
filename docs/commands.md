@@ -10,7 +10,6 @@
 | `git lex query "SPARQL"` | Query a live view of the working tree |
 | `git lex list` | List installed kits and their document types |
 | `git lex kit-add / kit-update / kit-remove` | Manage kits |
-| `git lex join <squad-path>` | Join a shared (squad) repo |
 | `git lex serve viz` | Local web UI |
 | `git lex serve sparql` | Standard SPARQL endpoint |
 | `git lex nuke` | Remove git-lex from a repo (commits + pushes the removal) |

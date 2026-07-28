@@ -151,11 +151,6 @@ enum Commands {
         #[arg(default_value = "git lex save")]
         message: String,
     },
-    /// Join a squad repo (creates mutual identity binding)
-    Join {
-        /// Path to the squad repo to join
-        squad_path: String,
-    },
     /// Parse a markdown file and show the syntax tree (debug)
     Parse {
         /// File to parse
@@ -300,7 +295,7 @@ fn cmd_init(directory: Option<String>, kit: Option<String>) {
         eprint!(
             "This repo is already initialized at {}.\n\
              Re-initializing will refresh the kit and ontology files and overwrite scaffold files.\n\
-             Extractions, tickets, and repo.yml fields are preserved.\n\
+             Extractions and repo.yml fields are preserved.\n\
              Continue? [y/N] ",
             lex_dir.display()
         );
@@ -1322,126 +1317,6 @@ fn cmd_save(message: &str) {
     }
 }
 
-// ─── SHACL validation via rudof ────────────────────────────────
-
-
-// ─── git lex identity ──────────────────────────────────────────
-
-fn read_identity(root: &std::path::Path) -> Option<String> {
-    let content = fs::read_to_string(root.join(".lex").join("repo.yml")).ok()?;
-    for line in content.lines() {
-        if let Some(sha) = line.strip_prefix("first_commit: ") {
-            return Some(sha.trim().to_string());
-        }
-    }
-    None
-}
-
-// ─── git lex join ──────────────────────────────────────────────
-
-fn cmd_join(squad_path: &str) {
-    let root = match find_git_root() {
-        Some(r) => r,
-        None => {
-            eprintln!("fatal: not a git repository");
-            exit(1);
-        }
-    };
-
-    let squad_root = PathBuf::from(squad_path);
-    if !squad_root.join(".lex").join("repo.yml").exists() {
-        eprintln!("Not a git-lex repo: {}", squad_path);
-        exit(1);
-    }
-
-    // Read this agent's identity
-    let agent_sha = match read_identity(&root) {
-        Some(sha) => sha,
-        None => {
-            eprintln!("No identity found. Run 'git lex init' first.");
-            exit(1);
-        }
-    };
-
-    // Read squad's identity
-    let squad_sha = match read_identity(&squad_root) {
-        Some(sha) => sha,
-        None => {
-            eprintln!("Squad repo has no identity: {}", squad_path);
-            exit(1);
-        }
-    };
-
-    // Read squad name from repo.yml or directory name
-    let squad_name = squad_root.file_name()
-        .map(|n| n.to_string_lossy().to_string())
-        .unwrap_or_else(|| "unknown".to_string());
-
-    // Read agent name from identity or directory name
-    let agent_name = root.file_name()
-        .map(|n| n.to_string_lossy().to_string())
-        .unwrap_or_else(|| "unknown".to_string());
-
-    let now = Command::new("date").args(["-u", "+%Y-%m-%dT%H:%M:%SZ"])
-        .output().ok()
-        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-        .unwrap_or_else(|| "unknown".to_string());
-
-    // --- Write ticket to agent's soul repo ---
-    let tickets_dir = root.join(".lex").join("tickets");
-    fs::create_dir_all(&tickets_dir).ok();
-
-    let ticket_slug = squad_name.to_lowercase()
-        .replace(|c: char| !c.is_alphanumeric() && c != '-', "-");
-    let ticket_path = tickets_dir.join(format!("{}.ticket", ticket_slug));
-
-    if ticket_path.exists() {
-        println!("Already a member of {} — ticket exists at .lex/tickets/{}.ticket",
-            squad_name, ticket_slug);
-        return;
-    }
-
-    let ticket_content = format!(
-        "# Squad membership ticket — do not edit\n\
-         # Mutual binding: this agent is a verified member of this squad.\n\
-         squad_name: {}\n\
-         squad_path: {}\n\
-         squad_identity: {}\n\
-         agent_name: {}\n\
-         agent_identity: {}\n\
-         joined: {}\n",
-        squad_name, squad_path, squad_sha,
-        agent_name, agent_sha, now
-    );
-    fs::write(&ticket_path, &ticket_content).expect("failed to write ticket");
-
-    // --- Write member entry to squad repo ---
-    let members_dir = squad_root.join(".lex").join("members");
-    fs::create_dir_all(&members_dir).ok();
-
-    let member_slug = agent_name.to_lowercase()
-        .replace(|c: char| !c.is_alphanumeric() && c != '-', "-");
-    let member_path = members_dir.join(format!("{}.yml", member_slug));
-
-    let member_content = format!(
-        "# Squad member — do not edit\n\
-         # This agent has joined this squad via 'git lex join'.\n\
-         agent_name: {}\n\
-         agent_identity: {}\n\
-         agent_repo: {}\n\
-         joined: {}\n",
-        agent_name, agent_sha,
-        root.to_string_lossy(), now
-    );
-    fs::write(&member_path, &member_content).expect("failed to write member entry");
-
-    println!("Joined squad: {}", squad_name);
-    println!("  Agent:  {} ({})", agent_name, &agent_sha[..12]);
-    println!("  Squad:  {} ({})", squad_name, &squad_sha[..12]);
-    println!("  Ticket: .lex/tickets/{}.ticket", ticket_slug);
-    println!("  Member: {} .lex/members/{}.yml", squad_path, member_slug);
-    println!("\nCommit both repos to finalize the binding.");
-}
 
 /// Returns true if all files pass, false if any violations found.
 fn cmd_validate() -> bool {
@@ -2526,7 +2401,6 @@ fn main() {
                 }
             }
         }
-        Commands::Join { squad_path } => cmd_join(&squad_path),
         Commands::Parse { file } => cmd_parse(&file),
         Commands::Nuke => cmd_nuke(),
         Commands::KitUpdate { kit, force } => cmd_kit_update(kit, force),

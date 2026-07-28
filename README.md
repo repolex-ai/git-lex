@@ -148,7 +148,6 @@ git lex query "PREFIX ks: <https://repolex.ai/ontology/kit/soul/>
 | `git lex kit-update [<kit>]` | Re-download + reinstall kits. Drift-aware: locally-changed files are preserved and the new version lands beside them as `<file>.kit-latest` to diff (`--force` overwrites, stashing your version first). |
 | `git lex kit-add <org/repo>` | Add an optional kit (the kit's `scope:` must be `optional`). Creates its folders + templates. |
 | `git lex kit-remove <org/repo>` | Remove an optional kit. Asks before deleting any content folders it owns. |
-| `git lex join <squad-path>` | Join a squad repo — creates a mutual identity binding (a ticket) between you and the squad. |
 | `git lex serve <viz\|listen\|sparql>` | Start one local server: `viz` (graph visualizer, 7878), `listen` (SSE relay, 7879), or `sparql` (W3C SPARQL endpoint over the synced store, 7880). |
 | `git lex display "CONSTRUCT ..."` | Run a SPARQL CONSTRUCT and push the result to the running viz server. |
 | `git lex verify` | Health-check the synced store (read-only): vocabulary declared, history well-formed, current state matches history. Temporary command — will be removed after the v1 rollout. |
@@ -170,8 +169,7 @@ git-lex keeps a clean split between **what you write**, **the index**, and
 - **`.lex/`** — the git-*tracked* index. Holds extraction sidecars
   (`.lex/extract/**.spo`), the installed kit(s) (`.lex/kit/`), generated SHACL
   shapes and ontology (`.lex/ontology/`), repo configuration + identity
-  (`.lex/repo.yml`, anchored on the genesis commit), and squad bindings
-  (`.lex/tickets/`). It's
+  (`.lex/repo.yml`, anchored on the genesis commit). It's
   checked in, so your graph travels with your repo.
 
 - **`.git/lex/`** — derived data (the oxigraph SPARQL store). Never tracked,
