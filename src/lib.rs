@@ -384,6 +384,7 @@ pub fn add_prefixes_at(root: Option<&std::path::Path>, query: &str) -> String {
     let mut defaults = vec![
         ("git:".to_string(), "PREFIX git: <https://repolex.ai/ontology/git-lex/git/>".to_string()),
         ("git-lex:".to_string(), "PREFIX git-lex: <https://repolex.ai/ontology/git-lex/>".to_string()),
+        ("git2:".to_string(), "PREFIX git2: <https://repolex.ai/ontology/git-lex/git2/>".to_string()),
         ("md:".to_string(), "PREFIX md: <https://repolex.ai/ontology/git-lex/md/>".to_string()),
         ("fm:".to_string(), "PREFIX fm: <https://repolex.ai/ontology/git-lex/fm/>".to_string()),
         ("o:".to_string(), o_prefix),

@@ -75,21 +75,12 @@ enum Commands {
         #[arg(long)]
         kit: Option<String>,
     },
-    /// Query the knowledge graph.
-    ///
-    /// By default, queries act on the union of all named graphs, meaning
-    /// `SELECT * WHERE { ?s ?p ?o }` will find everything across commits, files,
-    /// and extracted metrics automatically.
-    ///
-    /// Examples:
-    ///   git lex query "SELECT * WHERE { ?s ?p ?o } LIMIT 10"
-    ///   git lex query "SELECT ?path WHERE { ?f git2:path ?path }"
-    /// Show a document's CURRENT facts (the materialized now view).
+    /// Show a document's CURRENT facts.
     ///
     /// The canned "what is true about this thing right now" query. THING
     /// matches by substring against document IRIs — a path
     /// (Soul/Journal/day-1.md), a filename stem (day-52), or any fragment.
-    /// Reads the one graph's base layer, so it works on any synced store.
+    /// Reads the synced store (run `git lex sync` after new commits).
     Show {
         /// Document to show (substring match on the IRI)
         thing: String,
@@ -107,6 +98,18 @@ enum Commands {
         #[arg(long, default_value = "40")]
         limit: usize,
     },
+    /// Run a SPARQL query over a fresh view of the working tree — your
+    /// files as they are RIGHT NOW (committed or not), plus the git commit
+    /// layer. Common prefixes are injected automatically; queries see the
+    /// union of all graphs by default, so `SELECT * WHERE { ?s ?p ?o }`
+    /// finds everything.
+    ///
+    /// For history questions ("when did this change?") use `git lex log` —
+    /// history lives in the synced store, which this command does not read.
+    ///
+    /// Examples:
+    ///   git lex query "SELECT * WHERE { ?s ?p ?o } LIMIT 10"
+    ///   git lex query "SELECT ?c WHERE { ?c a git2:Commit } LIMIT 5"
     Query {
         /// The SPARQL query string
         query: String,
@@ -267,7 +270,10 @@ fn cmd_init(directory: Option<String>, kit: Option<String>) {
     if let Some(ref dir) = directory {
         let path = std::path::Path::new(dir);
         if !path.exists() {
-            fs::create_dir_all(path).expect("failed to create directory");
+            if let Err(e) = fs::create_dir_all(path) {
+                eprintln!("fatal: cannot create {}: {e}", path.display());
+                exit(1);
+            }
         }
         std::env::set_current_dir(path).expect("failed to cd into directory");
     }
@@ -574,19 +580,18 @@ fn cmd_init(directory: Option<String>, kit: Option<String>) {
                 doc.push_str("|---|---|\n");
                 doc.push_str(&format!("| `git lex create <type>` | Scaffold a new document. Valid types: {} |\n", type_names.join(", ")));
                 doc.push_str("| `git lex save \"msg\"` | Stage all changes, commit, extract frontmatter |\n");
-                doc.push_str("| `git lex sync` | Build the SPARQL knowledge graph from git + extractions |\n");
-                doc.push_str("| `git lex query \"...\"` | Run a SPARQL query against the knowledge graph |\n");
-                doc.push_str("| `git lex log` | Show commit history |\n");
-                doc.push_str("| `git lex llm list` | Show files needing LLM extraction |\n");
-                doc.push_str("| `git lex llm extract <file> --model <id>` | Extract entities via LLM |\n\n");
+                doc.push_str("| `git lex sync` | Build/update the knowledge graph from the commit history |\n");
+                doc.push_str("| `git lex query \"...\"` | SPARQL over the working tree (current files + git layer) |\n");
+                doc.push_str("| `git lex show <thing>` | Current facts about a document (synced store) |\n");
+                doc.push_str("| `git lex log [<thing>]` | Fact history — every add/remove with commit, author, date |\n\n");
 
                 doc.push_str("## Writing Documents\n\n");
                 doc.push_str("Documents use YAML frontmatter with flat dot notation: `kit.class.property`\n\n");
                 doc.push_str("```yaml\n");
                 doc.push_str("---\n");
-                doc.push_str(&format!("{}.memory.confidence: \"certain\"\n", kit_short));
-                doc.push_str(&format!("{}.memory.source: \"observation\"\n", kit_short));
-                doc.push_str(&format!("{}.memory.category: \"fact\"\n", kit_short));
+                let example_type = type_names.first().map(|s| s.as_str()).unwrap_or("Class");
+                doc.push_str(&format!("{}.{}.<property>: \"value\"\n", kit_short, example_type));
+                doc.push_str(&format!("# class names are case-sensitive: {}.{}. — see the __{}.md template\n", kit_short, example_type, example_type));
                 doc.push_str("---\n\n");
                 doc.push_str("Your content here. Use [[wikilinks]] for relationships between documents.\n");
                 doc.push_str("```\n\n");
@@ -624,14 +629,14 @@ fn cmd_init(directory: Option<String>, kit: Option<String>) {
                 }
 
                 doc.push_str("## Querying\n\n");
-                doc.push_str("Auto-injected prefixes: `git:`, `fm:`, `lex:`");
+                doc.push_str("Auto-injected prefixes: `git-lex:`, `git2:`, `md:`, `fm:`");
                 if kit_short != "none" {
                     doc.push_str(&format!(", `{}:`", kit_short));
                 }
                 doc.push_str("\n\n");
                 doc.push_str("```sparql\n");
                 doc.push_str("# List all documents by type\n");
-                doc.push_str(&format!("SELECT ?name ?type WHERE {{\n  GRAPH ?g {{ ?doc fm:{}.type ?type ; fm:title ?name }}\n}}\n", kit_short));
+                doc.push_str("SELECT ?doc ?type WHERE { ?doc a ?type } LIMIT 20\n");
                 doc.push_str("```\n");
 
                 fs::write(&readme_lex, &doc).ok();
@@ -878,11 +883,37 @@ fn cmd_init(directory: Option<String>, kit: Option<String>) {
 /// Get the persistent store path.
 // store_path and open_store_read_only imported from git_lex lib
 
-/// Create or open the persistent store.
+/// Exit with a clean one-line error when run outside a git repository —
+/// a panic + backtrace here is a crash report for a user mistake.
+fn require_git_root() -> std::path::PathBuf {
+    match find_git_root() {
+        Some(r) => r,
+        None => {
+            eprintln!("fatal: not a git repository (run this inside a repo)");
+            exit(1);
+        }
+    }
+}
+
+/// Create or open the persistent store, with clean errors (no panics) for
+/// the two user-reachable failures: not-a-repo and a locked/broken store.
 fn open_or_create_store() -> Store {
-    let path = store_path().expect("not in a git repo");
-    fs::create_dir_all(&path).expect("failed to create .git/lex/oxigraph/");
-    Store::open(&path).expect("failed to open store")
+    let Some(path) = store_path() else {
+        eprintln!("fatal: not a git repository (run this inside a repo)");
+        exit(1);
+    };
+    if let Err(e) = fs::create_dir_all(&path) {
+        eprintln!("fatal: cannot create store directory {}: {e}", path.display());
+        exit(1);
+    }
+    match Store::open(&path) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("fatal: cannot open the store at {}: {e}", path.display());
+            eprintln!("(another git-lex write process may hold the lock — is a sync already running?)");
+            exit(1);
+        }
+    }
 }
 
 
@@ -1260,13 +1291,14 @@ fn cmd_save(message: &str) {
         None => {
             eprintln!("fatal: no agent identity configured.");
             eprintln!();
-            eprintln!("Couldn't resolve GIT_AUTHOR_NAME / GIT_AUTHOR_EMAIL from either:");
-            eprintln!("  - process environment (your Claude Code session should inject these)");
+            eprintln!("Couldn't resolve an author identity from any of:");
+            eprintln!("  - agent_name: / agent_email: in .lex/repo.yml (the simplest fix:");
+            eprintln!("    add those two lines there and save again)");
+            eprintln!("  - GIT_AUTHOR_NAME / GIT_AUTHOR_EMAIL in the environment");
             eprintln!("  - {}/.claude/settings.json", root.display());
             eprintln!();
-            eprintln!("If this is your soul repo, run `git lex kit-update` to refresh identity.");
-            eprintln!("If this is a squad repo, your soul session should be injecting env vars —");
-            eprintln!("check that your soul's .claude/settings.json has the env block.");
+            eprintln!("Agent repos: `git lex kit-update` refreshes identity; squad repos get");
+            eprintln!("env vars injected by your agent session's settings.");
             exit(1);
         }
     };
@@ -1835,7 +1867,7 @@ fn cmd_extract() {
 fn cmd_sync() {
     let start = Instant::now();
 
-    let root = find_git_root().expect("not a git repo");
+    let root = require_git_root();
     // Identity: resolve + persist the genesis SHA ONCE per sync (identity.yml
     // is what Pool's boot-skip and federation readers consume). IRIs no longer
     // carry it — see git.rs Task-2 IRI families.
@@ -2241,7 +2273,7 @@ fn sync_onegraph_phase(store: &Store, root: &std::path::Path, resume_sha: Option
 }
 
 fn cmd_spike_onegraph(clear: bool, limit: usize) {
-    let root = find_git_root().expect("not a git repo");
+    let root = require_git_root();
     let store = open_or_create_store();
     let one_graph_uri = format!("<{}>", spo_events::LEXHISTORY_GRAPH_IRI);
 
@@ -2591,6 +2623,9 @@ fn run_query(store: &Store, query: &str, store_type: &str, json: bool) {
                     }
                 } else {
                     println!("(No results found)");
+                    if store_type.starts_with("one graph") {
+                        println!("(nothing synced yet? run `git lex sync` to build the store)");
+                    }
                 }
             }
         }
@@ -3047,7 +3082,7 @@ fn register_hook_in_settings(settings: &mut serde_json::Value, event: &str, comm
     }
 }
 fn cmd_nuke() {
-    let root = find_git_root().expect("not in a git repo");
+    let root = require_git_root();
     let lex_dir = root.join(".lex");
 
     if !lex_dir.exists() {
@@ -3069,6 +3104,10 @@ fn cmd_nuke() {
     eprintln!("║  NOT DELETED:                                           ║");
     eprintln!("║    • Your content files (markdown, etc.)                ║");
     eprintln!("║    • Git history (all commits preserved)                ║");
+    eprintln!("║                                                         ║");
+    eprintln!("║  THIS COMMITS AND PUSHES: uncommitted work is first     ║");
+    eprintln!("║  committed as a snapshot, then the removal is committed ║");
+    eprintln!("║  and pushed to the remote (if one is configured).       ║");
     eprintln!("║                                                         ║");
     eprintln!("║  You can re-initialize with: git lex init               ║");
     eprintln!("╚══════════════════════════════════════════════════════════╝");
@@ -3341,7 +3380,7 @@ fn collect_kits_for_update(root: &std::path::Path, target: Option<&str>) -> Vec<
 }
 
 fn cmd_kit_update(kit_arg: Option<String>, force: bool) {
-    let root = find_git_root().expect("not in a git repo");
+    let root = require_git_root();
     let lex_dir = root.join(".lex");
 
     if !lex_dir.exists() {
@@ -3654,7 +3693,7 @@ fn report_tracked_engine_paths(root: &Path) {
 /// scaffold via the drift-handler, creates class folders + templates, and
 /// records the kit in `repo.yml`'s `optional_kits:` list.
 fn cmd_kit_add(kit_spec: String) {
-    let root = find_git_root().expect("not in a git repo");
+    let root = require_git_root();
     let lex_dir = root.join(".lex");
     if !lex_dir.exists() {
         eprintln!("Not a git-lex repo. Run 'git lex init' first.");
@@ -3775,7 +3814,7 @@ fn cmd_kit_add(kit_spec: String) {
 /// deletes `.lex/kit/{org}/{repo}/`. Asks before deleting content folders
 /// (e.g. `Innerworld/`) unless --force.
 fn cmd_kit_remove(kit_spec: String, force: bool) {
-    let root = find_git_root().expect("not in a git repo");
+    let root = require_git_root();
     let lex_dir = root.join(".lex");
     if !lex_dir.exists() {
         eprintln!("Not a git-lex repo. Run 'git lex init' first.");
