@@ -19,6 +19,14 @@ use std::fs;
 use git_lex::resolve_kit_spec;
 
 use crate::nquad::uri_encode_path;
+
+/// Escape a string for a Turtle double-quoted literal. Backslash FIRST,
+/// then quote — escaping only the quote produced invalid Turtle for any
+/// value containing a backslash, which made rudof's parse fail and the
+/// whole file silently skip validation (adversarial finding 4b).
+fn turtle_escape(v: &str) -> String {
+    v.replace('\\', "\\\\").replace('"', "\\\"")
+}
 use crate::ontology::{get_object_properties, get_property_datatypes};
 
 /// Resolve a slug to an IRI under the soul a-box base (Day-50: no soul
@@ -172,15 +180,34 @@ pub(crate) fn frontmatter_to_turtle(
                     }
                 }
 
-                // Handle all YAML value types (string, number, bool)
-                let val_str = match value {
-                    serde_yaml::Value::String(s) if !s.is_empty() => Some(s.clone()),
-                    serde_yaml::Value::Number(n) => Some(n.to_string()),
-                    serde_yaml::Value::Bool(b) => Some(b.to_string()),
-                    _ => None,
-                };
-                if let Some(s) = val_str {
-                    kit_props.push((prop_name.to_string(), s));
+                // Handle all YAML value types. Sequences produce one
+                // entry per item — EXACTLY what flatten_yaml feeds the
+                // emitter. The old code had no Sequence arm, so a doc
+                // whose only kit properties were lists was skipped from
+                // SHACL entirely: it committed cleanly while violating
+                // its shape (adversarial finding 4a).
+                match value {
+                    serde_yaml::Value::String(s) if !s.is_empty() => {
+                        kit_props.push((prop_name.to_string(), s.clone()));
+                    }
+                    serde_yaml::Value::Number(n) => {
+                        kit_props.push((prop_name.to_string(), n.to_string()));
+                    }
+                    serde_yaml::Value::Bool(b) => {
+                        kit_props.push((prop_name.to_string(), b.to_string()));
+                    }
+                    serde_yaml::Value::Sequence(seq) => {
+                        for item in seq {
+                            if let Some(s) = item.as_str() {
+                                kit_props.push((prop_name.to_string(), s.to_string()));
+                            } else if let Some(n) = item.as_f64() {
+                                kit_props.push((prop_name.to_string(), n.to_string()));
+                            } else if let Some(b) = item.as_bool() {
+                                kit_props.push((prop_name.to_string(), b.to_string()));
+                            }
+                        }
+                    }
+                    _ => {}
                 }
             }
         }
@@ -254,7 +281,7 @@ pub(crate) fn frontmatter_to_turtle(
                         // surfaces the problem instead of inventing an IRI.
                         ttl.push_str(&format!(
                             "<{}> {}:{} \"{}\" .\n",
-                            doc_iri, prefix_name, prop_name, lit.replace('"', "\\\"")
+                            doc_iri, prefix_name, prop_name, turtle_escape(&lit)
                         ));
                     }
                     crate::resolve::ResolveResult::Rejected(msg) => {
@@ -266,13 +293,13 @@ pub(crate) fn frontmatter_to_turtle(
             // Typed literal (xsd:integer, xsd:date, etc.)
             ttl.push_str(&format!(
                 "<{}> {}:{} \"{}\"^^<{}> .\n",
-                doc_iri, prefix_name, prop_name, value.replace('"', "\\\""), datatype
+                doc_iri, prefix_name, prop_name, turtle_escape(value), datatype
             ));
         } else {
             // Plain string literal
             ttl.push_str(&format!(
                 "<{}> {}:{} \"{}\" .\n",
-                doc_iri, prefix_name, prop_name, value.replace('"', "\\\"")
+                doc_iri, prefix_name, prop_name, turtle_escape(value)
             ));
         }
     }

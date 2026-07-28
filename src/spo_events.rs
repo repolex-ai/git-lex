@@ -895,7 +895,11 @@ fn read_sidecar_at_commit(sha: &str, sidecar_path: &str) -> Result<Vec<String>, 
     // disambiguate with ls-tree: exit 0 + empty output = path not in that
     // tree, anything else = a real git failure that must not read as empty.
     let probe = Command::new("git")
-        .args(["ls-tree", sha, "--", sidecar_path])
+        // --full-tree: pathspecs are otherwise cwd-relative, and this probe
+        // must mean the same thing no matter where sync was invoked from
+        // (a cwd-sensitive probe reclassifies real git failures as
+        // "verified absent" — the exact fabrication this fn prevents).
+        .args(["ls-tree", "--full-tree", sha, "--", sidecar_path])
         .output()
         .map_err(|e| format!("git ls-tree {sha} -- {sidecar_path}: spawn failed: {e}"))?;
     if probe.status.success() && probe.stdout.iter().all(|b| b.is_ascii_whitespace()) {
@@ -1168,7 +1172,11 @@ pub(crate) fn onegraph_walk_engine(
             // Shape pre-checks, mirroring the emitter's own silent drops so
             // they're COUNTED here (the emitter still guards for its other
             // callers).
-            let fields: Vec<&str> = line.split(" | ").collect();
+            // splitn(3): MUST match the emitter's split (nquad.rs) — a
+            // value containing " | " is one value, not extra fields. The
+            // old .split() disagreed with the emitter and silently dropped
+            // such lines from history while query showed them.
+            let fields: Vec<&str> = line.splitn(3, " | ").collect();
             if fields.len() != 3 {
                 acct.malformed_shape += 1;
                 continue;
@@ -1765,4 +1773,18 @@ mod tests {
         assert!(got.is_err(), "expected Err, got {got:?}");
     }
 
+}
+
+#[cfg(test)]
+mod pipe_value_shape_tests {
+    #[test]
+    fn value_containing_pipe_separator_is_still_three_fields() {
+        // Walker pre-check must agree with the emitter's splitn(3): a value
+        // containing " | " is ONE value (adversarial finding 1d — these
+        // lines were silently dropped from history while query showed them).
+        let line = "soul.Journal.title | hasValue | pipe | trick";
+        let fields: Vec<&str> = line.splitn(3, " | ").collect();
+        assert_eq!(fields.len(), 3);
+        assert_eq!(fields[2], "pipe | trick");
+    }
 }

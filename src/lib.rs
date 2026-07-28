@@ -122,7 +122,26 @@ pub fn extract_kit_prefix(content: &str, short: &str) -> Option<(String, String)
     let mut fallback: Option<(String, String)> = None;
     for line in content.lines() {
         let t = line.trim();
-        let Some(rest) = t.strip_prefix("@prefix ") else { continue };
+        // Accept every legal spelling: `@prefix`, Turtle-1.1 caseless
+        // `PREFIX`/`prefix`, and tab or multi-space separators. A valid
+        // declaration the scanner can't read silently becomes the
+        // conventional-namespace fallback — wrong IRIs everywhere with
+        // no warning (adversarial finding, attack 3).
+        let lower = t.to_ascii_lowercase();
+        let keyword_len = if lower.starts_with("@prefix") {
+            "@prefix".len()
+        } else if lower.starts_with("prefix") {
+            "prefix".len()
+        } else {
+            continue;
+        };
+        // The keyword must be followed by whitespace ("prefixfoo:" is not
+        // a declaration).
+        match t.as_bytes().get(keyword_len) {
+            Some(b' ') | Some(b'\t') => {}
+            _ => continue,
+        }
+        let rest = t[keyword_len..].trim_start();
         let Some(colon) = rest.find(':') else { continue };
         let name = rest[..colon].trim();
         let after = &rest[colon + 1..];
@@ -642,5 +661,33 @@ mod kit_prefix_tests {
             extract_kit_prefix(ttl, "mykit"),
             Some(("myk".into(), "https://example.org/vocab/".into()))
         );
+    }
+}
+
+#[cfg(test)]
+mod kit_prefix_syntax_tests {
+    use super::*;
+
+    #[test]
+    fn sparql_style_and_tab_separators_parse() {
+        // All legal spellings of the same declaration (adversarial attack 3:
+        // these used to silently fall through to the conventional fallback).
+        for ttl in [
+            "PREFIX soul: <https://repolex.ai/ontology/soul/> .\n",
+            "prefix soul: <https://repolex.ai/ontology/soul/> .\n",
+            "@prefix\tsoul: <https://repolex.ai/ontology/soul/> .\n",
+            "@prefix  soul:  <https://repolex.ai/ontology/soul/> .\n",
+        ] {
+            assert_eq!(
+                extract_kit_prefix(ttl, "soul"),
+                Some(("soul".into(), "https://repolex.ai/ontology/soul/".into())),
+                "failed on: {ttl:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn keyword_needs_a_separator() {
+        assert_eq!(extract_kit_prefix("prefixsoul: <https://x.example/> .\n", "soul"), None);
     }
 }

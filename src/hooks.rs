@@ -127,10 +127,29 @@ pub(crate) fn install_hook() -> std::io::Result<()> {
     let hook_path = dir.join("pre-commit");
     let existing = fs::read_to_string(&hook_path).unwrap_or_default();
 
+    // Markers are detected as EXACT lines, never substrings: a commented-out
+    // marker ('## --- git-lex managed …') must not count as "section
+    // present" — that combination made install report success while
+    // installing nothing, silently disabling the extract+validate gate
+    // (adversarial finding 2b).
+    let starts = existing.lines().filter(|l| l.trim() == MARKER_START).count();
+    let ends = existing.lines().filter(|l| l.trim() == MARKER_END).count();
+    if starts != ends || starts > 1 {
+        // Mangled managed section (deleted marker line, merge damage,
+        // duplicated section). Rewriting through it risks destroying user
+        // hook content (finding 2a) — refuse loudly instead.
+        return Err(std::io::Error::other(format!(
+            "pre-commit hook at {} has a damaged git-lex managed section \
+             ({starts} start marker(s), {ends} end marker(s)); fix or delete \
+             the hook file and re-run",
+            hook_path.display()
+        )));
+    }
+
     let new_content = if existing.is_empty() {
         // No existing hook — create fresh
         format!("#!/bin/sh\n{}\n", MANAGED_SECTION)
-    } else if existing.contains(MARKER_START) {
+    } else if starts == 1 {
         // Already has our section — replace it
         replace_managed_section(&existing, MANAGED_SECTION)
     } else {
@@ -257,5 +276,30 @@ mod hook_convergence_tests {
         let once = format!("#!/bin/sh\n{}\n", MANAGED_SECTION);
         let twice = replace_managed_section(&once, MANAGED_SECTION);
         assert_eq!(once.trim(), twice.trim());
+    }
+}
+
+#[cfg(test)]
+mod hook_marker_damage_tests {
+    use super::*;
+
+    #[test]
+    fn commented_out_marker_is_not_a_section() {
+        // Substring detection used to see this as "section present" and
+        // install nothing while reporting success (finding 2b). Exact-line
+        // counting sees zero real markers → the append path runs instead.
+        let hook = format!("#!/bin/sh\n## {}\nmy-linter\n## {}\n", MARKER_START, MARKER_END);
+        let starts = hook.lines().filter(|l| l.trim() == MARKER_START).count();
+        assert_eq!(starts, 0);
+    }
+
+    #[test]
+    fn replace_preserves_user_content_when_markers_are_intact() {
+        let hook = format!("#!/bin/sh\nuser-before\n{}\nold body\n{}\nuser-after\n",
+            MARKER_START, MARKER_END);
+        let out = replace_managed_section(&hook, MANAGED_SECTION);
+        assert!(out.contains("user-before"));
+        assert!(out.contains("user-after"));
+        assert!(!out.contains("old body"));
     }
 }

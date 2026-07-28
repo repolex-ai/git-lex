@@ -610,15 +610,26 @@ pub(crate) fn emit_spo_line_nquads(
                         .replace(' ', "-")
                         .replace(|c: char| !c.is_alphanumeric() && c != '-' && c != '/' && c != '.', "");
                     if slug.is_empty() { continue; }
-                    let object_uri = if slug.contains('/') || slug.ends_with(".md") {
-                        format!("<{}>", resource_uri(&uri_encode_path(&slug)))
+                    if slug.contains('/') || slug.ends_with(".md") {
+                        out.push_str(&format!(
+                            "{} {} <{}> {} .\n",
+                            doc_uri, fm_predicate, resource_uri(&uri_encode_path(&slug)), graph
+                        ));
+                    } else if slug_index.contains_key(&slug) {
+                        out.push_str(&format!(
+                            "{} {} {} {} .\n",
+                            doc_uri, fm_predicate, resolve_slug_to_uri(&slug, slug_index), graph
+                        ));
                     } else {
-                        resolve_slug_to_uri(&slug, slug_index)
-                    };
-                    out.push_str(&format!(
-                        "{} {} {} {} .\n",
-                        doc_uri, fm_predicate, object_uri, graph
-                    ));
+                        // Unresolved stays a LITERAL (resolve.rs rule 7) —
+                        // this call site used to reach the index-miss panic
+                        // via historical sidecar lines whose target was
+                        // later deleted (review finding: sync brickable).
+                        out.push_str(&format!(
+                            "{} {} \"{}\" {} .\n",
+                            doc_uri, fm_predicate, nq_escape(val), graph
+                        ));
+                    }
                 }
             } else {
                 out.push_str(&format!(
