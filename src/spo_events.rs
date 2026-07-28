@@ -45,8 +45,49 @@ use git_lex::find_git_root;
 /// for the whole walk: a commit whose diff can't be read must stop the
 /// build, not silently contribute nothing (a corrupt object used to shrink
 /// history with exit 0 — adversarial finding 1e).
-pub(crate) fn collect_commits_from_shas(shas: &[String]) -> Result<Vec<WalkCommit>, String> {
-    shas.iter().map(|sha| build_commit(sha)).collect()
+pub(crate) fn collect_commits_from_shas(
+    shas: &[String],
+    horizon_start: Option<&str>,
+) -> Result<Vec<WalkCommit>, String> {
+    shas.iter()
+        .map(|sha| {
+            let mut c = build_commit(sha)?;
+            // dev_history_horizon: the first walked commit diffs against
+            // the EMPTY tree so the whole tree asserts as of the horizon.
+            if horizon_start == Some(sha.as_str()) {
+                c = rebuild_against_empty_tree(sha)?;
+            }
+            Ok(c)
+        })
+        .collect()
+}
+
+/// Build a WalkCommit whose baseline is the empty tree — every sidecar in
+/// the commit's tree counts as touched (horizon-start semantics).
+fn rebuild_against_empty_tree(sha: &str) -> Result<WalkCommit, String> {
+    let diff_out = Command::new("git")
+        .args([
+            "diff-tree", "--no-commit-id", "--no-color", "--no-ext-diff",
+            "--name-status", "-z", "-r", EMPTY_TREE_SHA, sha, "--",
+            ".lex/extract/*.spo",
+        ])
+        .output()
+        .map_err(|e| format!("git diff-tree {sha}: spawn failed: {e}"))?;
+    if !diff_out.status.success() {
+        return Err(format!(
+            "git diff-tree (horizon baseline) {sha} failed ({}): {}",
+            diff_out.status,
+            String::from_utf8_lossy(&diff_out.stderr).trim()
+        ));
+    }
+    let (touched, renames) =
+        parse_name_status_z(&String::from_utf8_lossy(&diff_out.stdout));
+    Ok(WalkCommit {
+        sha: sha.to_string(),
+        parent_sha: EMPTY_TREE_SHA.to_string(),
+        touched,
+        renames,
+    })
 }
 
 /// Well-known magic SHA for the empty git tree. Used as the diff baseline
@@ -987,6 +1028,11 @@ pub(crate) fn onegraph_walk_engine(
             acct.malformed_shape, acct.empty_object, acct.resolver_other,
             acct.unknown_suffix, acct.resolver_errors
         );
+        if clear_first && (acct.retired_body_extract > 0 || acct.resolver_errors > 0) {
+            eprintln!(
+                "  (these are HISTORICAL lines from pre-gate commits replayed by the rebuild — nothing to fix in live files; live problems are reported separately at save/sync)"
+            );
+        }
     }
 
     if show_progress && total > 0 {

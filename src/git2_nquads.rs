@@ -217,6 +217,7 @@ pub(crate) fn generate_git2_nquads() -> String {
                         ));
                     }
                     "first_commit" => {} // duplicate of genesisSha (computed) — ignored by ruling
+                    "dev_history_horizon" => {} // CONFIG, not a fact (dev-only walk stopgap) — never emitted
                     "optional_kits" => current_list = Some("optionalKit"),
                     "substrates" => current_list = Some("substrate"),
                     "name" | "kit" | "version" | "agent_name" | "agent_email" | "created" => {} // known key, empty value

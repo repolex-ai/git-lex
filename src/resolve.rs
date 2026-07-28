@@ -144,10 +144,9 @@ mod tests {
 
     /// Frontmatter ObjectProperty values must not use [[wikilink]] syntax.
     /// Wikilinks are body-text syntax for cross-referencing pages.
-    /// The agent should write the bare slug instead.
+    /// The agent should write the repo-relative path instead.
     #[test]
     fn rejects_wikilink_brackets() {
-        let idx = test_index();
         let result = resolve_frontmatter_value("[[w4r3z]]");
         assert!(
             matches!(result, ResolveResult::Rejected(_)),
@@ -168,7 +167,6 @@ mod tests {
     /// The brackets are the problem, not the content.
     #[test]
     fn rejects_wikilink_even_when_slug_exists() {
-        let idx = test_index();
         assert!(matches!(
             resolve_frontmatter_value("[[kira]]"),
             ResolveResult::Rejected(_)
@@ -181,7 +179,6 @@ mod tests {
     /// The @ prefix is body-text syntax for mentioning agents in prose.
     #[test]
     fn rejects_at_mention() {
-        let idx = test_index();
         let result = resolve_frontmatter_value("@w4r3z");
         assert!(
             matches!(result, ResolveResult::Rejected(_)),
@@ -192,7 +189,6 @@ mod tests {
     /// The rejection message should tell the agent what to write instead.
     #[test]
     fn at_mention_rejection_suggests_bare_slug() {
-        let idx = test_index();
         if let ResolveResult::Rejected(msg) = resolve_frontmatter_value("@kira") {
             assert!(msg.contains("kira"), "should suggest the inner slug");
         } else {
@@ -215,7 +211,6 @@ mod tests {
     /// This is the canonical form for machine-generated references.
     #[test]
     fn full_https_iri_passes_through() {
-        let idx = test_index();
         let iri = "https://repolex.ai/some/agent/foo";
         let result = resolve_frontmatter_value(iri);
         assert_eq!(result, ResolveResult::Iri(format!("<{}>", iri)));
@@ -224,7 +219,6 @@ mod tests {
     /// HTTP (not just HTTPS) is also accepted.
     #[test]
     fn full_http_iri_passes_through() {
-        let idx = test_index();
         let iri = "http://example.org/entity/bar";
         let result = resolve_frontmatter_value(iri);
         assert_eq!(result, ResolveResult::Iri(format!("<{}>", iri)));
@@ -236,7 +230,6 @@ mod tests {
     /// colons and mangled the IRI.
     #[test]
     fn full_iri_preserves_special_characters() {
-        let idx = test_index();
         let iri = "https://repolex.ai/git-lex/goodlux/claude-export/Conversation/4f10a178-c0a4-41c6-b397-655d222d6202";
         let result = resolve_frontmatter_value(iri);
         assert_eq!(result, ResolveResult::Iri(format!("<{}>", iri)));
@@ -247,7 +240,6 @@ mod tests {
     /// A value containing `/` is treated as a relative path within the repo.
     #[test]
     fn path_with_slash_resolves_as_path() {
-        let idx = test_index();
         let result = resolve_frontmatter_value("agent/w4r3z.md");
         assert_eq!(
             result,
@@ -258,7 +250,6 @@ mod tests {
     /// A value ending with `.md` is also treated as a path.
     #[test]
     fn dotmd_suffix_resolves_as_path() {
-        let idx = test_index();
         let result = resolve_frontmatter_value("w4r3z.md");
         assert_eq!(
             result,
@@ -282,7 +273,6 @@ mod tests {
     /// Empty string is unresolved.
     #[test]
     fn empty_string_is_unresolved() {
-        let idx = test_index();
         let result = resolve_frontmatter_value("");
         assert!(matches!(result, ResolveResult::Unresolved(_)));
     }
@@ -290,7 +280,6 @@ mod tests {
     /// Whitespace-only is unresolved (lowercased + trimmed to empty).
     #[test]
     fn whitespace_only_is_unresolved() {
-        let idx = test_index();
         let result = resolve_frontmatter_value("   ");
         assert!(matches!(result, ResolveResult::Unresolved(_)));
     }
@@ -298,7 +287,6 @@ mod tests {
     /// Multiple brackets are still rejected (not just one pair).
     #[test]
     fn rejects_nested_brackets() {
-        let idx = test_index();
         assert!(matches!(
             resolve_frontmatter_value("[[[[w4r3z]]]]"),
             ResolveResult::Rejected(_)
@@ -308,7 +296,6 @@ mod tests {
     /// the graph never guesses, full stop.
     #[test]
     fn bare_name_is_rejected_even_with_a_matching_file() {
-        let idx = test_index(); // contains "w4r3z" → agent/w4r3z.md
         match resolve_frontmatter_value("w4r3z") {
             ResolveResult::Rejected(msg) => {
                 assert!(msg.contains("agent") || msg.contains("path"), "fix-it message: {msg}");

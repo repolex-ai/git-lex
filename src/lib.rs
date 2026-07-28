@@ -93,6 +93,12 @@ pub struct RepoYml {
     pub agent_email: Option<String>,
     #[serde(default)]
     pub first_commit: Option<String>,
+    /// DEV-ONLY stopgap: a date; history walking starts at the first
+    /// commit after it. Exists for the ~10 pre-v1 squad repos whose early
+    /// development churn predates the data rules. Normal repos never set
+    /// this.
+    #[serde(default)]
+    pub dev_history_horizon: Option<String>,
     #[serde(default)]
     pub optional_kits: Vec<String>,
     #[serde(default)]

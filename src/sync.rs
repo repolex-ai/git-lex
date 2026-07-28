@@ -22,6 +22,39 @@ pub(crate) fn cmd_sync() {
     let start = Instant::now();
 
     let root = require_git_root();
+
+    // ══ DESIGN DECISION (Rob-ruled 2026-07-28): git-lex tracks the DEFAULT
+    // BRANCH, full stop. The semantic history is the history of the project
+    // as a whole — branches earn their place in it by merging, which is
+    // what git branches are for. This deliberately breaks from "track
+    // whatever git state you're in":
+    //   - "what is true now" is never ambiguous (no branch-dependent state);
+    //   - the resume point can never be poisoned by commits from refs the
+    //     walk never visits (the silent-skip failure the adversarial review
+    //     demonstrated);
+    //   - the model fits in one sentence for the docs.
+    // NOT-CHOSEN alternative, recorded for future revisiting: per-branch
+    // walking with an ancestor-filtered resume (one extra git call). It
+    // prevents the skip bug but NOT the deeper ambiguity — after syncing
+    // two diverged branches, the base layer reflects whichever synced
+    // last. If real branch-tracking demand appears, that ambiguity is the
+    // problem to solve first.
+    let current = git_current_branch(&root);
+    let default = git_default_branch(&root);
+    match &current {
+        Some(b) if *b == default => {}
+        Some(b) => {
+            eprintln!("sync tracks the default branch ('{default}') only — you are on '{b}'.");
+            eprintln!("git-lex records the project's merged history; merge your branch, then sync.");
+            std::process::exit(1);
+        }
+        None => {
+            eprintln!("sync tracks the default branch ('{default}') only — HEAD is detached.");
+            eprintln!("check out '{default}' and re-run.");
+            std::process::exit(1);
+        }
+    }
+
     // Identity: resolve + persist the genesis SHA ONCE per sync (identity.yml
     // is what Pool's boot-skip and federation readers consume). IRIs no longer
     // carry it — see git.rs Task-2 IRI families.
@@ -203,7 +236,10 @@ pub(crate) fn cmd_sync() {
     let resolver_ctx = crate::nquad::ResolverContext::build(&root);
     let (fm_nq, fm_errors) = crate::nquad::generate_frontmatter_nquads_with(&root, &resolver_ctx);
     if fm_errors > 0 {
-        eprintln!("warning: {} frontmatter error(s) during sync — extraction may be incomplete", fm_errors);
+        eprintln!(
+            "warning: {fm_errors} live document(s) carry values the data rules reject (each is listed above with its file). \
+These are in your WORKING FILES, not history — fix the listed files and the warning goes away for good."
+        );
     }
     let fm_count = fm_nq.lines().filter(|l| !l.is_empty()).count();
 
@@ -301,22 +337,53 @@ fn sync_onegraph_phase(store: &Store, root: &std::path::Path, resume_sha: Option
             .collect()
     };
 
-    let (shas, full_rebuild) = match &resume_sha {
-        Some(sha) if commit_exists(sha) => {
+    // Belt-and-braces on top of the main-only gate: a resume commit that
+    // is not an ancestor of HEAD can only mean external interference
+    // (manual store surgery, a force-push that kept the sha alive on
+    // another ref). Never walk past it — fall back to a full rebuild.
+    let is_ancestor_of_head = |sha: &str| -> bool {
+        Command::new("git")
+            .current_dir(root)
+            .args(["merge-base", "--is-ancestor", sha, "HEAD"])
+            .status()
+            .map(|st| st.success())
+            .unwrap_or(false)
+    };
+
+    let (mut shas, full_rebuild) = match &resume_sha {
+        Some(sha) if commit_exists(sha) && is_ancestor_of_head(sha) => {
             let exclude = format!("^{sha}");
             (rev_list(&[exclude.as_str(), "HEAD"]), false)
         }
         Some(sha) => {
             eprintln!(
-                "warning: one-graph resume commit {sha} no longer exists (history rewritten?) — FULL one-graph rebuild"
+                "warning: one-graph resume commit {sha} is gone or not an ancestor of HEAD (history rewritten?) — FULL one-graph rebuild"
             );
             (rev_list(&["HEAD"]), true)
         }
         None => (rev_list(&["HEAD"]), true),
     };
 
+    // DEV-ONLY horizon (see resolve_dev_horizon): on a full rebuild, drop
+    // everything before the horizon commit; it becomes the walk's first
+    // commit and diffs against the empty tree (the whole tree asserts as
+    // of the horizon).
+    let mut horizon_start: Option<String> = None;
+    if full_rebuild {
+        if let Some(h) = resolve_dev_horizon(root) {
+            if let Some(pos) = shas.iter().position(|s| *s == h) {
+                let dropped = pos;
+                shas.drain(..pos);
+                horizon_start = Some(h);
+                println!(
+                    "One graph: dev_history_horizon active — {dropped} pre-horizon commit(s) excluded from the walk."
+                );
+            }
+        }
+    }
+
     if !shas.is_empty() {
-        let commits = match spo_events::collect_commits_from_shas(&shas) {
+        let commits = match spo_events::collect_commits_from_shas(&shas, horizon_start.as_deref()) {
             Ok(c) => c,
             Err(e) => {
                 eprintln!("ERROR: could not read commit diffs: {e}");
@@ -410,4 +477,62 @@ fn sync_onegraph_phase(store: &Store, root: &std::path::Path, resume_sha: Option
         }
         _ => {}
     }
+}
+
+/// The branch HEAD is on, or None when detached.
+fn git_current_branch(root: &std::path::Path) -> Option<String> {
+    let out = Command::new("git")
+        .current_dir(root)
+        .args(["symbolic-ref", "--short", "-q", "HEAD"])
+        .output()
+        .ok()?;
+    if out.status.success() {
+        Some(String::from_utf8_lossy(&out.stdout).trim().to_string())
+    } else {
+        None
+    }
+}
+
+/// The repo's default branch: `main` if it exists, else `master`, else
+/// whatever branch HEAD is on (single-branch repos with custom names keep
+/// working — there is nothing to diverge from).
+fn git_default_branch(root: &std::path::Path) -> String {
+    for cand in ["main", "master"] {
+        let ok = Command::new("git")
+            .current_dir(root)
+            .args(["show-ref", "--verify", "--quiet", &format!("refs/heads/{cand}")])
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+        if ok {
+            return cand.to_string();
+        }
+    }
+    git_current_branch(root).unwrap_or_else(|| "main".to_string())
+}
+
+/// Resolve `dev_history_horizon:` (a DATE in repo.yml) to the first commit
+/// after it. DEV-ONLY: a stopgap so the ~10 squad repos that predate the
+/// v1 data rules can exclude their pre-spec development history from the
+/// graph without touching git. Normal repos never set this. The first
+/// walked commit diffs against the EMPTY tree, so the whole tree asserts
+/// as of the horizon — untouched old documents keep their facts; only the
+/// pre-horizon CHURN is excluded.
+fn resolve_dev_horizon(root: &std::path::Path) -> Option<String> {
+    let date = git_lex::RepoYml::load(root).dev_history_horizon?;
+    let out = Command::new("git")
+        .current_dir(root)
+        .args(["rev-list", "--reverse", "--after", date.trim(), "HEAD"])
+        .output()
+        .ok()
+        .filter(|o| o.status.success())?;
+    let first = String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .next()
+        .map(|l| l.trim().to_string())
+        .filter(|l| !l.is_empty());
+    if first.is_none() {
+        eprintln!("warning: dev_history_horizon '{date}' matches no commit — walking full history");
+    }
+    first
 }
