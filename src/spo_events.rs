@@ -854,10 +854,10 @@ fn decode_git_quoted_path(raw: &str) -> String {
 /// source path.
 ///
 /// Suffix knowledge lives in `SPO_EXTRACTOR_SUFFIXES` alone — a new extractor
-/// added there is automatically recognized here (and by `doc_uri_from_sidecar`,
-/// which derives from this). The `.lex/extract/` prefix is REQUIRED: only
-/// paths under it are sidecars (the diff-tree pathspec guarantees it), and a
-/// prefix-less path is not a sidecar we know how to attribute.
+/// added there is automatically recognized here. The `.lex/extract/` prefix
+/// is REQUIRED: only paths under it are sidecars (the diff-tree pathspec
+/// guarantees it), and a prefix-less path is not a sidecar we know how to
+/// attribute.
 pub(crate) fn derive_source_document(sidecar_rel_path: &str) -> Option<String> {
     let after_extract = sidecar_rel_path.strip_prefix(".lex/extract/")?;
     for suffix in SPO_EXTRACTOR_SUFFIXES {
@@ -906,19 +906,6 @@ fn read_sidecar_at_commit(sha: &str, sidecar_path: &str) -> Result<Vec<String>, 
         out.status,
         String::from_utf8_lossy(&out.stderr).trim()
     ))
-}
-
-/// Derive a doc URI for a sidecar path. The sidecar path is the `.spo` file
-/// path relative to the repo root, e.g. `.lex/extract/friend/1ux.md.fm.spo`.
-/// The corresponding doc is `friend/1ux.md`. We strip the `.lex/extract/`
-/// prefix and the `.{extractor}.spo` suffix.
-///
-/// Returns the doc URI in `<...>` form, ready to embed in N-Quads.
-/// Thin wrapper over `derive_source_document` — ONE place knows the
-/// sidecar-path shape.
-pub fn doc_uri_from_sidecar(sidecar_path: &str) -> Option<String> {
-    let doc_path = derive_source_document(sidecar_path)?;
-    Some(format!("<{}>", crate::git::resource_uri(&crate::nquad::uri_encode_path(&doc_path))))
 }
 
 // ════════════════════════════════════════════════════════════════════════════
