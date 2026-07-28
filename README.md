@@ -99,8 +99,7 @@ git lex create Memory "day-1"    # scaffold a typed Memory document
 # ...edit the new .md file: fill in its frontmatter + body...
 git lex save "first memory"      # stage + extract + validate + commit
 git lex query "SELECT * WHERE { ?s ?p ?o } LIMIT 10"
-git lex sync                     # build the history store, then:
-git lex log day-1                # every change to it, with commit + author + date
+git lex sync                     # build the history store
 ```
 
 `git lex save` is the everyday command: it stages your changes, runs frontmatter
@@ -142,7 +141,6 @@ git lex query "PREFIX ks: <https://repolex.ai/ontology/kit/soul/>
 | `git lex create <Type> [<id>]` | Scaffold a new document from a kit class, with frontmatter stubbed from the ontology. |
 | `git lex save "msg"` | Stage + extract frontmatter + SHACL-validate + commit, in one step. |
 | `git lex query "SPARQL"` | Run a SPARQL query over a live view built from your working tree, so it always reflects current frontmatter (no `sync` needed). History lives in the synced store — query it via `show`/`log` or the SPARQL endpoint (`git lex serve sparql`). `--json` for machine output. |
-| `git lex log [<thing>]` | The document's fact history — every assert/retract event with its commit, author, and date. Omit `<thing>` for the repo's most recent events. |
 | `git lex list` | List every document class the repo's installed kits define, each with its full namespace IRI (the prefix to query against). `--json` for machine output. |
 | `git lex sync` | Build/update the persistent store: walks new commits and appends each fact change as an assert/retract event tied to its commit (RDF 1.2 provenance), then refreshes the current-state view. Not required for `query`. |
 | `git lex kit-update [<kit>]` | Re-download + reinstall kits. Drift-aware: locally-changed files are preserved and the new version lands beside them as `<file>.kit-latest` to diff (`--force` overwrites, stashing your version first). |
@@ -198,8 +196,8 @@ querying current state never requires a sync.
 
 Because every fact change is recorded as an event (via RDF 1.2 triple terms)
 tied to the commit that caused it, the synced store answers not just *what is
-true* but *what was true, when it changed, and who changed it*
-(`git lex log`).
+true* but *what was true, when it changed, and who changed it* — see the
+[query cookbook](docs/queries.md).
 
 ---
 

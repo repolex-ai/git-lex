@@ -8,7 +8,6 @@ use std::process::{Command, exit};
 use std::time::Instant;
 use std::fs;
 use std::collections::HashMap;
-use tree_sitter;
 
 // Shared utilities (also used by git-lex-serve)
 use git_lex::{find_git_root, store_path, get_kit,
@@ -75,19 +74,6 @@ enum Commands {
         #[arg(long)]
         kit: Option<String>,
     },
-    /// Show a document's statement HISTORY — every assert/retract event with
-    /// its commit, author, and date, oldest first (like `git log` for facts).
-    ///
-    /// The canned temporal query over the one graph. THING matches by
-    /// substring against document IRIs; omit it for the most recent events
-    /// across the whole repo.
-    Log {
-        /// Document to trace (substring match; omit for repo-wide recent events)
-        thing: Option<String>,
-        /// Maximum events to print
-        #[arg(long, default_value = "40")]
-        limit: usize,
-    },
     /// Run a SPARQL query over a fresh view of the working tree — your
     /// files as they are RIGHT NOW (committed or not), plus the git commit
     /// layer. Common prefixes are injected automatically; queries see the
@@ -119,8 +105,6 @@ enum Commands {
         /// Hook event name (e.g., pre-commit)
         event: String,
     },
-    /// Dump all generated N-Quads to stdout (debug)
-    Dump,
     /// Sync git data + .lex/*.nq into the persistent store
     Sync,
     /// List all document classes defined across the repo's installed shapes
@@ -150,11 +134,6 @@ enum Commands {
         /// Commit message
         #[arg(default_value = "git lex save")]
         message: String,
-    },
-    /// Parse a markdown file and show the syntax tree (debug)
-    Parse {
-        /// File to parse
-        file: String,
     },
     /// Remove .lex/ entirely (content files and git history are preserved).
     Nuke,
@@ -1522,83 +1501,6 @@ fn cmd_validate() -> bool {
 }
 
 
-fn cmd_parse(file: &str) {
-    let root = find_git_root().unwrap_or_else(|| std::env::current_dir().unwrap());
-    let filepath = root.join(file);
-    let content = match fs::read_to_string(&filepath) {
-        Ok(c) => c,
-        Err(e) => {
-            eprintln!("Cannot read {}: {}", file, e);
-            exit(1);
-        }
-    };
-
-    let mut parser = tree_sitter_md::MarkdownParser::default();
-
-    let tree = match parser.parse(content.as_bytes(), None) {
-        Some(t) => t,
-        None => {
-            eprintln!("Failed to parse {}", file);
-            exit(1);
-        }
-    };
-
-    let root_node = tree.block_tree().root_node();
-
-    fn print_node(node: tree_sitter::Node, source: &str, depth: usize) {
-        let indent = "  ".repeat(depth);
-        let text = &source[node.start_byte()..node.end_byte()];
-        let preview = {
-            let escaped = text.replace('\n', "\\n");
-            if escaped.chars().count() > 80 {
-                format!("{}...", escaped.chars().take(77).collect::<String>())
-            } else {
-                escaped
-            }
-        };
-        println!("{}{}  [{}:{}–{}:{}]  \"{}\"",
-            indent, node.kind(),
-            node.start_position().row + 1, node.start_position().column,
-            node.end_position().row + 1, node.end_position().column,
-            preview);
-
-        let mut cursor = node.walk();
-        if cursor.goto_first_child() {
-            loop {
-                print_node(cursor.node(), source, depth + 1);
-                if !cursor.goto_next_sibling() { break; }
-            }
-        }
-    }
-
-    println!("Tree-sitter parse: {}", file);
-    println!();
-    print_node(root_node, &content, 0);
-
-    // Summary stats
-    let mut node_count = 0;
-    let mut type_counts: HashMap<String, usize> = HashMap::new();
-    fn count_nodes(node: tree_sitter::Node, count: &mut usize, types: &mut HashMap<String, usize>) {
-        *count += 1;
-        *types.entry(node.kind().to_string()).or_insert(0) += 1;
-        let mut cursor = node.walk();
-        if cursor.goto_first_child() {
-            loop {
-                count_nodes(cursor.node(), count, types);
-                if !cursor.goto_next_sibling() { break; }
-            }
-        }
-    }
-    count_nodes(root_node, &mut node_count, &mut type_counts);
-
-    println!();
-    println!("Total nodes: {}", node_count);
-    let mut sorted: Vec<_> = type_counts.iter().collect();
-    sorted.sort_by(|a, b| b.1.cmp(a.1));
-    for (kind, count) in sorted.iter().take(20) {
-        println!("  {:30} {}", kind, count);
-    }
-}
 
 // ─── viz/serve (moved to git-lex-serve binary) ─────────────────
 
@@ -2127,38 +2029,6 @@ fn sync_onegraph_phase(store: &Store, root: &std::path::Path, resume_sha: Option
 
 use git_lex::term_to_json;
 
-/// `git lex show <thing>` — current facts for matching documents, from the
-/// one graph's base layer (works on any synced store; no derivation).
-/// `git lex log [<thing>]` — the statement history: every assert/retract
-/// event joined to its commit's author + date, in commit order.
-fn cmd_log(thing: Option<&str>, limit: usize) {
-    let store = open_or_create_store();
-    let subject_filter = match thing {
-        Some(t) => format!("FILTER(CONTAINS(STR(?doc), \"{}\"))", t.replace('\\', "").replace('"', "")),
-        None => String::new(),
-    };
-    let order = if thing.is_some() { "ASC(?ordinal)" } else { "DESC(?ordinal)" };
-    let q = format!(
-        "PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> \
-         PREFIX gl: <https://repolex.ai/ontology/git-lex/> \
-         PREFIX g2: <https://repolex.ai/ontology/git-lex/git2/> \
-         SELECT ?when ?event ?doc ?property ?value ?author WHERE {{ \
-           GRAPH <{one}> {{ \
-             {{ ?e rdf:reifies <<( ?doc ?property ?value )>> ; gl:assertedIn ?c . BIND(\"ASSERT\" AS ?event) }} \
-             UNION \
-             {{ ?e rdf:reifies <<( ?doc ?property ?value )>> ; gl:retractedIn ?c . BIND(\"RETRACT\" AS ?event) }} \
-             {subject_filter} \
-           }} \
-           GRAPH <https://repolex.ai/git-lex/NamedGraph/commits> {{ \
-             ?c g2:ordinalDerived ?ordinal ; g2:author ?sig . \
-             ?sig g2:xsdDateTimeDerived ?when . \
-             OPTIONAL {{ ?sig g2:signatureName ?author }} \
-           }} \
-         }} ORDER BY {order} ?doc ?property LIMIT {limit}",
-        one = spo_events::LEXHISTORY_GRAPH_IRI,
-    );
-    run_query(&store, &q, "one graph (statement history)", false);
-}
 
 fn run_query(store: &Store, query: &str, store_type: &str, json: bool) {
     let start = Instant::now();
@@ -2384,14 +2254,7 @@ fn main() {
         Commands::Create { doctype, instance_id, json } => cmd_create(&doctype, instance_id.as_deref(), json),
         Commands::List { json } => cmd_list(json),
         Commands::Save { message } => cmd_save(&message),
-        Commands::Log { thing, limit } => cmd_log(thing.as_deref(), limit),
         Commands::Query { query, json } => cmd_query(query, json),
-        Commands::Dump => {
-            let git_nq = crate::git2_nquads::generate_git2_nquads();
-            let (fm_nq, _) = generate_frontmatter_nquads();
-            let lex_nq = load_lex_nquads();
-            print!("{}{}{}", git_nq, fm_nq, lex_nq);
-        }
         Commands::Hook { event } => {
             match event.as_str() {
                 "pre-commit" => hook_pre_commit(),
@@ -2401,7 +2264,6 @@ fn main() {
                 }
             }
         }
-        Commands::Parse { file } => cmd_parse(&file),
         Commands::Nuke => cmd_nuke(),
         Commands::KitUpdate { kit, force } => cmd_kit_update(kit, force),
         Commands::KitAdd { kit } => cmd_kit_add(kit),
