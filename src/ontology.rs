@@ -626,23 +626,11 @@ fn parse_class_type_label(content: &str, short: &str, class_name: &str) -> Strin
 /// namespace ends in `/{short}/` (or `/kit/{short}/`). Falls back to the
 /// short name itself if no `@prefix` line matches.
 fn find_kit_prefix(content: &str, short: &str) -> String {
-    for line in content.lines() {
-        let t = line.trim();
-        if !t.starts_with("@prefix") { continue; }
-        if let Some(rest) = t.strip_prefix("@prefix") {
-            let rest = rest.trim();
-            if let Some((name_part, ns_part)) = rest.split_once(':') {
-                let name = name_part.trim().to_string();
-                let ns_part = ns_part.trim();
-                if ns_part.contains(&format!("/{}/", short))
-                    || ns_part.contains(&format!("/kit/{}/", short))
-                {
-                    return name;
-                }
-            }
-        }
-    }
-    short.to_string()
+    // Delegates to the ONE shared scanner; the old inline version matched
+    // the retired /kit/ pattern (review finding M2 — flip hazard).
+    git_lex::extract_kit_prefix(content, short)
+        .map(|(name, _ns)| name)
+        .unwrap_or_else(|| short.to_string())
 }
 
 /// Pure parser for the `git-lex:foldered` flag lookup.

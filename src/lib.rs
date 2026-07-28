@@ -282,8 +282,8 @@ pub fn canonical_kit_ontology_path(root: &std::path::Path, spec: &str) -> PathBu
 }
 
 /// Auto-inject SPARQL prefixes into a query string. Adds standard prefixes
-/// (git:, lex:, fm:, rdf:, rdfs:, owl:, xsd:) plus the content ontology
-/// prefix (o:) and the kit prefix if one is configured.
+/// (git-lex:, git2:, git:, md:, fm:, rdf:, rdfs:, owl:, xsd:) plus the
+/// kit prefix if one is configured.
 pub fn add_prefixes(query: &str) -> String {
     add_prefixes_at(find_git_root().as_deref(), query)
 }
@@ -292,19 +292,6 @@ pub fn add_prefixes(query: &str) -> String {
 /// cwd — the form a multi-repo server (Syrinx) must use so each request gets
 /// the prefixes of the soul it landed on, never the server's own cwd.
 pub fn add_prefixes_at(root: Option<&std::path::Path>, query: &str) -> String {
-    // Get first commit SHA for content ontology prefix
-    let first_commit = root
-        .and_then(|r| {
-            Command::new("git")
-                .args(["-C", &r.display().to_string(), "rev-list", "--max-parents=0", "HEAD"])
-                .output()
-                .ok()
-        })
-        .filter(|o| o.status.success())
-        .map(|o| String::from_utf8_lossy(&o.stdout).trim()[..8].to_string())
-        .unwrap_or_default();
-    let o_prefix = format!("PREFIX o: <https://repolex.ai/ont/{}/>", first_commit);
-
     // Read kit from repo.yml, then pull the kit's prefix+namespace from its
     // installed SHACL shapes file (the runtime source of truth). Shapes live
     // at .lex/ontology/{short}/{short}-shapes.ttl.
@@ -344,7 +331,6 @@ pub fn add_prefixes_at(root: Option<&std::path::Path>, query: &str) -> String {
         ("git2:".to_string(), "PREFIX git2: <https://repolex.ai/ontology/git-lex/git2/>".to_string()),
         ("md:".to_string(), "PREFIX md: <https://repolex.ai/ontology/git-lex/md/>".to_string()),
         ("fm:".to_string(), "PREFIX fm: <https://repolex.ai/ontology/git-lex/fm/>".to_string()),
-        ("o:".to_string(), o_prefix),
         ("rdf:".to_string(), "PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>".to_string()),
         ("rdfs:".to_string(), "PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>".to_string()),
         ("owl:".to_string(), "PREFIX owl: <http://www.w3.org/2002/07/owl#>".to_string()),
@@ -355,15 +341,12 @@ pub fn add_prefixes_at(root: Option<&std::path::Path>, query: &str) -> String {
     }
     let defaults = defaults;
     // FIXME(w4r3z, Day 38): prefix detection is naive substring match —
-    // `query.contains("o:")` matches any token containing "o:" (e.g. another
-    // prefix, or "http://..." inside a literal IRI), so `o:` (the content
-    // ontology, namespaced DIFFERENTLY at /ont/<8charsha>/ vs everyone else's
-    // /ontology/...) gets injected spuriously, and a query using a literal that
-    // happens to contain "git:" pulls in unwanted PREFIXes. Match prefix tokens
-    // on a word boundary (regex `\b<short>` or tokenize), not raw contains().
-    // NOTE: `o:` still mints /ont/<8-char-sha>/ — the one SHA-bearing
-    // namespace left after the Day-50 SHA-out (identity is a fact now, not
-    // an IRI). Under review as task #39 (Rob: examine in context).
+    // a query using a literal that happens to contain "git:" pulls in
+    // unwanted PREFIXes. Harmless (an unused PREFIX changes nothing) but
+    // sloppy; match on a word boundary if it ever bites. (The worst
+    // offender, the retired `o:` prefix, was removed 2026-07-28 — it
+    // pointed at a namespace nothing ever wrote to and cost a git
+    // subprocess per query.)
     let upper = query.to_uppercase();
     let mut prefix_block = String::new();
     for (short, full) in &defaults {

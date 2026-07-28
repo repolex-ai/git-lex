@@ -444,50 +444,15 @@ pub(crate) fn build_adaptive_shapes() -> (Vec<(PathBuf, PathBuf)>, Vec<(PathBuf,
                 .unwrap_or_default()
                 .to_string_lossy()
                 .to_string();
-            let kit_ns_pattern = format!("/kit/{}/", label);
 
-            let mut prefix_name = String::new();
-            let mut namespace = String::new();
-            // First pass: prefer the prefix matching `/kit/{stem}/`.
-            for line in ttl_content.lines() {
-                if !line.starts_with("@prefix ") { continue; }
-                if line.contains(&kit_ns_pattern) {
-                    if let Some(colon_pos) = line[8..].find(':') {
-                        prefix_name = line[8..8 + colon_pos].trim().to_string();
-                    }
-                    if let Some(start) = line.find('<') {
-                        if let Some(end) = line.find('>') {
-                            namespace = line[start + 1..end].to_string();
-                        }
-                    }
-                    break;
-                }
-            }
-            // Fallback: first non-system prefix.
-            if prefix_name.is_empty() {
-                for line in ttl_content.lines() {
-                    if line.starts_with("@prefix ")
-                        && !line.contains("owl:") && !line.contains("rdfs:")
-                        && !line.contains("rdf:") && !line.contains("xsd:")
-                    {
-                        if let Some(colon_pos) = line[8..].find(':') {
-                            prefix_name = line[8..8 + colon_pos].trim().to_string();
-                        }
-                        if let Some(start) = line.find('<') {
-                            if let Some(end) = line.find('>') {
-                                namespace = line[start + 1..end].to_string();
-                            }
-                        }
-                        if !prefix_name.is_empty() && !namespace.is_empty() {
-                            break;
-                        }
-                    }
-                }
-            }
-            if prefix_name.is_empty() || namespace.is_empty() {
+            // ONE scanner (git_lex::extract_kit_prefix) — the inline copy
+            // this replaces still keyed on the retired /kit/ pattern and
+            // would have mis-derived every adaptive TTL after the
+            // namespace flip (review finding M2).
+            let Some((prefix_name, namespace)) = git_lex::extract_kit_prefix(&ttl_content, &label) else {
                 failures.push((ttl_path, "no prefix declaration found".to_string()));
                 continue;
-            }
+            };
 
             match generate_shapes_from_store(&store, &prefix_name, &namespace, &label) {
                 Some(shacl) => {
