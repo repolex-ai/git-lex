@@ -8,8 +8,8 @@ fact became true") and **retract** ("this fact stopped being true") events,
 each pointing at its git commit — so every event carries an author and a
 date for free.
 
-- `git lex show <thing>` answers: *what is true now?*
 - `git lex log <thing>` answers: *what happened, when, by whom?*
+- current state is a query away (`git lex query`) or just… the document itself
 
 Renaming or moving files produces **zero** phantom events — history tracks
 facts, not file shuffling.

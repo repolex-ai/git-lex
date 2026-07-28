@@ -18,7 +18,6 @@ git lex init --kit soul     # or your kit of choice
 git lex create <type>       # scaffold a document
 git lex save "first save"   # commit; extraction + validation run automatically
 git lex sync                # build the knowledge graph
-git lex show <name>         # what is true about this document?
 git lex log <name>          # how did it get that way?
 ```
 
