@@ -18,6 +18,8 @@ use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::PathBuf;
 
+use oxigraph::model::Term;
+
 use git_lex::{find_git_root, resolve_kit_spec};
 
 // ─── Shape file discovery ────────────────────────────────────
@@ -160,8 +162,23 @@ struct ShapeFile {
 
 // ─── Shape parser ────────────────────────────────────────────
 
-/// Parse a SHACL shapes TTL into `ShapeFile`. Line-oriented parser — shapes
-/// are auto-generated, so the format is predictable.
+/// Local name of an IRI relative to a kit namespace: strip the namespace
+/// when it matches, otherwise fall back to the last path segment (the same
+/// local-name rule shape generation uses in `shacl.rs`).
+fn local_name_in(namespace: &str, iri: &str) -> String {
+    iri.strip_prefix(namespace)
+        .unwrap_or_else(|| iri.rsplit('/').next().unwrap_or(iri))
+        .to_string()
+}
+
+/// Parse a SHACL shapes TTL into `ShapeFile` — a real Turtle parse (in-memory
+/// oxigraph store) queried with SPARQL, the ONE Turtle-reading policy.
+///
+/// Ordering: properties come out ORDER BY path IRI, which is exactly the
+/// order shape generation writes them (`shacl.rs` orders property blocks by
+/// prop IRI), so template prop order is unchanged. Classes come out ORDER BY
+/// class IRI (alphabetical); the old line scanner returned file order, which
+/// was itself arbitrary store-iteration order at generation time.
 fn parse_shape_file(content: &str, short_hint: &str) -> ShapeFile {
     let mut out = ShapeFile::default();
 
@@ -169,6 +186,7 @@ fn parse_shape_file(content: &str, short_hint: &str) -> ShapeFile {
     // by prefix NAME via the single shared scanner (git_lex::extract_kit_prefix),
     // so a kit's namespace can migrate with a one-line TTL edit and this
     // parser follows. Conventional fallback only when nothing declares.
+    // (SPARQL cannot see @prefix declarations — the scanner stays.)
     match git_lex::extract_kit_prefix(content, short_hint) {
         Some((name, ns)) => {
             out.prefix_name = name;
@@ -180,99 +198,85 @@ fn parse_shape_file(content: &str, short_hint: &str) -> ShapeFile {
         }
     }
 
-    // Walk shapes. State machine: when we see `sh:targetClass`, start a new
-    // shape. Each `sh:path` starts a new property block that accumulates
-    // constraints until the next `sh:path` or end-of-shape (`] .`).
-    let mut current_shape: Option<ParsedShape> = None;
-    let mut current_prop: Option<ShapeProp> = None;
-    let prefix_colon = format!("{}:", out.prefix_name);
-
-    let flush_prop = |shape: &mut ParsedShape, prop: &mut Option<ShapeProp>| {
-        if let Some(p) = prop.take() {
-            shape.props.push(p);
-        }
-    };
-    let flush_shape = |out: &mut ShapeFile, shape: &mut Option<ParsedShape>, prop: &mut Option<ShapeProp>| {
-        if let Some(mut s) = shape.take() {
-            if let Some(p) = prop.take() { s.props.push(p); }
-            out.shapes.push(s);
+    let store = match crate::kit::load_ttl_str(content, &format!("{} shapes", short_hint)) {
+        Ok(s) => s,
+        Err(e) => {
+            // Loud, not silent: a shapes file that doesn't parse means no
+            // runtime type info for the kit — say so instead of limping.
+            eprintln!("warning: {} — kit '{}' shapes ignored", e, short_hint);
+            return out;
         }
     };
 
-    for line in content.lines() {
-        let t = line.trim();
+    // One row per (shape, property block). OPTIONAL keeps property-less
+    // shapes (e.g. copia:Pose) as classes with zero props.
+    let q = "PREFIX sh: <http://www.w3.org/ns/shacl#>
+             PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>
+             SELECT ?class ?prop ?path ?nodeKind ?datatype ?minCount ?comment WHERE {
+                 ?shape sh:targetClass ?class .
+                 OPTIONAL {
+                     ?shape sh:property ?prop .
+                     ?prop sh:path ?path .
+                     OPTIONAL { ?prop sh:nodeKind ?nodeKind }
+                     OPTIONAL { ?prop sh:datatype ?datatype }
+                     OPTIONAL { ?prop sh:minCount ?minCount }
+                     OPTIONAL { ?prop rdfs:comment ?comment }
+                 }
+             } ORDER BY ?class ?path";
+    let Ok(oxigraph::sparql::QueryResults::Solutions(sols)) = git_lex::eval_query(&store, q)
+    else { return out };
 
-        // New class target
-        if let Some(rest) = t.strip_prefix("sh:targetClass ") {
-            // Close prior shape first.
-            flush_shape(&mut out, &mut current_shape, &mut current_prop);
-            let iri = rest.trim_end_matches(|c: char| c == ' ' || c == ';' || c == '.');
-            let class_name = iri
-                .strip_prefix(&prefix_colon)
-                .unwrap_or(iri)
-                .to_string();
-            current_shape = Some(ParsedShape {
-                class_name,
-                props: Vec::new(),
-            });
-            continue;
+    const XSD_NS: &str = "http://www.w3.org/2001/XMLSchema#";
+    const SH_IRI: &str = "http://www.w3.org/ns/shacl#IRI";
+    // Track the previous row's property node so a block with several values
+    // for one field (several comments, say) updates one ShapeProp instead of
+    // duplicating it.
+    let mut last_prop_key: Option<(String, String)> = None;
+    for s in sols.flatten() {
+        let class_iri = match s.get("class") {
+            Some(Term::NamedNode(n)) => n.as_str().to_string(),
+            _ => continue,
+        };
+        let class_name = local_name_in(&out.namespace, &class_iri);
+        if out.shapes.last().map(|sh: &ParsedShape| sh.class_name != class_name).unwrap_or(true) {
+            out.shapes.push(ParsedShape { class_name, props: Vec::new() });
+            last_prop_key = None;
         }
+        let shape = out.shapes.last_mut().unwrap();
 
-        let Some(shape) = current_shape.as_mut() else { continue };
-
-        // New property block inside current shape
-        if let Some(rest) = t.strip_prefix("sh:path ") {
-            flush_prop(shape, &mut current_prop);
-            let iri = rest.trim_end_matches(|c: char| c == ' ' || c == ';' || c == '.');
-            let name = iri
-                .strip_prefix(&prefix_colon)
-                .unwrap_or(iri)
-                .to_string();
-            current_prop = Some(ShapeProp {
-                name,
+        let Some(Term::NamedNode(path)) = s.get("path") else { continue };
+        let prop_key = (class_iri, s.get("prop").map(|t| t.to_string()).unwrap_or_default());
+        if last_prop_key.as_ref() != Some(&prop_key) {
+            shape.props.push(ShapeProp {
+                name: local_name_in(&out.namespace, path.as_str()),
                 is_iri: false,
                 datatype: None,
                 required: false,
                 comment: String::new(),
             });
-            continue;
+            last_prop_key = Some(prop_key);
         }
+        let prop = shape.props.last_mut().unwrap();
 
-        // Close shape when we hit `.` at end of a blank-surrounded block.
-        // SHACL shape blocks end with either `]` followed by `.`, or just `.`.
-        if t == "." || t.ends_with("] .") {
-            flush_shape(&mut out, &mut current_shape, &mut current_prop);
-            continue;
+        if let Some(Term::NamedNode(nk)) = s.get("nodeKind") {
+            if nk.as_str() == SH_IRI { prop.is_iri = true; }
         }
-
-        let Some(prop) = current_prop.as_mut() else { continue };
-
-        if t.starts_with("sh:nodeKind ") && t.contains("sh:IRI") {
-            prop.is_iri = true;
-        } else if let Some(rest) = t.strip_prefix("sh:datatype ") {
-            let dt = rest.trim_end_matches(|c: char| c == ' ' || c == ';' || c == '.');
-            // xsd:integer → "integer"
-            if let Some(local) = dt.strip_prefix("xsd:") {
+        if let Some(Term::NamedNode(dt)) = s.get("datatype") {
+            // xsd:integer → "integer"; non-XSD datatypes stay untyped,
+            // matching the old scanner.
+            if let Some(local) = dt.as_str().strip_prefix(XSD_NS) {
                 prop.datatype = Some(local.to_string());
             }
-        } else if let Some(rest) = t.strip_prefix("sh:minCount ") {
-            let n: Option<u32> = rest
-                .trim_end_matches(|c: char| c == ' ' || c == ';' || c == '.')
-                .parse().ok();
-            if n.unwrap_or(0) >= 1 {
+        }
+        if let Some(Term::Literal(n)) = s.get("minCount") {
+            if n.value().parse::<u32>().map(|n| n >= 1).unwrap_or(false) {
                 prop.required = true;
             }
-        } else if let Some(rest) = t.strip_prefix("rdfs:comment ") {
-            // `rdfs:comment "text" ;` — strip quotes.
-            if let Some(start) = rest.find('"') {
-                if let Some(end) = rest[start + 1..].find('"') {
-                    prop.comment = rest[start + 1..start + 1 + end].to_string();
-                }
-            }
+        }
+        if let Some(Term::Literal(c)) = s.get("comment") {
+            prop.comment = c.value().to_string();
         }
     }
-    // Flush tail in case file doesn't end with `.`.
-    flush_shape(&mut out, &mut current_shape, &mut current_prop);
     out
 }
 
@@ -579,102 +583,78 @@ pub(crate) fn get_class_type_label(kit: &str, class_name: &str) -> String {
 /// top-of-frontmatter `type:` field). Separated from filesystem I/O so it
 /// can be unit-tested directly.
 ///
-/// Two-fallback chain: the stanza's `rdfs:label "..."`; if absent (or the
+/// Two-fallback chain: the class's `rdfs:label "..."`; if absent (or the
 /// class isn't declared in this file at all), the class's local-name
 /// unchanged. (Formerly a three-step chain headed by `lex-o:okfType` — OKF
 /// was adopted speculatively and retired with lex-o, Rob's ruling; the
 /// label is the correct value for every class.)
+///
+/// Real Turtle parse + SPARQL, not a stanza scan. The class IRI is derived
+/// from the file's own kit `@prefix` declaration (the ONE shared scanner) —
+/// never a hardcoded namespace pattern.
 fn parse_class_type_label(content: &str, short: &str, class_name: &str) -> String {
-    let kit_prefix = find_kit_prefix(content, short);
-    let class_qname = format!("{}:{}", kit_prefix, class_name);
-
-    let mut in_stanza = false;
-    let mut label: Option<String> = None;
-    for line in content.lines() {
-        let t = line.trim();
-        if !in_stanza {
-            if let Some(rest) = t.strip_prefix(&class_qname) {
-                let rest = rest.trim_start();
-                if rest.starts_with("a ") || rest == "a" {
-                    in_stanza = true;
-                }
-            }
-            continue;
+    let class_iri = format!("{}{}", kit_namespace_of(content, short), class_name);
+    let store = match crate::kit::load_ttl_str(content, &format!("{} ontology", short)) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("warning: {} — falling back to class local-name", e);
+            return class_name.to_string();
         }
-        if label.is_none() {
-            if let Some(idx) = t.find("rdfs:label") {
-                let after = &t[idx + "rdfs:label".len()..];
-                let after = after.trim_start();
-                if let Some(rest) = after.strip_prefix('"') {
-                    if let Some(end) = rest.find('"') {
-                        label = Some(rest[..end].to_string());
-                    }
-                }
+    };
+    let q = format!(
+        "SELECT ?label WHERE {{ <{}> <http://www.w3.org/2000/01/rdf-schema#label> ?label }}
+         ORDER BY ?label LIMIT 1",
+        class_iri
+    );
+    if let Ok(oxigraph::sparql::QueryResults::Solutions(sols)) = git_lex::eval_query(&store, &q) {
+        for s in sols.flatten() {
+            if let Some(Term::Literal(l)) = s.get("label") {
+                return l.value().to_string();
             }
-        }
-        // Stanza terminator — a `.` at end of trimmed line, not preceded
-        // by `;` (predicate-list continuation).
-        if t.ends_with('.') && !t.ends_with(" ;") {
-            break;
         }
     }
-
-    label.unwrap_or_else(|| class_name.to_string())
+    class_name.to_string()
 }
 
-/// Shared kit-prefix detector — finds the `@prefix <name>: <ns>` line whose
-/// namespace ends in `/{short}/` (or `/kit/{short}/`). Falls back to the
-/// short name itself if no `@prefix` line matches.
-fn find_kit_prefix(content: &str, short: &str) -> String {
-    // Delegates to the ONE shared scanner; the old inline version matched
-    // the retired /kit/ pattern (review finding M2 — flip hazard).
+/// Kit namespace declared in TTL content, via the ONE shared `@prefix`
+/// scanner; conventional pattern only when nothing declares.
+fn kit_namespace_of(content: &str, short: &str) -> String {
     git_lex::extract_kit_prefix(content, short)
-        .map(|(name, _ns)| name)
-        .unwrap_or_else(|| short.to_string())
+        .map(|(_name, ns)| ns)
+        .unwrap_or_else(|| git_lex::conventional_kit_namespace(short))
 }
 
 /// Pure parser for the `git-lex:foldered` flag lookup.
 /// Separated from filesystem I/O so it can be unit-tested directly.
 ///
-/// Returns true ONLY for an explicit `git-lex:foldered true` (bare Turtle
-/// boolean literal) inside the class's stanza. Anything else — absent flag,
-/// `false`, missing class, empty file — is false (opt-in).
+/// Returns true ONLY for an explicit `git-lex:foldered true` (Turtle boolean
+/// literal) on the class. Anything else — absent flag, `false`, missing
+/// class, empty/unparseable file — is false (opt-in).
+///
+/// The `git-lex:` namespace is resolved from the file's own declaration
+/// (name-exact via the ONE shared scanner); the conventional base namespace
+/// is the fallback when the file doesn't declare it.
 fn parse_class_foldered(content: &str, short: &str, class_name: &str) -> bool {
-    let kit_prefix = find_kit_prefix(content, short);
-    let class_qname = format!("{}:{}", kit_prefix, class_name);
-
-    // Walk lines looking for the class declaration's stanza. Stanza
-    // terminator is a line whose trimmed end is `.` (Turtle's
-    // statement terminator). Within the stanza, look for
-    // `git-lex:foldered true`.
-    let mut in_stanza = false;
-    for line in content.lines() {
-        let t = line.trim();
-        if !in_stanza {
-            // Stanza start: line begins with the class qname followed by
-            // whitespace + `a` (the rdf:type abbreviation).
-            if let Some(rest) = t.strip_prefix(&class_qname) {
-                let rest = rest.trim_start();
-                if rest.starts_with("a ") || rest == "a" {
-                    in_stanza = true;
-                }
-            }
-            continue;
-        }
-        // In-stanza: look for the flag. Turtle booleans are bare tokens
-        // (`true`/`false`), not quoted strings.
-        if let Some(idx) = t.find("git-lex:foldered") {
-            let after = t[idx + "git-lex:foldered".len()..].trim_start();
-            return after.starts_with("true");
-        }
-        // Stanza terminator — a `.` at end of trimmed line, not preceded
-        // by `;` (which is the predicate-list continuation marker).
-        if t.ends_with('.') && !t.ends_with(" ;") {
+    let class_iri = format!("{}{}", kit_namespace_of(content, short), class_name);
+    // extract_kit_prefix's primary rule is name-exact, so short="git-lex"
+    // finds `@prefix git-lex:`; its fallback rule could hand back the KIT's
+    // prefix, so only trust a name-exact hit.
+    let gitlex_ns = match git_lex::extract_kit_prefix(content, "git-lex") {
+        Some((name, ns)) if name == "git-lex" => ns,
+        _ => git_lex::conventional_kit_namespace("git-lex"),
+    };
+    let store = match crate::kit::load_ttl_str(content, &format!("{} ontology", short)) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("warning: {} — treating classes as graph-only (no folder)", e);
             return false;
         }
-    }
-
-    false
+    };
+    let q = format!("ASK {{ <{}> <{}foldered> true }}", class_iri, gitlex_ns);
+    matches!(
+        git_lex::eval_query(&store, &q),
+        Ok(oxigraph::sparql::QueryResults::Boolean(true))
+    )
 }
 
 #[cfg(test)]
@@ -740,9 +720,13 @@ copia:Depictable a owl:Class ;
     fn handles_kit_prefix_via_kit_path() {
         // Some namespaces use /kit/{short}/ (the actual convention for
         // copia). Make sure the prefix-detect handles that form too.
+        // (owl/rdfs prefixes declared — the fixture predates the real
+        // Turtle parse, which rightly rejects undeclared prefixes.)
         let ttl = r#"
 @prefix soul: <https://repolex.ai/ontology/kit/soul/> .
 @prefix git-lex: <https://repolex.ai/ontology/git-lex/> .
+@prefix owl: <http://www.w3.org/2002/07/owl#> .
+@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
 
 soul:Memory a owl:Class ;
     git-lex:foldered true ;
@@ -753,10 +737,15 @@ soul:Memory a owl:Class ;
 
     // ── type-label lookup — label → local-name chain ──
 
+    // (Fixture typo fixed with the SPARQL port: rdfs was declared as
+    // `https://www.w3.org/...` — not the real rdfs namespace. The old
+    // token-level scanner matched `rdfs:label` by prefix NAME and never
+    // noticed; a real RDF parse resolves IRIs, so the standard namespace
+    // is required — which is what every real kit TTL declares.)
     const KIT_WITH_LABELS: &str = r#"
 @prefix copia: <https://repolex.ai/ontology/kit/copia/> .
 @prefix owl: <http://www.w3.org/2002/07/owl#> .
-@prefix rdfs: <https://www.w3.org/2000/01/rdf-schema#> .
+@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
 
 # Label differs from local-name — label wins
 copia:Place a owl:Class ;
