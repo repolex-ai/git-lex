@@ -17,10 +17,11 @@
 //!    for mentioning agents in prose. `assignedTo: @w4r3z` is rejected.
 //!    Write `assignedTo: w4r3z` instead.
 //!
-//! 3. **Bare slugs must resolve to a known file.** The slug is looked up
-//!    in the repo's file index (keyed by file stem, lowercased). If no
-//!    file matches, the value is returned as an unresolved literal so the
-//!    SHACL validator can flag it downstream.
+//! 3. **Bare names are REJECTED** (Rob-ruled 2026-07-28). A reference is
+//!    the document's repo-relative path (`friend/selkie.md`) or a full
+//!    IRI — the graph never guesses which file a name means. The old
+//!    bare-name search made history non-deterministic (resolution depended
+//!    on which files existed at sync time).
 //!
 //! 4. **Full IRIs are passed through unchanged.** If the value starts with
 //!    `http://` or `https://`, the resolver trusts it. This is the canonical
@@ -33,11 +34,9 @@
 //!    contains `/` or ends with `.md`, it's treated as a relative path
 //!    within the repo. Looked up in the path index directly.
 //!
-//! 6. **No case folding or workaround transformations.** The slug must
-//!    match the file stem as-is after lowercasing (which mirrors how the
-//!    slug index is built — all stems are lowercased at index time). No
-//!    dot-stripping fallback, no character removal, no silent coercion.
-//!    If the value doesn't match, it doesn't match.
+//! 6. **No transformations, ever.** No slugifying, no case folding, no
+//!    dot-stripping, no character removal. The written value is either a
+//!    valid form or it is rejected with the fix spelled out.
 //!
 //! 7. **Unresolved values become literals, not blank nodes.** When a
 //!    frontmatter ObjectProperty value can't be resolved, it's emitted
@@ -47,7 +46,6 @@
 //!    will flag these literals as validation errors, telling the agent
 //!    to fix their data.
 
-use std::collections::HashMap;
 
 /// The result of attempting to resolve a frontmatter ObjectProperty value.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -72,10 +70,7 @@ pub enum ResolveResult {
 ///
 /// See the module-level doc comment for the full rule set, and the test
 /// suite below for executable examples of each rule.
-pub fn resolve_frontmatter_value(
-    raw: &str,
-    slug_index: &HashMap<String, String>,
-) -> ResolveResult {
+pub fn resolve_frontmatter_value(raw: &str) -> ResolveResult {
     // Rule 1: reject [[wikilinks]]
     if raw.starts_with("[[") || raw.ends_with("]]") {
         let inner = raw
@@ -83,7 +78,7 @@ pub fn resolve_frontmatter_value(
             .trim_end_matches("]]");
         return ResolveResult::Rejected(format!(
             "wikilink syntax [[...]] is not allowed in frontmatter. \
-             Write the bare slug instead: {}",
+             Write the repo-relative path instead (e.g. {}.md with its folder)",
             inner
         ));
     }
@@ -93,7 +88,7 @@ pub fn resolve_frontmatter_value(
         let inner = &raw[1..];
         return ResolveResult::Rejected(format!(
             "@mention syntax is not allowed in frontmatter. \
-             Write the bare slug instead: {}",
+             Write the repo-relative path instead (e.g. {}.md with its folder)",
             inner
         ));
     }
@@ -112,25 +107,20 @@ pub fn resolve_frontmatter_value(
         return ResolveResult::Iri(format!("<{}>", crate::git::resource_uri(&crate::nquad::uri_encode_path(raw))));
     }
 
-    // Rule 3: bare slug lookup (lowercased to match index convention)
-    // NOTE(w4r3z, Day 38): this lowercases but does NOT trim. The test
-    // `whitespace_only_is_unresolved` claims "lowercased + trimmed to empty"
-    // as its rationale, but "   " stays "   " here (is_empty() is false) and is
-    // Unresolved only because the slug_index has no "   " key — a different
-    // reason than the test states. Harmless today, but the comment/test
-    // rationale is wrong; either trim here (so whitespace truly empties) or fix
-    // the test's stated reason. Low severity; flagging so a maintainer relying
-    // on the comment isn't misled.
-    let slug = raw.to_lowercase();
-    if slug.is_empty() {
+    // Rule 3 (Rob-ruled 2026-07-28, replacing the bare-name lookup): a
+    // reference is the document's REPO-RELATIVE PATH or a full IRI — the
+    // graph never guesses. The old rule searched the repo for a file
+    // matching the bare name, which made resolution depend on which files
+    // existed at sync time (non-deterministic history, silent rebinding
+    // when a same-named file appeared). Rejected with the fix spelled out.
+    if raw.trim().is_empty() {
         return ResolveResult::Unresolved(raw.to_string());
     }
-    if let Some(rel_path) = slug_index.get(&slug) {
-        ResolveResult::Iri(format!("<{}>", crate::git::resource_uri(&crate::nquad::uri_encode_path(rel_path))))
-    } else {
-        // Rule 7: unresolved → literal, not blank node
-        ResolveResult::Unresolved(raw.to_string())
-    }
+    ResolveResult::Rejected(format!(
+        "bare name '{raw}' — write the repo-relative path instead (e.g. \
+         friend/{raw}.md). References are paths or IRIs; the graph never \
+         guesses which file a name means.",
+    ))
 }
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -142,13 +132,6 @@ pub fn resolve_frontmatter_value(
 mod tests {
     use super::*;
 
-    fn test_index() -> HashMap<String, String> {
-        let mut m = HashMap::new();
-        m.insert("w4r3z".to_string(), "agent/w4r3z.md".to_string());
-        m.insert("kira".to_string(), "agent/kira.md".to_string());
-        m.insert("some-decision".to_string(), "decision/some-decision.md".to_string());
-        m
-    }
 
     // The a-box base is DERIVED per repo (kit short / repo name — never
     // hardcoded); tests assert resolution BEHAVIOR against whatever base
@@ -165,22 +148,19 @@ mod tests {
     #[test]
     fn rejects_wikilink_brackets() {
         let idx = test_index();
-        let result = resolve_frontmatter_value("[[w4r3z]]", &idx);
+        let result = resolve_frontmatter_value("[[w4r3z]]");
         assert!(
             matches!(result, ResolveResult::Rejected(_)),
             "[[wikilinks]] must be rejected in frontmatter"
         );
     }
 
-    /// The rejection message should tell the agent what to write instead.
+    /// Rule 1: the wikilink rejection tells the writer to use a path.
     #[test]
-    fn wikilink_rejection_suggests_bare_slug() {
-        let idx = test_index();
-        if let ResolveResult::Rejected(msg) = resolve_frontmatter_value("[[w4r3z]]", &idx) {
-            assert!(msg.contains("w4r3z"), "should suggest the inner slug");
-            assert!(msg.contains("bare slug"), "should say 'bare slug'");
-        } else {
-            panic!("expected Rejected");
+    fn wikilink_rejection_suggests_a_path() {
+        match resolve_frontmatter_value("[[w4r3z]]") {
+            ResolveResult::Rejected(msg) => assert!(msg.contains("path")),
+            other => panic!("expected Rejected, got {other:?}"),
         }
     }
 
@@ -190,7 +170,7 @@ mod tests {
     fn rejects_wikilink_even_when_slug_exists() {
         let idx = test_index();
         assert!(matches!(
-            resolve_frontmatter_value("[[kira]]", &idx),
+            resolve_frontmatter_value("[[kira]]"),
             ResolveResult::Rejected(_)
         ));
     }
@@ -202,7 +182,7 @@ mod tests {
     #[test]
     fn rejects_at_mention() {
         let idx = test_index();
-        let result = resolve_frontmatter_value("@w4r3z", &idx);
+        let result = resolve_frontmatter_value("@w4r3z");
         assert!(
             matches!(result, ResolveResult::Rejected(_)),
             "@mentions must be rejected in frontmatter"
@@ -213,7 +193,7 @@ mod tests {
     #[test]
     fn at_mention_rejection_suggests_bare_slug() {
         let idx = test_index();
-        if let ResolveResult::Rejected(msg) = resolve_frontmatter_value("@kira", &idx) {
+        if let ResolveResult::Rejected(msg) = resolve_frontmatter_value("@kira") {
             assert!(msg.contains("kira"), "should suggest the inner slug");
         } else {
             panic!("expected Rejected");
@@ -222,38 +202,11 @@ mod tests {
 
     // ─── Rule 3: bare slugs must resolve ──────────────────────────────────
 
-    /// A bare slug that matches a file in the repo resolves to that file's IRI.
-    #[test]
-    fn bare_slug_resolves_to_iri() {
-        let idx = test_index();
-        let result = resolve_frontmatter_value("w4r3z", &idx);
-        assert_eq!(
-            result,
-            ResolveResult::Iri(format!("<{}/agent/w4r3z.md>", base()))
-        );
-    }
 
     /// Slug matching is case-insensitive (the index is built from
-    /// lowercased file stems, so `W4R3Z` matches `w4r3z`).
-    #[test]
-    fn bare_slug_is_case_insensitive() {
-        let idx = test_index();
-        let result = resolve_frontmatter_value("W4R3Z", &idx);
-        assert_eq!(
-            result,
-            ResolveResult::Iri(format!("<{}/agent/w4r3z.md>", base()))
-        );
-    }
 
     /// A bare slug that does NOT match any file is returned as an
     /// unresolved literal. SHACL validation will catch it downstream
-    /// if the property requires sh:nodeKind sh:IRI.
-    #[test]
-    fn unresolved_slug_returns_literal() {
-        let idx = test_index();
-        let result = resolve_frontmatter_value("nobody", &idx);
-        assert_eq!(result, ResolveResult::Unresolved("nobody".to_string()));
-    }
 
     // ─── Rule 4: full IRIs pass through unchanged ─────────────────────────
 
@@ -264,7 +217,7 @@ mod tests {
     fn full_https_iri_passes_through() {
         let idx = test_index();
         let iri = "https://repolex.ai/some/agent/foo";
-        let result = resolve_frontmatter_value(iri, &idx);
+        let result = resolve_frontmatter_value(iri);
         assert_eq!(result, ResolveResult::Iri(format!("<{}>", iri)));
     }
 
@@ -273,7 +226,7 @@ mod tests {
     fn full_http_iri_passes_through() {
         let idx = test_index();
         let iri = "http://example.org/entity/bar";
-        let result = resolve_frontmatter_value(iri, &idx);
+        let result = resolve_frontmatter_value(iri);
         assert_eq!(result, ResolveResult::Iri(format!("<{}>", iri)));
     }
 
@@ -285,7 +238,7 @@ mod tests {
     fn full_iri_preserves_special_characters() {
         let idx = test_index();
         let iri = "https://repolex.ai/git-lex/goodlux/claude-export/Conversation/4f10a178-c0a4-41c6-b397-655d222d6202";
-        let result = resolve_frontmatter_value(iri, &idx);
+        let result = resolve_frontmatter_value(iri);
         assert_eq!(result, ResolveResult::Iri(format!("<{}>", iri)));
     }
 
@@ -295,7 +248,7 @@ mod tests {
     #[test]
     fn path_with_slash_resolves_as_path() {
         let idx = test_index();
-        let result = resolve_frontmatter_value("agent/w4r3z.md", &idx);
+        let result = resolve_frontmatter_value("agent/w4r3z.md");
         assert_eq!(
             result,
             ResolveResult::Iri(format!("<{}/agent/w4r3z.md>", base()))
@@ -306,7 +259,7 @@ mod tests {
     #[test]
     fn dotmd_suffix_resolves_as_path() {
         let idx = test_index();
-        let result = resolve_frontmatter_value("w4r3z.md", &idx);
+        let result = resolve_frontmatter_value("w4r3z.md");
         assert_eq!(
             result,
             ResolveResult::Iri(format!("<{}/w4r3z.md>", base()))
@@ -317,29 +270,12 @@ mod tests {
 
     /// The resolver does not strip dots, hyphens, or other characters
     /// from slugs. If the value doesn't match the index as-is (after
-    /// lowercasing), it's unresolved. No workarounds.
-    #[test]
-    fn no_dot_stripping_fallback() {
-        let idx = test_index();
-        // "w.4.r.3.z" should NOT match "w4r3z" via dot-stripping.
-        let result = resolve_frontmatter_value("w.4.r.3.z", &idx);
-        assert_eq!(result, ResolveResult::Unresolved("w.4.r.3.z".to_string()));
-    }
 
     // ─── Rule 7: unresolved → literal, not blank node ─────────────────────
 
     /// When resolution fails, the result is Unresolved (which the caller
     /// emits as a literal string on the kit predicate). No blank nodes
     /// are created. SHACL shapes that require sh:nodeKind sh:IRI will
-    /// flag the literal as a validation error.
-    #[test]
-    fn unresolved_is_literal_not_blank_node() {
-        let idx = test_index();
-        let result = resolve_frontmatter_value("nonexistent", &idx);
-        // The return type is Unresolved, not some BlankNode variant.
-        // The caller emits: <doc> kit:pred "nonexistent" <graph> .
-        assert!(matches!(result, ResolveResult::Unresolved(_)));
-    }
 
     // ─── Edge cases ───────────────────────────────────────────────────────
 
@@ -347,7 +283,7 @@ mod tests {
     #[test]
     fn empty_string_is_unresolved() {
         let idx = test_index();
-        let result = resolve_frontmatter_value("", &idx);
+        let result = resolve_frontmatter_value("");
         assert!(matches!(result, ResolveResult::Unresolved(_)));
     }
 
@@ -355,7 +291,7 @@ mod tests {
     #[test]
     fn whitespace_only_is_unresolved() {
         let idx = test_index();
-        let result = resolve_frontmatter_value("   ", &idx);
+        let result = resolve_frontmatter_value("   ");
         assert!(matches!(result, ResolveResult::Unresolved(_)));
     }
 
@@ -364,8 +300,45 @@ mod tests {
     fn rejects_nested_brackets() {
         let idx = test_index();
         assert!(matches!(
-            resolve_frontmatter_value("[[[[w4r3z]]]]", &idx),
+            resolve_frontmatter_value("[[[[w4r3z]]]]"),
             ResolveResult::Rejected(_)
         ));
     }
+    /// Rule 3: a bare name is rejected even when a matching file EXISTS —
+    /// the graph never guesses, full stop.
+    #[test]
+    fn bare_name_is_rejected_even_with_a_matching_file() {
+        let idx = test_index(); // contains "w4r3z" → agent/w4r3z.md
+        match resolve_frontmatter_value("w4r3z") {
+            ResolveResult::Rejected(msg) => {
+                assert!(msg.contains("agent") || msg.contains("path"), "fix-it message: {msg}");
+            }
+            other => panic!("expected Rejected, got {other:?}"),
+        }
+    }
+
+    /// Rule 3: the rejection names the value and tells the writer what to
+    /// write instead.
+    #[test]
+    fn bare_name_rejection_spells_out_the_fix() {
+        match resolve_frontmatter_value("selkie") {
+            ResolveResult::Rejected(msg) => {
+                assert!(msg.contains("selkie"));
+                assert!(msg.contains("path"));
+            }
+            other => panic!("expected Rejected, got {other:?}"),
+        }
+    }
+
+    /// Paths keep working without any index lookup — deterministic at
+    /// every commit whether or not the file exists yet (forward
+    /// references are legal; dangling ones warn at validate).
+    #[test]
+    fn path_resolves_without_index() {
+        match resolve_frontmatter_value("friend/selkie.md") {
+            ResolveResult::Iri(iri) => assert!(iri.ends_with("/friend/selkie.md>")),
+            other => panic!("expected Iri, got {other:?}"),
+        }
+    }
+
 }

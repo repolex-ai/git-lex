@@ -33,7 +33,7 @@ mod kit_cmds;
 mod extraction;
 
 use crate::git::{auto_commit_snapshot, resource_uri};
-use crate::nquad::{build_slug_path_indexes, generate_frontmatter_nquads,
+use crate::nquad::{generate_frontmatter_nquads,
                    load_lex_nquads};
 use crate::ontology::get_kit_types;
 use crate::extraction::{extract_jsonl_sessions, extract_markdown_links, frontmatter_to_turtle};
@@ -775,13 +775,9 @@ fn cmd_validate() -> bool {
     let mut total_violations = 0;
     let mut failed_files = Vec::new();
 
-    // The same slug index sync's emitter resolves against — validate must
-    // judge the exact triples sync will emit (review finding A5).
-    let (slug_index, _path_index) = build_slug_path_indexes(&root, &files);
-
     for filepath in &files {
         if !filepath.to_string_lossy().ends_with(".md") { continue; }
-        let ttl = match frontmatter_to_turtle(filepath, &root, &kit, &slug_index) {
+        let ttl = match frontmatter_to_turtle(filepath, &root, &kit) {
             Ok(Some(t)) => t,
             Ok(None) => continue,
             Err(e) => {

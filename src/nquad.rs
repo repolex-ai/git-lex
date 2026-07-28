@@ -22,8 +22,7 @@ use std::process::Command;
 use git_lex::find_git_root;
 
 use crate::git::{graph_uri, resource_uri};
-use crate::extraction::{flatten_yaml, normalize_wikilink_path,
-                        resolve_slug_to_uri};
+use crate::extraction::{flatten_yaml, normalize_wikilink_path};
 use crate::ontology::{get_kit_namespaces_all_kits, get_object_properties_all_kits,
                        get_property_datatypes_all_kits};
 use crate::resolve;
@@ -171,7 +170,6 @@ pub(crate) fn is_template(path: &std::path::Path) -> bool {
 /// inside frontmatter generation, again for the history walk).
 pub(crate) struct ResolverContext {
     pub files: Vec<PathBuf>,
-    pub slug_index: HashMap<String, String>,
     pub path_index: HashSet<String>,
     pub obj_props: HashSet<String>,
     pub prop_datatypes: HashMap<String, String>,
@@ -181,10 +179,9 @@ pub(crate) struct ResolverContext {
 impl ResolverContext {
     pub(crate) fn build(root: &std::path::Path) -> ResolverContext {
         let files = walk_repo_docs(root);
-        let (slug_index, path_index) = build_slug_path_indexes(root, &files);
+        let path_index = build_path_index(root, &files);
         ResolverContext {
             files,
-            slug_index,
             path_index,
             obj_props: get_object_properties_all_kits(),
             prop_datatypes: get_property_datatypes_all_kits(),
@@ -234,7 +231,7 @@ pub(crate) fn generate_frontmatter_nquads_with(
     let repo = git2::Repository::discover(".").ok();
 
     let files = ctx.files.as_slice();
-    let (slug_index, path_index) = (&ctx.slug_index, &ctx.path_index);
+    let path_index = &ctx.path_index;
     let (obj_props, prop_datatypes, kit_namespaces) =
         (&ctx.obj_props, &ctx.prop_datatypes, &ctx.kit_namespaces);
 
@@ -368,7 +365,6 @@ pub(crate) fn generate_frontmatter_nquads_with(
                 &doc_uri,
                 &graph,
                 &relpath_str,
-                &slug_index,
                 &path_index,
                 &obj_props,
                 &prop_datatypes,
@@ -418,7 +414,8 @@ pub(crate) fn generate_frontmatter_nquads_with(
 /// - `doc_uri`: IRI of the containing document (with angle brackets)
 /// - `graph`: target graph IRI (with angle brackets)
 /// - `relpath_str`: source document path relative to repo root (for warnings)
-/// - `slug_index` / `path_index`: doc lookup tables
+/// - `path_index`: repo-relative paths of every walked doc (dangling-link
+///   warnings only — resolution itself is pure path arithmetic)
 /// - `obj_props` / `prop_datatypes`: ontology-derived property metadata
 /// - `emitted_types`: in/out dedup set — the caller must zero this per doc
 ///   so each document emits its `rdf:type` assertions at most once
@@ -428,7 +425,6 @@ pub(crate) fn emit_spo_line_nquads(
     doc_uri: &str,
     graph: &str,
     relpath_str: &str,
-    slug_index: &HashMap<String, String>,
     path_index: &HashSet<String>,
     obj_props: &HashSet<String>,
     prop_datatypes: &HashMap<String, String>,
@@ -453,70 +449,51 @@ pub(crate) fn emit_spo_line_nquads(
     // Hard-fail: [[wikilinks]] in frontmatter values corrupt the graph
     if predicate != "linksTo" && (object.contains("[[") || object.contains("]]")) {
         eprintln!(
-            "error: {}: {} — wikilink syntax [[...]] is not allowed in frontmatter values. Write the bare slug instead.",
+            "error: {}: {} — wikilink syntax [[...]] is not allowed in frontmatter values. Write the repo-relative path (e.g. friend/selkie.md).",
             relpath_str, subject
         );
         return 1;
     }
 
     if predicate == "linksTo" {
-        // [[wikilink]] → md:linksTo (resolved) or literal fallback (broken).
+        // [[wikilink]] → md:linksTo. Rob-ruled 2026-07-28: a link target is
+        // a PATH — relative to the source file's folder, or repo-rooted
+        // with a leading `/` — resolved by pure path arithmetic. The IRI
+        // derives the same way at every commit, whether or not the target
+        // file exists yet (forward links are legal; dangling ones warn at
+        // save until the target appears). `.md` is appended when the
+        // target has no extension.
         //
-        // Three resolution strategies, tried in order:
-        //   1. Path-style — if the target contains `/`, treat it as a path
-        //      relative to the source file's directory. Normalize `..`, look
-        //      up against the path index.
-        //   2. Trailing-segment fallback — if path resolution fails, take the
-        //      last segment of the target and try the bare-wikilink path.
-        //   3. Bare wikilink — slugify (lowercase, hyphens, alnum-only) and
-        //      look up in the slug index keyed by file stem.
-        //
-        // Falls through to a literal linksTo only when all three miss.
+        // NOT-CHOSEN alternative, recorded for context: the old
+        // three-strategy search (path-with-existence-check, then trailing-
+        // segment fallback, then slugified-stem lookup across the whole
+        // repo) — deleted because search-based resolution rebinds silently
+        // as files come and go and makes history non-deterministic.
         let source_dir = std::path::Path::new(relpath_str)
             .parent()
             .map(|p| p.to_string_lossy().to_string())
             .unwrap_or_default();
 
-        let resolved_path: Option<String> = if object.contains('/') {
-            normalize_wikilink_path(object, &source_dir)
-                .filter(|p| path_index.contains(p))
-        } else {
-            None
-        };
-
-        let link_uri: Option<String> = if let Some(p) = resolved_path {
-            Some(format!("<{}>", resource_uri(&uri_encode_path(&p))))
-        } else {
-            // Strategy 2: trailing-segment fallback if the target had a `/`.
-            let candidate = if let Some(idx) = object.rfind('/') {
-                &object[idx + 1..]
-            } else {
-                object
-            };
-            // Strip trailing .md if present so the stem matches the index.
-            let stem = candidate.strip_suffix(".md").unwrap_or(candidate);
-            // Strategy 3: slugify and look up in slug_index.
-            let link_slug = stem.to_lowercase()
-                .replace(' ', "-")
-                .replace(|c: char| !c.is_alphanumeric() && c != '-', "");
-            if !link_slug.is_empty() && slug_index.contains_key(&link_slug) {
-                Some(resolve_slug_to_uri(&link_slug, slug_index))
-            } else {
-                None
+        match normalize_wikilink_path(object, &source_dir) {
+            Some(p) => {
+                if graph == format!("<{}>", crate::git::graph_uri("now"))
+                    && !path_index.contains(&p)
+                {
+                    eprintln!(
+                        "warning: {relpath_str}: [[{object}]] → {p} does not exist (yet) — forward link, or fix the path"
+                    );
+                }
+                out.push_str(&format!(
+                    "{} <https://repolex.ai/ontology/git-lex/md/linksTo> <{}> {} .\n",
+                    doc_uri, resource_uri(&uri_encode_path(&p)), graph
+                ));
             }
-        };
-
-        if let Some(uri) = link_uri {
-            out.push_str(&format!(
-                "{} <https://repolex.ai/ontology/git-lex/md/linksTo> {} {} .\n",
-                doc_uri, uri, graph
-            ));
-        } else {
-            // Unresolved wikilink → flat literal on md:linksTo.
-            out.push_str(&format!(
-                "{} <https://repolex.ai/ontology/git-lex/md/linksTo> \"{}\" {} .\n",
-                doc_uri, nq_escape(object), graph
-            ));
+            None => {
+                eprintln!(
+                    "error: {relpath_str}: [[{object}]] escapes the repo root — links stay inside the repo"
+                );
+                errors += 1;
+            }
         }
     } else {
         // Check for three-segment dot notation: kit.class.property
@@ -587,7 +564,7 @@ pub(crate) fn emit_spo_line_nquads(
                 let values: Vec<&str> = object.split(',').map(|s| s.trim()).filter(|s| !s.is_empty()).collect();
                 for val in values {
                     if val.is_empty() { continue; }
-                    match resolve::resolve_frontmatter_value(val, slug_index) {
+                    match resolve::resolve_frontmatter_value(val) {
                         resolve::ResolveResult::Iri(uri) => {
                             out.push_str(&format!(
                                 "{} {} {} {} .\n",
@@ -654,27 +631,18 @@ pub(crate) fn emit_spo_line_nquads(
                 } else {
                     vec![object.trim()]
                 };
+                // Pre-dot-notation-era keys (no current kit emits them;
+                // they exist only in old souls' history). Same law as
+                // everywhere else: paths derive IRIs, anything else stays
+                // a literal — no index lookup, no guessing.
                 for val in values {
                     if val.is_empty() { continue; }
-                    let slug = val.trim_start_matches('@').to_lowercase()
-                        .replace(' ', "-")
-                        .replace(|c: char| !c.is_alphanumeric() && c != '-' && c != '/' && c != '.', "");
-                    if slug.is_empty() { continue; }
-                    if slug.contains('/') || slug.ends_with(".md") {
+                    if val.contains('/') || val.ends_with(".md") {
                         out.push_str(&format!(
                             "{} {} <{}> {} .\n",
-                            doc_uri, fm_predicate, resource_uri(&uri_encode_path(&slug)), graph
-                        ));
-                    } else if slug_index.contains_key(&slug) {
-                        out.push_str(&format!(
-                            "{} {} {} {} .\n",
-                            doc_uri, fm_predicate, resolve_slug_to_uri(&slug, slug_index), graph
+                            doc_uri, fm_predicate, resource_uri(&uri_encode_path(val)), graph
                         ));
                     } else {
-                        // Unresolved stays a LITERAL (resolve.rs rule 7) —
-                        // this call site used to reach the index-miss panic
-                        // via historical sidecar lines whose target was
-                        // later deleted (review finding: sync brickable).
                         out.push_str(&format!(
                             "{} {} \"{}\" {} .\n",
                             doc_uri, fm_predicate, nq_escape(val), graph
@@ -694,42 +662,21 @@ pub(crate) fn emit_spo_line_nquads(
 
 /// Build the slug→path and path indexes used for `[[wikilink]]` resolution.
 ///
-/// Takes the repo root and a list of `.md` / `.txt` file paths, returns:
-/// - `slug_index`: lowercase filename stem → relative path (with a dot-stripped
-///   alias key for handles like `spaceg.o.a.t.` → `spacegoat`). Template files
-///   (prefix `__`) are excluded.
-/// - `path_index`: set of relative paths, for path-style wikilink resolution.
-///
-/// Extracted from `generate_frontmatter_nquads` so the history-graph walker
-/// can build the same indexes and produce byte-identical triples when replaying
-/// historical `.spo` line events through `emit_spo_line_nquads`.
-///
-/// Known fragility: slug_index is inherently collision-prone (two files with
-/// the same stem in different folders). The canonical direction is to prefer
-/// full-path wikilinks `[[Class/id]]` going forward and retain slug_index only
-/// as a shim for bare `[[name]]` references.
-pub(crate) fn build_slug_path_indexes(
+/// Repo-relative paths of every walked document — used to warn on
+/// dangling links. (The slug index that used to live here — lowercase
+/// stem → path, collision-prone by construction — died with the
+/// bare-name resolution rule, Rob-ruled 2026-07-28.)
+pub(crate) fn build_path_index(
     root: &std::path::Path,
     files: &[PathBuf],
-) -> (HashMap<String, String>, HashSet<String>) {
-    let mut slug_index: HashMap<String, String> = HashMap::new();
+) -> HashSet<String> {
     let mut path_index: HashSet<String> = HashSet::new();
     for f in files {
         if let Ok(rel) = f.strip_prefix(root) {
-            let rel_str = rel.to_string_lossy().to_string();
-            path_index.insert(rel_str.clone());
-            if let Some(file_name) = f.file_stem() {
-                let slug = file_name.to_string_lossy().to_lowercase();
-                if slug.starts_with("__") { continue; }
-                slug_index.insert(slug.clone(), rel_str.clone());
-                let dotless = slug.replace('.', "");
-                if dotless != slug {
-                    slug_index.entry(dotless).or_insert(rel_str);
-                }
-            }
+            path_index.insert(rel.to_string_lossy().to_string());
         }
     }
-    (slug_index, path_index)
+    path_index
 }
 
 
@@ -803,7 +750,6 @@ mod tests {
     /// with no installed declaration falls back to the conventional pattern.
     #[test]
     fn emitter_follows_declared_kit_namespace() {
-        let empty_idx: HashMap<String, String> = HashMap::new();
         let empty_paths: HashSet<String> = HashSet::new();
         let obj_props: HashSet<String> = HashSet::new();
         let datatypes: HashMap<String, String> = HashMap::new();
@@ -818,7 +764,7 @@ mod tests {
             "<https://repolex.ai/soul/Journal/day-1.md>",
             "<https://repolex.ai/git-lex/NamedGraph/now>",
             "Journal/day-1.md",
-            &empty_idx, &empty_paths, &obj_props, &datatypes, &namespaces,
+            &empty_paths, &obj_props, &datatypes, &namespaces,
             &mut types, &mut out,
         );
         assert!(
@@ -834,7 +780,7 @@ mod tests {
             "<https://repolex.ai/soul/friend/selkie.md>",
             "<https://repolex.ai/git-lex/NamedGraph/now>",
             "friend/selkie.md",
-            &empty_idx, &empty_paths, &obj_props, &datatypes, &namespaces,
+            &empty_paths, &obj_props, &datatypes, &namespaces,
             &mut types, &mut out2,
         );
         assert!(

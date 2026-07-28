@@ -18,7 +18,6 @@ use std::fs;
 
 use git_lex::resolve_kit_spec;
 
-use crate::nquad::uri_encode_path;
 
 /// Escape a string for a Turtle double-quoted literal. Backslash FIRST,
 /// then quote — escaping only the quote produced invalid Turtle for any
@@ -28,18 +27,6 @@ fn turtle_escape(v: &str) -> String {
     v.replace('\\', "\\\\").replace('"', "\\\"")
 }
 use crate::ontology::{get_object_properties, get_property_datatypes};
-
-/// Resolve a slug to an IRI under the soul a-box base (Day-50: no soul
-/// identity in subjects). Callers only invoke this on a slug-index HIT —
-/// there is no fallback IRI policy (unresolved values stay literals,
-/// resolve.rs rule 7; the old `entity/<slug>` fallback was the retired
-/// minting policy and was unreachable from every graph-path caller).
-pub(crate) fn resolve_slug_to_uri(slug: &str, slug_index: &HashMap<String, String>) -> String {
-    let rel_path = slug_index
-        .get(slug)
-        .expect("resolve_slug_to_uri called without a slug_index hit (caller bug)");
-    format!("<{}>", crate::git::resource_uri(&uri_encode_path(rel_path)))
-}
 
 /// Normalize a path-style wikilink target into a relpath that can be matched
 /// against the file index. Resolves the target relative to `source_dir`,
@@ -124,7 +111,6 @@ pub(crate) fn frontmatter_to_turtle(
     filepath: &std::path::Path,
     root: &std::path::Path,
     kit: &str,
-    slug_index: &HashMap<String, String>,
 ) -> Result<Option<String>, String> {
     let content = fs::read_to_string(filepath)
         .map_err(|e| format!("cannot read file: {}", e))?;
@@ -267,7 +253,7 @@ pub(crate) fn frontmatter_to_turtle(
             // at save time (review finding A5: two resolution policies).
             let values: Vec<&str> = value.split(',').map(|v| v.trim()).filter(|v| !v.is_empty()).collect();
             for val in values {
-                match crate::resolve::resolve_frontmatter_value(val, slug_index) {
+                match crate::resolve::resolve_frontmatter_value(val) {
                     crate::resolve::ResolveResult::Iri(uri) => {
                         // `uri` arrives in `<...>` form, valid Turtle as-is.
                         ttl.push_str(&format!(
