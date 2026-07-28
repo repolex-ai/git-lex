@@ -47,8 +47,6 @@ fn fetch_kit_for_update(kit_spec: &str) -> bool {
 /// Used by both `cmd_kit_update` (in a loop over all kits) and
 /// `cmd_kit_add` (single-kit). Stays silent if the kit has no types.
 fn regenerate_kit_artifacts(kit_name: &str, root: &std::path::Path, create_folders: bool) {
-    let (_, _, short) = resolve_kit_spec(kit_name);
-
     match build_shacl_shapes(kit_name) {
         Ok(Some(shapes_path)) => println!("  SHACL shapes regenerated: {}",
             shapes_path.file_name().unwrap_or_default().to_string_lossy()),
@@ -59,6 +57,55 @@ fn regenerate_kit_artifacts(kit_name: &str, root: &std::path::Path, create_folde
             exit(1);
         }
     }
+
+    let templates_updated = emit_class_templates(kit_name, root, create_folders);
+
+    // Folder audit — only meaningful when the kit declares a folder_base.
+    let kit_types = get_kit_types(kit_name);
+    let folder_base = kit_config_str(kit_name, "folder base");
+    if let Some(ref base) = folder_base {
+        let expected: std::collections::HashSet<String> =
+            kit_types.iter().map(|(name, _)| name.clone()).collect();
+        let base_dir = root.join(base);
+
+        let mut missing = Vec::new();
+        for name in &expected {
+            if !base_dir.join(name).exists() {
+                missing.push(name.clone());
+            }
+        }
+        let mut extra = Vec::new();
+        if let Ok(entries) = fs::read_dir(&base_dir) {
+            for entry in entries.filter_map(|e| e.ok()) {
+                let name = entry.file_name().to_string_lossy().to_string();
+                if entry.path().is_dir() && !expected.contains(&name) {
+                    extra.push(name);
+                }
+            }
+        }
+        if !missing.is_empty() {
+            eprintln!("  ⚠ Missing folders (in ontology but not on disk): {}", missing.join(", "));
+        }
+        if !extra.is_empty() {
+            eprintln!("  ⚠ Extra folders (on disk but not in ontology): {}", extra.join(", "));
+        }
+        if missing.is_empty() && extra.is_empty() && !expected.is_empty() {
+            println!("  Folders: {}/{} match ontology ✓", expected.len(), expected.len());
+        }
+    }
+
+    if templates_updated > 0 {
+        println!("  {} class template(s) regenerated.", templates_updated);
+    }
+}
+
+/// Emit the `__ClassName.md` frontmatter template for every foldered class of
+/// a kit. This is the CANONICAL template emitter — `git lex init`, `kit-add`
+/// and `kit-update` all converge templates through it, so template output is
+/// identical no matter which command wrote it. Returns the number of
+/// templates written.
+pub(crate) fn emit_class_templates(kit_name: &str, root: &std::path::Path, create_folders: bool) -> usize {
+    let (_, _, short) = resolve_kit_spec(kit_name);
 
     let kit_types = get_kit_types(kit_name);
     let shapes_content = {
@@ -124,41 +171,7 @@ fn regenerate_kit_artifacts(kit_name: &str, root: &std::path::Path, create_folde
         templates_updated += 1;
     }
 
-    // Folder audit — only meaningful when the kit declares a folder_base.
-    if let Some(ref base) = folder_base {
-        let expected: std::collections::HashSet<String> =
-            kit_types.iter().map(|(name, _)| name.clone()).collect();
-        let base_dir = root.join(base);
-
-        let mut missing = Vec::new();
-        for name in &expected {
-            if !base_dir.join(name).exists() {
-                missing.push(name.clone());
-            }
-        }
-        let mut extra = Vec::new();
-        if let Ok(entries) = fs::read_dir(&base_dir) {
-            for entry in entries.filter_map(|e| e.ok()) {
-                let name = entry.file_name().to_string_lossy().to_string();
-                if entry.path().is_dir() && !expected.contains(&name) {
-                    extra.push(name);
-                }
-            }
-        }
-        if !missing.is_empty() {
-            eprintln!("  ⚠ Missing folders (in ontology but not on disk): {}", missing.join(", "));
-        }
-        if !extra.is_empty() {
-            eprintln!("  ⚠ Extra folders (on disk but not in ontology): {}", extra.join(", "));
-        }
-        if missing.is_empty() && extra.is_empty() && !expected.is_empty() {
-            println!("  Folders: {}/{} match ontology ✓", expected.len(), expected.len());
-        }
-    }
-
-    if templates_updated > 0 {
-        println!("  {} class template(s) regenerated.", templates_updated);
-    }
+    templates_updated
 }
 
 /// Build the ordered list of kits a `kit-update` should refresh.
