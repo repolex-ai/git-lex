@@ -144,9 +144,10 @@ fn api_file_for_uri(state: &VizState, uri: Option<&str>) -> serde_json::Value {
     // so the path is DERIVED back from the IRI, no store query. The old
     // implementation asked the retired git: layer for git:path, which died
     // at the git2 cutover (w3bl0rd's live-confirmed bug, 2026-07-21).
-    let tail = match uri.strip_prefix("https://repolex.ai/soul/") {
+    let base = format!("{}/", git_lex::resource_base_at(&state.repo_root));
+    let tail = match uri.strip_prefix(base.as_str()) {
         Some(t) if !t.is_empty() => t,
-        _ => return serde_json::json!({"error": "not a document IRI (expected https://repolex.ai/soul/<path>)", "uri": uri}),
+        _ => return serde_json::json!({"error": format!("not a document IRI (expected {base}<path>)"), "uri": uri}),
     };
     // Percent-decode the IRI tail back to a filesystem path.
     let decoded = {
@@ -326,19 +327,26 @@ async fn run_viz_server(port: u16, www_dir: PathBuf) {
                     // documents. `target` is always a STRING; `resolved` is
                     // a boolean — the JS branches on columns, never on RDF
                     // term kinds.
-                    let q = "PREFIX md: <https://repolex.ai/ontology/git-lex/md/> \
-                        SELECT ?from ?predicate ?target ?resolved WHERE { \
-                          GRAPH <https://repolex.ai/git-lex/NamedGraph/now> { \
-                            { ?from md:linksTo ?to . BIND(STR(md:linksTo) AS ?predicate) } \
+                    // Kit predicates live under ontology/<kit>/ (the
+                    // kit/ tier is retired but old stores may carry it —
+                    // match both); machinery vocab (ontology/git-lex/) is
+                    // excluded except md:linksTo above. The a-box base is
+                    // DERIVED per repo, never hardcoded.
+                    let q = format!("PREFIX md: <https://repolex.ai/ontology/git-lex/md/> \
+                        SELECT ?from ?predicate ?target ?resolved WHERE {{ \
+                          GRAPH <https://repolex.ai/git-lex/NamedGraph/now> {{ \
+                            {{ ?from md:linksTo ?to . BIND(STR(md:linksTo) AS ?predicate) }} \
                             UNION \
-                            { ?from ?p ?to . \
-                              FILTER(STRSTARTS(STR(?p), \"https://repolex.ai/ontology/kit/\")) \
-                              FILTER(isIRI(?to) && STRSTARTS(STR(?to), \"https://repolex.ai/soul/\")) \
-                              BIND(STR(?p) AS ?predicate) } \
+                            {{ ?from ?p ?to . \
+                              FILTER(STRSTARTS(STR(?p), \"https://repolex.ai/ontology/\")) \
+                              FILTER(!STRSTARTS(STR(?p), \"https://repolex.ai/ontology/git-lex/\")) \
+                              FILTER(isIRI(?to) && STRSTARTS(STR(?to), \"{abox}/\")) \
+                              BIND(STR(?p) AS ?predicate) }} \
                             BIND(STR(?to) AS ?target) \
                             BIND(ISIRI(?to) AS ?resolved) \
-                          } }";
-                    Json(run_sparql_to_json(&state.store, q))
+                          }} }}",
+                        abox = git_lex::resource_base_at(&state.repo_root));
+                    Json(run_sparql_to_json(&state.store, &q))
                 }
             }
         }))

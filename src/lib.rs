@@ -84,6 +84,8 @@ pub fn eval_query<'a>(
 #[derive(Debug, Default, serde::Deserialize)]
 pub struct RepoYml {
     #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
     pub kit: Option<String>,
     #[serde(default)]
     pub agent_name: Option<String>,
@@ -142,6 +144,7 @@ impl RepoYml {
                 if !v.is_empty() { out.insert(k.to_string(), v.clone()); }
             }
         };
+        put("name", &self.name);
         put("kit", &self.kit);
         put("agent_name", &self.agent_name);
         put("agent_email", &self.agent_email);
@@ -169,6 +172,36 @@ impl RepoYml {
 /// old `ontology/kit/` tier is ruled dead (2026-07-24 flip).
 pub fn conventional_kit_namespace(short: &str) -> String {
     format!("https://repolex.ai/ontology/{}/", short)
+}
+
+/// The repo's a-box namespace base — DERIVED, never configured and never
+/// hardcoded (Rob-ruled 2026-07-28: "nothing should be hardcoded to soul").
+///
+/// Derivation: `https://repolex.ai/<ns>` where `<ns>` is
+///   1. the domain kit's short name (`kit: soul` → `soul`) — so every
+///      soul-kit repo keeps its existing IRIs verbatim;
+///   2. else the repo.yml `name:`, slugified — kit-less repos get their
+///      own namespace instead of being wrongly stamped `soul`;
+///   3. else `repo` — a last-resort constant so IRIs stay valid.
+pub fn resource_base_at(root: &std::path::Path) -> String {
+    let y = RepoYml::load(root);
+    let ns = y
+        .domain_kit()
+        .map(|k| resolve_kit_spec(&k).2)
+        .or_else(|| y.name.as_deref().map(slugify_ns).filter(|s| !s.is_empty()))
+        .unwrap_or_else(|| "repo".to_string());
+    format!("https://repolex.ai/{ns}")
+}
+
+/// Slugify a repo name into a namespace segment: lowercase, spaces → `-`,
+/// anything not alphanumeric/dash/dot dropped.
+fn slugify_ns(name: &str) -> String {
+    name.trim()
+        .to_lowercase()
+        .replace(' ', "-")
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '.')
+        .collect()
 }
 
 /// Find a kit's own prefix declaration in TTL content. Returns

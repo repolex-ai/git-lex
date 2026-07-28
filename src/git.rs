@@ -50,7 +50,32 @@ pub(crate) const GRAPH_BASE: &str = "https://repolex.ai/git-lex/NamedGraph/";
 /// The a-box (instance) base for soul-repo subjects. Subtexture-wide shape
 /// (Rob, Day-50): `https://repolex.ai/<application>/<Class>/<instanceId>` —
 /// no base word; vocabulary stays under `https://repolex.ai/ontology/...`.
-pub(crate) const SOUL_RESOURCE_BASE: &str = "https://repolex.ai/soul";
+/// Process-cached a-box base + scaffold-folder prefix, derived once from
+/// repo.yml via `git_lex::resource_base_at` (kit short name, else repo
+/// name; NEVER hardcoded — Rob-ruled 2026-07-28). The scaffold strip
+/// generalizes the old "Soul/" rule: the folder named after the namespace,
+/// capitalized, maps onto the namespace root ("Soul/Journal/x" →
+/// <base>/Journal/x — no "/soul/Soul/" stutter).
+/// (NOT-CHOSEN alternative, recorded for context: a per-call derivation
+/// with an explicit root parameter — correct for multi-repo processes,
+/// but every caller here is the single-repo CLI; the multi-repo serve
+/// binary derives per-repo via resource_base_at directly.)
+fn resource_base() -> &'static (String, String) {
+    static BASE: std::sync::OnceLock<(String, String)> = std::sync::OnceLock::new();
+    BASE.get_or_init(|| {
+        let base = find_git_root()
+            .map(|r| git_lex::resource_base_at(&r))
+            .unwrap_or_else(|| "https://repolex.ai/repo".to_string());
+        let ns = base.rsplit('/').next().unwrap_or("repo");
+        let mut cap = ns.to_string();
+        if let Some(first) = cap.get_mut(0..1) {
+            let up = first.to_uppercase();
+            cap.replace_range(0..1, &up);
+        }
+        let strip = format!("{cap}/");
+        (base, strip)
+    })
+}
 
 /// Mint a graph name: `https://repolex.ai/git-lex/NamedGraph/<name>`.
 /// Graphs are instances of `git-lex:NamedGraph` (⊑ sd:NamedGraph, kit-base
@@ -76,11 +101,12 @@ pub(crate) fn graph_uri(name: &str) -> String {
 /// filename (nquad.rs wikilink resolution + downstream resolvers exact-match
 /// on it); see the Task-2 spec's ON HOLD ruling before ever changing that.
 pub(crate) fn resource_uri(path: &str) -> String {
+    let (base, strip) = resource_base();
     if path.is_empty() {
-        return SOUL_RESOURCE_BASE.to_string();
+        return base.clone();
     }
-    let tail = path.strip_prefix("Soul/").unwrap_or(path);
-    format!("{SOUL_RESOURCE_BASE}/{tail}")
+    let tail = path.strip_prefix(strip.as_str()).unwrap_or(path);
+    format!("{base}/{tail}")
 }
 // ---------------------------------------------------------------------
 // SHA resolution (three tiers, ordered by cost)

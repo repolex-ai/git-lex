@@ -150,7 +150,12 @@ mod tests {
         m
     }
 
-    const BASE: &str = "https://repolex.ai/soul";
+    // The a-box base is DERIVED per repo (kit short / repo name — never
+    // hardcoded); tests assert resolution BEHAVIOR against whatever base
+    // this checkout derives, not a pinned literal.
+    fn base() -> String {
+        crate::git::resource_uri("")
+    }
 
     // ─── Rule 1: no wikilinks in frontmatter ──────────────────────────────
 
@@ -224,7 +229,7 @@ mod tests {
         let result = resolve_frontmatter_value("w4r3z", &idx);
         assert_eq!(
             result,
-            ResolveResult::Iri(format!("<{}/agent/w4r3z.md>", BASE))
+            ResolveResult::Iri(format!("<{}/agent/w4r3z.md>", base()))
         );
     }
 
@@ -236,7 +241,7 @@ mod tests {
         let result = resolve_frontmatter_value("W4R3Z", &idx);
         assert_eq!(
             result,
-            ResolveResult::Iri(format!("<{}/agent/w4r3z.md>", BASE))
+            ResolveResult::Iri(format!("<{}/agent/w4r3z.md>", base()))
         );
     }
 
@@ -293,7 +298,7 @@ mod tests {
         let result = resolve_frontmatter_value("agent/w4r3z.md", &idx);
         assert_eq!(
             result,
-            ResolveResult::Iri(format!("<{}/agent/w4r3z.md>", BASE))
+            ResolveResult::Iri(format!("<{}/agent/w4r3z.md>", base()))
         );
     }
 
@@ -304,7 +309,7 @@ mod tests {
         let result = resolve_frontmatter_value("w4r3z.md", &idx);
         assert_eq!(
             result,
-            ResolveResult::Iri(format!("<{}/w4r3z.md>", BASE))
+            ResolveResult::Iri(format!("<{}/w4r3z.md>", base()))
         );
     }
 
