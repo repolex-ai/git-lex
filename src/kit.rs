@@ -387,11 +387,18 @@ pub(crate) fn load_kit_into_store(kit: &str) -> Result<Option<Store>, String> {
     let Some(ttl_path) = find_kit_ttl(kit) else { return Ok(None) };
     let content = fs::read_to_string(&ttl_path)
         .map_err(|e| format!("cannot read {}: {}", ttl_path.display(), e))?;
+    Ok(Some(load_ttl_str(&content, &ttl_path.display().to_string())?))
+}
+
+/// Load Turtle TEXT into a fresh in-memory store — the ONE way git-lex reads
+/// TTL content (a real parse queried with SPARQL; never line scanning).
+/// `label` names the source in the error message.
+pub(crate) fn load_ttl_str(content: &str, label: &str) -> Result<Store, String> {
     let store = Store::new().map_err(|e| format!("store init failed: {}", e))?;
     store
         .load_from_reader(RdfFormat::Turtle, Cursor::new(content.as_bytes()))
-        .map_err(|e| format!("TTL parse error in {}: {}", ttl_path.display(), e))?;
-    Ok(Some(store))
+        .map_err(|e| format!("TTL parse error in {}: {}", label, e))?;
+    Ok(store)
 }
 
 // ─── install pipeline ──────────────────────────────────────────
