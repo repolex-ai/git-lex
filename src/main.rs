@@ -1356,23 +1356,10 @@ fn cmd_validate() -> bool {
         .collect::<Vec<_>>()
         .join("\n");
 
-    // Find all .md files in the repo. `.txt` files ride along for the SLUG
-    // INDEX only (sync's resolver indexes them as link targets, so validate
-    // must too — same index, same resolution); only .md files are validated.
-    fn walk_md(dir: &std::path::Path, files: &mut Vec<PathBuf>) {
-        if let Ok(entries) = fs::read_dir(dir) {
-            for entry in entries.filter_map(|e| e.ok()) {
-                let path = entry.path();
-                let name = entry.file_name().to_string_lossy().to_string();
-                if name.starts_with('.') { continue; }
-                if path.is_dir() { walk_md(&path, files); }
-                else if name.ends_with(".md") || name.ends_with(".txt") { files.push(path); }
-            }
-        }
-    }
-
-    let mut files = Vec::new();
-    walk_md(&root, &mut files);
+    // One walker for the whole codebase; `.txt` files ride along for the
+    // slug index (sync's resolver indexes them as link targets, so validate
+    // must too). Only .md files are validated (filter in the loop below).
+    let files = crate::nquad::walk_repo_docs(&root);
 
     // Parse SHACL shapes into compiled schema (once)
     use rudof_rdf::rdf_core::RDFFormat;
@@ -1764,14 +1751,18 @@ fn cmd_sync() {
     // what sync needs. (Splitting extraction from emission is a refactor
     // deferred until the direct query path's disposition is ruled — the
     // same function serves `git lex query`.)
-    let (fm_nq, fm_errors) = generate_frontmatter_nquads();
+    let resolver_ctx = crate::nquad::ResolverContext::build(&root);
+    let (fm_nq, fm_errors) = crate::nquad::generate_frontmatter_nquads_with(&root, &resolver_ctx);
     if fm_errors > 0 {
         eprintln!("warning: {} frontmatter error(s) during sync — extraction may be incomplete", fm_errors);
     }
     let fm_count = fm_nq.lines().filter(|l| !l.is_empty()).count();
 
-    // ─── One-graph phase: append new commits' statement events ───
-    sync_onegraph_phase(&store, &root, onegraph_resume);
+    // ─── One-graph phase: append new commits' statement events.
+    // Shares the SAME resolver context, so one-graph facts resolve
+    // identically to now-view facts (and the indexes build once per sync,
+    // not twice). ───
+    sync_onegraph_phase(&store, &root, onegraph_resume, &resolver_ctx);
 
     // ─── Stale graph cleanup ───
     // Subsumed by the Phase-1 clear filter: every graph not on the keep-list
@@ -1820,7 +1811,7 @@ fn cmd_sync() {
     println!("Store: {}", store_path().unwrap().display());
 }
 
-fn sync_onegraph_phase(store: &Store, root: &std::path::Path, resume_sha: Option<String>) {
+fn sync_onegraph_phase(store: &Store, root: &std::path::Path, resume_sha: Option<String>, ctx: &crate::nquad::ResolverContext) {
     let one_graph_uri = format!("<{}>", spo_events::LEXHISTORY_GRAPH_IRI);
 
     // Which commits are new?
@@ -1885,36 +1876,11 @@ fn sync_onegraph_phase(store: &Store, root: &std::path::Path, resume_sha: Option
             }
         };
 
-        // Same resolver inputs the now-graph emitter uses — ALL installed
-        // kits (base + optionals), so one-graph facts resolve identically to
-        // now-view facts (single-kit lookups were the old drift source).
-        let obj_props = crate::ontology::get_object_properties_all_kits();
-        let prop_datatypes = crate::ontology::get_property_datatypes_all_kits();
-        let kit_namespaces = crate::ontology::get_kit_namespaces_all_kits();
-        let mut md_files = Vec::new();
-        fn walk_md(dir: &std::path::Path, files: &mut Vec<PathBuf>) {
-            if let Ok(entries) = fs::read_dir(dir) {
-                for entry in entries.filter_map(|e| e.ok()) {
-                    let path = entry.path();
-                    let name = entry.file_name().to_string_lossy().to_string();
-                    if name.starts_with('.') { continue; }
-                    if path.is_dir() { walk_md(&path, files); }
-                    else if name.ends_with(".md") || name.ends_with(".txt") { files.push(path); }
-                }
-            }
-        }
-        walk_md(root, &mut md_files);
-        let (slug_index, path_index) = build_slug_path_indexes(root, &md_files);
-
         let (seen, emitted) = match spo_events::onegraph_walk_engine(
             &commits,
             store,
             &one_graph_uri,
-            &slug_index,
-            &path_index,
-            &obj_props,
-            &prop_datatypes,
-            &kit_namespaces,
+            ctx,
             false, // show_progress — sync prints its own phase summary
             full_rebuild, // clear_first only on a full rebuild
         ) {

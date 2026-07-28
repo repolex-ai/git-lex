@@ -133,6 +133,66 @@ pub(crate) fn load_lex_nquads() -> String {
     nq
 }
 
+/// THE repo document walker. Every consumer walks the same file set —
+/// `.md` and `.txt`, dot-entries skipped — through this one function.
+/// Call sites that need a narrower set filter EXPLICITLY (see
+/// `is_template`); the four hand-rolled walkers this replaces had drifted
+/// into three different file policies.
+pub(crate) fn walk_repo_docs(root: &std::path::Path) -> Vec<PathBuf> {
+    fn walk(dir: &std::path::Path, files: &mut Vec<PathBuf>) {
+        if let Ok(entries) = fs::read_dir(dir) {
+            for entry in entries.filter_map(|e| e.ok()) {
+                let path = entry.path();
+                let name = entry.file_name().to_string_lossy().to_string();
+                if name.starts_with('.') { continue; }
+                if path.is_dir() {
+                    walk(&path, files);
+                } else if name.ends_with(".md") || name.ends_with(".txt") {
+                    files.push(path);
+                }
+            }
+        }
+    }
+    let mut files = Vec::new();
+    walk(root, &mut files);
+    files
+}
+
+/// Is this a kit-derived `__Class.md` scaffold template?
+pub(crate) fn is_template(path: &std::path::Path) -> bool {
+    path.file_name()
+        .map(|n| n.to_string_lossy().starts_with("__"))
+        .unwrap_or(false)
+}
+
+/// Everything the shared emitter resolves against, built ONCE per run:
+/// the slug/path indexes over the repo's documents and the all-kits
+/// ontology tables. Sync used to build the indexes twice per run (once
+/// inside frontmatter generation, again for the history walk).
+pub(crate) struct ResolverContext {
+    pub files: Vec<PathBuf>,
+    pub slug_index: HashMap<String, String>,
+    pub path_index: HashSet<String>,
+    pub obj_props: HashSet<String>,
+    pub prop_datatypes: HashMap<String, String>,
+    pub kit_namespaces: HashMap<String, String>,
+}
+
+impl ResolverContext {
+    pub(crate) fn build(root: &std::path::Path) -> ResolverContext {
+        let files = walk_repo_docs(root);
+        let (slug_index, path_index) = build_slug_path_indexes(root, &files);
+        ResolverContext {
+            files,
+            slug_index,
+            path_index,
+            obj_props: get_object_properties_all_kits(),
+            prop_datatypes: get_property_datatypes_all_kits(),
+            kit_namespaces: get_kit_namespaces_all_kits(),
+        }
+    }
+}
+
 /// Extract frontmatter and body wikilinks from all .md/.txt files in the
 /// repo into the "now" graph. Also writes `.fm.spo` sidecars and scans
 /// commit messages for wikilinks.
@@ -141,6 +201,17 @@ pub(crate) fn generate_frontmatter_nquads() -> (String, u32) {
         Some(r) => r,
         None => return (String::new(), 0),
     };
+    let ctx = ResolverContext::build(&root);
+    generate_frontmatter_nquads_with(&root, &ctx)
+}
+
+/// [`generate_frontmatter_nquads`] against a caller-built context — sync
+/// builds ONE `ResolverContext` and shares it with the history walk.
+pub(crate) fn generate_frontmatter_nquads_with(
+    root: &std::path::Path,
+    ctx: &ResolverContext,
+) -> (String, u32) {
+    let root = root.to_path_buf();
 
     // The "now" graph is the canonical view of current state — extracted
     // frontmatter, body wikilinks/mentions, and any triples derived from the
@@ -158,35 +229,14 @@ pub(crate) fn generate_frontmatter_nquads() -> (String, u32) {
     // (xsd:integer, xsd:date, etc.) regardless of which kit declared the
     // property. The previous single-kit lookup hid optional-kit datatypes —
     // e.g. copia:firstVisited (xsd:date) emitted as untyped string.
-    let obj_props = get_object_properties_all_kits();
-    let prop_datatypes = get_property_datatypes_all_kits();
-    let kit_namespaces = get_kit_namespaces_all_kits();
 
     // Open git repo for blob hash lookups
     let repo = git2::Repository::discover(".").ok();
 
-    // Walk all .md files in the repo (skip .lex/ and .git/)
-    fn walk_md(dir: &std::path::Path, files: &mut Vec<PathBuf>) {
-        if let Ok(entries) = fs::read_dir(dir) {
-            for entry in entries.filter_map(|e| e.ok()) {
-                let path = entry.path();
-                let name = entry.file_name().to_string_lossy().to_string();
-                if name.starts_with('.') {
-                    continue;
-                }
-                if path.is_dir() {
-                    walk_md(&path, files);
-                } else if name.ends_with(".md") || name.ends_with(".txt") {
-                    files.push(path);
-                }
-            }
-        }
-    }
-
-    let mut files = Vec::new();
-    walk_md(&root, &mut files);
-
-    let (slug_index, path_index) = build_slug_path_indexes(&root, &files);
+    let files = ctx.files.as_slice();
+    let (slug_index, path_index) = (&ctx.slug_index, &ctx.path_index);
+    let (obj_props, prop_datatypes, kit_namespaces) =
+        (&ctx.obj_props, &ctx.prop_datatypes, &ctx.kit_namespaces);
 
     // entity_classes was used by the old range-aware resolver, which has been
     // replaced by src/resolve.rs. The range-check approach (matching class IRIs
@@ -203,7 +253,7 @@ pub(crate) fn generate_frontmatter_nquads() -> (String, u32) {
     // where everything is a document. Canonical direction: [[Class/id]].
     let wikilink_re = regex::Regex::new(r"\[\[([^\]]+)\]\]").unwrap();
 
-    for filepath in &files {
+    for filepath in files {
         let content = match fs::read_to_string(filepath) {
             Ok(c) => c,
             Err(_) => continue,

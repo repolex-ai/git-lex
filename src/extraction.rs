@@ -562,21 +562,14 @@ pub(crate) fn extract_markdown_links() {
 
     let mut parser = tree_sitter_md::MarkdownParser::default();
 
-    // Walk all .md files
-    fn walk_md(dir: &std::path::Path, files: &mut Vec<PathBuf>) {
-        if let Ok(entries) = fs::read_dir(dir) {
-            for entry in entries.flatten() {
-                let path = entry.path();
-                let name = entry.file_name().to_string_lossy().to_string();
-                if name.starts_with('.') { continue; }
-                if path.is_dir() { walk_md(&path, files); }
-                else if name.ends_with(".md") && !name.starts_with("__") { files.push(path); }
-            }
-        }
-    }
-
-    let mut files = Vec::new();
-    walk_md(&root, &mut files);
+    // One walker for the whole codebase; this consumer narrows EXPLICITLY:
+    // markdown only (tree-sitter md parser) and no `__Class.md` templates
+    // (kit scaffolds aren't content — their example links would pollute
+    // the graph).
+    let files: Vec<PathBuf> = crate::nquad::walk_repo_docs(&root)
+        .into_iter()
+        .filter(|p| p.extension().is_some_and(|x| x == "md") && !crate::nquad::is_template(p))
+        .collect();
 
     // Build file index for resolving internal links
     let mut file_index: HashSet<String> = HashSet::new();
