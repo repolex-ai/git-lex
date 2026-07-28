@@ -3089,6 +3089,19 @@ fn cmd_kit_update(kit_arg: Option<String>, force: bool) {
         regenerate_kit_artifacts(spec, &root, true);
     }
 
+    // Converge the git pre-commit hook to the current managed section.
+    // Old repos carry pre-marker-era hooks calling removed subcommands
+    // (`git-lex extract`/`validate`) — without this, every save breaks
+    // after a binary upgrade until the hook is refreshed by hand.
+    match hooks::install_hook() {
+        Ok(()) => println!("Pre-commit hook: converged to current version."),
+        Err(e) => {
+            eprintln!("ERROR: could not refresh the pre-commit hook: {e}");
+            eprintln!("`git lex save` may fail until the hook is fixed.");
+            exit(1);
+        }
+    }
+
     println!("Kit update complete: {} kit(s) refreshed.", kits_to_update.len());
 
     // t-box refresh: reload kit ontologies into the persistent ontology graph

@@ -94,6 +94,30 @@ fn hooks_dir() -> Option<PathBuf> {
 /// extract+validate enforcement gate, so a swallowed failure here means
 /// every later commit silently skips extraction and SHACL validation.
 /// Callers must surface the error instead of printing success.
+/// Hook lines written by pre-marker-era git-lex (before the managed
+/// section existed). Scrubbed on install so upgrading an old repo REPLACES
+/// them — otherwise the broken legacy lines (`git-lex extract` /
+/// `git-lex validate` are no longer subcommands) would keep failing every
+/// commit above a perfectly good managed section.
+const LEGACY_HOOK_LINES: &[&str] = &[
+    "git-lex extract",
+    "git lex extract",
+    "git add .lex/extract/ 2>/dev/null",
+    "git add .lex/extract/",
+    "git-lex validate || exit 1",
+    "git lex validate || exit 1",
+];
+
+/// Remove exact legacy git-lex lines from a hook script, preserving
+/// everything else (a user's own hook content is never touched).
+fn scrub_legacy_lines(content: &str) -> String {
+    content
+        .lines()
+        .filter(|l| !LEGACY_HOOK_LINES.contains(&l.trim()))
+        .map(|l| format!("{l}\n"))
+        .collect()
+}
+
 pub(crate) fn install_hook() -> std::io::Result<()> {
     let dir = hooks_dir().ok_or_else(|| std::io::Error::other(
         "could not locate .git/hooks (not a git repo?)",
@@ -110,15 +134,23 @@ pub(crate) fn install_hook() -> std::io::Result<()> {
         // Already has our section — replace it
         replace_managed_section(&existing, MANAGED_SECTION)
     } else {
-        // Existing hook without our section — append
-        let mut content = existing.clone();
-        if !content.ends_with('\n') {
+        // Existing hook without our section: scrub any pre-marker-era
+        // git-lex lines, then append the managed section.
+        let scrubbed = scrub_legacy_lines(&existing);
+        let rest = scrubbed.trim();
+        if rest.is_empty() || rest == "#!/bin/sh" || rest == "#!/bin/bash" {
+            // The old hook was entirely ours — start fresh.
+            format!("#!/bin/sh\n{}\n", MANAGED_SECTION)
+        } else {
+            let mut content = scrubbed;
+            if !content.ends_with('\n') {
+                content.push('\n');
+            }
             content.push('\n');
+            content.push_str(MANAGED_SECTION);
+            content.push('\n');
+            content
         }
-        content.push('\n');
-        content.push_str(MANAGED_SECTION);
-        content.push('\n');
-        content
     };
 
     fs::write(&hook_path, &new_content)?;
@@ -189,4 +221,41 @@ fn replace_managed_section(content: &str, replacement: &str) -> String {
     }
 
     result
+}
+
+#[cfg(test)]
+mod hook_convergence_tests {
+    use super::*;
+
+    /// The exact pre-marker-era hook found live in W4R3Z's repo on
+    /// 2026-07-28 — the shape that broke every save after the binary
+    /// upgrade removed the extract/validate subcommands.
+    const ANCIENT_HOOK: &str = "#!/bin/sh\n\
+        git-lex extract\n\
+        git add .lex/extract/ 2>/dev/null\n\
+        git-lex validate || exit 1\n";
+
+    #[test]
+    fn ancient_hook_lines_are_scrubbed_entirely() {
+        let scrubbed = scrub_legacy_lines(ANCIENT_HOOK);
+        assert!(!scrubbed.contains("git-lex extract"));
+        assert!(!scrubbed.contains("git-lex validate"));
+        assert!(!scrubbed.contains("git add .lex/extract/"));
+        assert_eq!(scrubbed.trim(), "#!/bin/sh");
+    }
+
+    #[test]
+    fn user_content_survives_the_scrub() {
+        let mixed = "#!/bin/sh\nmy-own-linter --check\ngit-lex extract\n";
+        let scrubbed = scrub_legacy_lines(mixed);
+        assert!(scrubbed.contains("my-own-linter --check"));
+        assert!(!scrubbed.contains("git-lex extract"));
+    }
+
+    #[test]
+    fn managed_section_replacement_is_idempotent() {
+        let once = format!("#!/bin/sh\n{}\n", MANAGED_SECTION);
+        let twice = replace_managed_section(&once, MANAGED_SECTION);
+        assert_eq!(once.trim(), twice.trim());
+    }
 }
