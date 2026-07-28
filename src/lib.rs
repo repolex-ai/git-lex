@@ -54,26 +54,9 @@ pub fn open_store_read_only_at(root: &std::path::Path) -> Option<Store> {
     }
 }
 
-/// Read the kit spec from `.lex/repo.yml`. Returns None if no kit or kit is "none".
-// FIXME(w4r3z, Day 38): hand-rolled YAML parse via `strip_prefix("kit: ")` —
-// brittle: breaks on `kit:  soul` (two spaces), `kit:\tsoul` (tab), a trailing
-// comment (`kit: soul  # ...`), or quoted values. The crate ALREADY depends on
-// serde_yaml (used in extraction); parse repo.yml into a struct once and read
-// fields off it. NOTE: `add_prefixes` below parses repo.yml's `kit:` AGAIN by
-// hand (line ~236) — two independent brittle parsers for the same file. Unify.
+/// The domain kit spec from `.lex/repo.yml` (None if unset or "none").
 pub fn get_kit() -> Option<String> {
-    let root = find_git_root()?;
-    let repo_yml = root.join(".lex").join("repo.yml");
-    let content = fs::read_to_string(&repo_yml).ok()?;
-    for line in content.lines() {
-        if let Some(kit) = line.strip_prefix("kit: ") {
-            let kit = kit.trim();
-            if kit != "none" {
-                return Some(kit.to_string());
-            }
-        }
-    }
-    None
+    RepoYml::load(&find_git_root()?).domain_kit()
 }
 
 /// Evaluate a SPARQL query on a store via the current oxigraph API
@@ -89,6 +72,91 @@ pub fn eval_query<'a>(
         .on_store(store)
         .execute()
         .map_err(|e| format!("eval: {e}"))
+}
+
+
+// ─── repo.yml — the ONE reader ─────────────────────────────────
+
+/// The parsed `.lex/repo.yml`. SEVEN hand-rolled line scanners of this one
+/// file (each with different whitespace/quoting/list rules — an observed
+/// drift source) collapsed into this struct. Read side only: writers still
+/// edit the file textually to preserve comments and ordering.
+#[derive(Debug, Default, serde::Deserialize)]
+pub struct RepoYml {
+    #[serde(default)]
+    pub kit: Option<String>,
+    #[serde(default)]
+    pub agent_name: Option<String>,
+    #[serde(default)]
+    pub agent_email: Option<String>,
+    #[serde(default)]
+    pub first_commit: Option<String>,
+    #[serde(default)]
+    pub optional_kits: Vec<String>,
+    #[serde(default)]
+    pub substrates: Vec<String>,
+    /// Every other key, preserved for init's re-init carryover.
+    #[serde(flatten)]
+    pub extra: std::collections::HashMap<String, serde_yaml::Value>,
+}
+
+impl RepoYml {
+    /// Load from `<root>/.lex/repo.yml`. Missing file = Default. A file
+    /// that exists but is not valid YAML WARNS loudly and returns Default —
+    /// never a silent misread.
+    pub fn load(root: &std::path::Path) -> RepoYml {
+        Self::load_path(&root.join(".lex").join("repo.yml"))
+    }
+
+    /// [`RepoYml::load`] for an explicit file path.
+    pub fn load_path(path: &std::path::Path) -> RepoYml {
+        let Ok(content) = fs::read_to_string(path) else {
+            return RepoYml::default();
+        };
+        match serde_yaml::from_str(&content) {
+            Ok(v) => v,
+            Err(e) => {
+                eprintln!(
+                    "warning: {} is not valid YAML ({e}) — treating as empty",
+                    path.display()
+                );
+                RepoYml::default()
+            }
+        }
+    }
+
+    /// The domain kit, if configured and not "none".
+    pub fn domain_kit(&self) -> Option<String> {
+        match self.kit.as_deref().map(str::trim) {
+            None | Some("") | Some("none") => None,
+            Some(k) => Some(k.to_string()),
+        }
+    }
+
+    /// All scalar fields as strings (known + extra) — what init's re-init
+    /// carryover preserves.
+    pub fn scalar_fields(&self) -> std::collections::HashMap<String, String> {
+        let mut out = std::collections::HashMap::new();
+        let mut put = |k: &str, v: &Option<String>| {
+            if let Some(v) = v {
+                if !v.is_empty() { out.insert(k.to_string(), v.clone()); }
+            }
+        };
+        put("kit", &self.kit);
+        put("agent_name", &self.agent_name);
+        put("agent_email", &self.agent_email);
+        put("first_commit", &self.first_commit);
+        for (k, v) in &self.extra {
+            let s = match v {
+                serde_yaml::Value::String(s) => s.clone(),
+                serde_yaml::Value::Number(n) => n.to_string(),
+                serde_yaml::Value::Bool(b) => b.to_string(),
+                _ => continue,
+            };
+            if !s.is_empty() { out.insert(k.clone(), s); }
+        }
+        out
+    }
 }
 
 // ─── Kit namespace derivation (ONE authority) ──────────────────
@@ -295,13 +363,12 @@ pub fn add_prefixes_at(root: Option<&std::path::Path>, query: &str) -> String {
     // Read kit from repo.yml, then pull the kit's prefix+namespace from its
     // installed SHACL shapes file (the runtime source of truth). Shapes live
     // at .lex/ontology/{short}/{short}-shapes.ttl.
-    let kit_prefix = root.map(|p| p.to_path_buf()).and_then(|r| {
-        let content = fs::read_to_string(r.join(".lex").join("repo.yml")).ok()?;
-        for line in content.lines() {
-            if let Some(kit) = line.strip_prefix("kit: ") {
-                let kit = kit.trim();
-                if kit == "none" { return None; }
-                let (_, _, short) = resolve_kit_spec(kit);
+    let kit_prefix = root.and_then(|r| {
+        let kit = RepoYml::load(r).domain_kit()?;
+        {
+            {
+                let (_, _, short) = resolve_kit_spec(&kit);
+                let r = r.to_path_buf();
                 let shapes_path = r
                     .join(".lex")
                     .join("ontology")
@@ -322,7 +389,6 @@ pub fn add_prefixes_at(root: Option<&std::path::Path>, query: &str) -> String {
                 ));
             }
         }
-        None
     });
 
     let mut defaults = vec![
@@ -502,43 +568,9 @@ pub fn w3c_query_at(
     }
 }
 
-// ─── repo.yml list readers (promoted from the binary's kit module so the
-// serve binary can enumerate installed kits — Task 2 Part B) ────────────────
-
-/// Read a top-level YAML list under `key:` from a repo.yml-style file.
-/// Missing file or key = empty list.
-pub fn read_repo_yml_list(path: &std::path::Path, key: &str) -> Vec<String> {
-    let content = match fs::read_to_string(path) {
-        Ok(c) => c,
-        Err(_) => return Vec::new(),
-    };
-    let key_prefix = format!("{}:", key);
-    let mut out = Vec::new();
-    let mut in_list = false;
-    for line in content.lines() {
-        let trimmed = line.trim();
-        if trimmed.is_empty() || trimmed.starts_with('#') { continue; }
-        if trimmed.starts_with(&key_prefix) {
-            in_list = true;
-            continue;
-        }
-        if in_list {
-            if let Some(rest) = trimmed.strip_prefix('-') {
-                let item = rest.trim().trim_matches('"').trim_matches('\'').to_string();
-                if !item.is_empty() {
-                    out.push(item);
-                }
-            } else {
-                in_list = false;
-            }
-        }
-    }
-    out
-}
-
-/// The `optional_kits:` list from a repo.yml.
+/// The `optional_kits:` list from a repo.yml (serve + kit commands).
 pub fn read_repo_yml_optional_kits(path: &std::path::Path) -> Vec<String> {
-    read_repo_yml_list(path, "optional_kits")
+    RepoYml::load_path(path).optional_kits
 }
 
 

@@ -30,44 +30,20 @@ use git_lex::{
     resolve_kit_spec,
 };
 
-/// Read simple `key: value` fields from a repo.yml-style file into a map.
-/// Used for honoring existing init variables on re-init (single-shot with
-/// carry-over). Skips comment lines and anything that doesn't parse as a
-/// flat key/value. Skips list keys (lines ending with `:` and no value).
+/// Scalar key:value fields of a repo.yml, via the ONE reader.
 pub(crate) fn read_repo_yml_fields(path: &std::path::Path) -> HashMap<String, String> {
-    let mut out = HashMap::new();
-    let content = match fs::read_to_string(path) {
-        Ok(c) => c,
-        Err(_) => return out,
-    };
-    for line in content.lines() {
-        let trimmed = line.trim();
-        if trimmed.is_empty() || trimmed.starts_with('#') { continue; }
-        // Skip list-item lines (`  - foo`) and bare keys (`optional_kits:`).
-        if trimmed.starts_with('-') { continue; }
-        if let Some(colon) = trimmed.find(':') {
-            let key = trimmed[..colon].trim().to_string();
-            let value = trimmed[colon + 1..].trim().to_string();
-            if !key.is_empty() && !value.is_empty() {
-                out.insert(key, value);
-            }
-        }
-    }
-    out
+    git_lex::RepoYml::load_path(path).scalar_fields()
 }
 
-/// Read a flat YAML list value from repo.yml. Used by
-/// `read_repo_yml_optional_kits` and `read_repo_yml_substrates`.
-///
-/// Format:
-/// ```yaml
-/// <key>:
-///   - item-one
-///   - item-two
-/// ```
-///
-/// The list ends at the first non-list, non-comment, non-blank line.
-pub(crate) use git_lex::read_repo_yml_list;
+/// Current entries of one of repo.yml's two lists, via the ONE reader.
+fn read_repo_yml_list(path: &std::path::Path, key: &str) -> Vec<String> {
+    let y = git_lex::RepoYml::load_path(path);
+    match key {
+        "optional_kits" => y.optional_kits,
+        "substrates" => y.substrates,
+        other => unreachable!("unknown repo.yml list key: {other}"),
+    }
+}
 
 /// Append an item to a flat YAML list in repo.yml. Creates the list if
 /// missing. Idempotent — no duplicate entries. Preserves all other fields
@@ -197,19 +173,9 @@ fn remove_repo_yml_list_item(
 /// ```
 pub(crate) use git_lex::read_repo_yml_optional_kits;
 
-/// Read the `substrates:` list from a repo.yml. Returns short substrate
-/// names (e.g. `["claude", "hermes"]`) that the agent has explicitly
-/// declared this repo targets. Empty if missing or absent — in which case
-/// the harness falls back to on-disk auto-detection.
-///
-/// Format:
-/// ```yaml
-/// substrates:
-///   - claude
-///   - hermes
-/// ```
+/// The `substrates:` list, via the ONE reader.
 pub(crate) fn read_repo_yml_substrates(path: &std::path::Path) -> Vec<String> {
-    read_repo_yml_list(path, "substrates")
+    git_lex::RepoYml::load_path(path).substrates
 }
 
 /// Append a kit spec to `optional_kits:` in repo.yml. Creates the list if

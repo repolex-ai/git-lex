@@ -2267,22 +2267,6 @@ fn main() {
 
 // ─── nuke ──────────────────────────────────────────────────────
 
-/// Read the `agent_name:` field from `.lex/repo.yml`, if present. Returns
-/// `None` if the file is missing or the field isn't set. Used by both
-/// `cmd_init` (carrying the value across re-init) and `cmd_kit_update`
-/// (rewiring substrate identity without re-prompting).
-fn read_agent_name(root: &std::path::Path) -> Option<String> {
-    let content = fs::read_to_string(root.join(".lex").join("repo.yml")).ok()?;
-    for line in content.lines() {
-        if let Some(rest) = line.strip_prefix("agent_name:") {
-            let val = rest.trim().trim_matches('"').to_string();
-            if !val.is_empty() {
-                return Some(val);
-            }
-        }
-    }
-    None
-}
 
 /// The canonical set of Claude Code hook event names, per the docs
 /// (https://code.claude.com/docs/en/hooks.md, verified Day 48). A hook file's
@@ -2673,24 +2657,6 @@ fn cmd_nuke() {
 
 // ─── kit-update ────────────────────────────────────────────────
 
-/// Determine the primary domain kit from repo.yml. Returns None if the
-/// `kit:` field is missing or `none`.
-fn read_domain_kit_from_repo_yml(root: &std::path::Path) -> Option<String> {
-    let repo_yml = root.join(".lex").join("repo.yml");
-    let content = fs::read_to_string(&repo_yml).unwrap_or_default();
-    for line in content.lines() {
-        let trimmed = line.trim();
-        // Skip list items so a `- kit: ...` shape inside optional_kits doesn't match.
-        if trimmed.starts_with('-') { continue; }
-        if let Some(rest) = trimmed.strip_prefix("kit:") {
-            let val = rest.trim().trim_matches('"').to_string();
-            if val != "none" && !val.is_empty() {
-                return Some(val);
-            }
-        }
-    }
-    None
-}
 
 /// Fetch a single kit into its install dir. Caller decides whether to
 /// remove-and-replace (cleanest for update) or skip-if-present.
@@ -2837,7 +2803,7 @@ fn regenerate_kit_artifacts(kit_name: &str, root: &std::path::Path, create_folde
 /// against installed-kit list — refuses to update a kit that isn't here).
 fn collect_kits_for_update(root: &std::path::Path, target: Option<&str>) -> Vec<String> {
     let mut all = vec![BASE_KIT.to_string()];
-    if let Some(domain) = read_domain_kit_from_repo_yml(root) {
+    if let Some(domain) = git_lex::RepoYml::load(root).domain_kit() {
         if domain != BASE_KIT { all.push(domain); }
     }
     let mut optionals = read_repo_yml_optional_kits(&root.join(".lex").join("repo.yml"));
@@ -2992,7 +2958,7 @@ fn cmd_kit_update(kit_arg: Option<String>, force: bool) {
     // The None branch below makes the skip LOUD (prefer-the-crash: a silent
     // skip of the thing that makes hooks FIRE is exactly the R11 ghost). Found
     // by w3bl0rd's flinch-audit on the convergence rollout, Day 50.
-    match read_agent_name(&root) {
+    match git_lex::RepoYml::load(&root).agent_name.filter(|s| !s.is_empty()) {
         Some(agent_name) => {
             for substrate in harness::active_substrates(&root) {
                 match substrate {
@@ -3221,7 +3187,7 @@ fn cmd_kit_add(kit_spec: String) {
         eprintln!("Kit '{}' is the base kit — installed implicitly by `git lex init`. Cannot kit-add.", canonical_spec);
         exit(1);
     }
-    if let Some(domain) = read_domain_kit_from_repo_yml(&root) {
+    if let Some(domain) = git_lex::RepoYml::load(&root).domain_kit() {
         let (d_org, d_repo, _) = resolve_kit_spec(&domain);
         if d_org == org && d_repo == repo {
             eprintln!("Kit '{}' is this repo's domain kit. Cannot kit-add a domain kit.", canonical_spec);
@@ -3290,7 +3256,7 @@ fn cmd_kit_add(kit_spec: String) {
     // Code never fires them (the pool-kit gap, Day 50). Identity is per-repo,
     // not per-kit, so this re-derives the whole hook set from all installed
     // kits — exactly the convergent behavior we want.
-    if let Some(agent_name) = read_agent_name(&root) {
+    if let Some(agent_name) = git_lex::RepoYml::load(&root).agent_name.filter(|s| !s.is_empty()) {
         for substrate in harness::active_substrates(&root) {
             match substrate {
                 harness::Substrate::Claude => setup_substrate_claude(&root, &agent_name),
@@ -3329,7 +3295,7 @@ fn cmd_kit_remove(kit_spec: String, force: bool) {
         eprintln!("Cannot remove the base kit.");
         exit(1);
     }
-    if let Some(domain) = read_domain_kit_from_repo_yml(&root) {
+    if let Some(domain) = git_lex::RepoYml::load(&root).domain_kit() {
         let (d_org, d_repo, _) = resolve_kit_spec(&domain);
         if d_org == org && d_repo == repo {
             eprintln!("Cannot remove the domain kit ('{}'). To switch domain kits, re-init.", canonical_spec);

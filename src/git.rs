@@ -105,20 +105,10 @@ fn sha_from_identity_yml() -> Option<String> {
     None
 }
 
-/// Read first-commit SHA from `.lex/repo.yml`. Already persisted there for
-/// the `o:` ontology prefix path. Cheap to keep reading.
+/// First-commit SHA from `.lex/repo.yml`, via the ONE reader.
 fn sha_from_repo_yml() -> Option<String> {
-    let root = find_git_root()?;
-    let content = fs::read_to_string(root.join(".lex").join("repo.yml")).ok()?;
-    for line in content.lines() {
-        if let Some(rest) = line.trim().strip_prefix("first_commit:") {
-            let sha = rest.trim();
-            if is_valid_sha(sha) {
-                return Some(sha.to_string());
-            }
-        }
-    }
-    None
+    let sha = git_lex::RepoYml::load(&find_git_root()?).first_commit?;
+    is_valid_sha(&sha).then_some(sha)
 }
 
 /// Query git directly for the first commit SHA.
