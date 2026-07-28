@@ -15,5 +15,14 @@ ready-made history query.
 Renaming or moving files produces **zero** phantom events — history tracks
 facts, not file shuffling.
 
+## History is the main branch
+
+git-lex records the semantic history of **the project as a whole**: the
+default branch (`main`). Running `sync` anywhere else is refused with a
+message. This is a deliberate break from raw git — branch experiments
+belong to git; they enter the *knowledge graph's* history when they merge,
+because the merged line IS the meaning of the repo. (One graph, one
+timeline, no "current state" ambiguity.)
+
 <!-- TODO(additive): the event model in RDF terms (rdf:reifies / triple
      terms) for readers who want the semantics; rebuild + migration notes -->

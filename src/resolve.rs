@@ -11,7 +11,8 @@
 //! 1. **No `[[wikilinks]]` in frontmatter.** Wikilinks are body-text syntax
 //!    for cross-referencing pages. If an agent writes `assignedTo: [[w4r3z]]`
 //!    the resolver rejects it with a clear error. The correct form is
-//!    `assignedTo: w4r3z` (bare slug).
+//!    `assignedTo: w4r3z` the resolver rejects it. The correct form is
+//!    `assignedTo: <repo-relative path>`.
 //!
 //! 2. **No `@mentions` in frontmatter.** The `@` prefix is body-text syntax
 //!    for mentioning agents in prose. `assignedTo: @w4r3z` is rejected.
@@ -195,14 +196,6 @@ mod tests {
             panic!("expected Rejected");
         }
     }
-
-    // ─── Rule 3: bare slugs must resolve ──────────────────────────────────
-
-
-    /// Slug matching is case-insensitive (the index is built from
-
-    /// A bare slug that does NOT match any file is returned as an
-    /// unresolved literal. SHACL validation will catch it downstream
 
     // ─── Rule 4: full IRIs pass through unchanged ─────────────────────────
 

@@ -160,7 +160,7 @@ pub(crate) fn emit_class_templates(kit_name: &str, root: &std::path::Path, creat
             let comment = match hint {
                 Some(h) => format!(" # {}", h),
                 None => match prop_type.as_str() {
-                    "reference" => " # IRI — bare slug or full URI".to_string(),
+                    "reference" => " # IRI — repo-relative path or full IRI".to_string(),
                     _ => String::new(),
                 },
             };
