@@ -28,12 +28,6 @@ enum Commands {
         #[arg(long, default_value = "7878")]
         port: u16,
     },
-    /// Start the squad messaging notification server (SSE on localhost)
-    Listen {
-        /// Port to listen on
-        #[arg(long, default_value = "7879")]
-        port: u16,
-    },
     /// Start the W3C SPARQL protocol endpoint (+ Swagger UI) over the synced store
     Sparql {
         /// Port to listen on
@@ -46,7 +40,6 @@ fn main() {
     let cli = Cli::parse();
     match cli.command {
         Commands::Viz { port } => cmd_viz(port),
-        Commands::Listen { port } => cmd_listen(port),
         Commands::Sparql { port } => cmd_sparql_server(port),
     }
 }
@@ -69,8 +62,6 @@ fn read_viz_asset(www_dir: &PathBuf, rel: &str) -> Option<String> {
 #[derive(Clone)]
 struct VizState {
     store: Arc<Store>,
-    scene: Arc<tokio::sync::Mutex<Option<serde_json::Value>>>,
-    tx: tokio::sync::broadcast::Sender<String>,
     repo_root: Arc<PathBuf>,
 }
 
@@ -247,18 +238,14 @@ async fn run_viz_server(port: u16, www_dir: PathBuf) {
         Router,
         routing::{get, post},
         response::{Html, Json},
-        extract::ws::WebSocketUpgrade,
     };
-    use tokio::sync::{Mutex, broadcast};
 
     let store = Arc::new(
         open_store_read_only().expect("failed to open store read-only — run `git lex sync` first"),
     );
-    let scene: Arc<Mutex<Option<serde_json::Value>>> = Arc::new(Mutex::new(None));
-    let (tx, _rx) = broadcast::channel::<String>(64);
 
     let repo_root = Arc::new(find_git_root().unwrap_or_else(|| std::env::current_dir().unwrap()));
-    let state = VizState { store, scene, tx, repo_root };
+    let state = VizState { store, repo_root };
     let www_dir = Arc::new(www_dir);
 
     let app = Router::new()
@@ -376,51 +363,6 @@ async fn run_viz_server(port: u16, www_dir: PathBuf) {
                 }
             }
         }))
-        .route("/api/push", post({
-            let state = state.clone();
-            move |Json(payload): Json<serde_json::Value>| {
-                let state = state.clone();
-                async move {
-                    {
-                        let mut scene = state.scene.lock().await;
-                        *scene = Some(payload.clone());
-                    }
-                    let msg = serde_json::json!({
-                        "type": "scene",
-                        "data": payload
-                    }).to_string();
-                    let _ = state.tx.send(msg);
-                    Json(serde_json::json!({"ok": true}))
-                }
-            }
-        }))
-        .route("/api/run-and-push", post({
-            let state = state.clone();
-            move |Json(payload): Json<serde_json::Value>| {
-                let state = state.clone();
-                async move {
-                    let query = payload.get("query").and_then(|v| v.as_str()).unwrap_or("");
-                    if query.is_empty() {
-                        return Json(serde_json::json!({"error": "missing 'query' field"}));
-                    }
-                    let result = run_sparql_to_json(&state.store, query);
-                    let scene = serde_json::json!({
-                        "query": query,
-                        "result": result,
-                    });
-                    {
-                        let mut s = state.scene.lock().await;
-                        *s = Some(scene.clone());
-                    }
-                    let msg = serde_json::json!({
-                        "type": "scene",
-                        "data": scene
-                    }).to_string();
-                    let _ = state.tx.send(msg);
-                    Json(serde_json::json!({"ok": true}))
-                }
-            }
-        }))
         .route("/api/file", get({
             let state = state.clone();
             move |axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>| {
@@ -430,25 +372,7 @@ async fn run_viz_server(port: u16, www_dir: PathBuf) {
                 }
             }
         }))
-        .route("/api/scene", get({
-            let state = state.clone();
-            move || {
-                let state = state.clone();
-                async move {
-                    let scene = state.scene.lock().await;
-                    Json(scene.clone().unwrap_or(serde_json::Value::Null))
-                }
-            }
-        }))
-        .route("/ws", get({
-            let state = state.clone();
-            move |ws: WebSocketUpgrade| {
-                let state = state.clone();
-                async move {
-                    ws.on_upgrade(move |socket| handle_ws(socket, state))
-                }
-            }
-        }));
+        ;
 
     let mut chosen_port = port;
     let mut listener = None;
@@ -486,110 +410,6 @@ async fn run_viz_server(port: u16, www_dir: PathBuf) {
         eprintln!("Server error: {}", e);
     }
 }
-
-async fn handle_ws(socket: axum::extract::ws::WebSocket, state: VizState) {
-    use axum::extract::ws::Message;
-    use futures_util::{SinkExt, StreamExt};
-
-    let (mut sender, mut receiver) = socket.split();
-
-    {
-        let scene = state.scene.lock().await;
-        if let Some(s) = scene.as_ref() {
-            let initial = serde_json::json!({"type": "scene", "data": s}).to_string();
-            let _ = sender.send(Message::Text(initial.into())).await;
-        } else {
-            let _ = sender.send(Message::Text("{\"type\":\"hello\"}".into())).await;
-        }
-    }
-
-    let mut rx = state.tx.subscribe();
-
-    let mut send_task = tokio::spawn(async move {
-        while let Ok(msg) = rx.recv().await {
-            if sender.send(Message::Text(msg.into())).await.is_err() {
-                break;
-            }
-        }
-    });
-
-    let mut recv_task = tokio::spawn(async move {
-        while let Some(Ok(_msg)) = receiver.next().await {}
-    });
-
-    tokio::select! {
-        _ = (&mut send_task) => recv_task.abort(),
-        _ = (&mut recv_task) => send_task.abort(),
-    }
-}
-
-// ─── listen server ──────────────────────────────────────────────
-
-fn cmd_listen(port: u16) {
-    let root = find_git_root().expect("not a git repo");
-    let repo_yml = root.join(".lex").join("repo.yml");
-    if !repo_yml.exists() {
-        eprintln!("No git-lex repository found. Run 'git lex init' first.");
-        exit(1);
-    }
-    let config = fs::read_to_string(repo_yml).unwrap_or_default();
-    if !config.contains("kit: squad") && !config.contains("kit: soul") && !config.contains("kit: lab") {
-        eprintln!("'listen' is only supported for squad, soul, or lab kits.");
-        exit(1);
-    }
-    if open_store_read_only().is_none() {
-        eprintln!("No knowledge graph store found. Run 'git lex sync' first to build the store.");
-        exit(1);
-    }
-    run_listen_server(port);
-}
-
-#[tokio::main(flavor = "multi_thread", worker_threads = 2)]
-async fn run_listen_server(port: u16) {
-    use axum::response::sse::{Event, Sse};
-    use axum::{Router, routing::{get, post}, Json};
-    use tokio::sync::broadcast;
-    use tokio_stream::wrappers::BroadcastStream;
-    use futures_util::StreamExt;
-    use std::convert::Infallible;
-
-    let (tx, _rx) = broadcast::channel::<String>(100);
-    let tx = Arc::new(tx);
-
-    let app = Router::new()
-        .route("/events", get({
-            let tx = tx.clone();
-            move || {
-                let tx = tx.clone();
-                async move {
-                    let rx = tx.subscribe();
-                    let stream = BroadcastStream::new(rx).filter_map(|res| async move {
-                        match res {
-                            Ok(msg) => Some(Ok::<Event, Infallible>(Event::default().data(msg))),
-                            Err(_) => None,
-                        }
-                    });
-                    Sse::new(stream)
-                }
-            }
-        }))
-        .route("/notify", post({
-            let tx = tx.clone();
-            move |Json(payload): Json<serde_json::Value>| {
-                let tx = tx.clone();
-                async move {
-                    let _ = tx.send(payload.to_string());
-                    Json(serde_json::json!({"ok": true}))
-                }
-            }
-        }));
-
-    let addr = format!("127.0.0.1:{}", port);
-    let listener = tokio::net::TcpListener::bind(&addr).await.unwrap();
-    println!("git-lex-serve listen started on {}", addr);
-    axum::serve(listener, app).await.unwrap();
-}
-
 
 // ─── W3C SPARQL protocol endpoint (Task 2 Part B) ───────────────────────────
 //

@@ -174,20 +174,11 @@ enum Commands {
         #[arg(long)]
         force: bool,
     },
-    /// Run a SPARQL CONSTRUCT query and push the result to the local viz server
-    Display {
-        /// SPARQL CONSTRUCT query (uses viz: namespace for rendering hints)
-        query: String,
-        /// Port the viz server is running on
-        #[arg(long, default_value = "7878")]
-        port: u16,
-    },
     /// Start ONE local server (pure passthrough to git-lex-serve)
     ///
-    /// Subcommands: `viz` (graph visualizer, port 7878), `listen` (SSE
-    /// relay, 7879), `sparql` (W3C SPARQL endpoint over the synced store,
-    /// 7880). Each invocation starts exactly one server, e.g.
-    /// `git lex serve sparql`.
+    /// Subcommands: `viz` (graph visualizer, port 7878) and `sparql`
+    /// (W3C SPARQL endpoint over the synced store, 7880). Each invocation
+    /// starts exactly one server, e.g. `git lex serve sparql`.
     Serve {
         /// Arguments passed through to git-lex-serve
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
@@ -1504,36 +1495,8 @@ fn cmd_validate() -> bool {
 
 // ─── viz/serve (moved to git-lex-serve binary) ─────────────────
 
-// Viz server, SPARQL endpoint, WebSocket handler, and listen server
-// have all moved to src/bin/git-lex-serve.rs
+// Viz server and SPARQL endpoint live in src/bin/git-lex-serve.rs
 
-#[tokio::main(flavor = "current_thread")]
-async fn cmd_display(query: &str, port: u16) {
-    // Send the query to the running viz server — the server runs it against its
-    // own (already-open) oxigraph store and broadcasts the result. We don't try
-    // to open the store here because RocksDB is exclusive-locked by the server.
-    let payload = serde_json::json!({ "query": query });
-
-    let url = format!("http://127.0.0.1:{}/api/run-and-push", port);
-    let client = reqwest::Client::new();
-    match client.post(&url).json(&payload).send().await {
-        Ok(resp) if resp.status().is_success() => {
-            println!("Pushed scene to {}", url);
-        }
-        Ok(resp) => {
-            eprintln!("Push failed: HTTP {}", resp.status());
-            if let Ok(body) = resp.text().await {
-                eprintln!("{}", body);
-            }
-            exit(1);
-        }
-        Err(e) => {
-            eprintln!("Push failed: {}", e);
-            eprintln!("Is the viz server running? Try: git lex-serve viz --port {}", port);
-            exit(1);
-        }
-    }
-}
 
 // `cleanup_orphaned_sidecars` was deleted in Phase 3 of the history-graph
 // work (2026-04-11). Its replacement is `spo_events::cleanup_sidecars_for_
@@ -2268,7 +2231,6 @@ fn main() {
         Commands::KitUpdate { kit, force } => cmd_kit_update(kit, force),
         Commands::KitAdd { kit } => cmd_kit_add(kit),
         Commands::KitRemove { kit, force } => cmd_kit_remove(kit, force),
-        Commands::Display { query, port } => cmd_display(&query, port),
         Commands::Serve { args } => {
             let status = Command::new("git-lex-serve")
                 .args(&args)

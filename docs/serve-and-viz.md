@@ -9,5 +9,4 @@ The viz shows recent activity, an interactive graph of your documents and
 their links, and an animated replay of your knowledge graph growing
 commit by commit.
 
-<!-- TODO(additive): screenshots; the HTTP API; pushing custom views with
-     `git lex display` -->
+<!-- TODO(additive): screenshots; the HTTP API -->

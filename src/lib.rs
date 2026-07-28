@@ -213,68 +213,6 @@ pub fn registry_remove(repo_path: &std::path::Path) {
     fs::write(&reg, filtered.join("\n") + "\n").ok();
 }
 
-/// Check if a repo path is already in `~/.lex/repos`.
-pub fn registry_contains(repo_path: &std::path::Path) -> bool {
-    let reg = match registry_path() {
-        Some(p) => p,
-        None => return false,
-    };
-
-    let canonical = match repo_path.canonicalize() {
-        Ok(p) => p.to_string_lossy().to_string(),
-        Err(_) => repo_path.to_string_lossy().to_string(),
-    };
-
-    let existing = fs::read_to_string(&reg).unwrap_or_default();
-    existing.lines().any(|l| l.trim() == canonical)
-}
-
-/// Prune stale entries from `~/.lex/repos`. Removes any path where the
-/// directory no longer exists or no longer contains a `.lex/` subdirectory.
-/// Returns the number of entries removed.
-pub fn registry_check() -> usize {
-    let reg = match registry_path() {
-        Some(p) => p,
-        None => return 0,
-    };
-
-    let existing = match fs::read_to_string(&reg) {
-        Ok(s) => s,
-        Err(_) => return 0,
-    };
-
-    let mut kept = Vec::new();
-    let mut pruned = 0usize;
-    for line in existing.lines() {
-        let path = line.trim();
-        if path.is_empty() { continue; }
-        let p = std::path::Path::new(path);
-        if p.is_dir() && p.join(".lex").is_dir() {
-            kept.push(path);
-        } else {
-            pruned += 1;
-        }
-    }
-
-    if pruned > 0 {
-        fs::write(&reg, kept.join("\n") + "\n").ok();
-    }
-    pruned
-}
-
-/// List all registered repo paths from `~/.lex/repos`.
-pub fn registry_list() -> Vec<String> {
-    let reg = match registry_path() {
-        Some(p) => p,
-        None => return vec![],
-    };
-    let content = fs::read_to_string(&reg).unwrap_or_default();
-    content.lines()
-        .map(|l| l.trim().to_string())
-        .filter(|l| !l.is_empty())
-        .collect()
-}
-
 /// Resolve a kit spec into (org, repo, short_name). Accepts either a short
 /// form (`soul`) which is sugar for `repolex-ai/git-lex-kit-{name}`, or a
 /// full `org/repo` form.
