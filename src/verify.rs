@@ -99,7 +99,7 @@ pub(crate) fn run_verify(store: &Store) -> usize {
          || STRSTARTS(STR(?g), \"https://repolex.ai/git-lex/NamedGraph/commits\") \
          || STRSTARTS(STR(?g), \"https://repolex.ai/git-lex/NamedGraph/refs\") \
          || STRSTARTS(STR(?g), \"https://repolex.ai/git-lex/NamedGraph/filetree/\") \
-         || STRSTARTS(STR(?g), \"https://repolex.ai/git-lex/NamedGraph/repo\"))";
+         || ?g = <https://repolex.ai/git-lex/NamedGraph/repo>)";
 
     // ── Check 1: every governed predicate is declared ───────────────────
     if vocab_checks_possible {
