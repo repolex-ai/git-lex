@@ -717,8 +717,12 @@ fn cmd_validate() -> bool {
     }
 
     if shapes_sources.is_empty() {
-        println!("No SHACL shapes found for kit '{}' — skipping validation.", kit);
-        return true;
+        // A kit IS configured but its shapes are gone (broken/partial
+        // install). A gate that can't run must not pretend it passed
+        // (Rob-ruled 2026-07-29) — fail the save and name the fix.
+        eprintln!("fatal: kit '{}' is configured but its SHACL shapes are not installed — validation cannot run.", kit);
+        eprintln!("Fix: `git lex kit-update` (reinstalls the kit's ontology and shapes), then retry.");
+        return false;
     }
 
     let shapes_ttl: String = shapes_sources.iter()

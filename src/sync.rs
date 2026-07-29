@@ -477,6 +477,60 @@ fn sync_onegraph_phase(store: &Store, root: &std::path::Path, resume_sha: Option
         }
         _ => {}
     }
+    // ── Commit joins + state-parity (promoted from `verify` before its
+    // removal — Rob-ruled 2026-07-29: every sync proves the store coherent
+    // or aborts; the strongest corruption detector runs on every build).
+    let count_q = |q: &str| -> Option<u64> {
+        match git_lex::eval_query(store, q) {
+            Ok(oxigraph::sparql::QueryResults::Solutions(mut sols)) => sols
+                .next()
+                .and_then(|r| r.ok())
+                .and_then(|r| r.get("n").map(|t| t.to_string()))
+                .and_then(|v| v.split('"').nth(1).and_then(|x| x.parse().ok())),
+            _ => None,
+        }
+    };
+    let dangling = count_q(
+        "SELECT (COUNT(DISTINCT ?c) AS ?n) WHERE { \
+           GRAPH <https://repolex.ai/git-lex/LexHistoryGraph> { \
+             { ?e <https://repolex.ai/ontology/git-lex/assertedIn> ?c } UNION \
+             { ?e <https://repolex.ai/ontology/git-lex/retractedIn> ?c } } \
+           FILTER NOT EXISTS { GRAPH <https://repolex.ai/git-lex/NamedGraph/commits> { ?c ?p ?o } } \
+        }",
+    );
+    let base_count = count_q(
+        "SELECT (COUNT(*) AS ?n) WHERE { GRAPH <https://repolex.ai/git-lex/LexHistoryGraph> { \
+           ?s ?p ?o . \
+           FILTER NOT EXISTS { ?s a <https://repolex.ai/ontology/git-lex/SpoEvent> } \
+           FILTER(?p != <http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies>) } }",
+    );
+    let derived_count = count_q(
+        "PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> \
+         PREFIX gl: <https://repolex.ai/ontology/git-lex/> \
+         PREFIX g2: <https://repolex.ai/ontology/git-lex/git2/> \
+         SELECT (COUNT(DISTINCT ?tt) AS ?n) WHERE { \
+           GRAPH <https://repolex.ai/git-lex/LexHistoryGraph> { ?a rdf:reifies ?tt ; gl:assertedIn ?ca } \
+           GRAPH <https://repolex.ai/git-lex/NamedGraph/commits> { ?ca g2:ordinalDerived ?oa } \
+           FILTER NOT EXISTS { \
+             GRAPH <https://repolex.ai/git-lex/LexHistoryGraph> { ?r rdf:reifies ?tt ; gl:retractedIn ?cr } \
+             GRAPH <https://repolex.ai/git-lex/NamedGraph/commits> { ?cr g2:ordinalDerived ?or } \
+             FILTER(?or >= ?oa) } }",
+    );
+    match (dangling, base_count, derived_count) {
+        (Some(0), Some(b), Some(d)) if b == d => {}
+        (None, _, _) | (_, None, _) | (_, _, None) => {
+            eprintln!("ERROR: store coherence checks could not run — the graph is unverified.");
+            std::process::exit(1);
+        }
+        (Some(dg), _, _) if dg > 0 => {
+            eprintln!("ERROR: {dg} history event commit(s) missing from the commits graph — the store is incoherent.");
+            std::process::exit(1);
+        }
+        (_, Some(b), Some(d)) => {
+            eprintln!("ERROR: current state ({b} facts) disagrees with what the history derives ({d}) — the store is corrupt. Delete .git/lex and re-run `git lex sync` to rebuild.");
+            std::process::exit(1);
+        }
+    }
 }
 
 /// The branch HEAD is on, or None when detached.
