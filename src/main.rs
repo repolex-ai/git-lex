@@ -135,17 +135,14 @@ enum Commands {
     /// Remove .lex/ entirely (content files and git history are preserved).
     Nuke,
     /// Re-download and reinstall the kit without touching content or extractions
+    ///
+    /// Kit files always converge to the kit's version: a local file that
+    /// differs is renamed `<file>.bak` and replaced. `SOUL.md` is never
+    /// overwritten.
     KitUpdate {
         /// Kit to update (e.g., repolex-ai/git-lex-kit-squad). If omitted,
         /// updates ALL installed kits (base + domain + optionals).
         kit: Option<String>,
-        /// Overwrite local files that differ from the kit. Without this,
-        /// drifted files are left untouched and the kit version is installed
-        /// alongside as `<file>.kit-latest` so you can diff and decide. With
-        /// --force, prior locals are stashed under
-        /// `.kit-pre-force/<timestamp>/` before being overwritten.
-        #[arg(long)]
-        force: bool,
     },
     /// Add an optional kit to this repo
     ///
@@ -1178,7 +1175,7 @@ fn main() {
             }
         }
         Commands::Nuke => cmd_nuke(),
-        Commands::KitUpdate { kit, force } => kit_cmds::cmd_kit_update(kit, force),
+        Commands::KitUpdate { kit } => kit_cmds::cmd_kit_update(kit),
         Commands::KitAdd { kit } => kit_cmds::cmd_kit_add(kit),
         Commands::KitRemove { kit, force } => kit_cmds::cmd_kit_remove(kit, force),
         Commands::Serve { args } => {

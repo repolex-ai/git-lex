@@ -212,7 +212,7 @@ pub(crate) fn collect_kits_for_update(root: &std::path::Path, target: Option<&st
     }
 }
 
-pub(crate) fn cmd_kit_update(kit_arg: Option<String>, force: bool) {
+pub(crate) fn cmd_kit_update(kit_arg: Option<String>) {
     let root = require_git_root();
     let lex_dir = root.join(".lex");
 
@@ -239,20 +239,12 @@ pub(crate) fn cmd_kit_update(kit_arg: Option<String>, force: bool) {
         }
     }
 
-    // Install scaffold files from each kit, accumulating drift/stash reports.
-    //
-    // Without --force:
-    //   - Missing files: installed.
-    //   - Identical files: silent no-op.
-    //   - Drifted files: local left untouched, kit version installed alongside
-    //     as `<file>.kit-latest` so the agent can diff and decide.
-    // With --force:
-    //   - Drifted files are stashed to `.kit-pre-force/<timestamp>/<rel>`
-    //     before being overwritten — recovery path if --force was wrong.
+    // Install each kit's files. Missing → installed; identical → no-op;
+    // differing → old copy renamed <file>.bak, kit version put in place.
+    // (SOUL.md is never overwritten.)
     let mut total_installed = 0usize;
     let mut total_skipped = 0usize;
-    let mut all_drifted: Vec<String> = Vec::new();
-    let mut all_stashed: Vec<String> = Vec::new();
+    let mut all_updated: Vec<String> = Vec::new();
     let mut kit_hook_names: std::collections::HashSet<String> = std::collections::HashSet::new();
     for spec in &kits_to_update {
         let (org, repo, _) = resolve_kit_spec(spec);
@@ -260,11 +252,10 @@ pub(crate) fn cmd_kit_update(kit_arg: Option<String>, force: bool) {
         for name in crate::kit::kit_shipped_hook_names(&kit_dir) {
             kit_hook_names.insert(name);
         }
-        let report = install_scaffold_files_from_skip_existing(&kit_dir, force);
+        let report = install_scaffold_files_from_skip_existing(&kit_dir);
         total_installed += report.installed;
         total_skipped += report.skipped;
-        all_drifted.extend(report.drifted);
-        all_stashed.extend(report.stashed);
+        all_updated.extend(report.updated);
     }
 
     // File-level hook reap (twin of the registration reap): now that ALL kits fetched
@@ -272,14 +263,13 @@ pub(crate) fn cmd_kit_update(kit_arg: Option<String>, force: bool) {
     // COMPLETE canonical set. Remove any .claude/hooks/*.sh that is neither kit-shipped
     // nor a `<Event>-local-*.sh` personal hook — this kills old-named hooks left behind
     // by a rename (the exact tangle a migrating soul hits: old + new both present +
-    // firing). Removed files are stashed to .kit-pre-force/; their now-dangling
+    // firing). Removed files stay beside as `<file>.bak`; their now-dangling
     // settings.json registrations get pruned by reap_orphan_hook_registrations inside
     // the setup_substrate_claude pass below (the file is gone → its registration reaps).
-    let hook_stash_root = root.join(".kit-pre-force").join("hooks-reap");
-    let reaped_hooks = crate::kit::reap_non_kit_non_local_hooks(&root, &kit_hook_names, &hook_stash_root);
+    let reaped_hooks = crate::kit::reap_non_kit_non_local_hooks(&root, &kit_hook_names);
     if !reaped_hooks.is_empty() {
         println!(
-            "Reaped {} non-kit, non-local hook file(s) (must be kit-shipped or named <Event>-local-*.sh); stashed under .kit-pre-force/:",
+            "Removed {} hook file(s) no installed kit ships (old copy kept as <file>.bak):",
             reaped_hooks.len()
         );
         for path in &reaped_hooks {
@@ -287,38 +277,21 @@ pub(crate) fn cmd_kit_update(kit_arg: Option<String>, force: bool) {
         }
     }
 
-    if total_installed > 0 || total_skipped > 0 || !all_drifted.is_empty() || !all_stashed.is_empty() {
-        if force {
-            println!("Scaffold: {} file(s) installed (--force)", total_installed);
-            if !all_stashed.is_empty() {
-                println!("Stashed {} local file(s) under .kit-pre-force/ before overwriting:", all_stashed.len());
-                for path in &all_stashed {
-                    println!("  {}", path);
-                }
-            }
-        } else {
-            println!("Scaffold: {} file(s) installed, {} unchanged", total_installed, total_skipped);
-            // Enforced kit-owned files (hooks) converge even without --force; their
-            // prior local copies are stashed. Surface them so the overwrite is never
-            // silent — the soul sees exactly what was replaced and where the backup is.
-            if !all_stashed.is_empty() {
-                println!(
-                    "Converged {} kit-owned file(s) to the kit version (prior local stashed under .kit-pre-force/):",
-                    all_stashed.len()
-                );
-                for path in &all_stashed {
-                    println!("  {}", path);
-                }
-            }
-            if !all_drifted.is_empty() {
-                println!(
-                    "Drift: {} file(s) differ from kit — kit version available as .kit-latest sibling:",
-                    all_drifted.len()
-                );
-                for path in &all_drifted {
-                    println!("  {} (see {}.kit-latest)", path, path);
-                }
-                println!("Run `diff <file> <file>.kit-latest` to inspect; rm the .kit-latest to dismiss, or mv it over the local to adopt.");
+    // The .kit-latest drift-sidecar mechanism is retired; sweep any leftovers.
+    let swept = crate::kit::sweep_kit_latest_files(&root);
+    if !swept.is_empty() {
+        println!("Swept {} leftover .kit-latest file(s) (retired mechanism)", swept.len());
+    }
+
+    if total_installed > 0 || total_skipped > 0 || !all_updated.is_empty() {
+        println!("Scaffold: {} file(s) installed, {} unchanged", total_installed, total_skipped);
+        if !all_updated.is_empty() {
+            println!(
+                "Updated {} file(s) to the kit's version (old copy kept as <file>.bak):",
+                all_updated.len()
+            );
+            for path in &all_updated {
+                println!("  {}", path);
             }
         }
     }
@@ -593,20 +566,23 @@ pub(crate) fn cmd_kit_add(kit_spec: String) {
     };
     println!("Kit fetched at {}.", kit_dir.strip_prefix(&root).unwrap_or(&kit_dir).display());
 
-    // Install scaffold (drift-aware). For a new optional kit nothing should
-    // exist locally yet, so this is almost entirely fresh-install — but if
-    // the agent has already hand-authored folders matching the kit's class
-    // names, the drift-handler will surface that as `.kit-latest` siblings.
-    let report = install_scaffold_files_from_skip_existing(&kit_dir, false);
-    if report.installed > 0 || report.skipped > 0 || !report.drifted.is_empty() {
+    // Install scaffold. For a new optional kit nothing should exist locally
+    // yet, so this is almost entirely fresh-install — but if the agent has
+    // already hand-authored files matching the kit's paths, those converge to
+    // the kit version (old copy kept as <file>.bak).
+    let report = install_scaffold_files_from_skip_existing(&kit_dir);
+    if report.installed > 0 || report.skipped > 0 || !report.updated.is_empty() {
         println!(
             "Scaffold: {} file(s) installed, {} unchanged",
             report.installed, report.skipped
         );
-        if !report.drifted.is_empty() {
-            println!("Drift: {} file(s) differ from kit:", report.drifted.len());
-            for path in &report.drifted {
-                println!("  {} (see {}.kit-latest)", path, path);
+        if !report.updated.is_empty() {
+            println!(
+                "Updated {} file(s) to the kit's version (old copy kept as <file>.bak):",
+                report.updated.len()
+            );
+            for path in &report.updated {
+                println!("  {}", path);
             }
         }
     }

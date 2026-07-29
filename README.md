@@ -143,7 +143,7 @@ git lex query "PREFIX ks: <https://repolex.ai/ontology/kit/soul/>
 | `git lex query "SPARQL"` | Run a SPARQL query over a live view built from your working tree, so it always reflects current frontmatter (no `sync` needed). History lives in the synced store — query it via the SPARQL endpoint (`git lex serve sparql`; ready-made history query in [docs/queries.md](docs/queries.md)). `--json` for machine output. |
 | `git lex list` | List every document class the repo's installed kits define, each with its full namespace IRI (the prefix to query against). `--json` for machine output. |
 | `git lex sync` | Build/update the persistent store: walks new commits and appends each fact change as an assert/retract event tied to its commit (RDF 1.2 provenance), then refreshes the current-state view. Not required for `query`. |
-| `git lex kit-update [<kit>]` | Re-download + reinstall kits. Drift-aware: locally-changed files are preserved and the new version lands beside them as `<file>.kit-latest` to diff (`--force` overwrites, stashing your version first). |
+| `git lex kit-update [<kit>]` | Re-download + reinstall kits. Kit files always converge to the kit's version: a local file that differs is renamed `<file>.bak` and replaced. `SOUL.md` is never overwritten. |
 | `git lex kit-add <org/repo>` | Add an optional kit (the kit's `scope:` must be `optional`). Creates its folders + templates. |
 | `git lex kit-remove <org/repo>` | Remove an optional kit. Asks before deleting any content folders it owns. |
 | `git lex serve <viz\|sparql>` | Start one local server: `viz` (graph visualizer, 7878) or `sparql` (W3C SPARQL endpoint over the synced store, 7880). |

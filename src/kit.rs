@@ -23,6 +23,7 @@ use std::fs;
 use std::io::Cursor;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+#[cfg(test)]
 use std::time::SystemTime;
 
 use git_lex::{
@@ -667,46 +668,21 @@ pub(crate) fn install_scaffold_files_from(kit_dir: &std::path::Path) -> usize {
 
 /// Report from `install_scaffold_files_from_skip_existing`.
 ///
-/// Beyond the legacy (installed, skipped) counts, this carries:
-/// - `drifted`: files where the local copy differs from the kit-shipped one;
-///   for each, a `.kit-latest` sibling has been written so the agent can see
-///   the diff. The local file itself was NOT touched.
-/// - `stashed`: files moved to `<repo-root>/.kit-pre-force/<timestamp>/<rel>`
-///   before being overwritten under `--force`. Recovery path if --force was
-///   wrong.
+/// - `installed`: files that were missing locally, copied from the kit.
+/// - `skipped`: files already byte-identical to the kit's version.
+/// - `updated`: files whose local copy differed — the old copy was renamed
+///   `<file>.bak` and the kit's version put in place.
 ///
 /// Paths are relative to the repo root, for display.
 #[derive(Default)]
 pub(crate) struct ScaffoldInstallReport {
     pub installed: usize,
     pub skipped: usize,
-    pub drifted: Vec<String>,
-    pub stashed: Vec<String>,
+    pub updated: Vec<String>,
 }
 
-/// Best-effort kit version string for the `.kit-latest` header.
-/// Reads `version:` from `kit.yml`; falls back to the kit dir name.
-fn kit_version_for(kit_dir: &Path) -> String {
-    if let Ok(content) = fs::read_to_string(kit_dir.join("kit.yml")) {
-        for line in content.lines() {
-            let l = line.trim();
-            if let Some(rest) = l.strip_prefix("version:") {
-                let v = rest.trim().trim_matches('"').trim_matches('\'');
-                if !v.is_empty() {
-                    return v.to_string();
-                }
-            }
-        }
-    }
-    kit_dir
-        .file_name()
-        .map(|n| n.to_string_lossy().to_string())
-        .unwrap_or_else(|| "unknown".to_string())
-}
-
-/// `YYYYMMDD-HHMMSS` (UTC) from `SystemTime`. Used for `.kit-pre-force/` stash
-/// dirs and `.kit-latest` header dates. UTC, not local — stash dirs sort right
-/// across timezones.
+/// `YYYYMMDD-HHMMSS` (UTC) from `SystemTime`. Test-only: unique tmp-dir names.
+#[cfg(test)]
 fn timestamp_now_utc() -> String {
     let secs = SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)
@@ -734,42 +710,6 @@ fn timestamp_now_utc() -> String {
     format!("{:04}{:02}{:02}-{:02}{:02}{:02}", y, m, d, hh, mm, ss)
 }
 
-/// ISO date `YYYY-MM-DD` (UTC), for `.kit-latest` headers.
-fn iso_date_utc() -> String {
-    let ts = timestamp_now_utc();
-    // ts is "YYYYMMDD-HHMMSS"; reformat the date portion.
-    if ts.len() >= 8 {
-        format!("{}-{}-{}", &ts[0..4], &ts[4..6], &ts[6..8])
-    } else {
-        ts
-    }
-}
-
-/// Pick the comment-prefix to use for a `.kit-latest` header, based on the
-/// file's existing first line (shebang-aware) and extension. Default: `# `.
-/// Recognizes `//` for JS/TS/Rust/C/Java/Go and `<!--`/`-->` for HTML/Markdown.
-fn header_for_drift_file(local_path: &Path, kit_version: &str, kit_path_rel: &str) -> String {
-    let ext = local_path
-        .extension()
-        .map(|e| e.to_string_lossy().to_lowercase())
-        .unwrap_or_default();
-    let date = iso_date_utc();
-    let line1 = format!(
-        "kit-latest from {} installed {} — your local {} differs",
-        kit_version, date, kit_path_rel
-    );
-    let line2 = format!("Diff: diff {0} {0}.kit-latest", kit_path_rel);
-    match ext.as_str() {
-        "rs" | "js" | "ts" | "jsx" | "tsx" | "c" | "h" | "cpp" | "java" | "go" | "swift" | "kt" => {
-            format!("// {}\n// {}\n", line1, line2)
-        }
-        "html" | "htm" | "md" | "xml" | "svg" => {
-            format!("<!-- {} -->\n<!-- {} -->\n", line1, line2)
-        }
-        _ => format!("# {}\n# {}\n", line1, line2),
-    }
-}
-
 /// True if the destination is a regular file whose bytes match `src`. Returns
 /// false on any error (treat as drift so the agent gets a chance to inspect).
 fn files_byte_identical(src: &Path, dest: &Path) -> bool {
@@ -779,22 +719,6 @@ fn files_byte_identical(src: &Path, dest: &Path) -> bool {
     }
 }
 
-/// Like `install_scaffold_files_from`, but safe for `kit-update` against a
-/// live repo.
-///
-/// Without `--force`:
-///   - Missing files: copied from kit (counted as `installed`).
-///   - Identical files: silent no-op (counted as `skipped`).
-///   - **Drifted files**: local left untouched; kit version installed
-///     alongside as `<name>.kit-latest` with a two-line header (kit version +
-///     diff one-liner). Recorded in `drifted` so the caller can surface the
-///     paths. This is the graceful upgrade path: drift is visible from `ls`,
-///     the decision stays with the agent.
-///
-/// With `--force`:
-///   - Files that differ are stashed to
-///     `<repo-root>/.kit-pre-force/<timestamp>/<rel-path>` before being
-///     overwritten. Recorded in `stashed`. Identical files still no-op.
 /// Collect the set of hook filenames (`<name>.sh`) shipped by an installed kit's
 /// `harness/.claude/hooks/` dir. Used by the file-level hook reap to decide which
 /// local hook files are kit-owned (survive) vs orphaned (removed). The caller passes
@@ -827,9 +751,10 @@ fn is_local_hook_name(name: &str) -> bool {
 
 /// File-level hook reap (the twin of the registration reaper): after kit-update has
 /// installed all kits, remove any `.claude/hooks/*.sh` that is NEITHER shipped by an
-/// installed kit NOR a `<Event>-local-*.sh` personal hook. The removed file is stashed
-/// to `stash_root` first (recoverable; .lex/kit/ is also git-tracked). Returns the list
-/// of reaped rel-paths so the caller can also prune their settings.json registrations.
+/// installed kit NOR a `<Event>-local-*.sh` personal hook. The removed file is renamed
+/// to `<file>.bak` in place (recoverable; non-.sh so it never fires or re-reaps).
+/// Returns the list of reaped rel-paths so the caller can also prune their
+/// settings.json registrations.
 ///
 /// SAFETY: only call this AFTER every kit has successfully fetched + installed —
 /// kit-update bails hard on any fetch failure before this point, so `kit_hook_names`
@@ -838,24 +763,12 @@ fn is_local_hook_name(name: &str) -> bool {
 pub(crate) fn reap_non_kit_non_local_hooks(
     root: &Path,
     kit_hook_names: &std::collections::HashSet<String>,
-    stash_root: &Path,
 ) -> Vec<String> {
     let hooks_dir = root.join(".claude").join("hooks");
     let mut reaped = Vec::new();
     let Ok(entries) = fs::read_dir(&hooks_dir) else { return reaped };
     for entry in entries.flatten() {
         let name = entry.file_name().to_string_lossy().to_string();
-        // Parked `.kit-latest` siblings whose base filename no kit ships
-        // anymore are fossils of a retired naming era (e.g. the bare
-        // SessionEnd.sh generation replaced 2026-07-04) — nothing will
-        // ever visit them again; sweep. (Cost Selkie a 4am detour.)
-        if let Some(base) = name.strip_suffix(".kit-latest") {
-            if base.ends_with(".sh") && !kit_hook_names.contains(base) {
-                let _ = fs::remove_file(entry.path());
-                reaped.push(format!(".claude/hooks/{name}"));
-            }
-            continue;
-        }
         if !name.ends_with(".sh") {
             continue; // only manage hook scripts; leave other files alone
         }
@@ -863,102 +776,79 @@ pub(crate) fn reap_non_kit_non_local_hooks(
         if kit_hook_names.contains(&name) || is_local_hook_name(&name) {
             continue;
         }
-        // Orphan: neither kit-owned nor local → stash then remove.
+        // Orphan: neither kit-owned nor local → keep a .bak, remove the hook.
         let dest = entry.path();
         let rel = dest
             .strip_prefix(root)
             .unwrap_or(&dest)
             .to_string_lossy()
             .to_string();
-        let stash_dest = stash_root.join(&rel);
-        let _ = fs::create_dir_all(stash_dest.parent().unwrap_or(&stash_dest));
-        let _ = fs::copy(&dest, &stash_dest); // best-effort archive
-        if fs::remove_file(&dest).is_ok() {
+        let mut bak = dest.clone().into_os_string();
+        bak.push(".bak");
+        if fs::rename(&dest, PathBuf::from(bak)).is_ok() {
             reaped.push(rel);
         }
     }
     reaped
 }
 
-/// Is this destination an ENFORCED kit-owned file — one that must ALWAYS converge to
-/// the kit version on update, never sit behind a `.kit-latest` drift sidecar?
-///
-/// Kit-owned MACHINERY (as opposed to user CONTENT like a journal template) should
-/// track the kit automatically: a soul running last-month's buggy hook is a bug, not
-/// a customization. Git is the revert path if a soul genuinely needs to fork — but the
-/// default is convergence, and local forks are discouraged.
-///
-/// Currently: hook scripts (`.claude/hooks/*.sh`). This is the same principle already
-/// applied to static ontology (ALWAYS clobbered — "kit-owned schema, must match the
-/// kit", see the static-ontology branch below). Extend this list as more kit-owned
-/// machinery is identified.
-fn is_enforced_path(dest: &Path) -> bool {
-    // ENFORCED = kit-owned machinery that must always converge to the kit
-    // version on kit-update (old local copy stashed to .kit-pre-force/,
-    // never silently lost). Rob-ruled 2026-07-29 after the Selkie
-    // migration hit stale AGENTS.md + skills parked as .kit-latest:
-    // "kit-managed things overwrite local, without it being a big
-    // research project". SOUL.md is NEVER in this set — identity is the
-    // squaddie's own.
-    //
-    //   - hook scripts        (.claude/hooks/*.sh — the original set)
-    //   - skills              (.claude/skills/** and Skill/**)
-    //   - agent instructions  (AGENTS.md, .claude/CLAUDE.md)
-    //   - harness plumbing    (.claude/*.py listeners etc. shipped by kits)
-    if dest.file_name().map(|n| n == "SOUL.md").unwrap_or(false) {
-        return false;
+/// Delete every `*.kit-latest` file under the repo (skipping `.git/`). The
+/// `.kit-latest` drift-sidecar mechanism was retired 2026-07-29 (kit files now
+/// simply overwrite, old copy → `.bak`), so any remaining sidecar is debris
+/// from the old mechanism. Returns rel-paths of removed files.
+pub(crate) fn sweep_kit_latest_files(root: &Path) -> Vec<String> {
+    let mut swept = Vec::new();
+    fn walk(dir: &Path, root: &Path, swept: &mut Vec<String>) {
+        let Ok(entries) = fs::read_dir(dir) else { return };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let name = entry.file_name().to_string_lossy().to_string();
+            if path.is_dir() {
+                if name == ".git" {
+                    continue;
+                }
+                walk(&path, root, swept);
+            } else if name.ends_with(".kit-latest") && fs::remove_file(&path).is_ok() {
+                swept.push(path.strip_prefix(root).unwrap_or(&path).to_string_lossy().to_string());
+            }
+        }
     }
-    let path_str = dest.to_string_lossy();
-    let is_sh = dest.extension().map(|e| e == "sh").unwrap_or(false);
-    let in_hooks_dir = dest
-        .parent()
-        .map(|p| p.ends_with(".claude/hooks"))
-        .unwrap_or(false);
-    if is_sh && in_hooks_dir {
-        return true;
-    }
-    if path_str.contains("/.claude/skills/") || path_str.contains("/Skill/") {
-        return true;
-    }
-    if path_str.ends_with("/AGENTS.md") {
-        return true;
-    }
-    if path_str.ends_with("/.claude/CLAUDE.md") {
-        return true;
-    }
-    // Kit-shipped harness helpers living directly in .claude/ (e.g.
-    // soul-listener.py): machinery, not content.
-    if dest.parent().map(|p| p.ends_with(".claude")).unwrap_or(false)
-        && dest.extension().map(|e| e == "py").unwrap_or(false)
-    {
-        return true;
-    }
-    false
+    walk(root, root, &mut swept);
+    swept
 }
 
+/// The ONE file kit-update never overwrites: `SOUL.md` — a soul's identity is
+/// the squaddie's own, never the kit's. Everything else a kit ships converges
+/// to the kit version on update (Rob-ruled 2026-07-29: "kit sees newer file →
+/// removes old file, puts new file in place, old one named .bak" — the agent
+/// never decides).
+fn is_never_overwrite(dest: &Path) -> bool {
+    dest.file_name().map(|n| n == "SOUL.md").unwrap_or(false)
+}
+
+/// Install a kit's files into the repo, safe for `kit-update` against a live
+/// repo:
+///   - Missing files: copied from kit (counted as `installed`).
+///   - Identical files: silent no-op (counted as `skipped`).
+///   - Differing files: old copy renamed `<file>.bak`, kit version put in
+///     place (recorded in `updated`). No agent decision, no diff homework.
+///   - `SOUL.md`: never overwritten (identity is the squaddie's own).
+///   - Adaptive-kit ontology: seed-only (agent-owned; see the ontology branch).
 pub(crate) fn install_scaffold_files_from_skip_existing(
     kit_dir: &std::path::Path,
-    force: bool,
 ) -> ScaffoldInstallReport {
     let root = match find_git_root() {
         Some(r) => r,
         None => return ScaffoldInstallReport::default(),
     };
 
-    let kit_version = kit_version_for(kit_dir);
-    // One stash dir per kit-update invocation (caller drives by passing the
-    // same timestamp via a fresh call — we use one per call here, which is
-    // fine since base+domain kit calls land within the same second and
-    // identical timestamps just merge into the same dir).
-    let stash_root = root.join(".kit-pre-force").join(timestamp_now_utc());
-
     let mut report = ScaffoldInstallReport::default();
 
     struct Ctx<'a> {
         repo_root: &'a Path,
-        kit_version: &'a str,
-        stash_root: &'a Path,
-        force: bool,
+        // Seed-only: install missing files but never touch existing ones.
+        // Used for adaptive-kit ontology (agent-owned).
+        seed_only: bool,
     }
 
     fn install_recursive(
@@ -983,10 +873,7 @@ pub(crate) fn install_scaffold_files_from_skip_existing(
             let ft = meta.file_type();
 
             if ft.is_symlink() {
-                if !ctx.force && dest.symlink_metadata().is_ok() {
-                    // Symlinks: drift is "exists differently" — but resolving
-                    // a symlink's target to byte-compare is fragile. Treat
-                    // existing-symlink-no-force as skip (legacy behavior).
+                if ctx.seed_only && dest.symlink_metadata().is_ok() {
                     report.skipped += 1;
                     continue;
                 }
@@ -1035,86 +922,39 @@ pub(crate) fn install_scaffold_files_from_skip_existing(
                 continue;
             }
 
-            // Destination exists. Decide based on byte-compare.
+            // Destination exists. Identical → no-op.
             let identical = dest_is_regular_file && files_byte_identical(&src, &dest);
-            if identical {
-                // Local already matches the kit — a lingering `.kit-latest`
-                // sibling from an earlier drift era is stale debris; sweep.
-                let mut kl = dest.clone().into_os_string();
-                kl.push(".kit-latest");
-                let _ = fs::remove_file(PathBuf::from(kl));
+            if identical || ctx.seed_only || is_never_overwrite(&dest) {
                 report.skipped += 1;
                 continue;
             }
 
-            // Drift case.
+            // Differs → old copy becomes <file>.bak, kit version goes in place.
             let rel = dest
                 .strip_prefix(ctx.repo_root)
                 .unwrap_or(&dest)
                 .to_string_lossy()
                 .to_string();
-
-            // ENFORCED kit-owned files (hooks) ALWAYS converge to the kit version,
-            // even without --force — they are machinery, not user content, and a soul
-            // must not run a stale local hook. The old local copy is still stashed to
-            // .kit-pre-force/ below (the revert path), so this is safe: overwrite +
-            // archive, never a silent loss. Non-enforced drift keeps the .kit-latest
-            // alongside-install so a soul's own customizations are preserved.
-            let enforced = is_enforced_path(&dest);
-
-            if !ctx.force && !enforced {
-                // Alongside-install: write `<dest>.kit-latest` with a header.
-                let kit_latest_path = {
-                    let mut p = dest.clone().into_os_string();
-                    p.push(".kit-latest");
-                    PathBuf::from(p)
-                };
-                let header = header_for_drift_file(&dest, ctx.kit_version, &rel);
-                if let Ok(body) = fs::read(&src) {
-                    let mut out: Vec<u8> = Vec::with_capacity(header.len() + body.len());
-                    out.extend_from_slice(header.as_bytes());
-                    out.extend_from_slice(&body);
-                    if fs::write(&kit_latest_path, &out).is_ok() {
-                        report.drifted.push(rel);
-                    }
-                }
-                continue;
+            let mut bak = dest.clone().into_os_string();
+            bak.push(".bak");
+            let bak = PathBuf::from(bak);
+            let _ = fs::remove_file(&bak);
+            if dest.is_dir() && !dest.is_symlink() {
+                // Odd type (dir where kit ships a file): move aside the same way.
+                let _ = fs::remove_dir_all(&bak);
             }
-
-            // Overwrite path — reached under --force OR for an enforced kit-owned
-            // file (hooks) even without --force. Either way: stash the prior local
-            // copy to .kit-pre-force/ first (the revert path), then write the kit
-            // version.
-            let stash_dest = ctx.stash_root.join(&rel);
-            let stash_ok = fs::create_dir_all(stash_dest.parent().unwrap_or(&stash_dest)).is_ok()
-                && fs::copy(&dest, &stash_dest).is_ok();
-            // Remove dest if it was an odd type, then write the kit version.
-            if dest_exists && !dest_is_regular_file {
-                if dest.symlink_metadata().ok().map(|m| m.file_type().is_dir() && !m.file_type().is_symlink()).unwrap_or(false) {
-                    let _ = fs::remove_dir_all(&dest);
-                } else {
-                    let _ = fs::remove_file(&dest);
-                }
+            if fs::rename(&dest, &bak).is_err() {
+                continue; // can't move the old one aside — leave it untouched
             }
             if fs::copy(&src, &dest).is_ok() {
-                // The dest now IS the kit version — a previously parked
-                // `.kit-latest` sibling is stale debris; sweep it.
-                let mut kl = dest.clone().into_os_string();
-                kl.push(".kit-latest");
-                let _ = fs::remove_file(PathBuf::from(kl));
-                report.installed += 1;
-                if stash_ok {
-                    report.stashed.push(rel);
-                }
+                report.updated.push(rel);
             }
         }
     }
 
     let ctx = Ctx {
         repo_root: &root,
-        kit_version: &kit_version,
-        stash_root: &stash_root,
-        force,
+        seed_only: false,
     };
 
     // New kit structure: ontology/, content/, harness/, www/
@@ -1139,25 +979,14 @@ pub(crate) fn install_scaffold_files_from_skip_existing(
             fs::create_dir_all(&ontology_dest).ok();
             let adaptive_ctx = Ctx {
                 repo_root: ctx.repo_root,
-                kit_version: ctx.kit_version,
-                stash_root: ctx.stash_root,
-                force: false,
+                seed_only: true,
             };
             install_recursive(&ontology_src, &ontology_dest, &adaptive_ctx, &mut report);
         } else {
-            // Static: kit-owned schema, ALWAYS clobber. Stash on force is
-            // implicit — and for static ontology we hard-overwrite even
-            // without --force because the SHACL/TTL graph must match the kit.
-            // (Same as legacy behavior; this is not a drift surface.)
+            // Static: kit-owned schema, converges like everything else.
             let ontology_dest = root.join(".lex").join("ontology");
             fs::create_dir_all(&ontology_dest).ok();
-            let static_ctx = Ctx {
-                repo_root: ctx.repo_root,
-                kit_version: ctx.kit_version,
-                stash_root: ctx.stash_root,
-                force: true,
-            };
-            install_recursive(&ontology_src, &ontology_dest, &static_ctx, &mut report);
+            install_recursive(&ontology_src, &ontology_dest, &ctx, &mut report);
         }
     }
 
@@ -1270,38 +1099,6 @@ mod tests {
     }
 
     #[test]
-    fn iso_date_utc_is_well_formed() {
-        let d = iso_date_utc();
-        assert_eq!(d.len(), 10);
-        assert_eq!(d.chars().nth(4), Some('-'));
-        assert_eq!(d.chars().nth(7), Some('-'));
-    }
-
-    #[test]
-    fn is_enforced_path_recognizes_hooks() {
-        // Hook scripts are ENFORCED (always converge to the kit version).
-        // Since 2026-07-29 hooks are one member of a wider enforced set
-        // (skills, AGENTS.md, .claude/CLAUDE.md, .claude helpers) — see
-        // enforced_path_tests for the full policy. These are the real
-        // filenames the kits ship.
-        assert!(is_enforced_path(Path::new("/soul/.claude/hooks/Stop-pool-moment.sh")));
-        assert!(is_enforced_path(Path::new("/soul/.claude/hooks/UserPromptSubmit-soul-recall.sh")));
-        assert!(is_enforced_path(Path::new("/soul/.claude/hooks/UserPromptSubmit-pool-share.sh")));
-        assert!(is_enforced_path(Path::new("/soul/.claude/hooks/SessionStart-soul-listener.sh")));
-        // A relative dest (as install_recursive builds) must also match.
-        assert!(is_enforced_path(Path::new(".claude/hooks/PreCompact-soul-journal.sh")));
-
-        // NOT enforced: non-.sh in the hooks dir, .sh outside the hooks dir, config,
-        // and especially user CONTENT (a journal template) — those keep .kit-latest.
-        assert!(!is_enforced_path(Path::new("/soul/.claude/hooks/README.md")));
-        assert!(!is_enforced_path(Path::new("/soul/.claude/settings.json")));
-        assert!(!is_enforced_path(Path::new("/soul/scripts/build.sh")));
-        assert!(!is_enforced_path(Path::new("/soul/Soul/Journal/__Journal.md")));
-        // A .sh one level deeper than hooks/ (not our flat layout) is not enforced.
-        assert!(!is_enforced_path(Path::new("/soul/.claude/hooks/sub/x.sh")));
-    }
-
-    #[test]
     fn is_local_hook_name_only_matches_local_namespace() {
         assert!(is_local_hook_name("Stop-local-mything.sh"));
         assert!(is_local_hook_name("UserPromptSubmit-local-scratch.sh"));
@@ -1330,8 +1127,7 @@ mod tests {
         let mut kit_names = std::collections::HashSet::new();
         kit_names.insert("UserPromptSubmit-soul-recall.sh".to_string());
 
-        let stash = tmp.join(".kit-pre-force").join("test");
-        let reaped = reap_non_kit_non_local_hooks(&tmp, &kit_names, &stash);
+        let reaped = reap_non_kit_non_local_hooks(&tmp, &kit_names);
 
         // Both orphans reaped; kit + local + non-.sh survive.
         assert_eq!(reaped.len(), 2, "exactly the two orphans reaped");
@@ -1340,8 +1136,9 @@ mod tests {
         assert!(hooks.join("README.md").exists(), "non-.sh untouched");
         assert!(!hooks.join("UserPromptSubmit.sh").exists(), "old combined hook reaped");
         assert!(!hooks.join("Stop-copia-moment.sh").exists(), "old renamed hook reaped");
-        // Orphans were stashed (recoverable).
-        assert!(stash.join(".claude/hooks/UserPromptSubmit.sh").exists(), "reaped hook stashed for revert");
+        // Orphans became .bak in place (recoverable, non-firing).
+        assert!(hooks.join("UserPromptSubmit.sh.bak").exists(), "reaped hook kept as .bak");
+        assert!(hooks.join("Stop-copia-moment.sh.bak").exists(), "reaped hook kept as .bak");
 
         std::fs::remove_dir_all(&tmp).ok();
     }
@@ -1351,8 +1148,29 @@ mod tests {
         let tmp = std::env::temp_dir().join(format!("glx_filereap_empty_{}_{}", std::process::id(), timestamp_now_utc()));
         // No .claude/hooks dir at all.
         let kit_names = std::collections::HashSet::new();
-        let reaped = reap_non_kit_non_local_hooks(&tmp, &kit_names, &tmp.join("stash"));
+        let reaped = reap_non_kit_non_local_hooks(&tmp, &kit_names);
         assert!(reaped.is_empty(), "missing hooks dir → no reap, no panic");
+    }
+
+    #[test]
+    fn sweep_removes_kit_latest_debris_everywhere() {
+        let tmp = std::env::temp_dir().join(format!("glx_klsweep_{}_{}", std::process::id(), timestamp_now_utc()));
+        let hooks = tmp.join(".claude").join("hooks");
+        std::fs::create_dir_all(&hooks).unwrap();
+        std::fs::create_dir_all(tmp.join(".git")).unwrap();
+        std::fs::write(hooks.join("SessionEnd.sh.kit-latest"), b"fossil\n").unwrap();
+        std::fs::write(tmp.join("AGENTS.md.kit-latest"), b"fossil\n").unwrap();
+        std::fs::write(tmp.join("AGENTS.md"), b"real\n").unwrap();
+        std::fs::write(tmp.join(".git").join("x.kit-latest"), b"never touched\n").unwrap();
+
+        let swept = sweep_kit_latest_files(&tmp);
+        assert_eq!(swept.len(), 2, "both debris files swept: {:?}", swept);
+        assert!(!hooks.join("SessionEnd.sh.kit-latest").exists());
+        assert!(!tmp.join("AGENTS.md.kit-latest").exists());
+        assert!(tmp.join("AGENTS.md").exists(), "real file untouched");
+        assert!(tmp.join(".git").join("x.kit-latest").exists(), ".git/ never entered");
+
+        std::fs::remove_dir_all(&tmp).ok();
     }
 
     #[test]
@@ -1369,32 +1187,10 @@ mod tests {
         std::fs::remove_dir_all(&tmp).ok();
     }
 
-    #[test]
-    fn header_picks_bash_style_for_shell() {
-        let p = Path::new("SessionStart.sh");
-        let h = header_for_drift_file(p, "git-lex-kit-soul", ".claude/hooks/SessionStart.sh");
-        assert!(h.starts_with("# kit-latest"), "got: {}", h);
-        assert!(h.contains("diff .claude/hooks/SessionStart.sh"));
-    }
-
-    #[test]
-    fn header_picks_html_style_for_md() {
-        let p = Path::new("README.md");
-        let h = header_for_drift_file(p, "kit", "README.md");
-        assert!(h.starts_with("<!--"), "got: {}", h);
-    }
-
-    #[test]
-    fn header_picks_rust_style_for_rs() {
-        let p = Path::new("lib.rs");
-        let h = header_for_drift_file(p, "kit", "src/lib.rs");
-        assert!(h.starts_with("// "), "got: {}", h);
-    }
-
     /// Smoke test: build a fake kit + fake repo, exercise the install path.
     /// Skipped if not in a git repo (we need find_git_root() to succeed).
     #[test]
-    fn scaffold_install_drift_smoke() {
+    fn scaffold_install_smoke() {
         // Skip cleanly if find_git_root() returns None — the test asserts only
         // that the function's contract holds when it can run.
         if find_git_root().is_none() {
@@ -1408,12 +1204,12 @@ mod tests {
         let mut f = std::fs::File::create(harness_dir.join("FakeHook.sh")).unwrap();
         f.write_all(b"#!/bin/bash\n# kit version\nexit 0\n").unwrap();
 
-        // Without --force on a non-existent dest, behavior should install.
-        // (We can't easily exercise the drift branch without writing into the
+        // On a non-existent dest, behavior should install.
+        // (We can't easily exercise the update branch without writing into the
         // real repo root, so this smoke just confirms no panic + counts work.)
-        let report = install_scaffold_files_from_skip_existing(&kit_dir, false);
+        let report = install_scaffold_files_from_skip_existing(&kit_dir);
         // Either the file was installed in the real repo (and we should clean
-        // up) or it was skipped/drifted there. Don't assert exact counts.
+        // up) or it was skipped there. Don't assert exact counts.
         let _ = report;
         // Cleanup: best-effort.
         std::fs::remove_dir_all(&tmp_root).ok();
@@ -1421,7 +1217,7 @@ mod tests {
         // try to remove it.
         if let Some(root) = find_git_root() {
             let _ = std::fs::remove_file(root.join(".claude").join("hooks").join("FakeHook.sh"));
-            let _ = std::fs::remove_file(root.join(".claude").join("hooks").join("FakeHook.sh.kit-latest"));
+            let _ = std::fs::remove_file(root.join(".claude").join("hooks").join("FakeHook.sh.bak"));
         }
     }
 
@@ -1679,11 +1475,16 @@ mod tests {
 }
 
 #[cfg(test)]
-mod enforced_path_tests {
+mod overwrite_policy_tests {
     use super::*;
 
     #[test]
-    fn kit_owned_machinery_is_enforced() {
+    fn soul_md_is_the_only_never_overwrite() {
+        // SOUL.md — identity, never the kit's to replace.
+        assert!(is_never_overwrite(Path::new("/repo/SOUL.md")));
+        assert!(is_never_overwrite(Path::new("SOUL.md")));
+
+        // Everything else a kit ships converges (old copy → .bak).
         for p in [
             "/repo/.claude/hooks/PreCompact-soul-journal.sh",
             "/repo/.claude/skills/search-your-soul/SKILL.md",
@@ -1691,20 +1492,9 @@ mod enforced_path_tests {
             "/repo/AGENTS.md",
             "/repo/.claude/CLAUDE.md",
             "/repo/.claude/soul-listener.py",
+            "/repo/Soul/Journal/__Journal.md",
         ] {
-            assert!(is_enforced_path(Path::new(p)), "{p} must be enforced");
-        }
-    }
-
-    #[test]
-    fn identity_and_content_are_never_enforced() {
-        for p in [
-            "/repo/SOUL.md",
-            "/repo/Soul/Journal/day-1.md",
-            "/repo/README.lex.md",
-            "/repo/.lex/repo.yml",
-        ] {
-            assert!(!is_enforced_path(Path::new(p)), "{p} must NOT be enforced");
+            assert!(!is_never_overwrite(Path::new(p)), "{p} must converge");
         }
     }
 }
