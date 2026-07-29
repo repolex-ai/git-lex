@@ -76,7 +76,7 @@ fn count(store: &Store, q: &str) -> u64 {
 /// Every violation prints; nothing is silent.
 pub(crate) fn run_verify(store: &Store) -> usize {
     let mut failures = 0usize;
-    println!("git-lex store health check");
+    println!("git lex verify");
     println!("──────────────────────────────────────────────────");
 
     // ── Check 0: the ontology graph itself ──────────────────────────────

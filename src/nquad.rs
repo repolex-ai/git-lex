@@ -605,6 +605,21 @@ pub(crate) fn emit_spo_line_nquads(
                                 relpath_str, kit_name, class_seg, prop_seg, prop_seg,
                                 canonical_class.as_deref().unwrap_or(class_seg), kit_name
                             );
+                        } else if !kit_namespaces.contains_key(kit_name)
+                            || obj_props.iter().chain(prop_datatypes.keys())
+                                .any(|k| k.starts_with(&kit_scope))
+                        {
+                            // The kit-qualified prefix CLAIMS ontology
+                            // vocabulary; a property the ontology has never
+                            // heard of used to sail through silently — how
+                            // months of junk keys (writtenFrom, soul.Note.
+                            // title, …) accumulated invisibly (Rob-ruled
+                            // 2026-07-29: warn at save). Bare keys (title:)
+                            // stay free — the open fm: lane is one line up.
+                            eprintln!(
+                                "warning: {}: `{}.{}.{}` is not declared in the `{}` ontology — emitted as plain data; fix the key (or drop the `{}.` prefix to use plain metadata)",
+                                relpath_str, kit_name, class_seg, prop_seg, kit_name, kit_name
+                            );
                         }
                     }
                 }
