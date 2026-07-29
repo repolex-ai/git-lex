@@ -1081,6 +1081,11 @@ pub(crate) fn install_scaffold_files_from_skip_existing(
                 }
             }
             if fs::copy(&src, &dest).is_ok() {
+                // The dest now IS the kit version — a previously parked
+                // `.kit-latest` sibling is stale debris; sweep it.
+                let mut kl = dest.clone().into_os_string();
+                kl.push(".kit-latest");
+                let _ = fs::remove_file(PathBuf::from(kl));
                 report.installed += 1;
                 if stash_ok {
                     report.stashed.push(rel);
