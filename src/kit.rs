@@ -882,13 +882,47 @@ pub(crate) fn reap_non_kit_non_local_hooks(
 /// kit", see the static-ontology branch below). Extend this list as more kit-owned
 /// machinery is identified.
 fn is_enforced_path(dest: &Path) -> bool {
-    // A hook script: parent dir is `.../.claude/hooks` and name ends in `.sh`.
+    // ENFORCED = kit-owned machinery that must always converge to the kit
+    // version on kit-update (old local copy stashed to .kit-pre-force/,
+    // never silently lost). Rob-ruled 2026-07-29 after the Selkie
+    // migration hit stale AGENTS.md + skills parked as .kit-latest:
+    // "kit-managed things overwrite local, without it being a big
+    // research project". SOUL.md is NEVER in this set — identity is the
+    // squaddie's own.
+    //
+    //   - hook scripts        (.claude/hooks/*.sh — the original set)
+    //   - skills              (.claude/skills/** and Skill/**)
+    //   - agent instructions  (AGENTS.md, .claude/CLAUDE.md)
+    //   - harness plumbing    (.claude/*.py listeners etc. shipped by kits)
+    if dest.file_name().map(|n| n == "SOUL.md").unwrap_or(false) {
+        return false;
+    }
+    let path_str = dest.to_string_lossy();
     let is_sh = dest.extension().map(|e| e == "sh").unwrap_or(false);
     let in_hooks_dir = dest
         .parent()
         .map(|p| p.ends_with(".claude/hooks"))
         .unwrap_or(false);
-    is_sh && in_hooks_dir
+    if is_sh && in_hooks_dir {
+        return true;
+    }
+    if path_str.contains("/.claude/skills/") || path_str.contains("/Skill/") {
+        return true;
+    }
+    if path_str.ends_with("/AGENTS.md") {
+        return true;
+    }
+    if path_str.ends_with("/.claude/CLAUDE.md") {
+        return true;
+    }
+    // Kit-shipped harness helpers living directly in .claude/ (e.g.
+    // soul-listener.py): machinery, not content.
+    if dest.parent().map(|p| p.ends_with(".claude")).unwrap_or(false)
+        && dest.extension().map(|e| e == "py").unwrap_or(false)
+    {
+        return true;
+    }
+    false
 }
 
 pub(crate) fn install_scaffold_files_from_skip_existing(
@@ -1223,10 +1257,12 @@ mod tests {
     }
 
     #[test]
-    fn is_enforced_path_recognizes_hooks_only() {
-        // The load-bearing decision: hook scripts are ENFORCED (always converge to the
-        // kit version); everything else keeps the drift-protect (.kit-latest) default.
-        // These are the real filenames the kits ship.
+    fn is_enforced_path_recognizes_hooks() {
+        // Hook scripts are ENFORCED (always converge to the kit version).
+        // Since 2026-07-29 hooks are one member of a wider enforced set
+        // (skills, AGENTS.md, .claude/CLAUDE.md, .claude helpers) — see
+        // enforced_path_tests for the full policy. These are the real
+        // filenames the kits ship.
         assert!(is_enforced_path(Path::new("/soul/.claude/hooks/Stop-pool-moment.sh")));
         assert!(is_enforced_path(Path::new("/soul/.claude/hooks/UserPromptSubmit-soul-recall.sh")));
         assert!(is_enforced_path(Path::new("/soul/.claude/hooks/UserPromptSubmit-pool-share.sh")));
@@ -1618,5 +1654,36 @@ mod tests {
         assert_eq!(read_repo_yml_substrates(&p),
             vec!["claude".to_string(), "hermes".to_string()]);
         std::fs::remove_dir_all(p.parent().unwrap()).ok();
+    }
+}
+
+#[cfg(test)]
+mod enforced_path_tests {
+    use super::*;
+
+    #[test]
+    fn kit_owned_machinery_is_enforced() {
+        for p in [
+            "/repo/.claude/hooks/PreCompact-soul-journal.sh",
+            "/repo/.claude/skills/search-your-soul/SKILL.md",
+            "/repo/Skill/search-your-soul.md",
+            "/repo/AGENTS.md",
+            "/repo/.claude/CLAUDE.md",
+            "/repo/.claude/soul-listener.py",
+        ] {
+            assert!(is_enforced_path(Path::new(p)), "{p} must be enforced");
+        }
+    }
+
+    #[test]
+    fn identity_and_content_are_never_enforced() {
+        for p in [
+            "/repo/SOUL.md",
+            "/repo/Soul/Journal/day-1.md",
+            "/repo/README.lex.md",
+            "/repo/.lex/repo.yml",
+        ] {
+            assert!(!is_enforced_path(Path::new(p)), "{p} must NOT be enforced");
+        }
     }
 }
