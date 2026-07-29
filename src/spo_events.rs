@@ -890,9 +890,16 @@ pub(crate) fn onegraph_walk_engine(
                 return Err(format!(
                     "malformed sidecar line in {sidecar_path}: {line:?} \
                      (expected `subject | predicate | object`). \
-                     If this is pre-standard dev-era data, fence it with \
-                     `dev_history_horizon:` in .lex/repo.yml (set it to the day \
-                     after this commit); otherwise this is a bug — report it."
+                     If this file exists in your CURRENT working tree, the damage \
+                     is live and must be repaired there: edit the source document \
+                     trivially, run `git lex save` (regenerates its sidecar), then \
+                     `rm -rf .git/lex` and re-run `git lex sync`. \
+                     If the line is only in HISTORY (dev-era data), fence it with \
+                     `dev_history_horizon:` in .lex/repo.yml set to the day after \
+                     this commit. Otherwise this is a bug — report it. \
+                     (Known dev-era damage signature: a value hard-wrapped across \
+                     two physical lines — the fragment above may be the tail of \
+                     the previous line.)"
                 ));
             }
             // Empty object is DEFINED format semantics, not damage: the
