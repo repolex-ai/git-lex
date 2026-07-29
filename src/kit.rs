@@ -1027,6 +1027,11 @@ pub(crate) fn install_scaffold_files_from_skip_existing(
             // Destination exists. Decide based on byte-compare.
             let identical = dest_is_regular_file && files_byte_identical(&src, &dest);
             if identical {
+                // Local already matches the kit — a lingering `.kit-latest`
+                // sibling from an earlier drift era is stale debris; sweep.
+                let mut kl = dest.clone().into_os_string();
+                kl.push(".kit-latest");
+                let _ = fs::remove_file(PathBuf::from(kl));
                 report.skipped += 1;
                 continue;
             }
