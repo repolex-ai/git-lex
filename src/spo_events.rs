@@ -828,18 +828,19 @@ pub(crate) fn onegraph_walk_engine(
     // == triple-set semantics). Also counts lines in / lines dropped by the
     // resolver (a line yielding zero triples) — the completeness accounting
     // foundation (BUG 4).
-    // Per-reason drop accounting (BUG 4): every sidecar line either yields
-    // triples or is counted under exactly one drop reason. Nothing vanishes
-    // silently. Classification happens WALKER-SIDE — the shared emitter
-    // (`emit_spo_line_nquads`, also serving the now view + `git lex query`)
-    // is deliberately untouched; lines it drops for its own reasons land in
-    // `resolver_other` until a conscious cross-surface change is ruled.
+    // Accounting (BUG 4): every sidecar line either yields triples, is
+    // counted (`resolver_other`, `unknown_suffix`), or HARD-FAILS the walk
+    // (malformed shape / empty object). The walker knows ONE sidecar format;
+    // a line violating it is either a real bug (fix it) or pre-standard
+    // dev-era data that `dev_history_horizon` in .lex/repo.yml should be
+    // fencing. Nothing vanishes silently, and nothing is tolerated quietly.
+    // The shared emitter (`emit_spo_line_nquads`, also serving the now view
+    // + `git lex query`) is deliberately untouched; lines it drops for its
+    // own reasons land in `resolver_other`.
     #[derive(Default)]
     struct DropAccounting {
         lines_in: usize,
-        retired_body_extract: usize, // BUG 3 — quarantined legacy shim (legacy_spo)
-        malformed_shape: usize,      // not exactly 3 ` | `-separated fields
-        empty_object: usize,         // third field empty/whitespace
+        empty_object: usize,         // `key | hasValue | ` — empty value, no fact
         resolver_other: usize,       // dropped inside the shared emitter
         unknown_suffix: usize,       // sidecar with an undeclared extractor suffix
         resolver_errors: u32,        // errors reported by the shared emitter
@@ -880,23 +881,24 @@ pub(crate) fn onegraph_walk_engine(
         let mut triples: HashSet<String> = HashSet::new();
         let mut emitted_types: HashSet<String> = HashSet::new();
         for line in &lines {
-            // Quarantined legacy formats first (never reach the emitter).
-            if crate::legacy_spo::is_retired_body_extract_line(line) {
-                acct.retired_body_extract += 1;
-                continue;
-            }
-            // Shape pre-checks, mirroring the emitter's own silent drops so
-            // they're COUNTED here (the emitter still guards for its other
-            // callers).
+            // Shape check — HARD error. The walker knows one format:
+            // `subject | predicate | object`.
             // splitn(3): MUST match the emitter's split (nquad.rs) — a
-            // value containing " | " is one value, not extra fields. The
-            // old .split() disagreed with the emitter and silently dropped
-            // such lines from history while query showed them.
+            // value containing " | " is one value, not extra fields.
             let fields: Vec<&str> = line.splitn(3, " | ").collect();
             if fields.len() != 3 {
-                acct.malformed_shape += 1;
-                continue;
+                return Err(format!(
+                    "malformed sidecar line in {sidecar_path}: {line:?} \
+                     (expected `subject | predicate | object`). \
+                     If this is pre-standard dev-era data, fence it with \
+                     `dev_history_horizon:` in .lex/repo.yml (set it to the day \
+                     after this commit); otherwise this is a bug — report it."
+                ));
             }
+            // Empty object is DEFINED format semantics, not damage: the
+            // extractor writes `key | hasValue | ` for a frontmatter field
+            // that is present but empty, and an empty value asserts no fact.
+            // Same behavior as the now-view emitter. Skipped, counted.
             if fields[2].trim().is_empty() {
                 acct.empty_object += 1;
                 continue;
@@ -1017,22 +1019,14 @@ pub(crate) fn onegraph_walk_engine(
         }
     }
 
-    // Completeness accounting, itemized by reason (BUG 4). Loud whenever any
-    // line was dropped; which reasons should hard-fail is Rob's pending call.
-    let dropped_total = acct.retired_body_extract + acct.malformed_shape
-        + acct.empty_object + acct.resolver_other;
-    if dropped_total > 0 || acct.unknown_suffix > 0 || acct.resolver_errors > 0 {
+    // Completeness accounting (BUG 4). Malformed lines hard-fail above;
+    // what remains countable is emitter-side drops and unknown suffixes.
+    if acct.empty_object > 0 || acct.resolver_other > 0 || acct.unknown_suffix > 0 || acct.resolver_errors > 0 {
         eprintln!(
-            "  one-graph accounting: {} line(s) read, {} dropped — retired-body-extract(@): {}, malformed-shape: {}, empty-object: {}, resolver-other: {}, unknown-suffix sidecar(s): {}, resolver error(s): {}",
-            acct.lines_in, dropped_total, acct.retired_body_extract,
-            acct.malformed_shape, acct.empty_object, acct.resolver_other,
+            "  one-graph accounting: {} line(s) read — empty-value (no fact): {}, resolver-other: {}, unknown-suffix sidecar(s): {}, resolver error(s): {}",
+            acct.lines_in, acct.empty_object, acct.resolver_other,
             acct.unknown_suffix, acct.resolver_errors
         );
-        if clear_first && (acct.retired_body_extract > 0 || acct.resolver_errors > 0) {
-            eprintln!(
-                "  (these are HISTORICAL lines from pre-gate commits replayed by the rebuild — nothing to fix in live files; live problems are reported separately at save/sync)"
-            );
-        }
     }
 
     if show_progress && total > 0 {

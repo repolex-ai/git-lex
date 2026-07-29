@@ -23,7 +23,6 @@ mod git;
 mod hooks;
 mod init;
 mod git2_nquads;
-mod legacy_spo;
 mod verify;
 mod nquad;
 mod ontology;
