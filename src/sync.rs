@@ -1,6 +1,6 @@
 //! `git lex sync` — build/refresh the derived knowledge graphs from git.
 //!
-//! Regenerates the ephemeral virtual graphs (git2 layer, adaptive shapes),
+//! Regenerates the ephemeral virtual graphs (git2 layer),
 //! appends new commits' statement events to the persistent one graph
 //! (with resume-or-full-rebuild logic and a structural integrity check),
 //! and materializes the `now` view from the one graph's base layer.
@@ -73,18 +73,6 @@ pub(crate) fn cmd_sync() {
     if head_sha.is_empty() {
         println!("No commits yet. Nothing to sync.");
         return;
-    }
-
-    // ─── Always: regenerate adaptive shapes before the fast-path check ───
-    // Adaptive shapes are derived from `_ontology/*.ttl` (agent-authored,
-    // can change at any time). Regenerating is cheap and idempotent. We
-    // do it BEFORE the fast-path so that when an agent edits an ontology
-    // without committing, the shapes file refreshes even if HEAD hasn't
-    // moved. Adaptive shapes are also a precondition for `git lex create`
-    // / `git lex list` finding adaptive-kit doctypes.
-    let (adaptive_ok, adaptive_fail) = crate::shacl::build_adaptive_shapes();
-    for (ttl, err) in &adaptive_fail {
-        eprintln!("warning: adaptive shapes failed for {}: {}", ttl.display(), err);
     }
 
     // ─── Fast path: already-synced no-op ───
@@ -216,8 +204,6 @@ pub(crate) fn cmd_sync() {
         }
     }
 
-    // (adaptive shapes already built at top of cmd_sync, before fast-path check)
-
     // Regenerate the git2 machinery layer (commits/signatures/refs/filetree)
     let git_nq = crate::git2_nquads::generate_git2_nquads();
     let git_count = git_nq.lines().count();
@@ -290,9 +276,6 @@ These are in your WORKING FILES, not history — fix the listed files and the wa
         elapsed.as_secs_f64() * 1000.0
     );
     println!("  git2 layer: {} quads; extracted: {} now-view facts", git_count, fm_count);
-    if !adaptive_ok.is_empty() || !adaptive_fail.is_empty() {
-        println!("  Adaptive shapes: {} built, {} failed", adaptive_ok.len(), adaptive_fail.len());
-    }
     println!("Store: {}", store_path().unwrap().display());
 }
 

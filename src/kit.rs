@@ -328,11 +328,9 @@ pub(crate) fn kit_config_str(kit: &str, key: &str) -> Option<String> {
 /// Find the kit TTL file path. Tries {kit}.ttl first, then any .ttl in the kit dir.
 ///
 /// Lookup order:
-///   1. `.lex/ontology/{short}/{short}.ttl`        — static kit primary
-///   2. any non-shapes `.ttl` in `.lex/ontology/{short}/` — static fallback
-///   3. `_ontology/{short}/{short}.ttl`            — adaptive kit primary
-///   4. any non-shapes `.ttl` in `_ontology/{short}/` — adaptive fallback
-///   5. `.lex/kit/{org}/{repo}/{short}.ttl`        — legacy
+///   1. `.lex/ontology/{short}/{short}.ttl`        — canonical
+///   2. any non-shapes `.ttl` in `.lex/ontology/{short}/` — fallback
+///   3. `.lex/kit/{org}/{repo}/{short}.ttl`        — legacy
 pub(crate) fn find_kit_ttl(kit: &str) -> Option<PathBuf> {
     let root = find_git_root()?;
     let (_, _, short_name) = resolve_kit_spec(kit);
@@ -363,10 +361,6 @@ pub(crate) fn find_kit_ttl(kit: &str) -> Option<PathBuf> {
     // (covers a kit that ships its TTL under a different filename — rare).
     let static_dir = root.join(".lex").join("ontology").join(&short_name);
     if let Some(p) = try_dir(&static_dir) { return Some(p); }
-
-    // Adaptive kit location (kit.yml `adaptive: true`; ontology lives outside .lex/)
-    let adaptive_dir = root.join("_ontology").join(&short_name);
-    if let Some(p) = try_dir(&adaptive_dir) { return Some(p); }
 
     // Legacy fallback: .lex/kit/{org}/{repo}/{short}.ttl
     let kit_dir = kit_install_dir_for_spec(&root, kit);
@@ -580,64 +574,18 @@ pub(crate) fn install_scaffold_files_from(kit_dir: &std::path::Path) -> usize {
         }
     }
 
-    fn install_recursive_skip_existing(
-        src_dir: &std::path::Path,
-        dest_dir: &std::path::Path,
-        count: &mut usize,
-    ) {
-        let entries = match fs::read_dir(src_dir) {
-            Ok(e) => e,
-            Err(_) => return,
-        };
-        for entry in entries.flatten() {
-            let src = entry.path();
-            let name = entry.file_name();
-            let dest = dest_dir.join(&name);
-
-            if src.is_dir() {
-                fs::create_dir_all(&dest).ok();
-                install_recursive_skip_existing(&src, &dest, count);
-            } else if src.is_file() && !dest.exists() {
-                fs::create_dir_all(dest.parent().unwrap_or(&dest)).ok();
-                if fs::copy(&src, &dest).is_ok() {
-                    *count += 1;
-                }
-            }
-        }
-    }
-
     // New kit structure: ontology/, content/, harness/ (and legacy scaffold/)
     // Each maps to a different destination:
-    //   ontology/ → .lex/ontology/  (static kit) or _ontology/ (adaptive kit)
+    //   ontology/ → .lex/ontology/  (kit-owned schema)
     //   content/  → repo root       (content files)
     //   harness/  → repo root       (substrate adapter files)
     //   www/      → .lex/www/       (web UI assets)
     //   scaffold/ → repo root       (legacy, for pre-migration kits)
     let ontology_src = kit_dir.join("ontology");
     if ontology_src.exists() {
-        // Adaptive kits seed ontology to _ontology/ (never clobber — agent-owned).
-        // Static kits install to .lex/ontology/ (always clobber — kit-owned).
-        let is_adaptive = fs::read_to_string(kit_dir.join("kit.yml"))
-            .ok()
-            .map(|c| c.lines().any(|l| {
-                let l = l.trim();
-                l.starts_with("adaptive:") && {
-                    let v = l.strip_prefix("adaptive:").unwrap().trim();
-                    v == "true" || v == "yes"
-                }
-            }))
-            .unwrap_or(false);
-
-        if is_adaptive {
-            let ontology_dest = root.join("_ontology");
-            fs::create_dir_all(&ontology_dest).ok();
-            // Only seed if nothing is there yet — never clobber agent work
-            install_recursive_skip_existing(&ontology_src, &ontology_dest, &mut count);
-        } else {
-            let ontology_dest = root.join(".lex").join("ontology");
-            fs::create_dir_all(&ontology_dest).ok();
-            install_recursive(&ontology_src, &ontology_dest, &mut count);
-        }
+        let ontology_dest = root.join(".lex").join("ontology");
+        fs::create_dir_all(&ontology_dest).ok();
+        install_recursive(&ontology_src, &ontology_dest, &mut count);
     }
 
     let content_src = kit_dir.join("content");
@@ -833,7 +781,6 @@ fn is_never_overwrite(dest: &Path) -> bool {
 ///   - Differing files: old copy renamed `<file>.bak`, kit version put in
 ///     place (recorded in `updated`). No agent decision, no diff homework.
 ///   - `SOUL.md`: never overwritten (identity is the squaddie's own).
-///   - Adaptive-kit ontology: seed-only (agent-owned; see the ontology branch).
 pub(crate) fn install_scaffold_files_from_skip_existing(
     kit_dir: &std::path::Path,
 ) -> ScaffoldInstallReport {
@@ -846,9 +793,6 @@ pub(crate) fn install_scaffold_files_from_skip_existing(
 
     struct Ctx<'a> {
         repo_root: &'a Path,
-        // Seed-only: install missing files but never touch existing ones.
-        // Used for adaptive-kit ontology (agent-owned).
-        seed_only: bool,
     }
 
     fn install_recursive(
@@ -873,10 +817,6 @@ pub(crate) fn install_scaffold_files_from_skip_existing(
             let ft = meta.file_type();
 
             if ft.is_symlink() {
-                if ctx.seed_only && dest.symlink_metadata().is_ok() {
-                    report.skipped += 1;
-                    continue;
-                }
                 let target = match fs::read_link(&src) {
                     Ok(t) => t,
                     Err(_) => continue,
@@ -924,7 +864,7 @@ pub(crate) fn install_scaffold_files_from_skip_existing(
 
             // Destination exists. Identical → no-op.
             let identical = dest_is_regular_file && files_byte_identical(&src, &dest);
-            if identical || ctx.seed_only || is_never_overwrite(&dest) {
+            if identical || is_never_overwrite(&dest) {
                 report.skipped += 1;
                 continue;
             }
@@ -952,42 +892,15 @@ pub(crate) fn install_scaffold_files_from_skip_existing(
         }
     }
 
-    let ctx = Ctx {
-        repo_root: &root,
-        seed_only: false,
-    };
+    let ctx = Ctx { repo_root: &root };
 
     // New kit structure: ontology/, content/, harness/, www/
-    // Static kits: ontology ALWAYS overwritten — kit's schema, must stay in sync.
-    // Adaptive kits: ontology seeded to _ontology/, never clobbered — agent-owned.
+    // Ontology is kit-owned schema — converges like everything else.
     let ontology_src = kit_dir.join("ontology");
     if ontology_src.exists() {
-        let is_adaptive = fs::read_to_string(kit_dir.join("kit.yml"))
-            .ok()
-            .map(|c| c.lines().any(|l| {
-                let l = l.trim();
-                l.starts_with("adaptive:") && {
-                    let v = l.strip_prefix("adaptive:").unwrap().trim();
-                    v == "true" || v == "yes"
-                }
-            }))
-            .unwrap_or(false);
-
-        if is_adaptive {
-            // Adaptive: agent-owned. Never clobber; only seed missing.
-            let ontology_dest = root.join("_ontology");
-            fs::create_dir_all(&ontology_dest).ok();
-            let adaptive_ctx = Ctx {
-                repo_root: ctx.repo_root,
-                seed_only: true,
-            };
-            install_recursive(&ontology_src, &ontology_dest, &adaptive_ctx, &mut report);
-        } else {
-            // Static: kit-owned schema, converges like everything else.
-            let ontology_dest = root.join(".lex").join("ontology");
-            fs::create_dir_all(&ontology_dest).ok();
-            install_recursive(&ontology_src, &ontology_dest, &ctx, &mut report);
-        }
+        let ontology_dest = root.join(".lex").join("ontology");
+        fs::create_dir_all(&ontology_dest).ok();
+        install_recursive(&ontology_src, &ontology_dest, &ctx, &mut report);
     }
 
     let content_src = kit_dir.join("content");

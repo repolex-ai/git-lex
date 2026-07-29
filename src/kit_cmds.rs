@@ -109,13 +109,9 @@ pub(crate) fn emit_class_templates(kit_name: &str, root: &std::path::Path, creat
 
     let kit_types = get_kit_types(kit_name);
     let shapes_content = {
-        let static_p = root.join(".lex").join("ontology").join(&short)
+        let shapes_p = root.join(".lex").join("ontology").join(&short)
             .join(format!("{}-shapes.ttl", short));
-        let adaptive_p = root.join("_ontology").join(&short)
-            .join(format!("{}-shapes.ttl", short));
-        fs::read_to_string(&static_p)
-            .or_else(|_| fs::read_to_string(&adaptive_p))
-            .unwrap_or_default()
+        fs::read_to_string(&shapes_p).unwrap_or_default()
     };
     let shacl_hints = parse_shacl_hints(&shapes_content, &short);
     let prefix_name = get_kit_prefix_name(&short);

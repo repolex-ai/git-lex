@@ -106,9 +106,8 @@ enum Commands {
     Sync,
     /// List all document classes defined across the repo's installed shapes
     ///
-    /// Walks both `.lex/ontology/` (kit-installed) and `_ontology/`
-    /// (agent-authored/adaptive) — so `list` sees every class the repo knows,
-    /// not just the classes from the configured kit.
+    /// Walks `.lex/ontology/` across every installed kit — so `list` sees
+    /// every class the repo knows, not just the configured kit's.
     List {
         /// Emit a JSON array on stdout instead of a human list.
         /// Each entry: {prefix, class, namespace, uri}.
@@ -238,9 +237,8 @@ pub(crate) fn open_or_create_store() -> Store {
 
 // ─── git lex list ──────────────────────────────────────────────
 
-/// Walk every installed SHACL shape file and emit the class list.
-/// Covers both kit-installed shapes (.lex/ontology/*/*-shapes.ttl) and
-/// adaptive shapes (_ontology/**/*-shapes.ttl). Output is grouped by prefix.
+/// Walk every installed SHACL shape file (.lex/ontology/*/*-shapes.ttl)
+/// and emit the class list, grouped by prefix.
 fn cmd_list(json: bool) {
     let classes = ontology::all_classes();
 
@@ -258,7 +256,7 @@ fn cmd_list(json: bool) {
     }
 
     if classes.is_empty() {
-        println!("No classes found. Install a kit with `git lex init --kit <name>` or add shapes under _ontology/.");
+        println!("No classes found. Install a kit with `git lex init --kit <name>`.");
         return;
     }
 
@@ -676,41 +674,15 @@ fn cmd_validate() -> bool {
         }
     };
 
-    // Collect SHACL shapes TTL from both .lex/ontology/{short}/ (kit-owned,
-    // built at kit install time) and _ontology/ (agent-owned, built at sync
-    // time by build_adaptive_shapes). Concatenated into one shapes graph —
-    // each TTL carries its own @prefix declarations, so merging is safe.
+    // Collect SHACL shapes TTL from .lex/ontology/{short}/ (kit-owned, built
+    // at kit install time).
     let (_, _, short) = resolve_kit_spec(&kit);
     let mut shapes_sources: Vec<(PathBuf, String)> = Vec::new();
 
-    // Kit shapes
     let kit_shapes = root.join(".lex").join("ontology").join(&short)
         .join(format!("{}-shapes.ttl", short));
     if let Ok(ttl) = fs::read_to_string(&kit_shapes) {
         shapes_sources.push((kit_shapes, ttl));
-    }
-
-    // Adaptive shapes from _ontology/{name}/{name}-shapes.ttl
-    let adaptive_root = root.join("_ontology");
-    if adaptive_root.exists() {
-        if let Ok(entries) = fs::read_dir(&adaptive_root) {
-            for entry in entries.flatten() {
-                let subdir = entry.path();
-                if !subdir.is_dir() { continue; }
-                if let Ok(files) = fs::read_dir(&subdir) {
-                    for f in files.flatten() {
-                        let p = f.path();
-                        if p.file_name()
-                            .is_some_and(|n| n.to_string_lossy().ends_with("-shapes.ttl"))
-                        {
-                            if let Ok(ttl) = fs::read_to_string(&p) {
-                                shapes_sources.push((p, ttl));
-                            }
-                        }
-                    }
-                }
-            }
-        }
     }
 
     if shapes_sources.is_empty() {

@@ -26,10 +26,8 @@ use git_lex::{find_git_root, resolve_kit_spec};
 
 /// Locate the shapes TTL for a kit. Returns empty string if not found.
 ///
-/// Resolved by canonical path, NOT by glob-walk. The two canonical
-/// install locations are:
-///   - `.lex/ontology/{short}/{short}-shapes.ttl`  (static kit)
-///   - `_ontology/{short}/{short}-shapes.ttl`      (adaptive kit)
+/// Resolved by canonical path, NOT by glob-walk. The canonical install
+/// location is `.lex/ontology/{short}/{short}-shapes.ttl`.
 ///
 /// Previous behavior glob-walked `all_shape_files()` and picked the FIRST
 /// file matching by name. That was first-wins-by-sort-order, which made
@@ -38,25 +36,18 @@ use git_lex::{find_git_root, resolve_kit_spec};
 /// layout) sorted alphabetically before `.lex/ontology/{short}/...` and
 /// shadowed the current shapes. See task #29 (TR1P.L3X repro Day 22).
 ///
-/// Now: try the static path; if missing, try adaptive. Anywhere else is
-/// ignored — `kit-update` sweeps the legacy `.lex/ontology/kit/` directory.
+/// Now: only the canonical path is read. Anywhere else is ignored —
+/// `kit-update` sweeps the legacy `.lex/ontology/kit/` directory.
 fn read_kit_shapes(kit: &str) -> String {
     let Some(root) = find_git_root() else { return String::new() };
     let (_, _, short) = resolve_kit_spec(kit);
     let target = format!("{}-shapes.ttl", short);
 
-    // Static kit: .lex/ontology/{short}/{short}-shapes.ttl
-    let static_path = root.join(".lex").join("ontology").join(&short).join(&target);
-    let static_content = fs::read_to_string(&static_path).ok();
+    let canonical_path = root.join(".lex").join("ontology").join(&short).join(&target);
+    let canonical_content = fs::read_to_string(&canonical_path).ok();
 
-    // Adaptive kit: _ontology/{short}/{short}-shapes.ttl
-    let adaptive_path = root.join("_ontology").join(&short).join(&target);
-    let adaptive_content = if static_content.is_none() {
-        fs::read_to_string(&adaptive_path).ok()
-    } else { None };
-
-    // Audit: surface ANY extra `{short}-shapes.ttl` found outside the two
-    // canonical paths. Catches old-layout stragglers like
+    // Audit: surface ANY extra `{short}-shapes.ttl` found outside the
+    // canonical path. Catches old-layout stragglers like
     // `.lex/ontology/kit/{short}/{short}-shapes.ttl` that were silently
     // shadowing canonical shapes prior to this resolver. Warning only —
     // we ignore them either way. Once-per-process per kit-short so a
@@ -77,7 +68,7 @@ fn read_kit_shapes(kit: &str) -> String {
         let mut stragglers: Vec<PathBuf> = Vec::new();
         for path in all_shape_files() {
             if path.file_name().and_then(|n| n.to_str()) != Some(target.as_str()) { continue; }
-            if path == static_path || path == adaptive_path { continue; }
+            if path == canonical_path { continue; }
             stragglers.push(path);
         }
         if !stragglers.is_empty() {
@@ -90,12 +81,11 @@ fn read_kit_shapes(kit: &str) -> String {
         }
     }
 
-    static_content.or(adaptive_content).unwrap_or_default()
+    canonical_content.unwrap_or_default()
 }
 
-/// Return paths to every shape TTL installed in the repo, across both
-/// `.lex/ontology/**/*-shapes.ttl` (kit-provided) and
-/// `_ontology/**/*-shapes.ttl` (agent-authored). Used by whole-repo listings.
+/// Return paths to every shape TTL installed in the repo
+/// (`.lex/ontology/**/*-shapes.ttl`). Used by whole-repo listings.
 pub(crate) fn all_shape_files() -> Vec<PathBuf> {
     let root = match find_git_root() {
         Some(r) => r,
@@ -119,8 +109,6 @@ pub(crate) fn all_shape_files() -> Vec<PathBuf> {
     }
     let a = root.join(".lex").join("ontology");
     if a.exists() { walk(&a, &mut out); }
-    let b = root.join("_ontology");
-    if b.exists() { walk(&b, &mut out); }
     out.sort();
     out
 }
@@ -540,14 +528,8 @@ pub(crate) fn get_class_foldered(kit: &str, class_name: &str) -> bool {
     let (_, _, short) = resolve_kit_spec(kit);
     let target = format!("{}.ttl", short);
 
-    // Static kit: .lex/ontology/{short}/{short}.ttl
-    let static_path = root.join(".lex").join("ontology").join(&short).join(&target);
-    // Adaptive kit: _ontology/{short}/{short}.ttl
-    let adaptive_path = root.join("_ontology").join(&short).join(&target);
-
-    let content = fs::read_to_string(&static_path)
-        .or_else(|_| fs::read_to_string(&adaptive_path))
-        .unwrap_or_default();
+    let path = root.join(".lex").join("ontology").join(&short).join(&target);
+    let content = fs::read_to_string(&path).unwrap_or_default();
     if content.is_empty() {
         return false;
     }
@@ -565,14 +547,8 @@ pub(crate) fn get_class_type_label(kit: &str, class_name: &str) -> String {
     let (_, _, short) = resolve_kit_spec(kit);
     let target = format!("{}.ttl", short);
 
-    // Static kit: .lex/ontology/{short}/{short}.ttl
-    let static_path = root.join(".lex").join("ontology").join(&short).join(&target);
-    // Adaptive kit: _ontology/{short}/{short}.ttl
-    let adaptive_path = root.join("_ontology").join(&short).join(&target);
-
-    let content = fs::read_to_string(&static_path)
-        .or_else(|_| fs::read_to_string(&adaptive_path))
-        .unwrap_or_default();
+    let path = root.join(".lex").join("ontology").join(&short).join(&target);
+    let content = fs::read_to_string(&path).unwrap_or_default();
     if content.is_empty() {
         return class_name.to_string();
     }
@@ -895,7 +871,7 @@ copia:NocturneActivity a owl:Class ;
 }
 
 /// Every class declared across all installed shape files — kit and
-/// adaptive. Each entry: (prefix_name, class_name, namespace).
+/// Each entry: (prefix_name, class_name, namespace).
 /// Used by `list` / `create` when they need a whole-repo view, not just one
 /// kit.
 pub(crate) fn all_classes() -> Vec<(String, String, String)> {

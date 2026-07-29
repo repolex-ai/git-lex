@@ -8,8 +8,6 @@
 //!   → sh:nodeKind sh:IRI, owl:Restriction minCard → sh:minCount).
 //! - `build_shacl_shapes` writes the generated shapes to
 //!   `.lex/ontology/{short}/{short}-shapes.ttl`.
-//! - `build_adaptive_shapes` scans `_ontology/` for agent-authored TTLs,
-//!   generates shapes alongside them.
 //!
 //! Peeled out of `main.rs` during modularization. No behavior changes.
 
@@ -18,7 +16,7 @@ use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::PathBuf;
 
-use git_lex::{find_git_root, resolve_kit_spec};
+use git_lex::resolve_kit_spec;
 
 /// Parse SHACL shapes TTL to extract inline hints for class template comments.
 /// Returns a map of property qname (`soul:confidence`) → hint string
@@ -375,9 +373,8 @@ pub(crate) fn generate_shacl_shapes(kit: &str) -> Result<Option<String>, String>
 /// Generate and write SHACL shapes for a kit.
 /// Returns the path to the generated shapes file.
 ///
-/// Output location is chosen to live alongside the source TTL:
-///   - static kit  → `.lex/ontology/{short}/{short}-shapes.ttl`
-///   - adaptive kit → `_ontology/{short}/{short}-shapes.ttl`
+/// Output location lives alongside the source TTL:
+/// `.lex/ontology/{short}/{short}-shapes.ttl`.
 pub(crate) fn build_shacl_shapes(kit: &str) -> Result<Option<PathBuf>, String> {
     let Some(shacl) = generate_shacl_shapes(kit)? else { return Ok(None) };
     let (_, _, short) = resolve_kit_spec(kit);
@@ -392,108 +389,4 @@ pub(crate) fn build_shacl_shapes(kit: &str) -> Result<Option<PathBuf>, String> {
     Ok(Some(shapes_path))
 }
 
-// ─── Adaptive shapes (_ontology/) ─────────────────────────────
 
-/// Scan `_ontology/` for agent-authored TTL files. For each, generate SHACL
-/// shapes and write them alongside the source TTL. Returns a list of
-/// (ttl_path, shapes_path) for successes and (ttl_path, error) for failures.
-pub(crate) fn build_adaptive_shapes() -> (Vec<(PathBuf, PathBuf)>, Vec<(PathBuf, String)>) {
-    let root = match find_git_root() {
-        Some(r) => r,
-        None => return (vec![], vec![]),
-    };
-
-    let adaptive_dir = root.join("_ontology");
-    if !adaptive_dir.exists() {
-        return (vec![], vec![]);
-    }
-
-    let mut successes: Vec<(PathBuf, PathBuf)> = Vec::new();
-    let mut failures: Vec<(PathBuf, String)> = Vec::new();
-
-    // Walk _ontology/{name}/{name}.ttl — same structure as .lex/ontology/
-    let entries = match fs::read_dir(&adaptive_dir) {
-        Ok(e) => e,
-        Err(_) => return (vec![], vec![]),
-    };
-
-    for entry in entries.flatten() {
-        if !entry.path().is_dir() { continue; }
-        let subdir = entry.path();
-        let ttl_files: Vec<PathBuf> = fs::read_dir(&subdir)
-            .into_iter()
-            .flat_map(|e| e.flatten())
-            .filter(|e| {
-                let p = e.path();
-                p.extension().is_some_and(|ext| ext == "ttl")
-                    && !p.file_name().unwrap_or_default().to_string_lossy().ends_with("-shapes.ttl")
-            })
-            .map(|e| e.path())
-            .collect();
-
-        for ttl_path in ttl_files {
-            let ttl_content = match fs::read_to_string(&ttl_path) {
-                Ok(c) => c,
-                Err(e) => {
-                    failures.push((ttl_path, format!("read error: {}", e)));
-                    continue;
-                }
-            };
-
-            // Load into temp store — the ONE TTL-text loader.
-            let store = match crate::kit::load_ttl_str(
-                &ttl_content,
-                &ttl_path.display().to_string(),
-            ) {
-                Ok(s) => s,
-                Err(e) => {
-                    failures.push((ttl_path, e));
-                    continue;
-                }
-            };
-
-            // Detect prefix and namespace from the TTL.
-            //
-            // The convention is `_ontology/{short}/{short}.ttl`, so the filename
-            // stem IS the kit short name. Prefer a `@prefix` line whose
-            // namespace contains `/kit/{short}/` — that's how non-adaptive
-            // build does it (generate_shacl_shapes line 325). Fall back to
-            // the first non-system prefix only if no match is found.
-            //
-            // Without this, a TTL that imports an upper ontology (e.g.
-            // `@prefix lex-o:` declared before `@prefix autoknow:`) caused
-            // the upper-ontology prefix to be picked, and shape generation
-            // then queried the wrong namespace and produced an empty file.
-            let label = ttl_path.file_stem()
-                .unwrap_or_default()
-                .to_string_lossy()
-                .to_string();
-
-            // ONE scanner (git_lex::extract_kit_prefix) — the inline copy
-            // this replaces still keyed on the retired /kit/ pattern and
-            // would have mis-derived every adaptive TTL after the
-            // namespace flip (review finding M2).
-            let Some((prefix_name, namespace)) = git_lex::extract_kit_prefix(&ttl_content, &label) else {
-                failures.push((ttl_path, "no prefix declaration found".to_string()));
-                continue;
-            };
-
-            match generate_shapes_from_store(&store, &prefix_name, &namespace, &label) {
-                Some(shacl) => {
-                    let shapes_path = ttl_path.with_file_name(
-                        format!("{}-shapes.ttl", label)
-                    );
-                    match fs::write(&shapes_path, &shacl) {
-                        Ok(_) => successes.push((ttl_path, shapes_path)),
-                        Err(e) => failures.push((ttl_path, format!("write error: {}", e))),
-                    }
-                }
-                None => {
-                    failures.push((ttl_path, "shape generation produced no output".to_string()));
-                }
-            }
-        }
-    }
-
-    (successes, failures)
-}
