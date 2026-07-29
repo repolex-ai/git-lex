@@ -65,18 +65,35 @@ pub(crate) fn normalize_wikilink_path(target: &str, source_dir: &str) -> Option<
     Some(joined)
 }
 
+/// Render a YAML string value as ONE physical sidecar line. The `.spo`
+/// format is line-based (one triple = one physical line — the sync walker
+/// hard-fails on violations), so interior newlines in a multiline YAML
+/// value (`description: |` blocks, wrapped strings) normalize to a single
+/// space. Defined serialization, not munging: the sidecar stores the
+/// single-line rendering of the value.
+fn one_line(s: &str) -> String {
+    if !s.contains('\n') && !s.contains('\r') {
+        return s.to_string();
+    }
+    s.split(['\n', '\r'])
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 /// Recursively flatten a YAML value into dot-notation `key | hasValue | val` lines.
 /// Used by the frontmatter extractor to produce .spo-compatible rows for nested
 /// YAML mappings and sequences.
 pub(crate) fn flatten_yaml(prefix: &str, value: &serde_yaml::Value, lines: &mut Vec<String>) {
     match value {
         serde_yaml::Value::String(s) => {
-            lines.push(format!("{} | hasValue | {}", prefix, s));
+            lines.push(format!("{} | hasValue | {}", prefix, one_line(s)));
         }
         serde_yaml::Value::Sequence(seq) => {
             for item in seq {
                 if let Some(s) = item.as_str() {
-                    lines.push(format!("{} | hasValue | {}", prefix, s));
+                    lines.push(format!("{} | hasValue | {}", prefix, one_line(s)));
                 } else if let Some(n) = item.as_f64() {
                     lines.push(format!("{} | hasValue | {}", prefix, n));
                 } else if let Some(b) = item.as_bool() {
@@ -659,5 +676,31 @@ pub(crate) fn extract_markdown_links() {
 
     if total_links > 0 {
         eprintln!("Markdown links: {} from {} files", total_links, files.len());
+    }
+}
+
+#[cfg(test)]
+mod one_line_tests {
+    use super::*;
+
+    /// PIN: one triple = one physical sidecar line. A multiline YAML value
+    /// (block scalar, wrapped string) must never put a raw newline into the
+    /// sidecar — that splits the triple across two lines and hard-fails sync
+    /// (Selkie's day-10 transcript class of failure, 2026-07-30).
+    #[test]
+    fn multiline_yaml_value_becomes_one_sidecar_line() {
+        let yaml: serde_yaml::Value =
+            serde_yaml::from_str("desc: |\n  first line\n  second line\n").unwrap();
+        let mut lines = Vec::new();
+        flatten_yaml("soul.Note", yaml.get("desc").unwrap(), &mut lines);
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0], "soul.Note | hasValue | first line second line");
+        assert!(!lines[0].contains('\n'));
+    }
+
+    #[test]
+    fn single_line_values_pass_through_untouched() {
+        assert_eq!(one_line("plain value"), "plain value");
+        assert_eq!(one_line("keeps  interior  spaces"), "keeps  interior  spaces");
     }
 }

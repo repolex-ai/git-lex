@@ -22,6 +22,14 @@ use std::process::Command;
 use git_lex::find_git_root;
 
 use crate::git::{graph_uri, resource_uri};
+
+/// The one wikilink pattern, shared by every extraction site. `[^\]\n]+`:
+/// a link target NEVER spans lines. A `[[...]]` token broken across two
+/// physical lines (e.g. a wrapped terminal paste inside a transcript doc)
+/// is prose, not a link — capturing it used to put a raw newline inside a
+/// sidecar value, splitting one triple across two physical lines and
+/// aborting sync (Selkie's day-10 transcript, 2026-07-30).
+pub(crate) const WIKILINK_PATTERN: &str = r"\[\[([^\]\n]+)\]\]";
 use crate::extraction::{flatten_yaml, normalize_wikilink_path};
 use crate::ontology::{get_kit_namespaces_all_kits, get_object_properties_all_kits,
                        get_property_datatypes_all_kits};
@@ -248,7 +256,7 @@ pub(crate) fn generate_frontmatter_nquads_with(
     // Regex pattern for [[wikilinks]].
     // @mentions removed — they were blog inheritance with no job in a system
     // where everything is a document. Canonical direction: [[Class/id]].
-    let wikilink_re = regex::Regex::new(r"\[\[([^\]]+)\]\]").unwrap();
+    let wikilink_re = regex::Regex::new(WIKILINK_PATTERN).unwrap();
 
     for filepath in files {
         let content = match fs::read_to_string(filepath) {
@@ -827,5 +835,23 @@ mod tests {
             oxigraph::model::NamedNode::new(&iri)
                 .unwrap_or_else(|e| panic!("{} → {} not a valid IRI: {}", name, iri, e));
         }
+    }
+}
+
+#[cfg(test)]
+mod wikilink_pattern_tests {
+    use super::WIKILINK_PATTERN;
+
+    /// PIN: a wikilink target never spans lines. A `[[...]]` token broken
+    /// across two physical lines (wrapped terminal paste in a transcript
+    /// doc) is prose, not a link — matching it used to write a raw newline
+    /// into a sidecar value and abort sync (Selkie's day-10 transcript).
+    #[test]
+    fn wikilink_never_matches_across_newlines() {
+        let re = regex::Regex::new(WIKILINK_PATTERN).unwrap();
+        assert!(re.captures("see [[Squad/Squaddie/lspy]] there").is_some());
+        // The day-10 failure shape: link broken by source-level wrapping.
+        let wrapped = "prefix [[Sq\n         uad/Squaddie/lspy]] suffix";
+        assert!(re.captures(wrapped).is_none(), "split token must NOT be a link");
     }
 }
