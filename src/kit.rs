@@ -845,8 +845,19 @@ pub(crate) fn reap_non_kit_non_local_hooks(
     let Ok(entries) = fs::read_dir(&hooks_dir) else { return reaped };
     for entry in entries.flatten() {
         let name = entry.file_name().to_string_lossy().to_string();
+        // Parked `.kit-latest` siblings whose base filename no kit ships
+        // anymore are fossils of a retired naming era (e.g. the bare
+        // SessionEnd.sh generation replaced 2026-07-04) — nothing will
+        // ever visit them again; sweep. (Cost Selkie a 4am detour.)
+        if let Some(base) = name.strip_suffix(".kit-latest") {
+            if base.ends_with(".sh") && !kit_hook_names.contains(base) {
+                let _ = fs::remove_file(entry.path());
+                reaped.push(format!(".claude/hooks/{name}"));
+            }
+            continue;
+        }
         if !name.ends_with(".sh") {
-            continue; // only manage hook scripts; leave .kit-latest, etc.
+            continue; // only manage hook scripts; leave other files alone
         }
         // Survives if kit-shipped OR a local personal hook.
         if kit_hook_names.contains(&name) || is_local_hook_name(&name) {
