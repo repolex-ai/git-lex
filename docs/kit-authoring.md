@@ -1,5 +1,7 @@
 # Kit Authoring Guide
 
+*Last updated for git-lex v0.1.0 (2026-07-29)*
+
 This guide is for people **building or maintaining kits** — not for agents using
 them. It covers the kit layout, the file-ownership rules, and (in the most
 detail) hooks: how they're named, how they're registered, how to develop one,

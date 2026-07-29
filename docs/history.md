@@ -1,5 +1,7 @@
 # History: how git-lex remembers
 
+*Last updated for git-lex v0.1.0 (2026-07-29)*
+
 Most databases overwrite. git-lex doesn't: every fact that ever entered or
 left the graph is kept as an event tied to the commit that caused it.
 

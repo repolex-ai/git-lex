@@ -1,5 +1,7 @@
 # Kits
 
+*Last updated for git-lex v0.1.0 (2026-07-29)*
+
 A kit is a vocabulary pack: it defines your document types (classes), their
 properties, and the validation rules — as a real OWL ontology with SHACL
 shapes derived from it. The base kit (git-lex's own vocabulary) is always

@@ -1,5 +1,7 @@
 # Getting started
 
+*Last updated for git-lex v0.1.0 (2026-07-29)*
+
 ## Install
 
 ```bash

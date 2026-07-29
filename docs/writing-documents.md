@@ -1,5 +1,7 @@
 # Writing documents
 
+*Last updated for git-lex v0.1.0 (2026-07-29)*
+
 Documents are plain markdown with YAML frontmatter in dot notation:
 
 ```yaml

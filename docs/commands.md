@@ -1,5 +1,7 @@
 # Commands
 
+*Last updated for git-lex v0.1.0 (2026-07-29)*
+
 | Command | What it does |
 |---|---|
 | `git lex init [--kit <kit>]` | Set up git-lex in a repo |
