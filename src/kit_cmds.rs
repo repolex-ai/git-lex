@@ -305,35 +305,58 @@ pub(crate) fn cmd_kit_update(kit_arg: Option<String>) {
     let mut total_installed = 0usize;
     let mut total_skipped = 0usize;
     let mut all_updated: Vec<String> = Vec::new();
-    let mut kit_hook_names: std::collections::HashSet<String> = std::collections::HashSet::new();
     for spec in &kits_to_update {
         let (org, repo, _) = resolve_kit_spec(spec);
         let kit_dir = lex_dir.join("kit").join(&org).join(&repo);
-        for name in crate::kit::kit_shipped_hook_names(&kit_dir) {
-            kit_hook_names.insert(name);
-        }
         let report = install_scaffold_files_from_skip_existing(&kit_dir);
         total_installed += report.installed;
         total_skipped += report.skipped;
         all_updated.extend(report.updated);
     }
 
-    // File-level hook reap (twin of the registration reap): now that ALL kits fetched
-    // successfully (we bailed above otherwise) and installed, kit_hook_names is the
-    // COMPLETE canonical set. Remove any .claude/hooks/*.sh that is neither kit-shipped
-    // nor a `<Event>-local-*.sh` personal hook — this kills old-named hooks left behind
-    // by a rename (the exact tangle a migrating soul hits: old + new both present +
-    // firing). Removed files stay beside as `<file>.bak`; their now-dangling
-    // settings.json registrations get pruned by reap_orphan_hook_registrations inside
-    // the setup_substrate_claude pass below (the file is gone → its registration reaps).
-    let reaped_hooks = crate::kit::reap_non_kit_non_local_hooks(&root, &kit_hook_names);
-    if !reaped_hooks.is_empty() {
-        println!(
-            "Removed {} hook file(s) no installed kit ships (old copy kept as <file>.bak):",
-            reaped_hooks.len()
-        );
-        for path in &reaped_hooks {
-            println!("  {}", path);
+    // File-level hook reap (twin of the registration reap). The keep-set MUST
+    // come from ALL installed kits — not just the kits being updated — or a
+    // single-kit `kit-update soul` would reap every other kit's hooks (the
+    // live incident of 2026-07-30: pool's hooks .bak'd and deregistered).
+    // Non-updated kits weren't re-fetched, but their install dirs are already
+    // on disk from their own install. If any installed kit's dir is missing
+    // we can't know its hook set, so skip the reap rather than guess.
+    let mut kit_hook_names: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut reap_safe = true;
+    for spec in collect_kits_for_update(&root, None) {
+        let (org, repo, _) = resolve_kit_spec(&spec);
+        let kit_dir = lex_dir.join("kit").join(&org).join(&repo);
+        if !kit_dir.exists() {
+            eprintln!(
+                "  ⚠ Kit '{}' has no install dir ({}); skipping the hook reap this run \
+                 (can't know which hooks it ships). Run a full `git lex kit-update` to repair.",
+                spec,
+                kit_dir.display()
+            );
+            reap_safe = false;
+            continue;
+        }
+        for name in crate::kit::kit_shipped_hook_names(&kit_dir) {
+            kit_hook_names.insert(name);
+        }
+    }
+    // Remove any .claude/hooks/*.sh that is neither kit-shipped nor a
+    // `<Event>-local-*.sh` personal hook — this kills old-named hooks left
+    // behind by a rename (the exact tangle a migrating soul hits: old + new
+    // both present + firing). Removed files stay beside as `<file>.bak`;
+    // their now-dangling settings.json registrations get pruned by
+    // reap_orphan_hook_registrations inside the setup_substrate_claude pass
+    // below (the file is gone → its registration reaps).
+    if reap_safe {
+        let reaped_hooks = crate::kit::reap_non_kit_non_local_hooks(&root, &kit_hook_names);
+        if !reaped_hooks.is_empty() {
+            println!(
+                "Removed {} hook file(s) no installed kit ships (old copy kept as <file>.bak):",
+                reaped_hooks.len()
+            );
+            for path in &reaped_hooks {
+                println!("  {}", path);
+            }
         }
     }
 
