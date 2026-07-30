@@ -640,7 +640,11 @@ fn cmd_save(message: &str) {
         .args(["diff", "--cached", "--quiet"])
         .status();
     if diff.map(|s| s.success()).unwrap_or(false) {
-        println!("Nothing to save (no changes).");
+        // Name the repo: save targets the CWD's repo, and an agent shell's cwd
+        // drifts (Day 120: a save fired from another repo's dir reported
+        // "nothing to save" while the intended repo sat modified — the bare
+        // message was a null signal indistinguishable from a clean save).
+        println!("Nothing to save (no changes) in {}", root.display());
         return;
     }
 
@@ -649,7 +653,7 @@ fn cmd_save(message: &str) {
         .status();
     match status {
         Ok(s) if s.success() => {
-            println!("Saved: {} [as {}]", message, author);
+            println!("Saved in {}: {} [as {}]", root.display(), message, author);
         }
         _ => {
             eprintln!("fatal: git commit failed");
