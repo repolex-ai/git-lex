@@ -86,6 +86,27 @@ fn regenerate_kit_artifacts(kit_name: &str, root: &std::path::Path, create_folde
         if !missing.is_empty() {
             eprintln!("  ⚠ Missing folders (in ontology but not on disk): {}", missing.join(", "));
         }
+        // Reap-when-empty (Rob-ruled 2026-07-30): an extra folder holding
+        // nothing but kit scaffold debris (`__Name.md` template + `.gitkeep`)
+        // is retired-class residue from a kit release that removed or moved
+        // the class. Reap it. A folder with ANY real content stays put and
+        // keeps its warning — content migration is per-repo, never automatic.
+        let extra = if extra.is_empty() { extra } else {
+            let declared = folders_declared_by_installed_kits(root);
+            let mut kept = Vec::new();
+            for name in extra {
+                let dir = base_dir.join(&name);
+                if !declared.contains(&dir)
+                    && folder_is_scaffold_only(&dir, &name)
+                    && fs::remove_dir_all(&dir).is_ok()
+                {
+                    println!("  Reaped retired folder (scaffold only): {}/{}", base, name);
+                } else {
+                    kept.push(name);
+                }
+            }
+            kept
+        };
         if !extra.is_empty() {
             eprintln!("  ⚠ Extra folders (on disk but not in ontology): {}", extra.join(", "));
         }
@@ -97,6 +118,49 @@ fn regenerate_kit_artifacts(kit_name: &str, root: &std::path::Path, create_folde
     if templates_updated > 0 {
         println!("  {} class template(s) regenerated.", templates_updated);
     }
+}
+
+/// True when `dir` contains nothing except its own class template
+/// (`__{class_name}.md`) and/or `.gitkeep` — i.e. pure kit scaffold with no
+/// agent content. Subdirectories or any other file make it NOT scaffold-only.
+fn folder_is_scaffold_only(dir: &Path, class_name: &str) -> bool {
+    let entries = match fs::read_dir(dir) {
+        Ok(e) => e,
+        Err(_) => return false,
+    };
+    let template = format!("__{}.md", class_name);
+    for entry in entries.filter_map(|e| e.ok()) {
+        if entry.path().is_dir() {
+            return false;
+        }
+        let name = entry.file_name().to_string_lossy().to_string();
+        if name != template && name != ".gitkeep" {
+            return false;
+        }
+    }
+    true
+}
+
+/// Every folder path any installed kit declares as a foldered class. Guard
+/// for the retired-folder reap: a folder that looks "extra" to the kit being
+/// audited may legitimately belong to another installed kit sharing the same
+/// folder base — those must never be reaped.
+fn folders_declared_by_installed_kits(root: &Path) -> std::collections::HashSet<std::path::PathBuf> {
+    let mut declared = std::collections::HashSet::new();
+    for kit in collect_kits_for_update(root, None) {
+        let base = kit_config_str(&kit, "folder base");
+        for (type_name, _) in &get_kit_types(&kit) {
+            if !ontology::get_class_foldered(&kit, type_name) {
+                continue;
+            }
+            let dir = match &base {
+                Some(b) => root.join(b).join(type_name),
+                None => root.join(type_name),
+            };
+            declared.insert(dir);
+        }
+    }
+    declared
 }
 
 /// Emit the `__ClassName.md` frontmatter template for every foldered class of
@@ -805,6 +869,45 @@ mod engine_gitignore_tests {
         let got = fs::read_to_string(dir.join(".gitignore")).unwrap();
         assert!(got.contains(".pool/") && got.contains(".copia/") && got.contains(".weave/"));
         assert_eq!(got.matches(ENGINE_GITIGNORE_BEGIN).count(), 1);
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    // ---- folder_is_scaffold_only: the retired-folder reap gate ----
+
+    #[test]
+    fn scaffold_only_folder_is_reapable() {
+        let dir = tmp_repo("reap-scaffold");
+        let task = dir.join("Task");
+        fs::create_dir_all(&task).unwrap();
+        fs::write(task.join("__Task.md"), "---\n---\n").unwrap();
+        fs::write(task.join(".gitkeep"), "").unwrap();
+        assert!(folder_is_scaffold_only(&task, "Task"));
+        // Empty folder (no template, no .gitkeep) is also reapable.
+        let empty = dir.join("Mantra");
+        fs::create_dir_all(&empty).unwrap();
+        assert!(folder_is_scaffold_only(&empty, "Mantra"));
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn folder_with_content_is_never_reapable() {
+        let dir = tmp_repo("reap-content");
+        let tex = dir.join("Texture");
+        fs::create_dir_all(&tex).unwrap();
+        fs::write(tex.join("__Texture.md"), "---\n---\n").unwrap();
+        fs::write(tex.join("self.md"), "agent content").unwrap();
+        assert!(!folder_is_scaffold_only(&tex, "Texture"));
+        // A foreign template (another class's __X.md) also blocks the reap.
+        let odd = dir.join("Habit");
+        fs::create_dir_all(&odd).unwrap();
+        fs::write(odd.join("__Task.md"), "---\n---\n").unwrap();
+        assert!(!folder_is_scaffold_only(&odd, "Habit"));
+        // A subdirectory blocks the reap.
+        let sub = dir.join("Dream");
+        fs::create_dir_all(sub.join("archive")).unwrap();
+        assert!(!folder_is_scaffold_only(&sub, "Dream"));
+        // A missing folder is not reapable (nothing to do).
+        assert!(!folder_is_scaffold_only(&dir.join("Nope"), "Nope"));
         fs::remove_dir_all(&dir).ok();
     }
 }
