@@ -988,7 +988,8 @@ pub(crate) fn onegraph_walk_engine(
             acct.resolver_errors += crate::nquad::emit_spo_line_nquads(
                 line, &doc_uri, one_graph, &relpath_str,
                 &ctx.path_index, &ctx.obj_props,
-                &ctx.prop_datatypes, &ctx.kit_namespaces,
+                &ctx.prop_datatypes, &ctx.declared_props,
+                &ctx.kit_namespaces,
                 &mut emitted_types, &mut emit_buf,
             );
             let mut any = false;

@@ -181,6 +181,11 @@ pub(crate) struct ResolverContext {
     pub path_index: HashSet<String>,
     pub obj_props: HashSet<String>,
     pub prop_datatypes: HashMap<String, String>,
+    /// Every "{kit}/{Class}/{prop}" any installed kit declares — datatype-
+    /// unconditional. The undeclared-key warning consults THIS set;
+    /// `prop_datatypes` (typed-literal emission only) misses every
+    /// xsd:string property by design and must never gate the warning.
+    pub declared_props: HashSet<String>,
     pub kit_namespaces: HashMap<String, String>,
 }
 
@@ -193,6 +198,7 @@ impl ResolverContext {
             path_index,
             obj_props: get_object_properties_all_kits(),
             prop_datatypes: get_property_datatypes_all_kits(),
+            declared_props: crate::ontology::get_declared_properties_all_kits(),
             kit_namespaces: get_kit_namespaces_all_kits(),
         }
     }
@@ -382,6 +388,7 @@ pub(crate) fn generate_frontmatter_nquads_with(
                 &path_index,
                 &obj_props,
                 &prop_datatypes,
+                &ctx.declared_props,
                 &kit_namespaces,
                 &mut emitted_types,
                 &mut nq,
@@ -442,6 +449,7 @@ pub(crate) fn emit_spo_line_nquads(
     path_index: &HashSet<String>,
     obj_props: &HashSet<String>,
     prop_datatypes: &HashMap<String, String>,
+    declared_props: &HashSet<String>,
     kit_namespaces: &HashMap<String, String>,
     emitted_types: &mut HashSet<String>,
     out: &mut String,
@@ -606,12 +614,18 @@ pub(crate) fn emit_spo_line_nquads(
                 // shape — it still emits (as a plain literal), and the drift
                 // is surfaced so the shape or the frontmatter gets fixed.
                 if let Some(key) = &lookup_key {
-                    if !prop_datatypes.contains_key(key) {
+                    // Membership test against the DECLARED set — datatype-
+                    // unconditional. Testing prop_datatypes here false-warned
+                    // every xsd:string property in every kit (the shapes
+                    // generator omits sh:datatype for strings): 412 bogus
+                    // "not declared" warnings per save in W4R3Z alone
+                    // (found 2026-08-01).
+                    if !declared_props.contains(key) && !obj_props.contains(key) {
                         let kit_scope = format!("{}/", kit_name);
                         let prop_tail = format!("/{}", prop_seg);
                         let declared_elsewhere_in_kit = obj_props
                             .iter()
-                            .chain(prop_datatypes.keys())
+                            .chain(declared_props.iter())
                             .any(|k| k.starts_with(&kit_scope) && k.ends_with(&prop_tail));
                         if declared_elsewhere_in_kit {
                             eprintln!(
@@ -788,12 +802,13 @@ mod tests {
 
         let mut types = HashSet::new();
         let mut out = String::new();
+        let declared = HashSet::new();
         emit_spo_line_nquads(
             "soul.Journal.soulDay | hasValue | 55",
             "<https://repolex.ai/soul/Journal/day-1.md>",
             "<https://repolex.ai/git-lex/NamedGraph/now>",
             "Journal/day-1.md",
-            &empty_paths, &obj_props, &datatypes, &namespaces,
+            &empty_paths, &obj_props, &datatypes, &declared, &namespaces,
             &mut types, &mut out,
         );
         assert!(
@@ -809,7 +824,7 @@ mod tests {
             "<https://repolex.ai/soul/friend/selkie.md>",
             "<https://repolex.ai/git-lex/NamedGraph/now>",
             "friend/selkie.md",
-            &empty_paths, &obj_props, &datatypes, &namespaces,
+            &empty_paths, &obj_props, &datatypes, &declared, &namespaces,
             &mut types, &mut out2,
         );
         assert!(

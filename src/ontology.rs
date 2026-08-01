@@ -369,6 +369,36 @@ pub(crate) fn get_property_datatypes_all_kits() -> HashMap<String, String> {
     out
 }
 
+/// The set of EVERY property declared by any installed kit's shapes,
+/// keyed "{kit}/{Class}/{prop}" — the same key shape as
+/// `get_property_datatypes_all_kits`, WITHOUT the sh:datatype condition.
+///
+/// This is the index the undeclared-key warning must consult. The datatype
+/// map cannot serve that job: the shapes generator deliberately omits
+/// `sh:datatype` for xsd:string properties, so every declared string
+/// property (soulId, journalId, emojimood — most of every kit) was
+/// invisible to a `prop_datatypes` membership test and false-warned as
+/// "not declared" on every save (412 warnings in one W4R3Z run,
+/// found 2026-08-01).
+pub(crate) fn get_declared_properties_all_kits() -> std::collections::HashSet<String> {
+    let mut out = std::collections::HashSet::new();
+    for path in all_shape_files() {
+        let Ok(content) = fs::read_to_string(&path) else { continue };
+        let short = path.file_stem()
+            .and_then(|s| s.to_str())
+            .and_then(|s| s.strip_suffix("-shapes"))
+            .unwrap_or("")
+            .to_string();
+        let parsed = parse_shape_file(&content, &short);
+        for shape in &parsed.shapes {
+            for p in &shape.props {
+                out.insert(format!("{}/{}/{}", short, shape.class_name, p.name));
+            }
+        }
+    }
+    out
+}
+
 /// Map of short kit name → declared namespace, for EVERY installed kit.
 /// This is what the emitters consult so predicate/class IRIs follow each
 /// kit's own `@prefix` declaration (namespace migrations = TTL edit only).
