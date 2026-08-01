@@ -91,8 +91,19 @@ pub struct RepoYml {
     pub agent_name: Option<String>,
     #[serde(default)]
     pub agent_email: Option<String>,
+    /// LEGACY key (pre-2026-08-01): the genesis sha under its old name.
+    /// Read for self-migration only — `genesis_sha` is the canonical key
+    /// (Rob-ruled 2026-08-01, matching identity.yml's key and the git2
+    /// ontology's genesisSha property). Sync rewrites the line in place.
     #[serde(default)]
     pub first_commit: Option<String>,
+    /// The repo's genesis (first-commit) sha — its stable identity. Written
+    /// by init; self-migrated from `first_commit` at sync. Replaces
+    /// `.lex/identity.yml` as the authority once Pool's boot-skip read
+    /// cuts over (coordinated 3-step; identity.yml still written until
+    /// then).
+    #[serde(default)]
+    pub genesis_sha: Option<String>,
     /// DEV-ONLY stopgap: a date; history walking starts at the first
     /// commit after it. Exists for the ~10 pre-v1 squad repos whose early
     /// development churn predates the data rules. Normal repos never set
@@ -172,6 +183,7 @@ impl RepoYml {
         put("agent_name", &self.agent_name);
         put("agent_email", &self.agent_email);
         put("first_commit", &self.first_commit);
+        put("genesis_sha", &self.genesis_sha);
         for (k, v) in &self.extra {
             let s = match v {
                 serde_yaml::Value::String(s) => s.clone(),

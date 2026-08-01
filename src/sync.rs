@@ -55,10 +55,11 @@ pub(crate) fn cmd_sync() {
         }
     }
 
-    // Identity: resolve + persist the genesis SHA ONCE per sync (identity.yml
-    // is what Pool's boot-skip and federation readers consume). IRIs no longer
-    // carry it — see git.rs Task-2 IRI families.
-    crate::git::ensure_identity_yml();
+    // Identity: resolve + record the genesis SHA ONCE per sync. Authority
+    // is repo.yml `genesis_sha:` (legacy `first_commit:` self-migrates);
+    // identity.yml still written for Pool's boot-skip until its read cuts
+    // over. IRIs no longer carry it — see git.rs Task-2 IRI families.
+    crate::git::ensure_genesis_recorded();
     let store = open_or_create_store();
 
     // Get current HEAD commit

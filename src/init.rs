@@ -554,9 +554,11 @@ pub(crate) fn cmd_init(directory: Option<String>, kit: Option<String>) {
         }
     }
 
-    // Capture first commit SHA — the cryptographic anchor — and append it
-    // to repo.yml as `first_commit:`. This replaces the old .lex/identity.yml
-    // file; one file holds all repo metadata now.
+    // Capture the genesis (first-commit) SHA — the cryptographic anchor —
+    // and append it to repo.yml as `genesis_sha:` (Rob-ruled 2026-08-01;
+    // one file holds all repo metadata, same key name identity.yml used).
+    // Existing repos carrying the legacy `first_commit:` key self-migrate
+    // at sync (git.rs::ensure_genesis_recorded).
     let first_sha = Command::new("git")
         .args(["rev-list", "--max-parents=0", "HEAD"])
         .output()
@@ -567,10 +569,10 @@ pub(crate) fn cmd_init(directory: Option<String>, kit: Option<String>) {
 
     if !first_sha.is_empty() {
         let existing = fs::read_to_string(&repo_yml_path).unwrap_or_default();
-        if !existing.contains("first_commit:") {
-            let updated = format!("{}first_commit: {}\n", existing, first_sha);
+        if !existing.contains("genesis_sha:") && !existing.contains("first_commit:") {
+            let updated = format!("{}genesis_sha: {}\n", existing, first_sha);
             fs::write(&repo_yml_path, &updated).unwrap_or_else(|e| {
-                eprintln!("fatal: could not record first_commit identity in .lex/repo.yml: {}", e);
+                eprintln!("fatal: could not record genesis_sha identity in .lex/repo.yml: {}", e);
                 exit(1);
             });
             let _ = Command::new("git").args(["add", ".lex/repo.yml"]).status();

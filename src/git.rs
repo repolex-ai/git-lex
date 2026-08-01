@@ -9,28 +9,70 @@ use std::process::Command;
 use git_lex::find_git_root;
 
 /// Resolve the soul's genesis SHA (three tiers, ordered by cost) and make
-/// sure `.lex/identity.yml` records it. Called ONCE per sync — identity.yml
-/// is the machine-readable identity file downstream consumers (Pool's
-/// boot-skip, federation readers) rely on. This replaces the old
-/// `base_uri()` read-that-writes: IRIs no longer carry the SHA (Day-50);
-/// identity lives here and as a `git:genesisSha` FACT on the repo node.
-pub(crate) fn ensure_identity_yml() -> Option<String> {
+/// sure it is RECORDED. Called ONCE per sync.
+///
+/// The authority is `repo.yml`'s `genesis_sha:` key (Rob-ruled 2026-08-01
+/// — the identity-fragmentation cleanup: one fact, one file, one name).
+/// Repos carrying the legacy `first_commit:` key self-migrate here: the
+/// line is rewritten in place, value preserved.
+///
+/// TRANSITION: `.lex/identity.yml` is still written too — it is a
+/// cross-system contract (Pool's boot-skip reads it). It stops being
+/// written, and repos delete it, ONLY after Pool's read cuts over to
+/// repo.yml (coordinated 3-step, step 2 is Pool's).
+pub(crate) fn ensure_genesis_recorded() -> Option<String> {
     let sha = genesis_sha()?;
-    // identity.yml is a CROSS-SYSTEM contract file (Pool boot-skip,
-    // federation readers). git-lex itself would recover via the fallback
-    // tiers, so a swallowed write error is invisible in-process while an
-    // external consumer reads a missing/stale file — warn loudly.
+    if let Err(e) = ensure_repo_yml_genesis(&sha) {
+        eprintln!("warning: could not record genesis_sha in .lex/repo.yml: {e}");
+    }
+    // Downstream consumers read identity.yml until the Pool cutover; a
+    // swallowed write error is invisible in-process while an external
+    // consumer reads a missing/stale file — warn loudly.
     if let Err(e) = write_identity_yml_sha(&sha) {
         eprintln!("warning: could not write .lex/identity.yml: {} — downstream consumers (Pool, federation) read this file", e);
     }
     Some(sha)
 }
 
-/// The soul's genesis (first-commit) SHA, if resolvable.
+/// The soul's genesis (first-commit) SHA, if resolvable. repo.yml is the
+/// authority; identity.yml is the transition-era fallback; git itself is
+/// the recompute-of-last-resort.
 pub(crate) fn genesis_sha() -> Option<String> {
-    sha_from_identity_yml()
-        .or_else(sha_from_repo_yml)
+    sha_from_repo_yml()
+        .or_else(sha_from_identity_yml)
         .or_else(sha_from_git)
+}
+
+/// Ensure repo.yml carries `genesis_sha: <sha>` — writing textually to
+/// preserve comments/ordering (the RepoYml struct is read-side only).
+/// Three cases: canonical key present → no-op; legacy `first_commit:` line
+/// present → rewritten in place to the canonical key (self-migration);
+/// neither → appended.
+fn ensure_repo_yml_genesis(sha: &str) -> std::io::Result<()> {
+    let Some(root) = find_git_root() else { return Ok(()) };
+    let path = root.join(".lex").join("repo.yml");
+    let existing = fs::read_to_string(&path).unwrap_or_default();
+    if existing.lines().any(|l| l.trim_start().starts_with("genesis_sha:")) {
+        return Ok(());
+    }
+    let mut migrated = false;
+    let mut lines: Vec<String> = existing
+        .lines()
+        .map(|l| {
+            if !migrated && l.trim_start().starts_with("first_commit:") {
+                migrated = true;
+                format!("genesis_sha: {sha}")
+            } else {
+                l.to_string()
+            }
+        })
+        .collect();
+    if !migrated {
+        lines.push(format!("genesis_sha: {sha}"));
+    }
+    let mut content = lines.join("\n");
+    content.push('\n');
+    fs::write(&path, content)
 }
 
 // ---------------------------------------------------------------------
@@ -131,9 +173,12 @@ fn sha_from_identity_yml() -> Option<String> {
     None
 }
 
-/// First-commit SHA from `.lex/repo.yml`, via the ONE reader.
+/// Genesis SHA from `.lex/repo.yml`, via the ONE reader. Canonical
+/// `genesis_sha` first; legacy `first_commit` accepted until the repo's
+/// next sync rewrites it (self-migration in ensure_repo_yml_genesis).
 fn sha_from_repo_yml() -> Option<String> {
-    let sha = git_lex::RepoYml::load(&find_git_root()?).first_commit?;
+    let yml = git_lex::RepoYml::load(&find_git_root()?);
+    let sha = yml.genesis_sha.or(yml.first_commit)?;
     is_valid_sha(&sha).then_some(sha)
 }
 
