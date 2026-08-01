@@ -187,6 +187,12 @@ pub(crate) struct ResolverContext {
     /// xsd:string property by design and must never gate the warning.
     pub declared_props: HashSet<String>,
     pub kit_namespaces: HashMap<String, String>,
+    /// Repo-level wikilink semantics (repo.yml `link_semantics`): true =
+    /// Obsidian (bare targets root-relative, `/` rejected), false = legacy
+    /// 2026-07-28 markdown semantics. Applies uniformly to the now view AND
+    /// the whole history walk — correct because only repos BORN under
+    /// Obsidian semantics (or fully migrated in Phase 4) carry the stamp.
+    pub obsidian_links: bool,
 }
 
 impl ResolverContext {
@@ -200,6 +206,7 @@ impl ResolverContext {
             prop_datatypes: get_property_datatypes_all_kits(),
             declared_props: crate::ontology::get_declared_properties_all_kits(),
             kit_namespaces: get_kit_namespaces_all_kits(),
+            obsidian_links: git_lex::RepoYml::load(root).obsidian_links(),
         }
     }
 }
@@ -390,6 +397,7 @@ pub(crate) fn generate_frontmatter_nquads_with(
                 &prop_datatypes,
                 &ctx.declared_props,
                 &kit_namespaces,
+                ctx.obsidian_links,
                 &mut emitted_types,
                 &mut nq,
             );
@@ -451,6 +459,7 @@ pub(crate) fn emit_spo_line_nquads(
     prop_datatypes: &HashMap<String, String>,
     declared_props: &HashSet<String>,
     kit_namespaces: &HashMap<String, String>,
+    obsidian_links: bool,
     emitted_types: &mut HashSet<String>,
     out: &mut String,
 ) -> u32 {
@@ -478,23 +487,43 @@ pub(crate) fn emit_spo_line_nquads(
     }
 
     if predicate == "linksTo" {
-        // [[wikilink]] → md:linksTo. Rob-ruled 2026-07-28: a link target is
+        // [[wikilink]] → md:linksTo. Two semantics, dispatched on the repo's
+        // link_semantics stamp (migration fence, see ResolverContext):
+        //
+        // LEGACY (2026-07-28 ruling, unstamped repos): a link target is
         // a PATH — relative to the source file's folder, or repo-rooted
-        // with a leading `/` — resolved by pure path arithmetic. The IRI
-        // derives the same way at every commit, whether or not the target
-        // file exists yet (forward links are legal; dangling ones warn at
-        // save until the target appears). `.md` is appended when the
-        // target has no extension.
+        // with a leading `/` — resolved by pure path arithmetic.
+        //
+        // OBSIDIAN (2026-08-01 ruling, stamped repos): bare targets are
+        // repo-ROOT-relative; a leading `/` is RETIRED and errors at save.
+        //
+        // Either way the IRI derives the same way at every commit, whether
+        // or not the target file exists yet (forward links are legal;
+        // dangling ones warn at save until the target appears). `.md` is
+        // appended when the target has no extension.
         //
         // NOT-CHOSEN alternative, recorded for context: the old
         // three-strategy search (path-with-existence-check, then trailing-
-        // segment fallback, then slugified-stem lookup across the whole
+        // segment fallback, then stem lookup across the whole
         // repo) — deleted because search-based resolution rebinds silently
         // as files come and go and makes history non-deterministic.
-        let source_dir = std::path::Path::new(relpath_str)
-            .parent()
-            .map(|p| p.to_string_lossy().to_string())
-            .unwrap_or_default();
+        if obsidian_links && object.starts_with('/') {
+            eprintln!(
+                "error: {relpath_str}: [[{object}]] — leading `/` is retired under \
+                 Obsidian link semantics; write the repo-root-relative path \
+                 (e.g. [[{}]])",
+                object.trim_start_matches('/')
+            );
+            return errors + 1;
+        }
+        let source_dir = if obsidian_links {
+            String::new() // bare = repo-root-relative
+        } else {
+            std::path::Path::new(relpath_str)
+                .parent()
+                .map(|p| p.to_string_lossy().to_string())
+                .unwrap_or_default()
+        };
 
         match normalize_wikilink_path(object, &source_dir) {
             Some(p) => {
@@ -808,7 +837,7 @@ mod tests {
             "<https://repolex.ai/soul/Journal/day-1.md>",
             "<https://repolex.ai/git-lex/NamedGraph/now>",
             "Journal/day-1.md",
-            &empty_paths, &obj_props, &datatypes, &declared, &namespaces,
+            &empty_paths, &obj_props, &datatypes, &declared, &namespaces, false,
             &mut types, &mut out,
         );
         assert!(
@@ -824,7 +853,7 @@ mod tests {
             "<https://repolex.ai/soul/friend/selkie.md>",
             "<https://repolex.ai/git-lex/NamedGraph/now>",
             "friend/selkie.md",
-            &empty_paths, &obj_props, &datatypes, &declared, &namespaces,
+            &empty_paths, &obj_props, &datatypes, &declared, &namespaces, false,
             &mut types, &mut out2,
         );
         assert!(

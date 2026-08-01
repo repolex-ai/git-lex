@@ -99,6 +99,16 @@ pub struct RepoYml {
     /// this.
     #[serde(default)]
     pub dev_history_horizon: Option<String>,
+    /// Wikilink resolution semantics — a MIGRATION FENCE, not user config
+    /// (same lifecycle as dev_history_horizon: deletable once every repo
+    /// has crossed). `git lex init` stamps "obsidian" on NEW repos: bare
+    /// targets are repo-root-relative, leading `/` is rejected at save
+    /// (Rob-ruled 2026-08-01). Absent = the legacy 2026-07-28 markdown
+    /// semantics (bare = source-folder-relative, `/` = repo-rooted) —
+    /// pre-existing repos keep it until their Phase-4 migration flips
+    /// them. KEY NAME PENDING ROB — nothing writes it until he picks.
+    #[serde(default)]
+    pub link_semantics: Option<String>,
     #[serde(default)]
     pub optional_kits: Vec<String>,
     #[serde(default)]
@@ -131,6 +141,13 @@ impl RepoYml {
                 RepoYml::default()
             }
         }
+    }
+
+    /// True when this repo uses Obsidian wikilink semantics (bare targets
+    /// are repo-root-relative; leading `/` rejected). False = legacy
+    /// 2026-07-28 markdown semantics.
+    pub fn obsidian_links(&self) -> bool {
+        self.link_semantics.as_deref().map(str::trim) == Some("obsidian")
     }
 
     /// The domain kit, if configured and not "none".

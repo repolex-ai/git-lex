@@ -204,8 +204,13 @@ pub(crate) fn cmd_init(directory: Option<String>, kit: Option<String>) {
         let today = Command::new("date").args(["+%Y-%m-%d"]).output().ok()
             .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
             .unwrap_or_else(|| "unknown".to_string());
+        // link_semantics stamp: NEW repos are born under Obsidian wikilink
+        // semantics (Rob-ruled 2026-08-01) — bare [[targets]] are repo-root-
+        // relative, leading `/` rejected at save. Pre-existing repos have no
+        // stamp and keep the legacy 2026-07-28 semantics until their Phase-4
+        // migration flips them. Migration fence, not user config.
         fs::write(&repo_yml_path, format!(
-            "name: {}\nkit: {}\ncreated: {}\n",
+            "name: {}\nkit: {}\ncreated: {}\nlink_semantics: obsidian\n",
             repo_name, kit_spec, today
         )).unwrap_or_else(|e| {
             eprintln!("fatal: could not write .lex/repo.yml: {}", e);
