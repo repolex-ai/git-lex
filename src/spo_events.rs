@@ -14,6 +14,77 @@ use std::process::Command;
 
 
 // ════════════════════════════════════════════════════════════════════════════
+// v1 write-gate: strict sidecar validation at save time
+// ════════════════════════════════════════════════════════════════════════════
+
+/// The closed operator vocabulary of the v1 sidecar format (spo format
+/// spec §4). The WALKER stays vocabulary-tolerant — history legally carries
+/// retired vocab, counted in DropAccounting — but the write-gate is strict:
+/// nothing outside this set can be WRITTEN anymore. Adding an operator is a
+/// spec revision, not a code change.
+pub(crate) const SPO_OPERATORS_V1: &[&str] = &["hasValue", "linksTo"];
+
+/// Validate one sidecar's full content against the v1 format spec. This is
+/// the round-trip write-gate: it runs at save, AFTER extraction writes the
+/// sidecars, using the same `splitn(3, " | ")` shape rule as the history
+/// walker — so nothing can be written that history can't later read (the
+/// enforcement brick the 3-month wrapped-line bug proved missing).
+///
+/// Returns (1-based line number, error) pairs; empty = valid.
+///
+/// Rules (spec §2, §4, §5 — all Rob-ruled 2026-07-30/08-01):
+///   - `subject | operator | object`, splitn(3): exactly three fields
+///   - no blank lines
+///   - operator ∈ SPO_OPERATORS_V1 (closed vocabulary)
+///   - object: no control characters (Unicode Cc — the standard property,
+///     not a homegrown parser; format chars Cf stay legal)
+///   - `hasValue` with empty object is LEGAL (present-but-empty field)
+///   - `linksTo`: non-empty target, bare repo-relative (no leading slash)
+pub(crate) fn validate_sidecar_v1(content: &str) -> Vec<(usize, String)> {
+    let mut errors = Vec::new();
+    for (idx, line) in content.lines().enumerate() {
+        let lineno = idx + 1;
+        if line.trim().is_empty() {
+            errors.push((lineno, "blank line (format is one triple per physical line)".to_string()));
+            continue;
+        }
+        let fields: Vec<&str> = line.splitn(3, " | ").collect();
+        if fields.len() != 3 {
+            errors.push((lineno, format!(
+                "malformed line {line:?} (expected `subject | operator | object`)"
+            )));
+            continue;
+        }
+        let (subject, operator, object) = (fields[0], fields[1], fields[2]);
+        if subject.trim().is_empty() {
+            errors.push((lineno, "empty subject".to_string()));
+        }
+        if !SPO_OPERATORS_V1.contains(&operator) {
+            errors.push((lineno, format!(
+                "operator {operator:?} not in the closed vocabulary {{{}}}",
+                SPO_OPERATORS_V1.join(", ")
+            )));
+        }
+        if let Some(c) = object.chars().find(|c| c.is_control()) {
+            errors.push((lineno, format!(
+                "control character U+{:04X} in object value", c as u32
+            )));
+        }
+        if operator == "linksTo" {
+            if object.trim().is_empty() {
+                errors.push((lineno, "linksTo with an empty target".to_string()));
+            } else if object.starts_with('/') {
+                errors.push((lineno, format!(
+                    "linksTo target {object:?} has a leading slash — canonical form \
+                     is bare repo-relative (spec §5)"
+                )));
+            }
+        }
+    }
+    errors
+}
+
+// ════════════════════════════════════════════════════════════════════════════
 // Data types
 // ════════════════════════════════════════════════════════════════════════════
 
@@ -1107,6 +1178,65 @@ fn take_term(s: &str) -> Option<(String, &str)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ─── v1 write-gate (validate_sidecar_v1) ───────────────────────────────
+
+    #[test]
+    fn gate_accepts_all_three_blessed_shapes() {
+        let content = "\
+copia.Texture.textureId | hasValue | self
+Copia/Texture/self.md | linksTo | Soul/Journal/day-15.md
+md.externalLink | hasValue | https://github.com/repolex-ai/git-lex
+soul.Memory.category | hasValue | \n";
+        // Includes the legal empty-object hasValue on the last line.
+        assert!(validate_sidecar_v1(content).is_empty());
+    }
+
+    #[test]
+    fn gate_accepts_pipe_inside_object() {
+        // splitn(3): the object may contain " | " verbatim.
+        let content = "soul.Note.title | hasValue | a | b | c\n";
+        assert!(validate_sidecar_v1(content).is_empty());
+    }
+
+    #[test]
+    fn gate_rejects_wrong_field_count() {
+        let errs = validate_sidecar_v1("         uad/Squaddie/lspy\n");
+        assert_eq!(errs.len(), 1);
+        assert!(errs[0].1.contains("malformed line"));
+    }
+
+    #[test]
+    fn gate_rejects_unknown_operator() {
+        // The dormant jsonl session extractor's shape must not pass.
+        let errs = validate_sidecar_v1("session-abc123 | isA | session\n");
+        assert_eq!(errs.len(), 1);
+        assert!(errs[0].1.contains("closed vocabulary"));
+    }
+
+    #[test]
+    fn gate_rejects_control_characters_in_object() {
+        let errs = validate_sidecar_v1("soul.Note.title | hasValue | tab\there\n");
+        assert_eq!(errs.len(), 1);
+        assert!(errs[0].1.contains("U+0009"));
+    }
+
+    #[test]
+    fn gate_rejects_leading_slash_and_empty_linksto() {
+        let errs = validate_sidecar_v1(
+            "A.md | linksTo | /Soul/Note/x.md\nB.md | linksTo |  \n");
+        assert_eq!(errs.len(), 2);
+        assert!(errs[0].1.contains("leading slash"));
+        assert!(errs[1].1.contains("empty target"));
+    }
+
+    #[test]
+    fn gate_reports_line_numbers_and_blank_lines() {
+        let errs = validate_sidecar_v1("a | hasValue | ok\n\nbroken line\n");
+        assert_eq!(errs.len(), 2);
+        assert_eq!(errs[0].0, 2); // blank line
+        assert_eq!(errs[1].0, 3); // malformed
+    }
 
     // ─── parse_unified_diff ────────────────────────────────────────────────
 

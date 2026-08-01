@@ -902,8 +902,48 @@ fn cmd_extract() {
     // Run JSONL extraction for claude-code kit
     extract_jsonl_sessions();
 
+    // The v1 write-gate: re-read EVERY sidecar (extraction rewrites the
+    // full tree each save) and validate against the format spec using the
+    // walker's own line rules. Nothing gets committed that history can't
+    // later read — the enforcement brick whose absence let one wrapped
+    // line ride 549 commits of lUX history.
+    let mut gate_files = 0usize;
+    let mut gate_errors = 0usize;
+    if let Some(root) = git_lex::find_git_root() {
+        let mut stack = vec![root.join(".lex").join("extract")];
+        while let Some(dir) = stack.pop() {
+            let Ok(entries) = std::fs::read_dir(&dir) else { continue };
+            for entry in entries.filter_map(|e| e.ok()) {
+                let path = entry.path();
+                if path.is_dir() {
+                    stack.push(path);
+                } else if path.extension().and_then(|e| e.to_str()) == Some("spo") {
+                    gate_files += 1;
+                    let content = std::fs::read_to_string(&path).unwrap_or_default();
+                    for (lineno, err) in spo_events::validate_sidecar_v1(&content) {
+                        let rel = path.strip_prefix(&root).unwrap_or(&path);
+                        eprintln!("sidecar gate: {}:{}: {}", rel.display(), lineno, err);
+                        gate_errors += 1;
+                    }
+                }
+            }
+        }
+    }
+
     let elapsed = start.elapsed();
     eprintln!("Extracted in {:.1}ms", elapsed.as_secs_f64() * 1000.0);
+
+    if gate_errors > 0 {
+        eprintln!(
+            "fatal: sidecar write-gate: {} error(s) across {} sidecar file(s). \
+             An out-of-spec sidecar means the extractor produced output the \
+             format spec forbids — a git-lex bug unless the message names \
+             damage in the sidecar file itself. Report it.",
+            gate_errors, gate_files
+        );
+        std::process::exit(1);
+    }
+    eprintln!("Sidecar gate: {} file(s) conform to the v1 format ✓", gate_files);
 
     if extraction_errors > 0 {
         eprintln!("fatal: {} frontmatter error(s) — fix before committing", extraction_errors);
