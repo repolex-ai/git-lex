@@ -70,16 +70,14 @@ pub(crate) fn validate_sidecar_v1(content: &str) -> Vec<(usize, String)> {
                 "control character U+{:04X} in object value", c as u32
             )));
         }
-        if operator == "linksTo" {
-            if object.trim().is_empty() {
-                errors.push((lineno, "linksTo with an empty target".to_string()));
-            } else if object.starts_with('/') {
-                errors.push((lineno, format!(
-                    "linksTo target {object:?} has a leading slash — canonical form \
-                     is bare repo-relative (spec §5)"
-                )));
-            }
+        if operator == "linksTo" && object.trim().is_empty() {
+            errors.push((lineno, "linksTo with an empty target".to_string()));
         }
+        // NOTE deliberately absent: no leading-slash rejection. Under the
+        // 2026-07-28 path law the slash is SEMANTIC (bare = source-folder-
+        // relative, `/` = repo-rooted); rejecting it here (tried 2026-08-01)
+        // outlawed valid data. Canonical-form unification is PENDING ROB in
+        // the format spec §5.
     }
     errors
 }
@@ -1223,12 +1221,14 @@ soul.Memory.category | hasValue | \n";
     }
 
     #[test]
-    fn gate_rejects_leading_slash_and_empty_linksto() {
+    fn gate_accepts_rooted_linksto_rejects_empty() {
+        // Leading slash is SEMANTIC under the 2026-07-28 path law
+        // (bare = source-folder-relative, `/` = repo-rooted) — the gate
+        // must accept both forms until the path law itself changes.
         let errs = validate_sidecar_v1(
             "A.md | linksTo | /Soul/Note/x.md\nB.md | linksTo |  \n");
-        assert_eq!(errs.len(), 2);
-        assert!(errs[0].1.contains("leading slash"));
-        assert!(errs[1].1.contains("empty target"));
+        assert_eq!(errs.len(), 1);
+        assert!(errs[0].1.contains("empty target"));
     }
 
     #[test]

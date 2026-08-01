@@ -316,15 +316,15 @@ pub(crate) fn generate_frontmatter_nquads_with(
         }
 
         // --- [[wikilink]] extraction ---
+        // The target passes through VERBATIM: under the 2026-07-28 path law
+        // a bare target is relative to the source file's folder and a
+        // leading `/` anchors at the repo root, so the slash is SEMANTIC —
+        // stripping it here (tried 2026-08-01) silently re-bound every
+        // root-anchored link to doc-relative. Canonical-form unification is
+        // a path-law decision (Rob's), not an extraction-time rewrite.
         let mut links_seen = HashSet::new();
         for cap in wikilink_re.captures_iter(&body_text) {
-            // Canonical target form is BARE repo-relative (Rob-ruled
-            // 2026-08-01, spo format spec §5): a leading slash is stripped
-            // at the seam, so prose may say [[/Soul/Note/x.md]] (the
-            // July-28 migration wrote that form) but the sidecar carries
-            // one form only. Since every sidecar rewrites on every save,
-            // historical leading-slash lines self-heal on the next save.
-            let link = cap[1].trim_start_matches('/').to_string();
+            let link = cap[1].to_string();
             if links_seen.insert(link.clone()) {
                 spo_lines.push(format!("{} | linksTo | {}", relpath_str, link));
             }
@@ -876,16 +876,15 @@ mod wikilink_pattern_tests {
         assert!(re.captures(wrapped).is_none(), "split token must NOT be a link");
     }
 
-    /// PIN: linksTo targets are canonically BARE repo-relative (Rob-ruled
-    /// 2026-08-01). Prose may carry [[/rooted/form]] (the July-28 reference
-    /// migration wrote root-anchored links); the emitter strips the slash at
-    /// the seam so the sidecar carries one form only and the write-gate's
-    /// leading-slash rejection never fires on emitter output.
+    /// PIN: the wikilink target passes into the sidecar VERBATIM, leading
+    /// slash included. Under the 2026-07-28 path law the slash is semantic
+    /// (bare = source-folder-relative, `/` = repo-rooted); an extraction-
+    /// time strip (tried and reverted 2026-08-01) silently re-bound every
+    /// root-anchored link to doc-relative.
     #[test]
-    fn wikilink_target_leading_slash_normalizes_bare() {
+    fn wikilink_target_passes_through_verbatim() {
         let re = regex::Regex::new(WIKILINK_PATTERN).unwrap();
         let cap = re.captures("see [[/Soul/Note/x.md]]").unwrap();
-        let link = cap[1].trim_start_matches('/').to_string();
-        assert_eq!(link, "Soul/Note/x.md");
+        assert_eq!(&cap[1], "/Soul/Note/x.md");
     }
 }
