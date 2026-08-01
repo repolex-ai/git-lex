@@ -35,7 +35,7 @@ use crate::git::{auto_commit_snapshot, resource_uri};
 use crate::nquad::{generate_frontmatter_nquads,
                    load_lex_nquads};
 use crate::ontology::get_kit_types;
-use crate::extraction::{extract_jsonl_sessions, extract_markdown_links, frontmatter_to_turtle};
+use crate::extraction::{extract_markdown_links, frontmatter_to_turtle};
 use crate::kit::{kit_config_str, read_repo_yml_fields};
 
 // .spo event stream — git-aware change detector for .spo sidecars. Used by
@@ -899,8 +899,10 @@ fn cmd_extract() {
     // Run markdown link extraction via tree-sitter
     extract_markdown_links();
 
-    // Run JSONL extraction for claude-code kit
-    extract_jsonl_sessions();
+    // (The .jsonl session extractor ran here 2026-04→08: claude-code-kit
+    // only, 13 ad-hoc operators no ontology declared, zero sidecars ever
+    // produced in any live repo. Deleted Rob-ruled 2026-08-01 — transcript
+    // analytics is ravel's domain.)
 
     // The v1 write-gate: re-read EVERY sidecar (extraction rewrites the
     // full tree each save) and validate against the format spec using the
