@@ -115,7 +115,27 @@ pub(crate) fn cmd_sync() {
                 .unwrap_or(false)
         };
 
-        if already_synced && onegraph_present {
+        // The fast path must also be format-current: an old-subject-model
+        // store (pre-re-anchor) with no new commits would otherwise report
+        // "already synced" forever and never take the one-time cutover
+        // rebuild. Same probe as the resume check below. A repo with no
+        // sidecar-bearing files never has File facts and so never fast-
+        // paths — a full sync of an empty extract tree is cheap.
+        let reanchored = {
+            let probe = format!(
+                "ASK {{ GRAPH <{}> {{ ?s <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> \
+                 <https://repolex.ai/ontology/git-lex/File> }} }}",
+                spo_events::LEXHISTORY_GRAPH_IRI
+            );
+            oxigraph::sparql::SparqlEvaluator::new()
+                .parse_query(&probe)
+                .ok()
+                .and_then(|q| q.on_store(&store).execute().ok())
+                .map(|r| matches!(r, oxigraph::sparql::QueryResults::Boolean(true)))
+                .unwrap_or(false)
+        };
+
+        if already_synced && onegraph_present && reanchored {
             // Check .lex/extract/ for uncommitted .spo changes
             let dirty = Command::new("git")
                 .args(["status", "--porcelain", "--", ".lex/extract/"])
@@ -166,6 +186,39 @@ pub(crate) fn cmd_sync() {
                 }
                 _ => None,
             })
+    };
+
+    // ─── Re-anchor format probe (identity model cutover, 2026-08-02) ───
+    // A one graph built by the pre-re-anchor emitter carries path-family
+    // subjects and ZERO `git-lex:File` type facts (the re-anchored emitter
+    // asserts one per sidecar-bearing file). Resuming onto such a store
+    // would mix two subject models in one graph — force the full rebuild
+    // instead. Derived probe, no stored marker: same ethos as the resume
+    // point ("the persisted data IS the marker").
+    let onegraph_resume: Option<String> = match onegraph_resume {
+        Some(sha) => {
+            let probe = format!(
+                "ASK {{ GRAPH <{}> {{ ?s <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> \
+                 <https://repolex.ai/ontology/git-lex/File> }} }}",
+                spo_events::LEXHISTORY_GRAPH_IRI
+            );
+            let file_typed = oxigraph::sparql::SparqlEvaluator::new()
+                .parse_query(&probe)
+                .ok()
+                .and_then(|q| q.on_store(&store).execute().ok())
+                .map(|r| matches!(r, oxigraph::sparql::QueryResults::Boolean(true)))
+                .unwrap_or(false);
+            if file_typed {
+                Some(sha)
+            } else {
+                println!(
+                    "One graph: pre-re-anchor subject model detected — FULL rebuild under \
+                     the identity-model emitter (one-time cutover)."
+                );
+                None
+            }
+        }
+        None => None,
     };
 
     // ─── Phase 1: Clear and regenerate virtual graphs ───

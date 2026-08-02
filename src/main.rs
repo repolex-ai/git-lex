@@ -898,8 +898,20 @@ fn cmd_extract() {
         }
     }
 
-    // Run frontmatter extraction (writes .spo sidecars as a side effect)
-    let (_nq, extraction_errors) = generate_frontmatter_nquads();
+    // Run frontmatter extraction (writes .spo sidecars as a side effect).
+    // The context is built here and shared with the identity gate below.
+    let ctx_root = git_lex::find_git_root();
+    let (_nq, extraction_errors, extract_ctx) = match &ctx_root {
+        Some(root) => {
+            let ctx = nquad::ResolverContext::build(root);
+            let (nq, errs) = nquad::generate_frontmatter_nquads_with(root, &ctx);
+            (nq, errs, Some(ctx))
+        }
+        None => {
+            let (nq, errs) = generate_frontmatter_nquads();
+            (nq, errs, None)
+        }
+    };
 
     // Run markdown link extraction via tree-sitter
     extract_markdown_links();
@@ -952,6 +964,57 @@ fn cmd_extract() {
         std::process::exit(1);
     }
     eprintln!("Sidecar gate: {} file(s) conform to the v1 format ✓", gate_files);
+
+    // Identity gate (identity model Law 3): per-class id uniqueness across
+    // the repo, enforced at save. Two files claiming the same
+    // <kit>/<Class>/<id> would collapse into ONE Thing IRI — a collision,
+    // rejected loudly (Rob: "you can't have two things and reliably tell
+    // them apart without an id — enforced, must-have"). Only files whose
+    // Thing anchor actually derives participate; unanchored classed files
+    // already warned in extraction (the Phase-4 work list).
+    if let (Some(root), Some(ctx)) = (&ctx_root, &extract_ctx) {
+        let mut id_errors = 0usize;
+        let mut owners: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+        let mut stack = vec![root.join(".lex").join("extract")];
+        while let Some(dir) = stack.pop() {
+            let Ok(entries) = std::fs::read_dir(&dir) else { continue };
+            for entry in entries.filter_map(|e| e.ok()) {
+                let path = entry.path();
+                if path.is_dir() {
+                    stack.push(path);
+                    continue;
+                }
+                let Some(rel) = path.strip_prefix(root).ok().map(|p| p.to_string_lossy().to_string()) else { continue };
+                let Some(src) = rel
+                    .strip_prefix(".lex/extract/")
+                    .and_then(|s| s.strip_suffix(".fm.spo"))
+                else { continue };
+                let content = std::fs::read_to_string(&path).unwrap_or_default();
+                let lines: Vec<String> = content.lines().map(String::from).collect();
+                let subjects = nquad::derive_file_subjects(
+                    &lines, src, &ctx.id_props, &ctx.declared_props,
+                    &ctx.obj_props, &ctx.kit_namespaces, false,
+                );
+                if let Some(thing) = subjects.thing_uri {
+                    if let Some(prior) = owners.get(&thing) {
+                        eprintln!(
+                            "identity gate: {} and {} both claim the Thing {} — \
+                             per-class ids must be unique; change one file's id",
+                            prior, src, thing
+                        );
+                        id_errors += 1;
+                    } else {
+                        owners.insert(thing, src.to_string());
+                    }
+                }
+            }
+        }
+        if id_errors > 0 {
+            eprintln!("fatal: identity gate: {} id collision(s)", id_errors);
+            std::process::exit(1);
+        }
+        eprintln!("Identity gate: {} Thing id(s) unique ✓", owners.len());
+    }
 
     if extraction_errors > 0 {
         eprintln!("fatal: {} frontmatter error(s) — fix before committing", extraction_errors);

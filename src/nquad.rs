@@ -21,7 +21,7 @@ use std::process::Command;
 
 use git_lex::find_git_root;
 
-use crate::git::{graph_uri, resource_uri};
+use crate::git::graph_uri;
 
 /// The one wikilink pattern, shared by every extraction site. `[^\]\n]+`:
 /// a link target NEVER spans lines. A `[[...]]` token broken across two
@@ -193,6 +193,11 @@ pub(crate) struct ResolverContext {
     /// the whole history walk — correct because only repos BORN under
     /// Obsidian semantics (or fully migrated in Phase 4) carry the stamp.
     pub obsidian_links: bool,
+    /// "{kit}/{Class}" → declared id-property name (Law 3 declarations
+    /// from installed kit TTLs). Empty = pre-declaration state; the
+    /// transitional `<class>Id` convention applies (see
+    /// `derive_file_subjects`).
+    pub id_props: HashMap<String, String>,
 }
 
 impl ResolverContext {
@@ -207,8 +212,183 @@ impl ResolverContext {
             declared_props: crate::ontology::get_declared_properties_all_kits(),
             kit_namespaces: get_kit_namespaces_all_kits(),
             obsidian_links: git_lex::RepoYml::load(root).obsidian_links(),
+            id_props: crate::ontology::get_id_properties_all_kits(),
         }
     }
+}
+
+/// The per-file subject anchors of the two identity planes (identity model
+/// Laws 1–5, Rob-ruled 2026-07-30). Derived ONCE per file from its full
+/// sidecar line set, then every line emits against the right plane:
+///
+/// - `file_uri` — the File node `git-lex/File/<path>`: linksTo edges,
+///   markdown/fm facts, git facts. Always present; a no-kit repo is a
+///   File-only graph and that is the bare-markdown tier working.
+/// - `thing_uri` — the Thing node `<kit-app>/<Class>/<id>`: kit-declared
+///   facts + rdf:type. Present only when the file's class has a known id
+///   property AND the sidecar carries its value. The Thing→File
+///   connection is the derived `fileId` edge (Law 5).
+///
+/// All IRIs carry angle brackets (ready to print into N-Quads).
+pub(crate) struct FileSubjects {
+    pub file_uri: String,
+    pub thing_uri: Option<String>,
+    /// (kit short name, canonical class) of the anchoring Thing.
+    pub thing_key: Option<(String, String)>,
+}
+
+/// A kit's a-box (application) base from its ontology namespace:
+/// `https://repolex.ai/ontology/soul/` → `https://repolex.ai/soul/` — the
+/// universal instance law (`<application>/<Class>/<id>`, Rob Day-50),
+/// derived from the installed TTL's own declaration, never hardcoded.
+fn app_base_from_kit_ns(kit_ns: &str) -> String {
+    match kit_ns.find("/ontology/") {
+        Some(i) => format!("{}/{}", &kit_ns[..i], &kit_ns[i + "/ontology/".len()..]),
+        None => kit_ns.to_string(),
+    }
+}
+
+/// Derive both plane anchors for one file from its full sidecar line set.
+///
+/// Thing-anchor derivation: the file's class is the FIRST kit-classed line's
+/// class (resolved against the ontology, same rule as type emission); its id
+/// property comes from the Law-3 declarations (`ctx.id_props`), or — ONLY
+/// while no installed kit declares any id property — the transitional
+/// `<class>Id` name convention, validated against the class's declared
+/// properties so a phantom name can never match. A classed file whose id
+/// value is absent anchors NOTHING (facts stay on the File node) and warns:
+/// pre-migration corpora hit this constantly, and the warning is the
+/// Phase-4 work list. (Flipping that warning to a save-time reject is the
+/// post-migration step — see the identity model doc §2.3.)
+pub(crate) fn derive_file_subjects(
+    spo_lines: &[String],
+    relpath_str: &str,
+    ctx_id_props: &HashMap<String, String>,
+    declared_props: &HashSet<String>,
+    obj_props: &HashSet<String>,
+    kit_namespaces: &HashMap<String, String>,
+    warn: bool,
+) -> FileSubjects {
+    let file_uri = format!("<{}>", crate::git::file_iri(&uri_encode_path(relpath_str)));
+
+    // First kit-classed line decides the file's class (existing single-class
+    // rule; other classes' lines warn at emission as before).
+    let mut anchor: Option<(String, String)> = None; // (kit, canonical class)
+    for line in spo_lines {
+        let parts: Vec<&str> = line.splitn(3, " | ").collect();
+        if parts.len() != 3 || parts[1] != "hasValue" {
+            continue;
+        }
+        let segments: Vec<&str> = parts[0].splitn(3, '.').collect();
+        if segments.len() != 3 {
+            continue;
+        }
+        if let Ok(canonical) = crate::ontology::resolve_class_segment(segments[0], segments[1]) {
+            anchor = Some((segments[0].to_string(), canonical));
+            break;
+        }
+    }
+    let Some((kit, class)) = anchor else {
+        return FileSubjects { file_uri, thing_uri: None, thing_key: None };
+    };
+
+    // Law-3 declaration, else the fenced transitional convention.
+    let key = format!("{}/{}", kit, class);
+    let id_prop: Option<String> = match ctx_id_props.get(&key) {
+        Some(p) => Some(p.clone()),
+        None if ctx_id_props.is_empty() => {
+            let mut conv = class.clone();
+            if let Some(first) = conv.get_mut(0..1) {
+                let low = first.to_lowercase();
+                conv.replace_range(0..1, &low);
+            }
+            conv.push_str("Id");
+            let prop_key = format!("{}/{}/{}", kit, class, conv);
+            (declared_props.contains(&prop_key) || obj_props.contains(&prop_key))
+                .then_some(conv)
+        }
+        None => None, // declarations exist, this class has none — no anchor
+    };
+    let Some(id_prop) = id_prop else {
+        return FileSubjects { file_uri, thing_uri: None, thing_key: None };
+    };
+
+    // Find the id value in this file's own lines.
+    let id_line_key = format!("{}.{}.{}", kit, class, id_prop);
+    let id_value = spo_lines.iter().find_map(|line| {
+        let parts: Vec<&str> = line.splitn(3, " | ").collect();
+        if parts.len() == 3
+            && parts[1] == "hasValue"
+            && parts[0] == id_line_key
+            && !parts[2].trim().is_empty()
+        {
+            Some(parts[2].trim().to_string())
+        } else {
+            None
+        }
+    });
+    let Some(id_value) = id_value else {
+        if warn {
+            eprintln!(
+                "warning: {relpath_str}: classed as {kit}.{class} but carries no \
+                 `{id_line_key}` — facts anchor to the File node until the id is authored \
+                 (Phase-4 migration work list)"
+            );
+        }
+        return FileSubjects { file_uri, thing_uri: None, thing_key: None };
+    };
+
+    let kit_ns = kit_namespaces
+        .get(&kit)
+        .cloned()
+        .unwrap_or_else(|| git_lex::conventional_kit_namespace(&kit));
+    let thing_uri = format!(
+        "<{}{}/{}>",
+        app_base_from_kit_ns(&kit_ns),
+        class,
+        uri_encode_path(&id_value)
+    );
+    FileSubjects {
+        file_uri,
+        thing_uri: Some(thing_uri),
+        thing_key: Some((kit, class)),
+    }
+}
+
+/// Emit the per-file anchor facts shared by BOTH graph paths:
+/// the File node's rdf:type, and — when the file expresses a Thing — the
+/// Thing's rdf:type plus the derived `fileId` edge (Law 5,
+/// Thing → File). In the one-graph walk these participate in resolved-set
+/// diffing, so a file move produces exactly the honest fileId
+/// retract+assert pair and nothing else.
+pub(crate) fn emit_file_anchor_nquads(
+    subjects: &FileSubjects,
+    kit_namespaces: &HashMap<String, String>,
+    graph: &str,
+    emitted_types: &mut HashSet<String>,
+    out: &mut String,
+) {
+    out.push_str(&format!(
+        "{} <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://repolex.ai/ontology/git-lex/File> {} .\n",
+        subjects.file_uri, graph
+    ));
+    let (Some(thing_uri), Some((kit, class))) = (&subjects.thing_uri, &subjects.thing_key) else {
+        return;
+    };
+    let kit_ns = kit_namespaces
+        .get(kit)
+        .cloned()
+        .unwrap_or_else(|| git_lex::conventional_kit_namespace(kit));
+    if emitted_types.insert(format!("{}.{}", kit, class)) {
+        out.push_str(&format!(
+            "{} <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <{}{}> {} .\n",
+            thing_uri, kit_ns, class, graph
+        ));
+    }
+    out.push_str(&format!(
+        "{} <https://repolex.ai/ontology/git-lex/fileId> {} {} .\n",
+        thing_uri, subjects.file_uri, graph
+    ));
 }
 
 /// Extract frontmatter and body wikilinks from all .md/.txt files in the
@@ -354,42 +534,47 @@ pub(crate) fn generate_frontmatter_nquads_with(
         }
 
         // --- Generate N-Quads for oxigraph (now graph) ---
-        // IRI scheme: https://repolex.ai/soul/{path} (Soul/ root maps onto
-        // the namespace root; no soul identity in the subject — Day-50).
-        // The IRI mirrors the file path verbatim — no folder capitalization,
-        // no folder→class derivation. Classes come from the ontology and from
-        // explicit dot-notation in frontmatter (kit.class.property), never
-        // from folder name guessing. Honors "ontology is the single source
-        // of truth" — sync stops inventing types the schema does not declare.
-        //
-        // No-kit repos get `git-lex:Document` only (plus the git layer).
-        // Kit repos get classes their ontology declares, via frontmatter.
+        // Identity model (Rob-ruled 2026-07-30, re-anchor 2026-08-02): two
+        // plane anchors per file. The File node `git-lex/File/<path>` (the
+        // path IS the id — Law 4) carries the git layer, links, and fm
+        // facts; when the file expresses a Thing with an authored id, the
+        // Thing node `<kit-app>/<Class>/<id>` (Law 2) carries the
+        // kit-declared facts, connected by the derived fileId edge (Law 5).
+        // Classes come from the ontology and explicit dot-notation, never
+        // folder-name guessing.
         //
         // File location is git:path — a git-lex-authored synthetic fact from
         // the on-disk path, NOT a user frontmatter key; fm: carries ONLY what
         // the user wrote (the fm firewall).
-        let doc_uri = format!("<{}>", resource_uri(&uri_encode_path(&relpath_str)));
+        let subjects = derive_file_subjects(
+            &spo_lines,
+            &relpath_str,
+            &ctx.id_props,
+            &ctx.declared_props,
+            &obj_props,
+            &kit_namespaces,
+            true, // the now path is the save/sync moment — warn here
+        );
 
         nq.push_str(&format!(
-            "{} <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://repolex.ai/ontology/git-lex/Document> {} .\n",
-            doc_uri, graph
-        ));
-        nq.push_str(&format!(
             "{} <https://repolex.ai/ontology/git-lex/git/path> \"{}\" {} .\n",
-            doc_uri, nq_escape(&relpath_str), graph
+            subjects.file_uri, nq_escape(&relpath_str), graph
         ));
         nq.push_str(&format!(
             "{} <https://repolex.ai/ontology/git-lex/git/blobHash> \"{}\" {} .\n",
-            doc_uri, blob_hash, graph
+            subjects.file_uri, blob_hash, graph
         ));
 
         // Track which kit types we've seen for rdf:type emission (dedup)
         let mut emitted_types: HashSet<String> = HashSet::new();
 
+        // File rdf:type + (when anchored) Thing rdf:type + fileId edge.
+        emit_file_anchor_nquads(&subjects, &kit_namespaces, &graph, &mut emitted_types, &mut nq);
+
         for line in &spo_lines {
             total_errors += emit_spo_line_nquads(
                 line,
-                &doc_uri,
+                &subjects,
                 &graph,
                 &relpath_str,
                 &path_index,
@@ -440,7 +625,11 @@ pub(crate) fn generate_frontmatter_nquads_with(
 ///
 /// Arguments:
 /// - `line`: raw `.spo` line in `subject | predicate | object` form
-/// - `doc_uri`: IRI of the containing document (with angle brackets)
+/// - `subjects`: the file's two plane anchors (see `derive_file_subjects`);
+///   each line lands on the plane its nature dictates — kit-declared facts
+///   on the Thing node, links/markdown/fm facts on the File node. Kit lines
+///   with no Thing anchor (missing id, non-anchor class) fall back to the
+///   File node so nothing is dropped; the drift is surfaced elsewhere.
 /// - `graph`: target graph IRI (with angle brackets)
 /// - `relpath_str`: source document path relative to repo root (for warnings)
 /// - `path_index`: repo-relative paths of every walked doc (dangling-link
@@ -451,7 +640,7 @@ pub(crate) fn generate_frontmatter_nquads_with(
 /// - `out`: the N-Quad buffer being appended to
 pub(crate) fn emit_spo_line_nquads(
     line: &str,
-    doc_uri: &str,
+    subjects: &FileSubjects,
     graph: &str,
     relpath_str: &str,
     path_index: &HashSet<String>,
@@ -534,9 +723,12 @@ pub(crate) fn emit_spo_line_nquads(
                         "warning: {relpath_str}: [[{object}]] → {p} does not exist (yet) — forward link, or fix the path"
                     );
                 }
+                // Prose links follow documents (Law 6): File → File, both
+                // ends in the File-plane family. A dangling target still
+                // derives its IRI — the dangle is true data about the text.
                 out.push_str(&format!(
                     "{} <https://repolex.ai/ontology/git-lex/md/linksTo> <{}> {} .\n",
-                    doc_uri, resource_uri(&uri_encode_path(&p)), graph
+                    subjects.file_uri, crate::git::file_iri(&uri_encode_path(&p)), graph
                 ));
             }
             None => {
@@ -584,13 +776,24 @@ pub(crate) fn emit_spo_line_nquads(
                 .cloned()
                 .unwrap_or_else(|| git_lex::conventional_kit_namespace(kit_name));
 
+            // The line's subject: the Thing anchor when this line's class IS
+            // the file's anchoring class; otherwise the File node (kit lines
+            // with no Thing anchor — missing id, second class — fall back so
+            // no fact is dropped; the type lands on the same subject, which
+            // preserves today's queryability for the unmigrated corpus and
+            // relocates Thing-ward per file as ids get authored).
+            let line_subject: &str = match (&subjects.thing_uri, &subjects.thing_key, &canonical_class) {
+                (Some(t), Some((ak, ac)), Some(c)) if ak == kit_name && ac == c => t,
+                _ => &subjects.file_uri,
+            };
+
             if let Some(canonical) = &canonical_class {
                 let type_key = format!("{}.{}", kit_name, canonical);
                 if emitted_types.insert(type_key) {
                     let type_uri = format!("<{}{}>", kit_ns, canonical);
                     out.push_str(&format!(
                         "{} <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> {} {} .\n",
-                        doc_uri, type_uri, graph
+                        line_subject, type_uri, graph
                     ));
                 }
             }
@@ -619,13 +822,13 @@ pub(crate) fn emit_spo_line_nquads(
                         resolve::ResolveResult::Iri(uri) => {
                             out.push_str(&format!(
                                 "{} {} {} {} .\n",
-                                doc_uri, kit_predicate, uri, graph
+                                line_subject, kit_predicate, uri, graph
                             ));
                         }
                         resolve::ResolveResult::Unresolved(literal) => {
                             out.push_str(&format!(
                                 "{} {} \"{}\" {} .\n",
-                                doc_uri, kit_predicate, nq_escape(&literal), graph
+                                line_subject, kit_predicate, nq_escape(&literal), graph
                             ));
                         }
                         resolve::ResolveResult::Rejected(msg) => {
@@ -684,12 +887,12 @@ pub(crate) fn emit_spo_line_nquads(
                 if let Some(datatype) = lookup_key.as_ref().and_then(|k| prop_datatypes.get(k)) {
                     out.push_str(&format!(
                         "{} {} \"{}\"^^<{}> {} .\n",
-                        doc_uri, kit_predicate, nq_escape(object), datatype, graph
+                        line_subject, kit_predicate, nq_escape(object), datatype, graph
                     ));
                 } else {
                     out.push_str(&format!(
                         "{} {} \"{}\" {} .\n",
-                        doc_uri, kit_predicate, nq_escape(object), graph
+                        line_subject, kit_predicate, nq_escape(object), graph
                     ));
                 }
             }
@@ -712,19 +915,19 @@ pub(crate) fn emit_spo_line_nquads(
                     if val.contains('/') || val.ends_with(".md") {
                         out.push_str(&format!(
                             "{} {} <{}> {} .\n",
-                            doc_uri, fm_predicate, resource_uri(&uri_encode_path(val)), graph
+                            subjects.file_uri, fm_predicate, crate::git::file_iri(&uri_encode_path(val)), graph
                         ));
                     } else {
                         out.push_str(&format!(
                             "{} {} \"{}\" {} .\n",
-                            doc_uri, fm_predicate, nq_escape(val), graph
+                            subjects.file_uri, fm_predicate, nq_escape(val), graph
                         ));
                     }
                 }
             } else {
                 out.push_str(&format!(
                     "{} {} \"{}\" {} .\n",
-                    doc_uri, fm_predicate, nq_escape(object), graph
+                    subjects.file_uri, fm_predicate, nq_escape(object), graph
                 ));
             }
         }
@@ -832,9 +1035,14 @@ mod tests {
         let mut types = HashSet::new();
         let mut out = String::new();
         let declared = HashSet::new();
+        let subjects = FileSubjects {
+            file_uri: "<https://repolex.ai/git-lex/File/Journal/day-1.md>".into(),
+            thing_uri: None,
+            thing_key: None,
+        };
         emit_spo_line_nquads(
             "soul.Journal.soulDay | hasValue | 55",
-            "<https://repolex.ai/soul/Journal/day-1.md>",
+            &subjects,
             "<https://repolex.ai/git-lex/NamedGraph/now>",
             "Journal/day-1.md",
             &empty_paths, &obj_props, &datatypes, &declared, &namespaces, false,
@@ -848,9 +1056,14 @@ mod tests {
 
         // No declaration for this kit → conventional fallback.
         let mut out2 = String::new();
+        let subjects2 = FileSubjects {
+            file_uri: "<https://repolex.ai/git-lex/File/friend/selkie.md>".into(),
+            thing_uri: None,
+            thing_key: None,
+        };
         emit_spo_line_nquads(
             "copia.Being.beingName | hasValue | selkie",
-            "<https://repolex.ai/soul/friend/selkie.md>",
+            &subjects2,
             "<https://repolex.ai/git-lex/NamedGraph/now>",
             "friend/selkie.md",
             &empty_paths, &obj_props, &datatypes, &declared, &namespaces, false,
@@ -860,6 +1073,47 @@ mod tests {
             out2.contains("<https://repolex.ai/ontology/copia/beingName>"),
             "undeclared kit must use the conventional (app-tier) fallback, got: {out2}"
         );
+    }
+
+    /// The a-box base derives from the kit's ontology namespace by dropping
+    /// the /ontology/ tier — the universal instance law
+    /// (`<application>/<Class>/<id>`), never a second hardcoded pattern.
+    #[test]
+    fn app_base_drops_the_ontology_tier() {
+        assert_eq!(
+            app_base_from_kit_ns("https://repolex.ai/ontology/soul/"),
+            "https://repolex.ai/soul/"
+        );
+        assert_eq!(
+            app_base_from_kit_ns("https://repolex.ai/ontology/git-lex/"),
+            "https://repolex.ai/git-lex/"
+        );
+        // A namespace without the tier passes through untouched.
+        assert_eq!(
+            app_base_from_kit_ns("https://example.org/vocab/"),
+            "https://example.org/vocab/"
+        );
+    }
+
+    /// A file with no kit-classed lines anchors NO Thing: File node only —
+    /// the bare-markdown tier. The File IRI is the path verbatim under the
+    /// git-lex File family (no scaffold stripping).
+    #[test]
+    fn derive_subjects_no_kit_lines_is_file_only() {
+        let lines = vec![
+            "README.md | linksTo | docs/intro.md".to_string(),
+            "title | hasValue | hello".to_string(),
+        ];
+        let id_props = HashMap::new();
+        let declared = HashSet::new();
+        let obj_props = HashSet::new();
+        let namespaces = HashMap::new();
+        let s = derive_file_subjects(
+            &lines, "README.md", &id_props, &declared, &obj_props, &namespaces, false,
+        );
+        assert_eq!(s.file_uri, "<https://repolex.ai/git-lex/File/README.md>");
+        assert!(s.thing_uri.is_none());
+        assert!(s.thing_key.is_none());
     }
 
     /// '%', '"', and '\' are legal in filenames but illegal (or

@@ -951,14 +951,34 @@ pub(crate) fn onegraph_walk_engine(
             }
             return Ok(HashSet::new());
         };
-        let doc_uri = format!(
-            "<{}>",
-            crate::git::resource_uri(&crate::nquad::uri_encode_path(&relpath_str))
-        );
         let lines = read_sidecar_at_commit(commit, sidecar_path)?;
         acct.lines_in += lines.len();
         let mut triples: HashSet<String> = HashSet::new();
         let mut emitted_types: HashSet<String> = HashSet::new();
+        // Both plane anchors, derived from the FULL sidecar at this commit
+        // (identity model re-anchor). The anchor facts (File type, Thing
+        // type, fileId edge) join the resolved set so they diff temporally
+        // like every other fact — a file move is exactly one fileId
+        // retract+assert pair, nothing else. Warnings stay quiet here: the
+        // walk revisits every commit and the save path already warned.
+        let subjects = crate::nquad::derive_file_subjects(
+            &lines,
+            &relpath_str,
+            &ctx.id_props,
+            &ctx.declared_props,
+            &ctx.obj_props,
+            &ctx.kit_namespaces,
+            false,
+        );
+        {
+            let mut anchor_buf = String::new();
+            crate::nquad::emit_file_anchor_nquads(
+                &subjects, &ctx.kit_namespaces, one_graph, &mut emitted_types, &mut anchor_buf,
+            );
+            for t in anchor_buf.lines().filter(|l| !l.trim().is_empty()) {
+                triples.insert(t.to_string());
+            }
+        }
         for line in &lines {
             // Shape check — HARD error. The walker knows one format:
             // `subject | predicate | object`.
@@ -994,7 +1014,7 @@ pub(crate) fn onegraph_walk_engine(
             // errors — e.g. one rejected value among several); the now path
             // counts the same errors, so the walk must too.
             acct.resolver_errors += crate::nquad::emit_spo_line_nquads(
-                line, &doc_uri, one_graph, &relpath_str,
+                line, &subjects, one_graph, &relpath_str,
                 &ctx.path_index, &ctx.obj_props,
                 &ctx.prop_datatypes, &ctx.declared_props,
                 &ctx.kit_namespaces, ctx.obsidian_links,

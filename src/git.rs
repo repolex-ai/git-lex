@@ -119,6 +119,20 @@ fn resource_base() -> &'static (String, String) {
     })
 }
 
+/// The File-plane instance family (identity model Law 4, Rob-ruled
+/// 2026-07-30): a File's id IS its repo-relative path, and File nodes are
+/// git-lex application instances under the universal instance law — the
+/// same shape the NamedGraph family already uses. NO scaffold-folder
+/// stripping here (that is a Thing-plane derivation nicety): the path is
+/// the id, verbatim, so `git-lex/File/Soul/Journal/day-1.md` and a
+/// no-kit repo's `git-lex/File/README.md` follow one rule.
+pub(crate) const FILE_BASE: &str = "https://repolex.ai/git-lex/File/";
+
+/// A File node's IRI from its (already uri-encoded) repo-relative path.
+pub(crate) fn file_iri(encoded_path: &str) -> String {
+    format!("{FILE_BASE}{encoded_path}")
+}
+
 /// Mint a graph name: `https://repolex.ai/git-lex/NamedGraph/<name>`.
 /// Graphs are instances of `git-lex:NamedGraph` (⊑ sd:NamedGraph, kit-base
 /// 72be113) under the universal instance law — the git-lex application's
