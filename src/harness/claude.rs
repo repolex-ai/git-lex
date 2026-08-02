@@ -422,6 +422,20 @@ pub(crate) fn setup_substrate_claude(root: &std::path::Path, agent_name: &str) {
     env.insert("GIT_COMMITTER_NAME".to_string(), serde_json::json!(agent_name));
     env.insert("GIT_COMMITTER_EMAIL".to_string(), serde_json::json!(email));
 
+    // Auto-memory home (Rob-ruled 2026-08-02): Claude Code's auto-memory
+    // lives IN the soul repo — `Harness/Memory/`, committed, visible to
+    // git-lex as Files with full history — instead of the harness-default
+    // `~/.claude/projects/<cwd-slug>/memory/`. Soul repos only (the soul
+    // kit ships the folder scaffold; a squad/work repo keeps the default).
+    // CC accepts only absolute or `~`-prefixed values (no variables, no
+    // relative paths); the `~`-form is preferred so committed settings
+    // survive a different home dir, and since this converges on every
+    // kit-update, a MOVED repo self-heals on its next update.
+    if crate::soul_md::soul_kit_installed(root) {
+        settings["autoMemoryDirectory"] =
+            serde_json::json!(auto_memory_dir_value(root, std::env::var("HOME").ok().as_deref()));
+    }
+
     // Auto-register any hook scripts the kit's harness/.claude/hooks/ shipped.
     // Each hook file is named `<Event>-<kit>-<purpose>.sh` (§3.2a naming standard);
     // hook_event_for parses it to its CC event (split on first '-'). This lets N
@@ -472,6 +486,21 @@ pub(crate) fn setup_substrate_claude(root: &std::path::Path, agent_name: &str) {
         eprintln!("(gitignored) overrides settings.json in Claude Code load order,");
         eprintln!("so its env block (if any) will silently win. Review and delete");
         eprintln!("if you do not need it: rm .claude/settings.local.json");
+    }
+}
+
+/// The `autoMemoryDirectory` value for a soul repo: `<root>/Harness/Memory`,
+/// `~`-shortened when the repo lives under the given home dir. Pure — the
+/// caller supplies `$HOME` (None in tests / exotic environments → absolute).
+fn auto_memory_dir_value(root: &std::path::Path, home: Option<&str>) -> String {
+    let abs = root.join("Harness").join("Memory");
+    let abs_str = abs.to_string_lossy().to_string();
+    match home {
+        Some(h) if !h.is_empty() => match abs_str.strip_prefix(h) {
+            Some(rest) if rest.starts_with('/') => format!("~{}", rest),
+            _ => abs_str,
+        },
+        _ => abs_str,
     }
 }
 
@@ -748,5 +777,29 @@ mod hook_registration_tests {
         let mut settings = serde_json::json!({"env": {"GIT_AUTHOR_NAME": "w4r3z"}});
         reap_orphan_hook_registrations(&mut settings, std::path::Path::new("/nonexistent"));
         assert!(settings.get("hooks").is_none(), "must not fabricate a hooks block");
+    }
+
+    /// autoMemoryDirectory derives from the repo root: `~`-shortened under
+    /// $HOME (portable committed settings), absolute otherwise, and never a
+    /// false-prefix mangle (`/Users/rob2` is NOT under `/Users/rob`).
+    #[test]
+    fn auto_memory_dir_value_forms() {
+        use std::path::Path;
+        assert_eq!(
+            auto_memory_dir_value(Path::new("/Users/rob/repos/X"), Some("/Users/rob")),
+            "~/repos/X/Harness/Memory"
+        );
+        assert_eq!(
+            auto_memory_dir_value(Path::new("/srv/repos/X"), Some("/Users/rob")),
+            "/srv/repos/X/Harness/Memory"
+        );
+        assert_eq!(
+            auto_memory_dir_value(Path::new("/Users/rob2/repos/X"), Some("/Users/rob")),
+            "/Users/rob2/repos/X/Harness/Memory"
+        );
+        assert_eq!(
+            auto_memory_dir_value(Path::new("/Users/rob/repos/X"), None),
+            "/Users/rob/repos/X/Harness/Memory"
+        );
     }
 }
