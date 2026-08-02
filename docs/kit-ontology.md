@@ -1,6 +1,6 @@
 # Kit Ontology Design
 
-*Last updated for git-lex v0.1.0 (2026-07-30)*
+*Last updated for git-lex v0.1.0 (2026-08-02)*
 
 This guide is for kit builders defining **document types** — the vocabulary a
 kit gives its users. It covers where the ontology file lives, and the four
@@ -180,7 +180,30 @@ Frontmatter keys are `<kit>.<Class>.<property>`. Everything declared validates
 at save; a key the ontology doesn't declare still works as a plain
 frontmatter key, but joins nothing.
 
-## 9. Naming rules (short, absolute)
+## 9. Graph-only kits (no authored documents)
+
+Some kits have no markdown at all — their instances are written by an engine
+into the store (ravel's conversation Turns are the canonical example). Three
+things change, and only three:
+
+- **Omit `git-lex:foldered true` on every class.** No flag, no folder: kit-add
+  and kit-update scaffold nothing into the repo. That's the whole mechanism.
+- **Machine-derived ids are fine.** The `<class>Id` law still holds (every
+  class declares its id property), but "human-readable, hyphenated" applies to
+  *authored* ids. An engine-written class uses whatever stable id the source
+  provides (a UUID, a sha, a content id) — stability and per-class uniqueness
+  are the contract, prettiness is not.
+- **Store-native references don't need the value-type suffix.** The
+  `...Id`/`...Path`/`...Url` suffix exists so a human typing frontmatter knows
+  what string belongs in the field. An engine-written `owl:ObjectProperty`
+  whose value is the actual target node (an IRI, not an id string) is named
+  plainly for the relationship (`parentTurn`, not `parentTurnId`) — the name
+  still tells the truth about the value, which is the law underneath the
+  suffix rule.
+
+Everything else — the skeleton, enums, comments, publishing — is identical.
+
+## 10. Naming rules (short, absolute)
 
 1. **The name is the definition.** If the name needs a paragraph to explain,
    it's the wrong name.
@@ -192,7 +215,7 @@ frontmatter key, but joins nothing.
    document needs it — never because it "feels right." Unused fields don't
    stay neutral; they rot into confusion.
 
-## 10. Publishing
+## 11. Publishing
 
 When the ontology changes: commit in the source repo, then run the publish
 flow (`subtexture/tools/ontology-publish` from the source repo root). It
