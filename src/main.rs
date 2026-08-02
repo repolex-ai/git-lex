@@ -30,6 +30,7 @@ mod shacl;
 mod kit;
 mod kit_cmds;
 mod extraction;
+mod soul_md;
 
 use crate::git::{auto_commit_snapshot, resource_uri};
 use crate::nquad::{generate_frontmatter_nquads,
@@ -594,6 +595,10 @@ fn resolve_agent_identity(root: &std::path::Path) -> Option<(String, String)> {
 
 fn cmd_save(message: &str) {
     let root = require_git_root();
+
+    // Identity floor: a soul repo without its root SOUL.md must not save
+    // (fail-loud, #29 — the file is restorable via kit-update).
+    soul_md::require_soul_md(&root);
 
     // Resolve the agent's identity. Tries env first (squad-repo case where
     // the agent's soul session injects GIT_AUTHOR_*) then settings.json

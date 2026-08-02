@@ -473,6 +473,17 @@ pub(crate) fn cmd_kit_update(kit_arg: Option<String>) {
         }
     }
 
+    // Identity floor: self-heal soul.Soul.soulId in the root SOUL.md from
+    // the genesis sha (#29 — fills a missing/empty value AND corrects a
+    // wrong one; the receipt prints inside heal_soul_id). A missing
+    // SOUL.md was just restored by the scaffold install above; if it's
+    // STILL absent something upstream is broken — say so rather than
+    // letting the next save fail-loud without context.
+    if let crate::soul_md::HealOutcome::NoSoulMd = crate::soul_md::heal_soul_id(&root) {
+        eprintln!("warning: root SOUL.md is missing and the kit scaffold did not restore it —");
+        eprintln!("`git lex sync`/`save` will refuse to run until it exists.");
+    }
+
     println!("Kit update complete: {} kit(s) refreshed.", kits_to_update.len());
 
     // t-box refresh: reload kit ontologies into the persistent ontology graph

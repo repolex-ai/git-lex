@@ -569,15 +569,29 @@ pub(crate) fn cmd_init(directory: Option<String>, kit: Option<String>) {
 
     if !first_sha.is_empty() {
         let existing = fs::read_to_string(&repo_yml_path).unwrap_or_default();
+        let mut identity_paths: Vec<&str> = Vec::new();
         if !existing.contains("genesis_sha:") && !existing.contains("first_commit:") {
             let updated = format!("{}genesis_sha: {}\n", existing, first_sha);
             fs::write(&repo_yml_path, &updated).unwrap_or_else(|e| {
                 eprintln!("fatal: could not record genesis_sha identity in .lex/repo.yml: {}", e);
                 exit(1);
             });
-            let _ = Command::new("git").args(["add", ".lex/repo.yml"]).status();
-            let _ = Command::new("git").args(["commit", "-m", "git lex identity"]).status();
+            identity_paths.push(".lex/repo.yml");
             println!("Identity: {}", first_sha);
+        }
+        // Fill soul.Soul.soulId in the freshly installed root SOUL.md from
+        // the same genesis sha (#29 — the kit template ships the key empty
+        // and declares this fill as git-lex's job).
+        match crate::soul_md::heal_soul_id(&root) {
+            crate::soul_md::HealOutcome::Filled
+            | crate::soul_md::HealOutcome::Healed { .. } => identity_paths.push("SOUL.md"),
+            _ => {}
+        }
+        if !identity_paths.is_empty() {
+            for p in &identity_paths {
+                let _ = Command::new("git").args(["add", p]).status();
+            }
+            let _ = Command::new("git").args(["commit", "-m", "git lex identity"]).status();
         }
     }
 

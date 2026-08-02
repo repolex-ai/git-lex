@@ -23,6 +23,10 @@ pub(crate) fn cmd_sync() {
 
     let root = require_git_root();
 
+    // Identity floor: wake (sync) fails loud on a soul repo missing its
+    // root SOUL.md (#29 — restorable via kit-update).
+    crate::soul_md::require_soul_md(&root);
+
     // ══ DESIGN DECISION (Rob-ruled 2026-07-28): git-lex tracks the DEFAULT
     // BRANCH, full stop. The semantic history is the history of the project
     // as a whole — branches earn their place in it by merging, which is
