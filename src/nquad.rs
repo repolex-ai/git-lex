@@ -193,11 +193,6 @@ pub(crate) struct ResolverContext {
     /// the whole history walk — correct because only repos BORN under
     /// Obsidian semantics (or fully migrated in Phase 4) carry the stamp.
     pub obsidian_links: bool,
-    /// "{kit}/{Class}" → declared id-property name (Law 3 declarations
-    /// from installed kit TTLs). Empty = pre-declaration state; the
-    /// transitional `<class>Id` convention applies (see
-    /// `derive_file_subjects`).
-    pub id_props: HashMap<String, String>,
 }
 
 impl ResolverContext {
@@ -212,7 +207,6 @@ impl ResolverContext {
             declared_props: crate::ontology::get_declared_properties_all_kits(),
             kit_namespaces: get_kit_namespaces_all_kits(),
             obsidian_links: git_lex::RepoYml::load(root).obsidian_links(),
-            id_props: crate::ontology::get_id_properties_all_kits(),
         }
     }
 }
@@ -252,18 +246,22 @@ fn app_base_from_kit_ns(kit_ns: &str) -> String {
 ///
 /// Thing-anchor derivation: the file's class is the FIRST kit-classed line's
 /// class (resolved against the ontology, same rule as type emission); its id
-/// property comes from the Law-3 declarations (`ctx.id_props`), or — ONLY
-/// while no installed kit declares any id property — the transitional
-/// `<class>Id` name convention, validated against the class's declared
-/// properties so a phantom name can never match. A classed file whose id
-/// value is absent anchors NOTHING (facts stay on the File node) and warns:
-/// pre-migration corpora hit this constantly, and the warning is the
-/// Phase-4 work list. (Flipping that warning to a save-time reject is the
-/// post-migration step — see the identity model doc §2.3.)
+/// property IS `<className>Id` — CONVENTION-AS-LAW, Rob-ruled 2026-08-02:
+/// "shouldn't the id property always be the classNameId?" Every
+/// file-expressed class conforms (soul 17/17, copia, File→fileId); the
+/// pattern-breakers (pool's cid, git2's sha) are machine-derived classes
+/// that never pass through frontmatter, documented non-cases. The name is
+/// validated against the class's DECLARED properties, so a class that
+/// ships no `<class>Id` property anchors nothing and says so — the
+/// lintable guarantee, now enforced at the kit level rather than by a
+/// per-class annotation. A classed file whose id VALUE is absent anchors
+/// NOTHING (facts stay on the File node) and warns: pre-migration corpora
+/// hit this constantly, and the warning is the Phase-4 work list.
+/// (Flipping that warning to a save-time reject is the post-migration
+/// step — see the identity model doc §2.3.)
 pub(crate) fn derive_file_subjects(
     spo_lines: &[String],
     relpath_str: &str,
-    ctx_id_props: &HashMap<String, String>,
     declared_props: &HashSet<String>,
     obj_props: &HashSet<String>,
     kit_namespaces: &HashMap<String, String>,
@@ -292,26 +290,28 @@ pub(crate) fn derive_file_subjects(
         return FileSubjects { file_uri, thing_uri: None, thing_key: None };
     };
 
-    // Law-3 declaration, else the fenced transitional convention.
-    let key = format!("{}/{}", kit, class);
-    let id_prop: Option<String> = match ctx_id_props.get(&key) {
-        Some(p) => Some(p.clone()),
-        None if ctx_id_props.is_empty() => {
-            let mut conv = class.clone();
-            if let Some(first) = conv.get_mut(0..1) {
-                let low = first.to_lowercase();
-                conv.replace_range(0..1, &low);
-            }
-            conv.push_str("Id");
-            let prop_key = format!("{}/{}/{}", kit, class, conv);
-            (declared_props.contains(&prop_key) || obj_props.contains(&prop_key))
-                .then_some(conv)
+    // Convention-as-law: id property = lowerFirst(Class) + "Id", valid
+    // only if the class actually declares it.
+    let id_prop = {
+        let mut conv = class.clone();
+        if let Some(first) = conv.get_mut(0..1) {
+            let low = first.to_lowercase();
+            conv.replace_range(0..1, &low);
         }
-        None => None, // declarations exist, this class has none — no anchor
+        conv.push_str("Id");
+        conv
     };
-    let Some(id_prop) = id_prop else {
+    let prop_key = format!("{}/{}/{}", kit, class, id_prop);
+    if !declared_props.contains(&prop_key) && !obj_props.contains(&prop_key) {
+        if warn {
+            eprintln!(
+                "warning: {relpath_str}: class {kit}.{class} declares no `{id_prop}` \
+                 property — files of this class cannot anchor Things (kit bug: every \
+                 file-expressed class must declare its `<class>Id`)"
+            );
+        }
         return FileSubjects { file_uri, thing_uri: None, thing_key: None };
-    };
+    }
 
     // Find the id value in this file's own lines.
     let id_line_key = format!("{}.{}.{}", kit, class, id_prop);
@@ -549,7 +549,6 @@ pub(crate) fn generate_frontmatter_nquads_with(
         let subjects = derive_file_subjects(
             &spo_lines,
             &relpath_str,
-            &ctx.id_props,
             &ctx.declared_props,
             &obj_props,
             &kit_namespaces,
@@ -1104,12 +1103,11 @@ mod tests {
             "README.md | linksTo | docs/intro.md".to_string(),
             "title | hasValue | hello".to_string(),
         ];
-        let id_props = HashMap::new();
         let declared = HashSet::new();
         let obj_props = HashSet::new();
         let namespaces = HashMap::new();
         let s = derive_file_subjects(
-            &lines, "README.md", &id_props, &declared, &obj_props, &namespaces, false,
+            &lines, "README.md", &declared, &obj_props, &namespaces, false,
         );
         assert_eq!(s.file_uri, "<https://repolex.ai/git-lex/File/README.md>");
         assert!(s.thing_uri.is_none());

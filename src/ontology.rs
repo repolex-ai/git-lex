@@ -622,86 +622,6 @@ fn parse_class_type_label(content: &str, short: &str, class_name: &str) -> Strin
     class_name.to_string()
 }
 
-/// The id-property annotation's local name (identity model Law 3: which
-/// property is a class's id is DECLARED in the ontology, never inferred
-/// from a name pattern). Kit TTLs author either form:
-///   soul:Journal git-lex:idProperty "journalId" .      # string form
-///   soul:Journal git-lex:idProperty soul:journalId .   # IRI form
-/// PROPOSED name (W4R3Z 2026-08-02) — this const is the single place it
-/// bakes; Rob rules the final name before the cutover release.
-pub(crate) const ID_PROPERTY_LOCAL: &str = "idProperty";
-
-/// `"{kit}/{Class}"` → id-property name, for every `git-lex:idProperty`
-/// declaration in every installed kit ontology TTL.
-///
-/// An EMPTY map is the pre-declaration state (no installed kit has had its
-/// Law-3 authoring pass yet) — `derive_file_subjects` then applies the
-/// TRANSITIONAL `<class>Id` name convention, validated against the class's
-/// actually-declared properties. The convention lane dies the moment any
-/// kit ships a declaration: from then on, undeclared classes anchor
-/// nothing and say so.
-pub(crate) fn get_id_properties_all_kits() -> HashMap<String, String> {
-    let mut out = HashMap::new();
-    let Some(root) = find_git_root() else { return out };
-    let ont_root = root.join(".lex").join("ontology");
-    let Ok(entries) = fs::read_dir(&ont_root) else { return out };
-    for e in entries.filter_map(|e| e.ok()) {
-        let dir = e.path();
-        if !dir.is_dir() { continue }
-        let Some(short) = dir.file_name().and_then(|n| n.to_str()).map(String::from) else { continue };
-        let ttl = dir.join(format!("{}.ttl", short));
-        let Ok(content) = fs::read_to_string(&ttl) else { continue };
-        for (class, prop) in parse_id_properties(&content, &short) {
-            out.insert(format!("{}/{}", short, class), prop);
-        }
-    }
-    out
-}
-
-/// Pure parser for `git-lex:idProperty` declarations in one kit TTL.
-/// Returns `(class_local_name, id_property_name)` pairs. Accepts a string
-/// literal (the property name) or a property IRI (its local tail is
-/// taken). Classes outside the kit's own namespace are skipped.
-fn parse_id_properties(content: &str, short: &str) -> Vec<(String, String)> {
-    let kit_ns = kit_namespace_of(content, short);
-    let gitlex_ns = match git_lex::extract_kit_prefix(content, "git-lex") {
-        Some((name, ns)) if name == "git-lex" => ns,
-        _ => git_lex::conventional_kit_namespace("git-lex"),
-    };
-    let store = match crate::kit::load_ttl_str(content, &format!("{} ontology", short)) {
-        Ok(s) => s,
-        Err(e) => {
-            eprintln!("warning: {} — id-property declarations unreadable", e);
-            return Vec::new();
-        }
-    };
-    let q = format!(
-        "SELECT ?c ?p WHERE {{ ?c <{}{}> ?p }}",
-        gitlex_ns, ID_PROPERTY_LOCAL
-    );
-    let mut out = Vec::new();
-    if let Ok(oxigraph::sparql::QueryResults::Solutions(sols)) = git_lex::eval_query(&store, &q) {
-        for s in sols.flatten() {
-            let Some(Term::NamedNode(c)) = s.get("c") else { continue };
-            let Some(class) = c.as_str().strip_prefix(kit_ns.as_str()) else { continue };
-            let prop = match s.get("p") {
-                Some(Term::Literal(l)) => l.value().to_string(),
-                Some(Term::NamedNode(p)) => p
-                    .as_str()
-                    .rsplit(['/', '#'])
-                    .next()
-                    .unwrap_or_default()
-                    .to_string(),
-                _ => continue,
-            };
-            if !class.is_empty() && !prop.is_empty() {
-                out.push((class.to_string(), prop));
-            }
-        }
-    }
-    out
-}
-
 /// Kit namespace declared in TTL content, via the ONE shared `@prefix`
 /// scanner; conventional pattern only when nothing declares.
 fn kit_namespace_of(content: &str, short: &str) -> String {
@@ -746,32 +666,6 @@ fn parse_class_foldered(content: &str, short: &str, class_name: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// Law-3 id-property declarations parse in both authoring forms —
-    /// string literal and property IRI — and classes outside the kit's own
-    /// namespace are skipped.
-    #[test]
-    fn parse_id_properties_both_forms() {
-        let ttl = r#"
-@prefix soul: <https://repolex.ai/ontology/soul/> .
-@prefix git-lex: <https://repolex.ai/ontology/git-lex/> .
-@prefix owl: <http://www.w3.org/2002/07/owl#> .
-
-soul: a owl:Ontology .
-soul:Journal a owl:Class ; git-lex:idProperty "journalId" .
-soul:Soul a owl:Class ; git-lex:idProperty soul:soulId .
-<https://example.org/other/Thing> git-lex:idProperty "otherId" .
-"#;
-        let mut pairs = parse_id_properties(ttl, "soul");
-        pairs.sort();
-        assert_eq!(
-            pairs,
-            vec![
-                ("Journal".to_string(), "journalId".to_string()),
-                ("Soul".to_string(), "soulId".to_string()),
-            ]
-        );
-    }
 
     const KIT_COPIA_SAMPLE: &str = r#"
 @prefix copia: <https://repolex.ai/ontology/kit/copia/> .

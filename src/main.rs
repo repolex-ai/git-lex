@@ -992,7 +992,7 @@ fn cmd_extract() {
                 let content = std::fs::read_to_string(&path).unwrap_or_default();
                 let lines: Vec<String> = content.lines().map(String::from).collect();
                 let subjects = nquad::derive_file_subjects(
-                    &lines, src, &ctx.id_props, &ctx.declared_props,
+                    &lines, src, &ctx.declared_props,
                     &ctx.obj_props, &ctx.kit_namespaces, false,
                 );
                 if let Some(thing) = subjects.thing_uri {

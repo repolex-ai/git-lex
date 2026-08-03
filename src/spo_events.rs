@@ -964,7 +964,6 @@ pub(crate) fn onegraph_walk_engine(
         let subjects = crate::nquad::derive_file_subjects(
             &lines,
             &relpath_str,
-            &ctx.id_props,
             &ctx.declared_props,
             &ctx.obj_props,
             &ctx.kit_namespaces,
