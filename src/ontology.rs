@@ -630,6 +630,62 @@ fn kit_namespace_of(content: &str, short: &str) -> String {
         .unwrap_or_else(|| git_lex::conventional_kit_namespace(short))
 }
 
+/// Law-6 reference ranges: `"{kit}/{prop}"` → the range CLASS IRI, for
+/// every `owl:ObjectProperty` with a non-XSD `rdfs:range` in every
+/// installed kit ontology TTL. This is what turns a declared reference
+/// (copia:lookBeingId, range copia:Being) into id→IRI resolution at
+/// emission: the authored value is the TARGET'S id; the emitter derives
+/// `<range-app>/<RangeClass>/<id>`. Property-level (ranges live on the
+/// property, not the shape) — the emitter pairs it with the class-
+/// qualified obj_props membership test it already does.
+pub(crate) fn get_reference_ranges_all_kits() -> HashMap<String, String> {
+    let mut out = HashMap::new();
+    let Some(root) = find_git_root() else { return out };
+    let ont_root = root.join(".lex").join("ontology");
+    let Ok(entries) = fs::read_dir(&ont_root) else { return out };
+    for e in entries.filter_map(|e| e.ok()) {
+        let dir = e.path();
+        if !dir.is_dir() { continue }
+        let Some(short) = dir.file_name().and_then(|n| n.to_str()).map(String::from) else { continue };
+        let ttl = dir.join(format!("{}.ttl", short));
+        let Ok(content) = fs::read_to_string(&ttl) else { continue };
+        for (prop, range) in parse_reference_ranges(&content, &short) {
+            out.insert(format!("{}/{}", short, prop), range);
+        }
+    }
+    out
+}
+
+/// Pure parser for object-property ranges in one kit TTL. Returns
+/// `(property_local_name, range_class_iri)` pairs; XSD ranges and
+/// properties outside the kit's own namespace are skipped.
+fn parse_reference_ranges(content: &str, short: &str) -> Vec<(String, String)> {
+    let kit_ns = kit_namespace_of(content, short);
+    let store = match crate::kit::load_ttl_str(content, &format!("{} ontology", short)) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("warning: {} — reference ranges unreadable", e);
+            return Vec::new();
+        }
+    };
+    let q = "SELECT ?p ?r WHERE { \
+             ?p <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> \
+                <http://www.w3.org/2002/07/owl#ObjectProperty> ; \
+                <http://www.w3.org/2000/01/rdf-schema#range> ?r }";
+    let mut out = Vec::new();
+    if let Ok(oxigraph::sparql::QueryResults::Solutions(sols)) = git_lex::eval_query(&store, q) {
+        for s in sols.flatten() {
+            let (Some(Term::NamedNode(p)), Some(Term::NamedNode(r))) = (s.get("p"), s.get("r")) else { continue };
+            let Some(prop) = p.as_str().strip_prefix(kit_ns.as_str()) else { continue };
+            if prop.is_empty() || r.as_str().starts_with("http://www.w3.org/2001/XMLSchema#") {
+                continue;
+            }
+            out.push((prop.to_string(), r.as_str().to_string()));
+        }
+    }
+    out
+}
+
 /// Pure parser for the `git-lex:foldered` flag lookup.
 /// Separated from filesystem I/O so it can be unit-tested directly.
 ///
@@ -666,6 +722,33 @@ fn parse_class_foldered(content: &str, short: &str, class_name: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Law-6 range parsing, pinned to tr1p's staged copia FK flip
+    /// (repolex-ai/copia train/re-anchor c4b325f): ObjectProperties with a
+    /// kit-class range parse; XSD ranges and other kits' properties skip.
+    #[test]
+    fn parse_reference_ranges_pins_staged_copia_shapes() {
+        let ttl = r#"
+@prefix copia: <https://repolex.ai/ontology/copia/> .
+@prefix owl: <http://www.w3.org/2002/07/owl#> .
+@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+@prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
+
+copia: a owl:Ontology .
+copia:lookBeingId a owl:ObjectProperty ; rdfs:range copia:Being .
+copia:lookMomentId a owl:ObjectProperty ; rdfs:range copia:Moment .
+copia:firstVisited a owl:DatatypeProperty ; rdfs:range xsd:date .
+"#;
+        let mut pairs = parse_reference_ranges(ttl, "copia");
+        pairs.sort();
+        assert_eq!(
+            pairs,
+            vec![
+                ("lookBeingId".to_string(), "https://repolex.ai/ontology/copia/Being".to_string()),
+                ("lookMomentId".to_string(), "https://repolex.ai/ontology/copia/Moment".to_string()),
+            ]
+        );
+    }
 
     const KIT_COPIA_SAMPLE: &str = r#"
 @prefix copia: <https://repolex.ai/ontology/kit/copia/> .

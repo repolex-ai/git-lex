@@ -193,6 +193,12 @@ pub(crate) struct ResolverContext {
     /// the whole history walk — correct because only repos BORN under
     /// Obsidian semantics (or fully migrated in Phase 4) carry the stamp.
     pub obsidian_links: bool,
+    /// Law-6 reference ranges: "{kit}/{prop}" → range class IRI, from
+    /// installed kit TTLs (owl:ObjectProperty + non-XSD rdfs:range). A
+    /// declared range makes the property's authored value a TARGET ID,
+    /// resolved to `<range-app>/<RangeClass>/<id>` at emission; without
+    /// one, the legacy path/IRI resolver applies (resolve.rs).
+    pub ref_ranges: HashMap<String, String>,
 }
 
 impl ResolverContext {
@@ -207,8 +213,28 @@ impl ResolverContext {
             declared_props: crate::ontology::get_declared_properties_all_kits(),
             kit_namespaces: get_kit_namespaces_all_kits(),
             obsidian_links: git_lex::RepoYml::load(root).obsidian_links(),
+            ref_ranges: crate::ontology::get_reference_ranges_all_kits(),
         }
     }
+}
+
+/// A Thing IRI derived from a range CLASS IRI + a bare target id:
+/// `https://repolex.ai/ontology/copia/Being` + `lux`
+/// → `https://repolex.ai/copia/Being/lux` (universal instance law; the
+/// class's own namespace decides the application, so cross-kit ranges
+/// resolve into the right id-space). Returns the bracketed IRI.
+pub(crate) fn thing_iri_from_range(range_class_iri: &str, id: &str) -> Option<String> {
+    let split = range_class_iri.rfind('/')?;
+    let (ns, class) = range_class_iri.split_at(split + 1);
+    if class.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "<{}{}/{}>",
+        app_base_from_kit_ns(ns),
+        class,
+        uri_encode_path(id)
+    ))
 }
 
 /// The per-file subject anchors of the two identity planes (identity model
@@ -581,6 +607,7 @@ pub(crate) fn generate_frontmatter_nquads_with(
                 &prop_datatypes,
                 &ctx.declared_props,
                 &kit_namespaces,
+                &ctx.ref_ranges,
                 ctx.obsidian_links,
                 &mut emitted_types,
                 &mut nq,
@@ -647,6 +674,7 @@ pub(crate) fn emit_spo_line_nquads(
     prop_datatypes: &HashMap<String, String>,
     declared_props: &HashSet<String>,
     kit_namespaces: &HashMap<String, String>,
+    ref_ranges: &HashMap<String, String>,
     obsidian_links: bool,
     emitted_types: &mut HashSet<String>,
     out: &mut String,
@@ -812,11 +840,34 @@ pub(crate) fn emit_spo_line_nquads(
 
             // Check if this is an ObjectProperty (from ontology) → resolve as IRI
             if lookup_key.as_ref().is_some_and(|k| obj_props.contains(k)) {
-                // ObjectProperty: split on commas, resolve each value
-                // via the canonical resolver (see src/resolve.rs).
+                // Law 6 (identity model): a DECLARED RANGE makes the
+                // authored value the TARGET'S ID — resolution is declared,
+                // never guessed: id → the range class's id-space → one
+                // Thing IRI. Deterministic at every commit, dangling or
+                // not (existence is the save gate's job, not derivation's).
+                let range = ref_ranges.get(&format!("{}/{}", kit_name, prop_seg));
                 let values: Vec<&str> = object.split(',').map(|s| s.trim()).filter(|s| !s.is_empty()).collect();
                 for val in values {
                     if val.is_empty() { continue; }
+                    if let Some(range_iri) = range {
+                        match thing_iri_from_range(range_iri, val) {
+                            Some(target) => {
+                                out.push_str(&format!(
+                                    "{} {} {} {} .\n",
+                                    line_subject, kit_predicate, target, graph
+                                ));
+                            }
+                            None => {
+                                eprintln!(
+                                    "error: {}: {} — declared range `{}` is not a resolvable class IRI",
+                                    relpath_str, prop_seg, range_iri
+                                );
+                                errors += 1;
+                            }
+                        }
+                        continue;
+                    }
+                    // No declared range: the legacy path/IRI resolver.
                     match resolve::resolve_frontmatter_value(val) {
                         resolve::ResolveResult::Iri(uri) => {
                             out.push_str(&format!(
@@ -1030,6 +1081,7 @@ mod tests {
         let mut namespaces: HashMap<String, String> = HashMap::new();
         // The flip case: soul declares the migrated (kit-less) namespace.
         namespaces.insert("soul".into(), "https://repolex.ai/ontology/soul/".into());
+        let ranges: HashMap<String, String> = HashMap::new();
 
         let mut types = HashSet::new();
         let mut out = String::new();
@@ -1044,7 +1096,7 @@ mod tests {
             &subjects,
             "<https://repolex.ai/git-lex/NamedGraph/now>",
             "Journal/day-1.md",
-            &empty_paths, &obj_props, &datatypes, &declared, &namespaces, false,
+            &empty_paths, &obj_props, &datatypes, &declared, &namespaces, &ranges, false,
             &mut types, &mut out,
         );
         assert!(
@@ -1065,13 +1117,34 @@ mod tests {
             &subjects2,
             "<https://repolex.ai/git-lex/NamedGraph/now>",
             "friend/selkie.md",
-            &empty_paths, &obj_props, &datatypes, &declared, &namespaces, false,
+            &empty_paths, &obj_props, &datatypes, &declared, &namespaces, &ranges, false,
             &mut types, &mut out2,
         );
         assert!(
             out2.contains("<https://repolex.ai/ontology/copia/beingName>"),
             "undeclared kit must use the conventional (app-tier) fallback, got: {out2}"
         );
+    }
+
+    /// Law-6 id→IRI derivation: range class IRI + bare target id → the
+    /// Thing IRI in the range class's own application id-space. Pinned to
+    /// tr1p's staged copia shapes (train/re-anchor c4b325f).
+    #[test]
+    fn thing_iri_from_range_derives_target_id_space() {
+        assert_eq!(
+            thing_iri_from_range("https://repolex.ai/ontology/copia/Being", "lux").as_deref(),
+            Some("<https://repolex.ai/copia/Being/lux>")
+        );
+        assert_eq!(
+            thing_iri_from_range("https://repolex.ai/ontology/copia/Moment", "abc123").as_deref(),
+            Some("<https://repolex.ai/copia/Moment/abc123>")
+        );
+        // ids get IRI-encoded; malformed range yields None, never a panic.
+        assert_eq!(
+            thing_iri_from_range("https://repolex.ai/ontology/soul/Being", "a b").as_deref(),
+            Some("<https://repolex.ai/soul/Being/a%20b>")
+        );
+        assert!(thing_iri_from_range("no-slashes", "x").is_none());
     }
 
     /// The a-box base derives from the kit's ontology namespace by dropping

@@ -975,6 +975,7 @@ fn cmd_extract() {
     if let (Some(root), Some(ctx)) = (&ctx_root, &extract_ctx) {
         let mut id_errors = 0usize;
         let mut owners: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+        let mut all_sidecars: Vec<(String, Vec<String>)> = Vec::new();
         let mut stack = vec![root.join(".lex").join("extract")];
         while let Some(dir) = stack.pop() {
             let Ok(entries) = std::fs::read_dir(&dir) else { continue };
@@ -1007,6 +1008,7 @@ fn cmd_extract() {
                         owners.insert(thing, src.to_string());
                     }
                 }
+                all_sidecars.push((src.to_string(), lines));
             }
         }
         if id_errors > 0 {
@@ -1014,6 +1016,54 @@ fn cmd_extract() {
             std::process::exit(1);
         }
         eprintln!("Identity gate: {} Thing id(s) unique ✓", owners.len());
+
+        // Law 6, save-side: a declared reference whose range class is
+        // FILE-EXPRESSED IN THIS REPO (foldered) must point at a Thing
+        // that exists here — dangling rejects at save, same posture as
+        // the path law. Graph-only ranges (Moment, …) skip the existence
+        // check: their id-spaces live in engine stores, which own their
+        // own integrity; the IRI still derives deterministically.
+        let mut ref_errors = 0usize;
+        let mut foldered_cache: std::collections::HashMap<String, bool> = std::collections::HashMap::new();
+        for (src, lines) in &all_sidecars {
+            for line in lines {
+                let parts: Vec<&str> = line.splitn(3, " | ").collect();
+                if parts.len() != 3 || parts[1] != "hasValue" || parts[2].trim().is_empty() {
+                    continue;
+                }
+                let segs: Vec<&str> = parts[0].splitn(3, '.').collect();
+                if segs.len() != 3 {
+                    continue;
+                }
+                let Some(range_iri) = ctx.ref_ranges.get(&format!("{}/{}", segs[0], segs[2])) else { continue };
+                let enforce = *foldered_cache.entry(range_iri.clone()).or_insert_with(|| {
+                    let Some(cut) = range_iri.rfind('/') else { return false };
+                    let (ns, class) = range_iri.split_at(cut + 1);
+                    let kit_short = ns.trim_end_matches('/').rsplit('/').next().unwrap_or("");
+                    !kit_short.is_empty() && !class.is_empty()
+                        && ontology::get_class_foldered(kit_short, class)
+                });
+                if !enforce {
+                    continue;
+                }
+                for val in parts[2].split(',').map(|v| v.trim()).filter(|v| !v.is_empty()) {
+                    if let Some(target) = nquad::thing_iri_from_range(range_iri, val) {
+                        if !owners.contains_key(&target) {
+                            eprintln!(
+                                "identity gate: {}: `{}` references `{}` but no Thing {} exists \
+                                 in this repo — dangling references reject at save (Law 6)",
+                                src, parts[0], val, target
+                            );
+                            ref_errors += 1;
+                        }
+                    }
+                }
+            }
+        }
+        if ref_errors > 0 {
+            eprintln!("fatal: identity gate: {} dangling reference(s)", ref_errors);
+            std::process::exit(1);
+        }
     }
 
     if extraction_errors > 0 {
