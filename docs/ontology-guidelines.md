@@ -44,6 +44,37 @@ person who reads the graph after you. So:
   `https://repolex.ai/copia/Being/w4r3z`. The a-box is the t-box minus
   `ontology/`.
 
+### 2a. Banned words
+
+These are not discouraged, they are **banned**. Each was banned by ruling after
+it caused a real problem, and each has a replacement that says more.
+
+| Banned | Why | Instead |
+|---|---|---|
+| `kind` | Not descriptive, and it gets thrown onto everything — a `kind` field tells you a discrimination happened without saying along what axis. | Name the axis (`substrate`, `severity`, `encoding`). But first check §2b: usually the class already carries it. |
+| `mint`, `minted` | Implies a value is conjured rather than computed, which hides whether a rebuild reproduces it. Only a commit is ever minted. | `derived` when it's computed from source, `assigned` when it's allocated once and recorded (Pan's `panId`). |
+| `ledger` | Says "list of entries" and nothing about what the entries *are* or when they're true. | Name the event (`SpoEvent`) or the graph (`LexHistoryGraph`). |
+| `type`, `data`, `status`, `info`, `meta`, `value` — **alone** | Generic words say nothing on their own. | Scope them (`health`, not `status`) or don't ship them. Same rule as [Kit ontology design §10](kit-ontology.md#10-naming-rules-short-absolute). |
+
+### 2b. Before you add a discriminator, check what already holds it
+
+A field that answers "what sort of thing is this?" is usually the third copy of
+a fact you already store twice. Before declaring one, ask:
+
+1. **Does the class already say it?** If instances are typed
+   `rdf:type app:Image`, then "which images" is already a one-line query and
+   the class IS the answer. A parallel field can now disagree with it — and
+   the moment two places can disagree, one of them will.
+2. **Does an existing standard field already contain it?** Coarse values are
+   often a *prefix* of a precise one you already keep. Splitting the precise
+   value costs nothing and can never drift; storing the prefix separately can.
+3. **If it survives both questions**, it is a real, independent fact — so name
+   it for what it actually holds, per §2a.
+
+The general form of this rule: **declare once, derive the rest.** A derived
+value can be recomputed and can't rot. A stored duplicate is a drift source
+with a maintenance schedule.
+
 ## 3. The identity law
 
 > **Every foldered class declares its own identity property, named
@@ -72,6 +103,57 @@ copia:setId a owl:DatatypeProperty ;
   hard way: copia's `Set`/`Sequence` once inherited `groupId` from abstract
   `Group`, and every Set anchored to nothing until v0.27 gave each class its
   own id.
+
+### 3a. Which class owns the id: follow the identity event
+
+The rule above says identity is never inherited. The question it doesn't
+answer is *which* class declares it when a hierarchy is involved — and the
+answer is not "the most specific one," it's:
+
+> **Identity belongs to the class that owns the identity event.**
+
+Ask: *when is identity assigned, and by what event?* Put the id property
+there.
+
+- **Authored documents** — the identity event is "a file was written." The
+  foldered class owns it; the file **is** the thing and the filename **is**
+  the id. That's where §3 comes from.
+- **Stores and engines** — the identity event is "an object entered the
+  store." The base class owns it. Pan assigns a `panId` at put — to *bytes*,
+  before and independent of what those bytes turn out to be — so `panId` lives
+  on `pan:Media`, while `pan:Image` / `pan:Audio` / `pan:Video` carry only
+  their divergent metadata and declare no id of their own.
+
+The decisive argument is what happens to a **reclassification**. Split
+identity per subclass and a mislabeled `.heic` that turns out to be video must
+retract `imageId` and assert `videoId` — identity churn caused by a
+*classification correction*, for an object whose identity never changed. In an
+append-only store that is exactly backwards. **Subclassing describes what a
+thing turned out to be; it never creates a new identity.**
+
+Subclass freely for the metadata, though — genuinely different property sets
+(`duration` on video and audio, dimensions on image and video, `pageCount` on
+documents) are what subclassing is *for*. One flat class carrying a union of
+mostly-inapplicable optional fields is the open-domain smell, and it costs you
+SHACL: you cannot say "duration is required for video" if everything is one
+class.
+
+Two things follow, one settled and one deliberately not:
+
+- **The id's NAME is a ruling, not a derivation.** `<class>Id` is the default,
+  but stored-data naming is the project owner's call, and where the two
+  diverge the ruling wins. `panId` on `pan:Media` is the precedent: `mediaId`
+  was the mechanical answer, was argued for on consistency grounds, and was
+  rejected — a thing in Pan has a `panId`. Follow the stamp, then write it
+  down here.
+- **Whether a hierarchy ALSO carries a coarse type field is not a question
+  this page answers.** Once the class carries the kind, a parallel
+  `type`/`kind` field may be redundant, may be wanted at an API boundary, or
+  may be the right home for a different fact entirely (an encoding, say —
+  `image/png` is information no class split carries). Those are different
+  answers with different names, and the choice is the project owner's, per
+  the bullet above. Don't default it, don't infer it from the class split, and
+  don't let a proposal become a convention by being written down. Ask.
 
 ## 4. The four kinds of id-valued properties
 
