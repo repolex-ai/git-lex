@@ -852,11 +852,23 @@ fn hook_pre_commit() {
     // with sidecars that no longer match the .md content — the history
     // history build diffs COMMITTED sidecars, so that divergence would be
     // permanent and silent. Fail the commit instead.
-    let staged = Command::new("git").args(["add", ".lex/extract/"]).status()
+    //
+    // Exception: a repo that gitignores .lex/ has declared its artifacts
+    // machine-local (the git-lex code repo dogfoods this way) — nothing is
+    // committed, so no committed-sidecar divergence is possible. Skip
+    // staging rather than fatal on `git add` refusing an ignored path,
+    // which broke every commit in such repos (2026-08-04).
+    let lex_ignored = Command::new("git").args(["check-ignore", "-q", ".lex"]).status()
         .map(|s| s.success()).unwrap_or(false);
-    if !staged {
-        eprintln!("fatal: failed to stage extraction artifacts (.lex/extract/)");
-        exit(1);
+    if lex_ignored {
+        println!(".lex/ is gitignored here — extraction artifacts stay local, not staged.");
+    } else {
+        let staged = Command::new("git").args(["add", ".lex/extract/"]).status()
+            .map(|s| s.success()).unwrap_or(false);
+        if !staged {
+            eprintln!("fatal: failed to stage extraction artifacts (.lex/extract/)");
+            exit(1);
+        }
     }
 
     // Phase 2: SHACL validation

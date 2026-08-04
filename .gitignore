@@ -7,4 +7,6 @@
 .pool/
 .copia/
 .weave/
+.ravel/
+.pan/
 # <<< git-lex engine runtime (managed) <<<
