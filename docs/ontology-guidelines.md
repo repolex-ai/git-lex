@@ -107,19 +107,22 @@ mostly-inapplicable optional fields is the open-domain smell, and it costs you
 SHACL: you cannot say "duration is required for video" if everything is one
 class.
 
-Two corollaries:
+Two things follow, one settled and one deliberately not:
 
-- **The class is the kind — but encoding is not kind.** A coarse
-  `type`/`kind` enum sitting beside real subclasses is redundant (the class
-  already says it; derive the field for API responses rather than storing it).
-  An *encoding* field is a different fact and survives: `pan:mediaType` holds
-  the MIME type (`image/png`), because png-vs-webp is information no class
-  split carries.
 - **The id's NAME is a ruling, not a derivation.** `<class>Id` is the default,
   but stored-data naming is the project owner's call, and where the two
   diverge the ruling wins. `panId` on `pan:Media` is the precedent: `mediaId`
-  was the mechanical answer, was considered, and was rejected — a thing in Pan
-  has a `panId`. Follow the stamp, then write it down here.
+  was the mechanical answer, was argued for on consistency grounds, and was
+  rejected — a thing in Pan has a `panId`. Follow the stamp, then write it
+  down here.
+- **Whether a hierarchy ALSO carries a coarse type field is not a question
+  this page answers.** Once the class carries the kind, a parallel
+  `type`/`kind` field may be redundant, may be wanted at an API boundary, or
+  may be the right home for a different fact entirely (an encoding, say —
+  `image/png` is information no class split carries). Those are different
+  answers with different names, and the choice is the project owner's, per
+  the bullet above. Don't default it, don't infer it from the class split, and
+  don't let a proposal become a convention by being written down. Ask.
 
 ## 4. The four kinds of id-valued properties
 
