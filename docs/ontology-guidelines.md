@@ -44,6 +44,37 @@ person who reads the graph after you. So:
   `https://repolex.ai/copia/Being/w4r3z`. The a-box is the t-box minus
   `ontology/`.
 
+### 2a. Banned words
+
+These are not discouraged, they are **banned**. Each was banned by ruling after
+it caused a real problem, and each has a replacement that says more.
+
+| Banned | Why | Instead |
+|---|---|---|
+| `kind` | Not descriptive, and it gets thrown onto everything — a `kind` field tells you a discrimination happened without saying along what axis. | Name the axis (`substrate`, `severity`, `encoding`). But first check §2b: usually the class already carries it. |
+| `mint`, `minted` | Implies a value is conjured rather than computed, which hides whether a rebuild reproduces it. Only a commit is ever minted. | `derived` when it's computed from source, `assigned` when it's allocated once and recorded (Pan's `panId`). |
+| `ledger` | Says "list of entries" and nothing about what the entries *are* or when they're true. | Name the event (`SpoEvent`) or the graph (`LexHistoryGraph`). |
+| `type`, `data`, `status`, `info`, `meta`, `value` — **alone** | Generic words say nothing on their own. | Scope them (`health`, not `status`) or don't ship them. Same rule as [Kit ontology design §10](kit-ontology.md#10-naming-rules-short-absolute). |
+
+### 2b. Before you add a discriminator, check what already holds it
+
+A field that answers "what sort of thing is this?" is usually the third copy of
+a fact you already store twice. Before declaring one, ask:
+
+1. **Does the class already say it?** If instances are typed
+   `rdf:type app:Image`, then "which images" is already a one-line query and
+   the class IS the answer. A parallel field can now disagree with it — and
+   the moment two places can disagree, one of them will.
+2. **Does an existing standard field already contain it?** Coarse values are
+   often a *prefix* of a precise one you already keep. Splitting the precise
+   value costs nothing and can never drift; storing the prefix separately can.
+3. **If it survives both questions**, it is a real, independent fact — so name
+   it for what it actually holds, per §2a.
+
+The general form of this rule: **declare once, derive the rest.** A derived
+value can be recomputed and can't rot. A stored duplicate is a drift source
+with a maintenance schedule.
+
 ## 3. The identity law
 
 > **Every foldered class declares its own identity property, named
