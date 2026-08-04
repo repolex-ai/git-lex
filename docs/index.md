@@ -15,6 +15,7 @@ became true and when it stopped*.
 - [Kits](kits.md) — the vocabulary packs that define your document types
 - [Kit authoring](kit-authoring.md) — building kits: layout, file ownership, the full hook development flow
 - [Kit ontology design](kit-ontology.md) — defining your document types: classes, ids, enums, references
+- [Ontology guidelines](ontology-guidelines.md) — the naming and identifier standard: the identity law, the four kinds of id-valued properties, reference naming
 - [Hook authoring](hook-authoring.md) — placeholder; hook material lives in Kit authoring §3 until the docs pass
 - [History](history.md) — how git-lex remembers everything that ever changed
 - [Querying](queries.md) — SPARQL over your repo, with worked examples
