@@ -499,11 +499,13 @@ pub(crate) fn cmd_kit_update(kit_arg: Option<String>) {
 /// of the Subtexture engines. These hold index stores, embeddings, HNSW
 /// indexes, and media roots — heavy, high-churn, machine-local, never
 /// committed. Current engines per the ravel git-lex mode spec (2026_08_01):
-/// `.copia/`, `.pan/`, `.ravel/`. The pre-rename dirs `.pool/` and `.weave/`
-/// stay listed until retirement is ruled — a dead ignore entry is free, but a
-/// missing live one commits someone's store (th34's day-one repo vacuumed
-/// 1.4MB of .ravel/ RocksDB before ".ravel/" was here).
-const ENGINE_GITIGNORE_DIRS: &[&str] = &[".pool/", ".copia/", ".weave/", ".ravel/", ".pan/"];
+/// `.copia/`, `.pan/`, `.ravel/`. Pre-rename `.pool/` stays until the full
+/// Pool→Pan conversion (Rob, 2026-08-04); `.weave/` retired same day after a
+/// fleet sweep found zero on-disk and zero tracked dirs. Removing a live
+/// entry commits someone's store at their next save (th34's day-one repo
+/// vacuumed 1.4MB of .ravel/ RocksDB before ".ravel/" was here) — sweep
+/// before you drop.
+const ENGINE_GITIGNORE_DIRS: &[&str] = &[".pool/", ".copia/", ".ravel/", ".pan/"];
 
 const ENGINE_GITIGNORE_BEGIN: &str = "# >>> git-lex engine runtime (managed) >>>";
 const ENGINE_GITIGNORE_END: &str = "# <<< git-lex engine runtime (managed) <<<";
