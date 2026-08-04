@@ -30,6 +30,71 @@ use crate::git::graph_uri;
 /// sidecar value, splitting one triple across two physical lines and
 /// aborting sync (Selkie's day-10 transcript, 2026-07-30).
 pub(crate) const WIKILINK_PATTERN: &str = r"\[\[([^\]\n]+)\]\]";
+
+/// Blank out fenced code blocks and inline code spans before the wikilink
+/// scan: backticked text is quotation, not linkage. A doc ABOUT the link
+/// rules must be able to show a literal `[[..]]` without creating a link —
+/// the kit's Harness/Memory README did exactly that and fataled every
+/// fresh `init` under Obsidian semantics (2026-08-03, Rob-ruled fix B).
+/// Masked characters become spaces; newlines survive so nothing shifts.
+pub(crate) fn mask_code_spans(text: &str) -> String {
+    // Fenced blocks first (line-based, CommonMark): an opening fence of N
+    // backticks/tildes closes only on a same-char run of >= N.
+    let mut fenced = String::with_capacity(text.len());
+    let mut fence: Option<(char, usize)> = None;
+    for line in text.split_inclusive('\n') {
+        let trimmed = line.trim_start();
+        let fence_here = ['`', '~'].iter().copied().find_map(|c| {
+            let n = trimmed.chars().take_while(|&x| x == c).count();
+            (n >= 3).then_some((c, n))
+        });
+        let blank = match (fence, fence_here) {
+            (None, Some(open)) => { fence = Some(open); true }
+            (Some((c, n)), Some((c2, n2))) if c2 == c && n2 >= n => { fence = None; true }
+            (Some(_), _) => true,
+            (None, None) => false,
+        };
+        if blank {
+            fenced.extend(line.chars().map(|ch| if ch == '\n' { '\n' } else { ' ' }));
+        } else {
+            fenced.push_str(line);
+        }
+    }
+    // Inline code spans: a run of N backticks closes at the next run of
+    // exactly N (CommonMark; spans may cross lines). An unclosed run is
+    // literal text and masks nothing.
+    let chars: Vec<char> = fenced.chars().collect();
+    let mut out = String::with_capacity(fenced.len());
+    let mut i = 0;
+    while i < chars.len() {
+        if chars[i] != '`' {
+            out.push(chars[i]);
+            i += 1;
+            continue;
+        }
+        let start = i;
+        while i < chars.len() && chars[i] == '`' { i += 1; }
+        let n = i - start;
+        let mut j = i;
+        let mut close_end = None;
+        while j < chars.len() {
+            if chars[j] == '`' {
+                let cstart = j;
+                while j < chars.len() && chars[j] == '`' { j += 1; }
+                if j - cstart == n { close_end = Some(j); break; }
+            } else {
+                j += 1;
+            }
+        }
+        if let Some(end) = close_end {
+            out.extend(chars[start..end].iter().map(|&ch| if ch == '\n' { '\n' } else { ' ' }));
+            i = end;
+        } else {
+            out.extend(&chars[start..i]);
+        }
+    }
+    out
+}
 use crate::extraction::{flatten_yaml, normalize_wikilink_path};
 use crate::ontology::{get_kit_namespaces_all_kits, get_object_properties_all_kits,
                        get_property_datatypes_all_kits};
@@ -536,7 +601,8 @@ pub(crate) fn generate_frontmatter_nquads_with(
         // root-anchored link to doc-relative. Canonical-form unification is
         // a path-law decision (Rob's), not an extraction-time rewrite.
         let mut links_seen = HashSet::new();
-        for cap in wikilink_re.captures_iter(&body_text) {
+        let scannable_body = mask_code_spans(&body_text);
+        for cap in wikilink_re.captures_iter(&scannable_body) {
             let link = cap[1].to_string();
             if links_seen.insert(link.clone()) {
                 spo_lines.push(format!("{} | linksTo | {}", relpath_str, link));
@@ -628,7 +694,8 @@ pub(crate) fn generate_frontmatter_nquads_with(
                 let (sha, message) = (parts[0], parts[1]);
                 let commit_uri = format!("<{}>", crate::git2_nquads::git2_uri(&format!("Commit/{}", sha)));
 
-                for cap in wikilink_re.captures_iter(message) {
+                let scannable_message = mask_code_spans(message);
+                for cap in wikilink_re.captures_iter(&scannable_message) {
                     let link = &cap[1];
                     nq.push_str(&format!(
                         "{} <https://repolex.ai/ontology/git-lex/md/linksTo> \"{}\" {} .\n",
@@ -1240,5 +1307,37 @@ mod wikilink_pattern_tests {
         let re = regex::Regex::new(WIKILINK_PATTERN).unwrap();
         let cap = re.captures("see [[/Soul/Note/x.md]]").unwrap();
         assert_eq!(&cap[1], "/Soul/Note/x.md");
+    }
+
+    /// PIN: backticked text is quotation, not linkage. The kit's
+    /// Harness/Memory README shows a literal `[[..]]` while documenting
+    /// the write-gate rule; scanning it as a link fataled every fresh
+    /// `init` under Obsidian semantics (birth blocker, 2026-08-03).
+    #[test]
+    fn code_spans_never_link() {
+        use super::mask_code_spans;
+        let re = regex::Regex::new(WIKILINK_PATTERN).unwrap();
+
+        // The exact birth-blocker shape: inline code in prose.
+        let readme = "no `[[..]]` in a frontmatter value. The gate names it.";
+        assert!(re.captures(&mask_code_spans(readme)).is_none());
+
+        // Fenced block, any info string; link outside the fence survives.
+        let fenced = "see [[Soul/Note/x.md]]\n```markdown\n[[Class/id]]\n```\n";
+        let masked = mask_code_spans(fenced);
+        let links: Vec<_> = re.captures_iter(&masked).map(|c| c[1].to_string()).collect();
+        assert_eq!(links, vec!["Soul/Note/x.md"]);
+
+        // Double-backtick span holding a single backtick + link inside.
+        let double = "quote `` ` [[x]] `` end, real [[y]] after";
+        let links: Vec<_> = re.captures_iter(&mask_code_spans(double)).map(|c| c[1].to_string()).collect();
+        assert_eq!(links, vec!["y"]);
+
+        // An UNCLOSED backtick is literal text and masks nothing.
+        let unclosed = "stray ` tick then [[real/link]] here";
+        assert!(re.captures(&mask_code_spans(unclosed)).is_some());
+
+        // Masking preserves newlines so nothing shifts lines.
+        assert_eq!(mask_code_spans("a\n```\nb\n```\nc").matches('\n').count(), 4);
     }
 }
