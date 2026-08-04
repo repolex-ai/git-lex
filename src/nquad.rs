@@ -95,6 +95,18 @@ pub(crate) fn mask_code_spans(text: &str) -> String {
     }
     out
 }
+/// A wikilink capture may carry an Obsidian alias — `[[target|display]]`.
+/// The link target is everything before the FIRST pipe; the display text is
+/// presentation, not linkage. Without this split the pipe rode into the
+/// linksTo target and resolved nowhere (Selkie's lUX stress-test, 2026-08-04,
+/// Rob-prioritized pre-release).
+pub(crate) fn link_target(captured: &str) -> &str {
+    match captured.split_once('|') {
+        Some((target, _display)) => target.trim_end(),
+        None => captured,
+    }
+}
+
 use crate::extraction::{flatten_yaml, normalize_wikilink_path};
 use crate::ontology::{get_kit_namespaces_all_kits, get_object_properties_all_kits,
                        get_property_datatypes_all_kits};
@@ -603,7 +615,14 @@ pub(crate) fn generate_frontmatter_nquads_with(
         let mut links_seen = HashSet::new();
         let scannable_body = mask_code_spans(&body_text);
         for cap in wikilink_re.captures_iter(&scannable_body) {
-            let link = cap[1].to_string();
+            let link = link_target(&cap[1]).to_string();
+            if link.is_empty() {
+                eprintln!(
+                    "warning: {relpath_str}: [[{}]] has an empty link target — skipped",
+                    &cap[1]
+                );
+                continue;
+            }
             if links_seen.insert(link.clone()) {
                 spo_lines.push(format!("{} | linksTo | {}", relpath_str, link));
             }
@@ -696,7 +715,10 @@ pub(crate) fn generate_frontmatter_nquads_with(
 
                 let scannable_message = mask_code_spans(message);
                 for cap in wikilink_re.captures_iter(&scannable_message) {
-                    let link = &cap[1];
+                    let link = link_target(&cap[1]);
+                    if link.is_empty() {
+                        continue;
+                    }
                     nq.push_str(&format!(
                         "{} <https://repolex.ai/ontology/git-lex/md/linksTo> \"{}\" {} .\n",
                         commit_uri, nq_escape(link), graph
@@ -1339,5 +1361,22 @@ mod wikilink_pattern_tests {
 
         // Masking preserves newlines so nothing shifts lines.
         assert_eq!(mask_code_spans("a\n```\nb\n```\nc").matches('\n').count(), 4);
+    }
+
+    /// PIN: `[[target|display]]` links on the TARGET — the display text is
+    /// presentation, not linkage. Pre-fix the pipe rode into the linksTo
+    /// target and resolved nowhere (Selkie's lUX, Rob-prioritized
+    /// pre-release, 2026-08-04).
+    #[test]
+    fn alias_links_on_target_not_display() {
+        use super::link_target;
+        assert_eq!(link_target("Soul/Note/x.md"), "Soul/Note/x.md");
+        assert_eq!(link_target("Soul/Note/x.md|the note"), "Soul/Note/x.md");
+        // Trailing space before the pipe is trimmed off the target.
+        assert_eq!(link_target("Soul/Note/x.md |shown"), "Soul/Note/x.md");
+        // Split at the FIRST pipe — display may itself contain pipes.
+        assert_eq!(link_target("a/b|x|y"), "a/b");
+        // Pathological: no target at all — empty, callers skip with a warning.
+        assert_eq!(link_target("|display only"), "");
     }
 }
