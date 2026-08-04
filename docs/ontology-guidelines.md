@@ -73,6 +73,54 @@ copia:setId a owl:DatatypeProperty ;
   `Group`, and every Set anchored to nothing until v0.27 gave each class its
   own id.
 
+### 3a. Which class owns the id: follow the identity event
+
+The rule above says identity is never inherited. The question it doesn't
+answer is *which* class declares it when a hierarchy is involved — and the
+answer is not "the most specific one," it's:
+
+> **Identity belongs to the class that owns the identity event.**
+
+Ask: *when is identity assigned, and by what event?* Put the id property
+there.
+
+- **Authored documents** — the identity event is "a file was written." The
+  foldered class owns it; the file **is** the thing and the filename **is**
+  the id. That's where §3 comes from.
+- **Stores and engines** — the identity event is "an object entered the
+  store." The base class owns it. Pan assigns a `panId` at put — to *bytes*,
+  before and independent of what those bytes turn out to be — so `panId` lives
+  on `pan:Media`, while `pan:Image` / `pan:Audio` / `pan:Video` carry only
+  their divergent metadata and declare no id of their own.
+
+The decisive argument is what happens to a **reclassification**. Split
+identity per subclass and a mislabeled `.heic` that turns out to be video must
+retract `imageId` and assert `videoId` — identity churn caused by a
+*classification correction*, for an object whose identity never changed. In an
+append-only store that is exactly backwards. **Subclassing describes what a
+thing turned out to be; it never creates a new identity.**
+
+Subclass freely for the metadata, though — genuinely different property sets
+(`duration` on video and audio, dimensions on image and video, `pageCount` on
+documents) are what subclassing is *for*. One flat class carrying a union of
+mostly-inapplicable optional fields is the open-domain smell, and it costs you
+SHACL: you cannot say "duration is required for video" if everything is one
+class.
+
+Two corollaries:
+
+- **The class is the kind — but encoding is not kind.** A coarse
+  `type`/`kind` enum sitting beside real subclasses is redundant (the class
+  already says it; derive the field for API responses rather than storing it).
+  An *encoding* field is a different fact and survives: `pan:mediaType` holds
+  the MIME type (`image/png`), because png-vs-webp is information no class
+  split carries.
+- **The id's NAME is a ruling, not a derivation.** `<class>Id` is the default,
+  but stored-data naming is the project owner's call, and where the two
+  diverge the ruling wins. `panId` on `pan:Media` is the precedent: `mediaId`
+  was the mechanical answer, was considered, and was rejected — a thing in Pan
+  has a `panId`. Follow the stamp, then write it down here.
+
 ## 4. The four kinds of id-valued properties
 
 Almost every property whose value looks like an identifier is one of exactly
