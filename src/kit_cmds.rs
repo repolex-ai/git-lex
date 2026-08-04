@@ -3,7 +3,7 @@
 //! Command-level orchestration over the kit internals in `crate::kit`:
 //! fetching kits, converging scaffold files and hooks, regenerating derived
 //! artifacts (SHACL shapes, class templates, folder audit), and keeping the
-//! engine runtime dirs (`.pool/` `.copia/` `.weave/`) gitignored.
+//! engine runtime dirs (`ENGINE_GITIGNORE_DIRS`) gitignored.
 
 use std::fs;
 use std::path::Path;
@@ -549,7 +549,10 @@ pub(crate) fn ensure_engine_gitignore(root: &Path) {
 
     if new_contents != existing {
         if fs::write(&gitignore, &new_contents).is_ok() {
-            println!("Ensured engine runtime dirs are gitignored (.pool/ .copia/ .weave/).");
+            println!(
+                "Ensured engine runtime dirs are gitignored ({}).",
+                ENGINE_GITIGNORE_DIRS.join(" ")
+            );
         }
     }
 
@@ -572,10 +575,13 @@ fn report_tracked_engine_paths(root: &Path) {
         Ok(o) if o.status.success() => o.stdout,
         _ => return,
     };
-    // Engine dir prefixes to match against tracked paths. Include the legacy
-    // capitalized `Pool/` tree — the pre-`.pool` layout W4R3Z is still on — so
-    // the report catches it too (that whole tree is migrating to `.pool/`).
-    let prefixes: &[&str] = &[".pool/", ".copia/", ".weave/", "Pool/"];
+    // Engine dir prefixes to match against tracked paths: the live ignore set
+    // plus legacy trees the report should still catch — retired `.weave/`
+    // (anyone resurrecting a pre-rename store deserves the warning) and the
+    // capitalized `Pool/` tree from the pre-`.pool` layout.
+    let prefixes: Vec<&str> =
+        ENGINE_GITIGNORE_DIRS.iter().copied().chain([".weave/", "Pool/"]).collect();
+    let prefixes: &[&str] = &prefixes;
     let mut hits: std::collections::BTreeMap<&str, usize> = std::collections::BTreeMap::new();
     for path in stdout.split(|b| *b == 0) {
         if path.is_empty() {
@@ -860,7 +866,11 @@ mod engine_gitignore_tests {
         assert!(got.contains(ENGINE_GITIGNORE_BEGIN));
         assert!(got.contains(".pool/"));
         assert!(got.contains(".copia/"));
-        assert!(got.contains(".weave/"));
+        assert!(got.contains(".ravel/"));
+        assert!(got.contains(".pan/"));
+        // .weave/ retired 2026-08-04 (Rob; fleet swept clean first) — a
+        // re-emitted block must NOT reintroduce it.
+        assert!(!got.contains(".weave/"));
         assert!(got.contains(ENGINE_GITIGNORE_END));
         fs::remove_dir_all(&dir).ok();
     }
@@ -895,7 +905,8 @@ mod engine_gitignore_tests {
         // The block is rewritten in place (still one pair), now with all dirs,
         // and the surrounding non-managed lines are untouched.
         assert_eq!(got.matches(ENGINE_GITIGNORE_BEGIN).count(), 1);
-        assert!(got.contains(".copia/") && got.contains(".weave/"));
+        assert!(got.contains(".copia/") && got.contains(".ravel/") && got.contains(".pan/"));
+        assert!(!got.contains(".weave/"), "retired entry must be dropped on rewrite");
         assert!(got.contains("keepme/"), "content before the block is preserved");
         assert!(got.contains("tail/"), "content after the block is preserved");
         fs::remove_dir_all(&dir).ok();
@@ -907,7 +918,8 @@ mod engine_gitignore_tests {
         // No .gitignore at all.
         ensure_engine_gitignore(&dir);
         let got = fs::read_to_string(dir.join(".gitignore")).unwrap();
-        assert!(got.contains(".pool/") && got.contains(".copia/") && got.contains(".weave/"));
+        assert!(got.contains(".pool/") && got.contains(".copia/") && got.contains(".ravel/") && got.contains(".pan/"));
+        assert!(!got.contains(".weave/"));
         assert_eq!(got.matches(ENGINE_GITIGNORE_BEGIN).count(), 1);
         fs::remove_dir_all(&dir).ok();
     }
