@@ -496,16 +496,20 @@ pub(crate) fn cmd_kit_update(kit_arg: Option<String>) {
 }
 
 /// The engine runtime dirs every soul must gitignore: the per-soul LOCAL state
-/// of the three Subtexture engines (Pool, CoPIA, Weave). These hold index stores,
-/// embeddings, HNSW indexes, and media roots — heavy, high-churn, machine-local,
-/// never committed. Mirrors the `.pool`/`.copia`/`.weave` standard.
-const ENGINE_GITIGNORE_DIRS: &[&str] = &[".pool/", ".copia/", ".weave/"];
+/// of the Subtexture engines. These hold index stores, embeddings, HNSW
+/// indexes, and media roots — heavy, high-churn, machine-local, never
+/// committed. Current engines per the ravel git-lex mode spec (2026_08_01):
+/// `.copia/`, `.pan/`, `.ravel/`. The pre-rename dirs `.pool/` and `.weave/`
+/// stay listed until retirement is ruled — a dead ignore entry is free, but a
+/// missing live one commits someone's store (th34's day-one repo vacuumed
+/// 1.4MB of .ravel/ RocksDB before ".ravel/" was here).
+const ENGINE_GITIGNORE_DIRS: &[&str] = &[".pool/", ".copia/", ".weave/", ".ravel/", ".pan/"];
 
 const ENGINE_GITIGNORE_BEGIN: &str = "# >>> git-lex engine runtime (managed) >>>";
 const ENGINE_GITIGNORE_END: &str = "# <<< git-lex engine runtime (managed) <<<";
 
 /// Idempotently ensure the soul repo's root `.gitignore` ignores the engine
-/// runtime dirs (`.pool/`, `.copia/`, `.weave/`). Wrapped in a sentinel block so
+/// runtime dirs (`ENGINE_GITIGNORE_DIRS`). Wrapped in a sentinel block so
 /// re-runs replace-in-place (never duplicate) and a future dir can be added by
 /// editing `ENGINE_GITIGNORE_DIRS` — the next `git lex kit-update` re-emits the
 /// block. Reports (does NOT auto-remove) files already tracked that now match, so
