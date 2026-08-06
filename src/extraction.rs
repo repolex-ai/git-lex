@@ -174,10 +174,14 @@ pub(crate) fn frontmatter_to_turtle(
                 // a bad class prefix; we warn and emit nothing for it (return
                 // None) rather than stamp a phantom type.
                 if doc_type.is_none() {
-                    match crate::ontology::resolve_class_segment(kit, class_seg) {
+                    match crate::ontology::resolve_class_segment(
+                        kit,
+                        class_seg,
+                        &filepath.display().to_string(),
+                    ) {
                         Ok(canonical) => doc_type = Some(canonical),
                         Err(msg) => {
-                            eprintln!("warning: {msg} (skipping {})", filepath.display());
+                            eprintln!("warning: {}: {msg}", filepath.display());
                             return Ok(None);
                         }
                     }

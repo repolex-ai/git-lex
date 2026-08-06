@@ -384,7 +384,9 @@ pub(crate) fn derive_file_subjects(
         if segments.len() != 3 {
             continue;
         }
-        if let Ok(canonical) = crate::ontology::resolve_class_segment(segments[0], segments[1]) {
+        if let Ok(canonical) =
+            crate::ontology::resolve_class_segment(segments[0], segments[1], relpath_str)
+        {
             anchor = Some((segments[0].to_string(), canonical));
             break;
         }
@@ -408,9 +410,11 @@ pub(crate) fn derive_file_subjects(
     if !declared_props.contains(&prop_key) && !obj_props.contains(&prop_key) {
         if warn {
             eprintln!(
-                "warning: {relpath_str}: class {kit}.{class} declares no `{id_prop}` \
-                 property — files of this class cannot anchor Things (kit bug: every \
-                 file-expressed class must declare its `<class>Id`)"
+                "warning: {relpath_str}: the class `{kit}.{class}` has no `{id_prop}` \
+                 key in its ontology, so documents of this class cannot get their own \
+                 identity in the graph. You cannot fix this by editing this file — \
+                 report it to the `{kit}` ontology owner. (The document's facts still \
+                 save, attached to the file itself.)"
             );
         }
         return FileSubjects { file_uri, thing_uri: None, thing_key: None };
@@ -432,10 +436,14 @@ pub(crate) fn derive_file_subjects(
     });
     let Some(id_value) = id_value else {
         if warn {
+            let stem = std::path::Path::new(relpath_str)
+                .file_stem()
+                .map(|s| s.to_string_lossy().to_string())
+                .unwrap_or_else(|| relpath_str.to_string());
             eprintln!(
-                "warning: {relpath_str}: classed as {kit}.{class} but carries no \
-                 `{id_line_key}` — facts anchor to the File node until the id is authored \
-                 (Phase-4 migration work list)"
+                "warning: {relpath_str}: this {kit}.{class} document has no id. Fix: \
+                 add this line to the YAML block at the top of the file: \
+                 {id_line_key}: \"{stem}\""
             );
         }
         return FileSubjects { file_uri, thing_uri: None, thing_key: None };
@@ -876,10 +884,10 @@ pub(crate) fn emit_spo_line_nquads(
             // phantom `a soul:memory`. The doc's properties still emit; only
             // the bad type is withheld until the frontmatter is fixed.
             let canonical_class: Option<String> =
-                match crate::ontology::resolve_class_segment(kit_name, class_seg) {
+                match crate::ontology::resolve_class_segment(kit_name, class_seg, relpath_str) {
                     Ok(canonical) => Some(canonical),
                     Err(msg) => {
-                        eprintln!("warning: {msg} (skipping type emission for this doc)");
+                        eprintln!("warning: {relpath_str}: {msg}");
                         None
                     }
                 };
@@ -994,15 +1002,27 @@ pub(crate) fn emit_spo_line_nquads(
                     if !declared_props.contains(key) && !obj_props.contains(key) {
                         let kit_scope = format!("{}/", kit_name);
                         let prop_tail = format!("/{}", prop_seg);
-                        let declared_elsewhere_in_kit = obj_props
+                        let class_for_msg = canonical_class.as_deref().unwrap_or(class_seg);
+                        let owners: std::collections::BTreeSet<String> = obj_props
                             .iter()
                             .chain(declared_props.iter())
-                            .any(|k| k.starts_with(&kit_scope) && k.ends_with(&prop_tail));
-                        if declared_elsewhere_in_kit {
+                            .filter(|k| k.starts_with(&kit_scope) && k.ends_with(&prop_tail))
+                            .filter_map(|k| k.split('/').nth(1).map(str::to_string))
+                            .collect();
+                        if !owners.is_empty() {
+                            let owner_list =
+                                owners.into_iter().collect::<Vec<_>>().join(", ");
                             eprintln!(
-                                "warning: {}: `{}.{}.{}` — property `{}` is not declared on class `{}` in kit `{}` (declared on another class); emitted as a plain literal until the shape or frontmatter is aligned",
+                                "warning: {}: the key `{}.{}.{}` — `{}` exists in the \
+                                 `{}` ontology, but on class {}, not on {}. Fix, pick \
+                                 one: (a) this line belongs in a {} document — move it \
+                                 there; (b) this key genuinely belongs on {} too — \
+                                 keep the line and report it to the `{}` ontology \
+                                 owner; (c) the line no longer matters — delete it. \
+                                 Until fixed, the value saves as plain ungoverned data.",
                                 relpath_str, kit_name, class_seg, prop_seg, prop_seg,
-                                canonical_class.as_deref().unwrap_or(class_seg), kit_name
+                                kit_name, owner_list, class_for_msg, owner_list,
+                                class_for_msg, kit_name
                             );
                         } else if !kit_namespaces.contains_key(kit_name)
                             || obj_props.iter().chain(prop_datatypes.keys())
@@ -1015,9 +1035,58 @@ pub(crate) fn emit_spo_line_nquads(
                             // title, …) accumulated invisibly (Rob-ruled
                             // 2026-07-29: warn at save). Bare keys (title:)
                             // stay free — the open fm: lane is one line up.
+                            //
+                            // did-you-mean: declared keys on THIS class that
+                            // plausibly mean the same thing (the renamed-by-
+                            // the-ontology case, e.g. kind → textureKind) —
+                            // case-insensitive containment either way, 4+
+                            // chars so single letters never match.
+                            let class_prefix =
+                                format!("{}/{}/", kit_name, class_for_msg);
+                            let prop_lower = prop_seg.to_lowercase();
+                            let mut candidates: Vec<String> = obj_props
+                                .iter()
+                                .chain(declared_props.iter())
+                                .filter(|k| k.starts_with(&class_prefix))
+                                .filter_map(|k| k.split('/').nth(2))
+                                .filter(|cand| {
+                                    let cl = cand.to_lowercase();
+                                    cl != prop_lower
+                                        && ((prop_lower.len() >= 4
+                                            && cl.contains(&prop_lower))
+                                            || (cl.len() >= 4
+                                                && prop_lower.contains(&cl)))
+                                })
+                                .map(str::to_string)
+                                .collect();
+                            candidates.sort();
+                            candidates.dedup();
+                            candidates.truncate(3);
+                            let hint = if candidates.is_empty() {
+                                format!(
+                                    " (the `__{}.md` template in this class's folder \
+                                     lists every declared key)",
+                                    class_for_msg
+                                )
+                            } else {
+                                format!(
+                                    " — closest declared keys on {}: {}",
+                                    class_for_msg,
+                                    candidates.join(", ")
+                                )
+                            };
                             eprintln!(
-                                "warning: {}: `{}.{}.{}` is not declared in the `{}` ontology — emitted as plain data; fix the key (or drop the `{}.` prefix to use plain metadata)",
-                                relpath_str, kit_name, class_seg, prop_seg, kit_name, kit_name
+                                "warning: {}: the key `{}.{}.{}` does not exist in \
+                                 the `{}` ontology. Fix, pick one: (a) the ontology \
+                                 may use a different name for this{} — if one means \
+                                 the same thing, edit this line to use it; (b) no \
+                                 current key fits and the information matters — keep \
+                                 the line and report the missing key to the `{}` \
+                                 ontology owner; (c) the line no longer matters — \
+                                 delete it. Until fixed, the value saves as plain \
+                                 ungoverned data.",
+                                relpath_str, kit_name, class_seg, prop_seg, kit_name,
+                                hint, kit_name
                             );
                         }
                     }

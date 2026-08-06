@@ -486,7 +486,11 @@ pub(crate) fn get_kit_types(kit: &str) -> Vec<(String, Vec<(String, String, bool
 /// kit with only properties, or shapes not yet generated), validation is
 /// skipped and the segment passes through unchanged, preserving prior
 /// behavior for kits this check can't speak to.
-pub(crate) fn resolve_class_segment(kit: &str, class_seg: &str) -> Result<String, String> {
+pub(crate) fn resolve_class_segment(
+    kit: &str,
+    class_seg: &str,
+    context: &str,
+) -> Result<String, String> {
     let classes: Vec<String> = get_kit_types(kit).into_iter().map(|(name, _)| name).collect();
     match resolve_class_against(&classes, class_seg) {
         ClassMatch::Exact(name) | ClassMatch::PassThrough(name) => Ok(name),
@@ -495,16 +499,19 @@ pub(crate) fn resolve_class_segment(kit: &str, class_seg: &str) -> Result<String
             // corrects the frontmatter (and so this never silently masks a
             // future real typo that happens to differ only in case).
             eprintln!(
-                "warning: frontmatter class segment `{kit}.{given}.…` does not match \
-                 the ontology class casing; using canonical `{kit}.{canonical}.…`. \
-                 Fix the frontmatter prefix to `{canonical}` (class names are \
-                 case-sensitive in the graph)."
+                "warning: {context}: the key prefix `{kit}.{given}.` has the wrong \
+                 capitalization. Fix: edit it to `{kit}.{canonical}.` exactly \
+                 (capitalization matters). Auto-corrected for this run only."
             );
             Ok(canonical)
         }
         ClassMatch::NoMatch => Err(format!(
-            "frontmatter class segment `{class_seg}` is not a class in kit `{kit}`. \
-             Known classes: {}. (Class names are case-sensitive; check the prefix.)",
+            "`{class_seg}` is not a class in kit `{kit}` (declared classes: {}). \
+             Fix, pick one: (a) this document really is one of the declared classes \
+             — edit its keys to use that class name; (b) its class belongs to a kit \
+             that is not installed in this repo — leave the file as-is and report it \
+             to the kit owner. Until fixed, this document's facts are skipped, \
+             not lost.",
             classes.join(", ")
         )),
     }
