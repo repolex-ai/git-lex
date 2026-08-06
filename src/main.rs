@@ -130,6 +130,10 @@ enum Commands {
         /// Commit message
         #[arg(default_value = "git lex save")]
         message: String,
+        /// Probe write-health: run extraction and every save gate, commit
+        /// nothing. Exit 0 means a real save would pass its gates.
+        #[arg(long)]
+        dry_run: bool,
     },
     /// Remove .lex/ entirely (content files and git history are preserved).
     Nuke,
@@ -638,7 +642,7 @@ fn resolve_agent_identity(root: &std::path::Path) -> Option<(String, String)> {
     Some((name, email))
 }
 
-fn cmd_save(message: &str) {
+fn cmd_save(message: &str, dry_run: bool) {
     let root = require_git_root();
 
     // Identity floor: a soul repo without its root SOUL.md must not save
@@ -666,6 +670,31 @@ fn cmd_save(message: &str) {
         }
     };
     let author = format!("{} <{}>", author_name, author_email);
+
+    // The write-health probe: run the exact gates a real save runs —
+    // extraction (which refreshes derived sidecars on disk), the sidecar
+    // write-gate, the identity gate, SHACL validation — and commit nothing.
+    // Exists because `verify` audits the STORE while the gates live on the
+    // WRITE path, and a clean-tree save short-circuits before any gate: a
+    // repo could be write-dead with NO command able to say so until the
+    // moment a real write is needed (W3BL0RD's receipt, 2026-08-06: verify
+    // ALL CHECKS PASSED on a repo that could not save). Known fidelity gap:
+    // a real save stages deletions before the hook, so its sidecar cleanup
+    // sees them; the probe stages nothing and skips that pass.
+    if dry_run {
+        cmd_extract();
+        if !cmd_validate() {
+            eprintln!("DRY RUN: a real `git lex save` would FAIL validation in {}.", root.display());
+            exit(1);
+        }
+        println!(
+            "DRY RUN: all save gates pass in {} — a real save would proceed [as {}].",
+            root.display(),
+            author
+        );
+        println!("(nothing was committed; derived sidecars under .lex/extract/ may have been refreshed)");
+        return;
+    }
 
     // Sync skills/subagents into every active substrate's harness. The
     // substrate list comes from `.lex/repo.yml`'s `substrates:` field
@@ -1356,7 +1385,7 @@ fn main() {
         Commands::Init { directory, kit } => init::cmd_init(directory, kit),
         Commands::Create { doctype, instance_id, json } => cmd_create(&doctype, instance_id.as_deref(), json),
         Commands::List { json } => cmd_list(json),
-        Commands::Save { message } => cmd_save(&message),
+        Commands::Save { message, dry_run } => cmd_save(&message, dry_run),
         Commands::Query { query, json } => cmd_query(query, json),
         Commands::Hook { event } => {
             match event.as_str() {
