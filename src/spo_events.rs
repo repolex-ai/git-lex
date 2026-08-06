@@ -745,7 +745,8 @@ fn read_sidecar_at_commit(sha: &str, sidecar_path: &str) -> Result<Vec<String>, 
 //     <event> git-lex:retractedIn  <git2:Commit/SHA> .   (fact stopped being true)
 //
 // `git lex sync` runs the walk engine below incrementally; a full rebuild
-// (delete .git/lex, sync) re-derives the whole graph from commit history.
+// (delete .lex/_ignore/oxigraph, sync) re-derives the whole graph from
+// commit history.
 // The graph's BASE LAYER is current state (net-asserted facts as plain
 // triples), maintained by the walk engine and copied out as NamedGraph/now
 // each sync. Events join to their commit's author/date via the git2: layer.
@@ -991,7 +992,7 @@ pub(crate) fn onegraph_walk_engine(
                      If this file exists in your CURRENT working tree, the damage \
                      is live and must be repaired there: edit the source document \
                      trivially, run `git lex save` (regenerates its sidecar), then \
-                     `rm -rf .git/lex` and re-run `git lex sync`. \
+                     `rm -rf .lex/_ignore/oxigraph` and re-run `git lex sync`. \
                      If the line is only in HISTORY (dev-era data), fence it with \
                      `dev_history_horizon:` in .lex/repo.yml set to the day after \
                      this commit. Otherwise this is a bug — report it. \

@@ -149,9 +149,10 @@ pub(crate) fn cmd_init(directory: Option<String>, kit: Option<String>) {
         }
     }
 
-    // Create .git/lex/ for derived data (oxigraph store, etc.)
-    let git_lex_dir = root.join(".git").join("lex");
-    fs::create_dir_all(&git_lex_dir).ok();
+    // Create the machine-local pocket for derived data (oxigraph store, etc.)
+    // — gitignored via the managed engine block below, never committed.
+    let pocket_dir = lex_dir.join("_ignore");
+    fs::create_dir_all(&pocket_dir).ok();
 
     // Claude Code kit needs a whitelist-style root .gitignore because it
     // runs against an existing project directory and only wants to track
@@ -250,7 +251,7 @@ pub(crate) fn cmd_init(directory: Option<String>, kit: Option<String>) {
             "# .lex/\n\nKnowledge graph managed by git-lex.\nKit: {}\n\n\
              - `extract/` — extraction sidecars (.spo)\n\
              - `ontology/` — ontology definitions\n\
-             - `.git/lex/oxigraph/` — local SPARQL store\n",
+             - `_ignore/oxigraph/` — local SPARQL store (machine-local, gitignored)\n",
             kit_name
         )).ok();
     }

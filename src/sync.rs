@@ -86,7 +86,7 @@ pub(crate) fn cmd_sync() {
     // changes), every phase of sync would rebuild identical state. Skip.
     //
     // Contract this depends on: the oxigraph store is derived. If you've
-    // manually mutated it, rebuild via `rm -rf .git/lex/oxigraph`.
+    // manually mutated it, rebuild via `rm -rf .lex/_ignore/oxigraph`.
     {
         let probe = format!(
             "ASK {{ GRAPH <{}> {{ <https://repolex.ai/git-lex/git2/Commit/{}> ?p ?o }} }}",
@@ -568,7 +568,7 @@ fn sync_onegraph_phase(store: &Store, root: &std::path::Path, resume_sha: Option
             std::process::exit(1);
         }
         (_, Some(b), Some(d)) => {
-            eprintln!("ERROR: current state ({b} facts) disagrees with what the history derives ({d}) — the store is corrupt. Delete .git/lex and re-run `git lex sync` to rebuild.");
+            eprintln!("ERROR: current state ({b} facts) disagrees with what the history derives ({d}) — the store is corrupt. Delete .lex/_ignore/oxigraph and re-run `git lex sync` to rebuild.");
             std::process::exit(1);
         }
     }
