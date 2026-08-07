@@ -216,7 +216,33 @@ cheaper to get right on day one.
   product) is the single source of truth; the publish pipeline copies
   outward. Never edit the installed copy or the kit copy of an app ontology.
 
-## 7. The five-minute test
+## 7. The why-test: what earns a property at all
+
+This is the gate **before** everything above — run it before any ontology
+change, before you even reach for a name.
+
+> **A property earns a place in the ontology (or a document's frontmatter)
+> only when some system will query or enforce its structure. Before you bless
+> a new key, name the system that breaks without it. Can't name one → body.**
+
+The shapes that qualify are exactly four: an **id**, a **strict enum**, a
+**required field**, or a **real edge** (an ObjectProperty join). Everything
+else — descriptions, statuses, moods, provenance notes — is an incidental
+fact, and it belongs in the document **body**, where grep and full-text search
+find it fine.
+
+The failure mode this catches is adding a property because it "seems
+valuable." Value is not a graph need. And the tempting middle ground — "keep
+it in frontmatter, just ungoverned" — is worse than either honest option: an
+ungoverned frontmatter key binds the fact to the **file**, not the concept,
+so it dies on a move, while body prose rides with the Thing. That's not
+preservation; it's a slow leak.
+
+(Proven at scale before it was written down: the lUX repo's 1218→0 warning
+pass was this test applied per-property — ids, enums, requireds, and edges
+kept; everything incidental moved to body.)
+
+## 8. The five-minute test
 
 Before you ship a vocabulary, hand it to someone who has never seen your kit:
 **can a markdown-repo developer understand it in five minutes?** Every name
@@ -226,12 +252,14 @@ ontology.
 
 **Checklist for a new property:**
 
-1. Which of the four kinds is it? (§4)
-2. Does its name carry the contract — id suffix for identity and references,
+1. Does it pass the why-test — which system breaks without it? (§7. No
+   system → body, and you're done.)
+2. Which of the four kinds is it? (§4)
+3. Does its name carry the contract — id suffix for identity and references,
    target named for joins? (§3, §5)
-3. Is there already a property that says this? (If yes: use it, don't alias
+4. Is there already a property that says this? (If yes: use it, don't alias
    it.)
-4. Range declared? (References resolve — and get gate-checked — only if the
+5. Range declared? (References resolve — and get gate-checked — only if the
    range says where they point.)
-5. Comment says what it *means*, in one sentence, without restating what the
+6. Comment says what it *means*, in one sentence, without restating what the
    name and range already say.
