@@ -362,15 +362,17 @@ pub(crate) fn cmd_init(directory: Option<String>, kit: Option<String>) {
                 doc.push_str(&format!("{}.{}.<property>: \"value\"\n", kit_short, example_type));
                 doc.push_str(&format!("# class names are case-sensitive: {}.{}. — see the __{}.md template\n", kit_short, example_type, example_type));
                 doc.push_str("---\n\n");
-                doc.push_str("Your content here. Use [[wikilinks]] for relationships between documents.\n");
+                doc.push_str("Your content here. Link other documents with standard markdown links.\n");
                 doc.push_str("```\n\n");
                 doc.push_str("See `__ClassName.md` files in each folder for available properties and SHACL-derived constraints.\n\n");
 
-                doc.push_str("## [[wikilinks]]\n\n");
-                doc.push_str("Reference other documents naturally in your text:\n\n");
-                doc.push_str("- `[[Class/id]]` — creates a `md:linksTo` relationship to that document\n");
-                doc.push_str("- bare `[[some-doc]]` is also accepted (resolved via slug)\n\n");
-                doc.push_str("Wikilinks are extracted automatically from document bodies and commit messages.\n\n");
+                doc.push_str("## Linking documents\n\n");
+                doc.push_str("Use standard markdown links with root-relative paths:\n\n");
+                doc.push_str("- `[display text](/Soul/Note/some-doc.md)` — creates a `linksTo` relationship to that document\n");
+                doc.push_str("- links resolve from the repository root; they survive the linking file moving\n\n");
+                doc.push_str("git-lex does not read `[[wikilinks]]` — the only place that notation appears is\n");
+                doc.push_str("Claude Code's own memory files under `Harness/Memory/`, where it is the\n");
+                doc.push_str("harness's private note-taking shorthand and is never resolved by any tool.\n\n");
 
                 // Kit-specific section
                 doc.push_str(&format!("## {} Kit — Document Types\n\n", kit_short));

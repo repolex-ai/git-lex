@@ -381,7 +381,7 @@ pub(crate) fn extract_markdown_links() {
         for inline_tree in tree.inline_trees() {
             let inline_root = inline_tree.root_node();
 
-            fn extract_links(node: tree_sitter::Node, source: &str, lines: &mut Vec<String>, file_index: &HashSet<String>, doc_dir: &str) {
+            fn extract_links(node: tree_sitter::Node, source: &str, lines: &mut Vec<String>, file_index: &HashSet<String>, doc_dir: &str, relpath: &str) {
                 if node.kind() == "inline_link" {
                     let dest = node.children(&mut node.walk())
                         .find(|c| c.kind() == "link_destination")
@@ -403,7 +403,12 @@ pub(crate) fn extract_markdown_links() {
                             };
 
                             if file_index.contains(&resolved) {
-                                lines.push(format!("md.internalLink | hasValue | {}", resolved));
+                                // Markdown links are THE document-reference
+                                // edge (Rob-ruled 2026-08-06): they emit
+                                // `linksTo`, the name the graph and viz
+                                // already consume. md.internalLink retired
+                                // with the wikilink reader.
+                                lines.push(format!("{} | linksTo | {}", relpath, resolved));
                             } else {
                                 lines.push(format!("md.unresolvedLink | hasValue | {}", dest));
                             }
@@ -423,7 +428,7 @@ pub(crate) fn extract_markdown_links() {
                 let mut cursor = node.walk();
                 if cursor.goto_first_child() {
                     loop {
-                        extract_links(cursor.node(), source, lines, file_index, doc_dir);
+                        extract_links(cursor.node(), source, lines, file_index, doc_dir, relpath);
                         if !cursor.goto_next_sibling() { break; }
                     }
                 }
@@ -433,7 +438,7 @@ pub(crate) fn extract_markdown_links() {
                 .map(|p| p.to_string_lossy().to_string())
                 .unwrap_or_default();
 
-            extract_links(inline_root, &content, &mut spo_lines, &file_index, &doc_dir);
+            extract_links(inline_root, &content, &mut spo_lines, &file_index, &doc_dir, &relpath_str);
         }
 
         // Write .md.spo sidecar; when a doc's last link goes away its

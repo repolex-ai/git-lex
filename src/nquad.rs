@@ -4,7 +4,8 @@
 //! generators that produce git-lex's "now" view of the world:
 //!
 //! - `generate_frontmatter_nquads` — the "now" graph: current-state frontmatter
-//!   extraction, body wikilinks.
+//!   extraction. (Body links are markdown links, extracted in `extraction.rs`;
+//!   the wikilink reader was retired 2026-08-06, Rob-ruled.)
 //! - `load_lex_nquads` — slurp any `.lex/**/*.nq` files the user wrote by hand.
 //!
 //! The git machinery layer lives in `git2_nquads` (library reads, `git2:`
@@ -17,95 +18,9 @@
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::PathBuf;
-use std::process::Command;
-
 use git_lex::find_git_root;
 
 use crate::git::graph_uri;
-
-/// The one wikilink pattern, shared by every extraction site. `[^\]\n]+`:
-/// a link target NEVER spans lines. A `[[...]]` token broken across two
-/// physical lines (e.g. a wrapped terminal paste inside a transcript doc)
-/// is prose, not a link — capturing it used to put a raw newline inside a
-/// sidecar value, splitting one triple across two physical lines and
-/// aborting sync (Selkie's day-10 transcript, 2026-07-30).
-pub(crate) const WIKILINK_PATTERN: &str = r"\[\[([^\]\n]+)\]\]";
-
-/// Blank out fenced code blocks and inline code spans before the wikilink
-/// scan: backticked text is quotation, not linkage. A doc ABOUT the link
-/// rules must be able to show a literal `[[..]]` without creating a link —
-/// the kit's Harness/Memory README did exactly that and fataled every
-/// fresh `init` under Obsidian semantics (2026-08-03, Rob-ruled fix B).
-/// Masked characters become spaces; newlines survive so nothing shifts.
-pub(crate) fn mask_code_spans(text: &str) -> String {
-    // Fenced blocks first (line-based, CommonMark): an opening fence of N
-    // backticks/tildes closes only on a same-char run of >= N.
-    let mut fenced = String::with_capacity(text.len());
-    let mut fence: Option<(char, usize)> = None;
-    for line in text.split_inclusive('\n') {
-        let trimmed = line.trim_start();
-        let fence_here = ['`', '~'].iter().copied().find_map(|c| {
-            let n = trimmed.chars().take_while(|&x| x == c).count();
-            (n >= 3).then_some((c, n))
-        });
-        let blank = match (fence, fence_here) {
-            (None, Some(open)) => { fence = Some(open); true }
-            (Some((c, n)), Some((c2, n2))) if c2 == c && n2 >= n => { fence = None; true }
-            (Some(_), _) => true,
-            (None, None) => false,
-        };
-        if blank {
-            fenced.extend(line.chars().map(|ch| if ch == '\n' { '\n' } else { ' ' }));
-        } else {
-            fenced.push_str(line);
-        }
-    }
-    // Inline code spans: a run of N backticks closes at the next run of
-    // exactly N (CommonMark; spans may cross lines). An unclosed run is
-    // literal text and masks nothing.
-    let chars: Vec<char> = fenced.chars().collect();
-    let mut out = String::with_capacity(fenced.len());
-    let mut i = 0;
-    while i < chars.len() {
-        if chars[i] != '`' {
-            out.push(chars[i]);
-            i += 1;
-            continue;
-        }
-        let start = i;
-        while i < chars.len() && chars[i] == '`' { i += 1; }
-        let n = i - start;
-        let mut j = i;
-        let mut close_end = None;
-        while j < chars.len() {
-            if chars[j] == '`' {
-                let cstart = j;
-                while j < chars.len() && chars[j] == '`' { j += 1; }
-                if j - cstart == n { close_end = Some(j); break; }
-            } else {
-                j += 1;
-            }
-        }
-        if let Some(end) = close_end {
-            out.extend(chars[start..end].iter().map(|&ch| if ch == '\n' { '\n' } else { ' ' }));
-            i = end;
-        } else {
-            out.extend(&chars[start..i]);
-        }
-    }
-    out
-}
-/// A wikilink capture may carry an Obsidian alias — `[[target|display]]`.
-/// The link target is everything before the FIRST pipe; the display text is
-/// presentation, not linkage. Without this split the pipe rode into the
-/// linksTo target and resolved nowhere (Selkie's lUX stress-test, 2026-08-04,
-/// Rob-prioritized pre-release).
-pub(crate) fn link_target(captured: &str) -> &str {
-    match captured.split_once('|') {
-        Some((target, _display)) => target.trim_end(),
-        None => captured,
-    }
-}
 
 use crate::extraction::{flatten_yaml, normalize_wikilink_path};
 use crate::ontology::{get_kit_namespaces_all_kits, get_object_properties_all_kits,
@@ -560,7 +475,6 @@ pub(crate) fn generate_frontmatter_nquads_with(
     // Regex pattern for [[wikilinks]].
     // @mentions removed — they were blog inheritance with no job in a system
     // where everything is a document. Canonical direction: [[Class/id]].
-    let wikilink_re = regex::Regex::new(WIKILINK_PATTERN).unwrap();
 
     for filepath in files {
         let content = match fs::read_to_string(filepath) {
@@ -613,28 +527,14 @@ pub(crate) fn generate_frontmatter_nquads_with(
             body_text = content.clone();
         }
 
-        // --- [[wikilink]] extraction ---
-        // The target passes through VERBATIM: under the 2026-07-28 path law
-        // a bare target is relative to the source file's folder and a
-        // leading `/` anchors at the repo root, so the slash is SEMANTIC —
-        // stripping it here (tried 2026-08-01) silently re-bound every
-        // root-anchored link to doc-relative. Canonical-form unification is
-        // a path-law decision (Rob's), not an extraction-time rewrite.
-        let mut links_seen = HashSet::new();
-        let scannable_body = mask_code_spans(&body_text);
-        for cap in wikilink_re.captures_iter(&scannable_body) {
-            let link = link_target(&cap[1]).to_string();
-            if link.is_empty() {
-                eprintln!(
-                    "warning: {relpath_str}: [[{}]] has an empty link target — skipped",
-                    &cap[1]
-                );
-                continue;
-            }
-            if links_seen.insert(link.clone()) {
-                spo_lines.push(format!("{} | linksTo | {}", relpath_str, link));
-            }
-        }
+        // --- [[wikilink]] extraction: RETIRED (Rob-ruled 2026-08-06) ---
+        // git-lex no longer reads wikilinks. Markdown links are the linking
+        // story (extraction.rs emits their `linksTo` lines); `[[...]]` in a
+        // body is plain prose. The ONLY sanctioned wikilink use is Claude
+        // Code's Harness/Memory notation, which no resolver ever reads.
+        // Historical sidecar lines with `linksTo` targets still replay
+        // through the quad emitter below — history doesn't un-happen.
+        let _ = &body_text;
 
         // Sort and dedup
         spo_lines.sort();
@@ -708,33 +608,9 @@ pub(crate) fn generate_frontmatter_nquads_with(
         }
     }
 
-    // --- Scan commit messages for [[wikilinks]] ---
-    let commit_output = Command::new("git")
-        .args(["log", "--all", "--format=%H%x00%s"])
-        .output();
-    if let Ok(o) = commit_output {
-        if o.status.success() {
-            let stdout = String::from_utf8_lossy(&o.stdout);
-            for line in stdout.lines() {
-                let parts: Vec<&str> = line.splitn(2, '\x00').collect();
-                if parts.len() < 2 { continue; }
-                let (sha, message) = (parts[0], parts[1]);
-                let commit_uri = format!("<{}>", crate::git2_nquads::git2_uri(&format!("Commit/{}", sha)));
-
-                let scannable_message = mask_code_spans(message);
-                for cap in wikilink_re.captures_iter(&scannable_message) {
-                    let link = link_target(&cap[1]);
-                    if link.is_empty() {
-                        continue;
-                    }
-                    nq.push_str(&format!(
-                        "{} <https://repolex.ai/ontology/git-lex/md/linksTo> \"{}\" {} .\n",
-                        commit_uri, nq_escape(link), graph
-                    ));
-                }
-            }
-        }
-    }
+    // Commit-message [[wikilink]] scanning: RETIRED with the wikilink reader
+    // (Rob-ruled 2026-08-06). git-lex reads no wikilinks anywhere; a
+    // bracketed name in a commit subject is prose.
 
     (nq, total_errors)
 }
@@ -1371,81 +1247,3 @@ mod tests {
     }
 }
 
-#[cfg(test)]
-mod wikilink_pattern_tests {
-    use super::WIKILINK_PATTERN;
-
-    /// PIN: a wikilink target never spans lines. A `[[...]]` token broken
-    /// across two physical lines (wrapped terminal paste in a transcript
-    /// doc) is prose, not a link — matching it used to write a raw newline
-    /// into a sidecar value and abort sync (Selkie's day-10 transcript).
-    #[test]
-    fn wikilink_never_matches_across_newlines() {
-        let re = regex::Regex::new(WIKILINK_PATTERN).unwrap();
-        assert!(re.captures("see [[Squad/Squaddie/lspy]] there").is_some());
-        // The day-10 failure shape: link broken by source-level wrapping.
-        let wrapped = "prefix [[Sq\n         uad/Squaddie/lspy]] suffix";
-        assert!(re.captures(wrapped).is_none(), "split token must NOT be a link");
-    }
-
-    /// PIN: the wikilink target passes into the sidecar VERBATIM, leading
-    /// slash included. Under the 2026-07-28 path law the slash is semantic
-    /// (bare = source-folder-relative, `/` = repo-rooted); an extraction-
-    /// time strip (tried and reverted 2026-08-01) silently re-bound every
-    /// root-anchored link to doc-relative.
-    #[test]
-    fn wikilink_target_passes_through_verbatim() {
-        let re = regex::Regex::new(WIKILINK_PATTERN).unwrap();
-        let cap = re.captures("see [[/Soul/Note/x.md]]").unwrap();
-        assert_eq!(&cap[1], "/Soul/Note/x.md");
-    }
-
-    /// PIN: backticked text is quotation, not linkage. The kit's
-    /// Harness/Memory README shows a literal `[[..]]` while documenting
-    /// the write-gate rule; scanning it as a link fataled every fresh
-    /// `init` under Obsidian semantics (birth blocker, 2026-08-03).
-    #[test]
-    fn code_spans_never_link() {
-        use super::mask_code_spans;
-        let re = regex::Regex::new(WIKILINK_PATTERN).unwrap();
-
-        // The exact birth-blocker shape: inline code in prose.
-        let readme = "no `[[..]]` in a frontmatter value. The gate names it.";
-        assert!(re.captures(&mask_code_spans(readme)).is_none());
-
-        // Fenced block, any info string; link outside the fence survives.
-        let fenced = "see [[Soul/Note/x.md]]\n```markdown\n[[Class/id]]\n```\n";
-        let masked = mask_code_spans(fenced);
-        let links: Vec<_> = re.captures_iter(&masked).map(|c| c[1].to_string()).collect();
-        assert_eq!(links, vec!["Soul/Note/x.md"]);
-
-        // Double-backtick span holding a single backtick + link inside.
-        let double = "quote `` ` [[x]] `` end, real [[y]] after";
-        let links: Vec<_> = re.captures_iter(&mask_code_spans(double)).map(|c| c[1].to_string()).collect();
-        assert_eq!(links, vec!["y"]);
-
-        // An UNCLOSED backtick is literal text and masks nothing.
-        let unclosed = "stray ` tick then [[real/link]] here";
-        assert!(re.captures(&mask_code_spans(unclosed)).is_some());
-
-        // Masking preserves newlines so nothing shifts lines.
-        assert_eq!(mask_code_spans("a\n```\nb\n```\nc").matches('\n').count(), 4);
-    }
-
-    /// PIN: `[[target|display]]` links on the TARGET — the display text is
-    /// presentation, not linkage. Pre-fix the pipe rode into the linksTo
-    /// target and resolved nowhere (Selkie's lUX, Rob-prioritized
-    /// pre-release, 2026-08-04).
-    #[test]
-    fn alias_links_on_target_not_display() {
-        use super::link_target;
-        assert_eq!(link_target("Soul/Note/x.md"), "Soul/Note/x.md");
-        assert_eq!(link_target("Soul/Note/x.md|the note"), "Soul/Note/x.md");
-        // Trailing space before the pipe is trimmed off the target.
-        assert_eq!(link_target("Soul/Note/x.md |shown"), "Soul/Note/x.md");
-        // Split at the FIRST pipe — display may itself contain pipes.
-        assert_eq!(link_target("a/b|x|y"), "a/b");
-        // Pathological: no target at all — empty, callers skip with a warning.
-        assert_eq!(link_target("|display only"), "");
-    }
-}
