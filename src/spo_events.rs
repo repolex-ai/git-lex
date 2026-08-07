@@ -622,15 +622,21 @@ pub fn cleanup_sidecars_for_staged_changes() -> CleanupReport {
             if !git_path_is_tracked(&root, &old_sidecar) {
                 continue;
             }
-            // Skip only if the destination is ALREADY TRACKED IN THE
-            // INDEX (separately from old_sidecar). A case-only rename
-            // where old and new paths resolve to the same inode on APFS
-            // is still a legitimate rename we want to do.
+            // Destination ALREADY TRACKED IN THE INDEX (separately from
+            // old_sidecar): a prior extract pass — typically a dry-run
+            // before this save — already wrote fresh sidecars at the new
+            // path. The rename's intent ("content lives at the new path")
+            // is satisfied; the source is simply stale — delete it.
+            // Erroring here instead hard-failed every class-move save
+            // that followed a dry-run (tr1p's 0.9.0 convergence find).
+            // A case-only rename resolving to the same inode on APFS is
+            // excluded by the path-inequality guard: git's index tracks
+            // exact casing, so same-inode ≠ same tracked path.
             if git_path_is_tracked(&root, &new_sidecar) && new_sidecar != old_sidecar {
-                report.errors.push(format!(
-                    "skipping rename of {}: destination {} is already tracked",
-                    old_sidecar, new_sidecar
-                ));
+                match git_rm(&root, &old_sidecar) {
+                    Ok(()) => report.deleted.push(old_sidecar),
+                    Err(e) => report.errors.push(e),
+                }
                 continue;
             }
             match git_mv(&root, &old_sidecar, &new_sidecar) {
@@ -642,12 +648,20 @@ pub fn cleanup_sidecars_for_staged_changes() -> CleanupReport {
         // renamed source (same tracked-in-index rules as the sidecars).
         let old_meta = format!(".lex/extract/{}.meta", old_md);
         let new_meta = format!(".lex/extract/{}.meta", new_md);
-        if git_path_is_tracked(&root, &old_meta)
-            && !(git_path_is_tracked(&root, &new_meta) && new_meta != old_meta)
-        {
-            match git_mv(&root, &old_meta, &new_meta) {
-                Ok(()) => report.renamed.push((old_meta, new_meta)),
-                Err(e) => report.errors.push(e),
+        if git_path_is_tracked(&root, &old_meta) {
+            if git_path_is_tracked(&root, &new_meta) && new_meta != old_meta {
+                // Same rule as the sidecars above: tracked destination
+                // means the move already happened — the source is stale,
+                // and silently skipping it left it tracked forever.
+                match git_rm(&root, &old_meta) {
+                    Ok(()) => report.deleted.push(old_meta),
+                    Err(e) => report.errors.push(e),
+                }
+            } else {
+                match git_mv(&root, &old_meta, &new_meta) {
+                    Ok(()) => report.renamed.push((old_meta, new_meta)),
+                    Err(e) => report.errors.push(e),
+                }
             }
         }
     }
