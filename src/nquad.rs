@@ -191,6 +191,11 @@ pub(crate) struct ResolverContext {
     /// resolved to `<range-app>/<RangeClass>/<id>` at emission; without
     /// one, the legacy path/IRI resolver applies (resolve.rs).
     pub ref_ranges: HashMap<String, String>,
+    /// "{kit}/{prop}" → optional replacement for owl:deprecated properties.
+    /// Retired-by-deprecation keys are DECLARED (history stays replayable);
+    /// the save-time note teaches the deprecation instead of falsely
+    /// claiming the key does not exist.
+    pub deprecated_props: HashMap<String, Option<String>>,
 }
 
 impl ResolverContext {
@@ -206,6 +211,7 @@ impl ResolverContext {
             kit_namespaces: get_kit_namespaces_all_kits(),
             obsidian_links: git_lex::RepoYml::load(root).obsidian_links(),
             ref_ranges: crate::ontology::get_reference_ranges_all_kits(),
+            deprecated_props: crate::ontology::get_deprecated_properties_all_kits(),
         }
     }
 }
@@ -601,6 +607,7 @@ pub(crate) fn generate_frontmatter_nquads_with(
                 &ctx.declared_props,
                 &kit_namespaces,
                 &ctx.ref_ranges,
+                &ctx.deprecated_props,
                 ctx.obsidian_links,
                 &mut emitted_types,
                 &mut nq,
@@ -648,6 +655,7 @@ pub(crate) fn emit_spo_line_nquads(
     declared_props: &HashSet<String>,
     kit_namespaces: &HashMap<String, String>,
     ref_ranges: &HashMap<String, String>,
+    deprecated_props: &HashMap<String, Option<String>>,
     obsidian_links: bool,
     emitted_types: &mut HashSet<String>,
     out: &mut String,
@@ -917,6 +925,29 @@ pub(crate) fn emit_spo_line_nquads(
                             // the-ontology case, e.g. kind → textureKind) —
                             // case-insensitive containment either way, 4+
                             // chars so single letters never match.
+                            // Deprecated lane FIRST: a retired-by-deprecation
+                            // key EXISTS in the ontology (deprecate-never-
+                            // delete — the 0.9.0 Friend incident proved
+                            // deletion breaks history replay), so "does not
+                            // exist" would be false. One informational line,
+                            // not the four-branch teaching: existing lines
+                            // are legal history; the nudge is for new writing.
+                            if let Some(replaced) =
+                                deprecated_props.get(&format!("{}/{}", kit_name, prop_seg))
+                            {
+                                let repl = replaced
+                                    .as_ref()
+                                    .map(|r| format!(" — replacement: `{}`", r))
+                                    .unwrap_or_default();
+                                eprintln!(
+                                    "note: {}: the key `{}.{}.{}` is deprecated (the \
+                                     `{}` ontology retired it{}). The line still saves \
+                                     and history replays; don't use it in new writing — \
+                                     migrate or delete when you next edit this file.",
+                                    relpath_str, kit_name, class_seg, prop_seg,
+                                    kit_name, repl
+                                );
+                            } else {
                             let class_prefix =
                                 format!("{}/{}/", kit_name, class_for_msg);
                             let prop_lower = prop_seg.to_lowercase();
@@ -964,6 +995,7 @@ pub(crate) fn emit_spo_line_nquads(
                                 relpath_str, kit_name, class_seg, prop_seg, kit_name,
                                 hint, kit_name
                             );
+                            }
                         }
                     }
                 }
@@ -1130,7 +1162,8 @@ mod tests {
             &subjects,
             "<https://repolex.ai/git-lex/NamedGraph/now>",
             "Journal/day-1.md",
-            &empty_paths, &obj_props, &datatypes, &declared, &namespaces, &ranges, false,
+            &empty_paths, &obj_props, &datatypes, &declared, &namespaces, &ranges,
+            &std::collections::HashMap::new(), false,
             &mut types, &mut out,
         );
         assert!(
@@ -1151,7 +1184,8 @@ mod tests {
             &subjects2,
             "<https://repolex.ai/git-lex/NamedGraph/now>",
             "friend/selkie.md",
-            &empty_paths, &obj_props, &datatypes, &declared, &namespaces, &ranges, false,
+            &empty_paths, &obj_props, &datatypes, &declared, &namespaces, &ranges,
+            &std::collections::HashMap::new(), false,
             &mut types, &mut out2,
         );
         assert!(

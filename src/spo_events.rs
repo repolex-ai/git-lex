@@ -1031,7 +1031,8 @@ pub(crate) fn onegraph_walk_engine(
                 line, &subjects, one_graph, &relpath_str,
                 &ctx.path_index, &ctx.obj_props,
                 &ctx.prop_datatypes, &ctx.declared_props,
-                &ctx.kit_namespaces, &ctx.ref_ranges, ctx.obsidian_links,
+                &ctx.kit_namespaces, &ctx.ref_ranges, &ctx.deprecated_props,
+                ctx.obsidian_links,
                 &mut emitted_types, &mut emit_buf,
             );
             let mut any = false;

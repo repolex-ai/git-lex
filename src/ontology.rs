@@ -663,6 +663,70 @@ pub(crate) fn get_reference_ranges_all_kits() -> HashMap<String, String> {
     out
 }
 
+/// `"{kit}/{prop}"` → optional replacement (dcterms:isReplacedBy) for every
+/// property any installed kit declares with `owl:deprecated true`. The
+/// deprecated-key note at save consults this: a retired key EXISTS in the
+/// ontology (deprecate-never-delete keeps history replayable — the 0.9.0
+/// Friend incident), so telling the author it "does not exist" is a lie;
+/// it gets the deprecation teaching instead. Replacement values in the
+/// kit's own namespace are shortened to the local name.
+pub(crate) fn get_deprecated_properties_all_kits() -> HashMap<String, Option<String>> {
+    let mut out = HashMap::new();
+    let Some(root) = find_git_root() else { return out };
+    let ont_root = root.join(".lex").join("ontology");
+    let Ok(entries) = fs::read_dir(&ont_root) else { return out };
+    for e in entries.filter_map(|e| e.ok()) {
+        let dir = e.path();
+        if !dir.is_dir() { continue }
+        let Some(short) = dir.file_name().and_then(|n| n.to_str()).map(String::from) else { continue };
+        let ttl = dir.join(format!("{}.ttl", short));
+        let Ok(content) = fs::read_to_string(&ttl) else { continue };
+        for (prop, replaced) in parse_deprecated_properties(&content, &short) {
+            out.insert(format!("{}/{}", short, prop), replaced);
+        }
+    }
+    out
+}
+
+/// Pure parser for `owl:deprecated true` properties in one kit TTL.
+/// Returns `(property_local_name, Option<replacement>)` pairs; properties
+/// outside the kit's own namespace are skipped.
+fn parse_deprecated_properties(content: &str, short: &str) -> Vec<(String, Option<String>)> {
+    let kit_ns = kit_namespace_of(content, short);
+    let store = match crate::kit::load_ttl_str(content, &format!("{} ontology", short)) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("warning: {} — deprecated properties unreadable", e);
+            return Vec::new();
+        }
+    };
+    let q = "SELECT ?p ?r WHERE { \
+             ?p <http://www.w3.org/2002/07/owl#deprecated> true . \
+             OPTIONAL { ?p <http://purl.org/dc/terms/isReplacedBy> ?r } }";
+    let mut out = Vec::new();
+    if let Ok(oxigraph::sparql::QueryResults::Solutions(sols)) = git_lex::eval_query(&store, q) {
+        for s in sols.flatten() {
+            let Some(Term::NamedNode(p)) = s.get("p") else { continue };
+            let Some(prop) = p.as_str().strip_prefix(kit_ns.as_str()) else { continue };
+            if prop.is_empty() {
+                continue;
+            }
+            let replaced = match s.get("r") {
+                Some(Term::NamedNode(r)) => Some(
+                    r.as_str()
+                        .strip_prefix(kit_ns.as_str())
+                        .map(str::to_string)
+                        .unwrap_or_else(|| r.as_str().to_string()),
+                ),
+                Some(Term::Literal(l)) => Some(l.value().to_string()),
+                _ => None,
+            };
+            out.push((prop.to_string(), replaced));
+        }
+    }
+    out
+}
+
 /// Pure parser for object-property ranges in one kit TTL. Returns
 /// `(property_local_name, range_class_iri)` pairs; XSD ranges and
 /// properties outside the kit's own namespace are skipped.
@@ -908,7 +972,12 @@ copia:NocturneActivity a owl:Class ;
         let path = std::path::PathBuf::from("/Users/rob/repos/repolex-ai/git-lex-kit-soul/ontology/soul/soul.ttl");
         let Ok(content) = fs::read_to_string(&path) else { return };
         assert_eq!(parse_class_type_label(&content, "soul", "Memory"), "Memory");
-        assert_eq!(parse_class_type_label(&content, "soul", "Decision"), "Decision");
+        // Decision deprecated at soul 0.9.0 (isReplacedBy soul:Note) — the
+        // label honestly says so; deprecate-never-delete keeps the stanza.
+        assert_eq!(
+            parse_class_type_label(&content, "soul", "Decision"),
+            "Decision (deprecated)"
+        );
         assert_eq!(parse_class_type_label(&content, "soul", "Note"), "Note");
         assert_eq!(parse_class_type_label(&content, "soul", "Journal"), "Journal");
     }
