@@ -241,6 +241,7 @@ pub(crate) fn frontmatter_to_turtle(
     // Build ObjectProperty set and datatype map for proper literal emission
     let obj_props = get_object_properties(kit);
     let prop_datatypes = get_property_datatypes(kit);
+    let ref_ranges = crate::ontology::get_reference_ranges_all_kits();
 
     // Build Turtle RDF for this document. Subjects use the same minting
     // authority as the now-graph (resource_uri) — no urn: anywhere. SHACL
@@ -273,7 +274,32 @@ pub(crate) fn frontmatter_to_turtle(
             // IRIs — so an `@mention` PASSED validation and then errored
             // at save time (review finding A5: two resolution policies).
             let values: Vec<&str> = value.split(',').map(|v| v.trim()).filter(|v| !v.is_empty()).collect();
+            // Law 6 (identity model, 2026-07-30): a DECLARED RANGE makes the
+            // authored value the target's ID — the range names the class, the
+            // id names the Thing, nothing is guessed. This mirrors the sync
+            // emitter's range branch in nquad.rs EXACTLY (the A5 rule this
+            // comment block cites: one resolution policy, judged here as it
+            // will be emitted there). Path-law resolution applies only to
+            // ObjectProperties with no declared class range.
+            let range = ref_ranges.get(&format!("{}/{}", short, prop_name));
             for val in values {
+                if let Some(range_iri) = range {
+                    match crate::nquad::thing_iri_from_range(range_iri, val) {
+                        Some(target) => {
+                            ttl.push_str(&format!(
+                                "<{}> {}:{} {} .\n",
+                                doc_iri, prefix_name, prop_name, target
+                            ));
+                        }
+                        None => {
+                            return Err(format!(
+                                "{}: declared range `{}` is not a resolvable class IRI",
+                                prop_name, range_iri
+                            ));
+                        }
+                    }
+                    continue;
+                }
                 match crate::resolve::resolve_frontmatter_value(val) {
                     crate::resolve::ResolveResult::Iri(uri) => {
                         // `uri` arrives in `<...>` form, valid Turtle as-is.
