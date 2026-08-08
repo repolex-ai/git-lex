@@ -324,13 +324,37 @@ pub(crate) fn cmd_kit_update(kit_arg: Option<String>) {
     let mut total_installed = 0usize;
     let mut total_skipped = 0usize;
     let mut all_updated: Vec<String> = Vec::new();
+    // #72: which kit(s) converged each path this run. Two kits shipping the
+    // SAME path with different content flip the file back and forth every
+    // update — the last kit silently wins by install order, not intent, and
+    // the loser's copy churns as <file>.bak forever. Receipt: base shipped
+    // an empty .claude/CLAUDE.md while soul ships the real one — every
+    // fleet kit-update printed the path twice and re-.bak'd it.
+    let mut converged_by: std::collections::BTreeMap<String, Vec<String>> =
+        std::collections::BTreeMap::new();
     for spec in &kits_to_update {
         let (org, repo, _) = resolve_kit_spec(spec);
         let kit_dir = lex_dir.join("kit").join(&org).join(&repo);
         let report = install_scaffold_files_from_skip_existing(&kit_dir);
         total_installed += report.installed;
         total_skipped += report.skipped;
+        for path in &report.updated {
+            converged_by.entry(path.clone()).or_default().push(repo.clone());
+        }
         all_updated.extend(report.updated);
+    }
+    for (path, kits) in &converged_by {
+        if kits.len() > 1 {
+            eprintln!(
+                "⚠ kit CONFLICT: {} is shipped by {} — each kit-update rewrites it {} times \
+                 and `{}` wins only by install order. This is a kit-lane bug: exactly one \
+                 kit should ship this file. Report it to the kit owner.",
+                path,
+                kits.join(" AND "),
+                kits.len(),
+                kits.last().map(String::as_str).unwrap_or("?")
+            );
+        }
     }
 
     // File-level hook reap (twin of the registration reap). The keep-set MUST
