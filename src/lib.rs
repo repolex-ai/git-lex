@@ -128,18 +128,6 @@ pub struct RepoYml {
     /// this.
     #[serde(default)]
     pub dev_history_horizon: Option<String>,
-    /// HISTORY-REPLAY FENCE, not user config. The wikilink reader is
-    /// retired (Rob-ruled 2026-08-06) — nothing writes this key anymore —
-    /// but wikilink-era sidecars still exist in repo HISTORY, and the walk
-    /// must resolve their linksTo operands the way the era they were
-    /// written under resolved them: "obsidian" = bare targets repo-root-
-    /// relative (2026-08-01 ruling), absent = legacy 2026-07-28 semantics
-    /// (bare = source-folder-relative, `/` = repo-rooted). Same lifecycle
-    /// as dev_history_horizon: deletable from a repo.yml only when that
-    /// repo's history holds no wikilink-era sidecars the two semantics
-    /// would resolve differently.
-    #[serde(default)]
-    pub link_semantics: Option<String>,
     #[serde(default)]
     pub optional_kits: Vec<String>,
     #[serde(default)]
@@ -172,13 +160,6 @@ impl RepoYml {
                 RepoYml::default()
             }
         }
-    }
-
-    /// True when this repo uses Obsidian wikilink semantics (bare targets
-    /// are repo-root-relative; leading `/` rejected). False = legacy
-    /// 2026-07-28 markdown semantics.
-    pub fn obsidian_links(&self) -> bool {
-        self.link_semantics.as_deref().map(str::trim) == Some("obsidian")
     }
 
     /// The domain kit, if configured and not "none".

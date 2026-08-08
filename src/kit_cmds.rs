@@ -487,6 +487,28 @@ pub(crate) fn cmd_kit_update(kit_arg: Option<String>) {
         }
     }
 
+    // Sweep the retired `link_semantics:` key from repo.yml. The wikilink-era
+    // migration fence is gone from the code (ONE link law, Rob-ruled
+    // 2026-08-08: linksTo targets are repo-root-relative everywhere, every
+    // era) — the key is inert, and inert config left lying around reads as
+    // meaning something.
+    {
+        let ryml = root.join(".lex").join("repo.yml");
+        if let Ok(content) = fs::read_to_string(&ryml) {
+            if content.lines().any(|l| l.trim_start().starts_with("link_semantics:")) {
+                let cleaned: String = content
+                    .lines()
+                    .filter(|l| !l.trim_start().starts_with("link_semantics:"))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+                    + "\n";
+                if fs::write(&ryml, cleaned).is_ok() {
+                    println!("Removed retired `link_semantics:` key from .lex/repo.yml (one link law)");
+                }
+            }
+        }
+    }
+
     // #71: converge .lex/ontology/ to exactly what the installed kits own.
     // Kit installs copy additively and never delete, so every layout era
     // left fossils behind (top-level fm/ git/ lex/ lex-o/, retired optional

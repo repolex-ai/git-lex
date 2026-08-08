@@ -205,11 +205,9 @@ pub(crate) fn cmd_init(directory: Option<String>, kit: Option<String>) {
         let today = Command::new("date").args(["+%Y-%m-%d"]).output().ok()
             .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
             .unwrap_or_else(|| "unknown".to_string());
-        // No link_semantics stamp: the wikilink reader is retired
-        // (Rob-ruled 2026-08-06) — markdown links are the linking story.
-        // The key survives in OLD repo.ymls only as a history-replay fence
-        // (see RepoYml::link_semantics); a newborn has no wikilink-era
-        // history, so writing it here would be minting dead config.
+        // Three keys only. The wikilink-era `link_semantics` fence is fully
+        // retired (one link law, Rob-ruled 2026-08-08); kit-update sweeps
+        // the key from old repo.ymls.
         fs::write(&repo_yml_path, format!(
             "name: {}\nkit: {}\ncreated: {}\n",
             repo_name, kit_spec, today

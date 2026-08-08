@@ -179,12 +179,6 @@ pub(crate) struct ResolverContext {
     /// xsd:string property by design and must never gate the warning.
     pub declared_props: HashSet<String>,
     pub kit_namespaces: HashMap<String, String>,
-    /// Repo-level wikilink semantics (repo.yml `link_semantics`): true =
-    /// Obsidian (bare targets root-relative, `/` rejected), false = legacy
-    /// 2026-07-28 markdown semantics. Applies uniformly to the now view AND
-    /// the whole history walk — correct because only repos BORN under
-    /// Obsidian semantics (or fully migrated in Phase 4) carry the stamp.
-    pub obsidian_links: bool,
     /// Law-6 reference ranges: "{kit}/{prop}" → range class IRI, from
     /// installed kit TTLs (owl:ObjectProperty + non-XSD rdfs:range). A
     /// declared range makes the property's authored value a TARGET ID,
@@ -209,7 +203,6 @@ impl ResolverContext {
             prop_datatypes: get_property_datatypes_all_kits(),
             declared_props: crate::ontology::get_declared_properties_all_kits(),
             kit_namespaces: get_kit_namespaces_all_kits(),
-            obsidian_links: git_lex::RepoYml::load(root).obsidian_links(),
             ref_ranges: crate::ontology::get_reference_ranges_all_kits(),
             deprecated_props: crate::ontology::get_deprecated_properties_all_kits(),
         }
@@ -608,7 +601,6 @@ pub(crate) fn generate_frontmatter_nquads_with(
                 &kit_namespaces,
                 &ctx.ref_ranges,
                 &ctx.deprecated_props,
-                ctx.obsidian_links,
                 true, // the now path is the save/sync moment — warn here
                 &mut emitted_types,
                 &mut nq,
@@ -661,7 +653,6 @@ pub(crate) fn emit_spo_line_nquads(
     kit_namespaces: &HashMap<String, String>,
     ref_ranges: &HashMap<String, String>,
     deprecated_props: &HashMap<String, Option<String>>,
-    obsidian_links: bool,
     warn: bool,
     emitted_types: &mut HashSet<String>,
     out: &mut String,
@@ -692,53 +683,31 @@ pub(crate) fn emit_spo_line_nquads(
     }
 
     if predicate == "linksTo" {
-        // [[wikilink]] → md:linksTo. Two semantics, dispatched on the repo's
-        // link_semantics stamp (migration fence, see ResolverContext):
-        //
-        // LEGACY (2026-07-28 ruling, unstamped repos): a link target is
-        // a PATH — relative to the source file's folder, or repo-rooted
-        // with a leading `/` — resolved by pure path arithmetic.
-        //
-        // OBSIDIAN (2026-08-01 ruling, stamped repos): bare targets are
-        // repo-ROOT-relative; a leading `/` is RETIRED and errors at save.
-        //
-        // Either way the IRI derives the same way at every commit, whether
-        // or not the target file exists yet (forward links are legal;
-        // dangling ones warn at save until the target appears). `.md` is
+        // md:linksTo — ONE law (Rob-ruled 2026-08-08): the sidecar object is
+        // a repo-ROOT-relative path, used as-is. The extractor already
+        // resolved the markdown link against its document's folder when it
+        // wrote the sidecar, so resolving again here was the double-join
+        // that minted `Soul/Note/Soul/Note/b.md` File IRIs (review-HIGH).
+        // A leading `/` (the retired 2026-07-28 repo-rooted form, present
+        // in historical sidecars) names the same root-relative path — it is
+        // stripped, not rejected, so all eras replay under the one law.
+        // Deterministic at every commit whether or not the target exists
+        // (forward links are legal; dangling ones warn at save). `.md` is
         // appended when the target has no extension.
         //
-        // NOT-CHOSEN alternative, recorded for context: the old
-        // three-strategy search (path-with-existence-check, then trailing-
-        // segment fallback, then stem lookup across the whole
-        // repo) — deleted because search-based resolution rebinds silently
-        // as files come and go and makes history non-deterministic.
-        if obsidian_links && object.starts_with('/') {
-            if warn {
-                eprintln!(
-                    "error: {relpath_str}: [[{object}]] — leading `/` is retired under \
-                     Obsidian link semantics; write the repo-root-relative path \
-                     (e.g. [[{}]])",
-                    object.trim_start_matches('/')
-                );
-            }
-            return errors + 1;
-        }
-        let source_dir = if obsidian_links {
-            String::new() // bare = repo-root-relative
-        } else {
-            std::path::Path::new(relpath_str)
-                .parent()
-                .map(|p| p.to_string_lossy().to_string())
-                .unwrap_or_default()
-        };
-
-        match normalize_wikilink_path(object, &source_dir) {
+        // History note: this lane once dispatched two semantics on a
+        // repo.yml `link_semantics` stamp (the wikilink-era migration
+        // fence). The wikilink reader retired 2026-08-06; the fence itself
+        // retired with the one-law ruling. Old-era bare targets that were
+        // authored source-folder-relative re-derive as root-relative — the
+        // accepted data change that bought one law for all history.
+        match normalize_wikilink_path(object.trim_start_matches('/'), "") {
             Some(p) => {
                 if graph == format!("<{}>", crate::git::graph_uri("now"))
                     && !path_index.contains(&p)
                 {
                     eprintln!(
-                        "warning: {relpath_str}: [[{object}]] → {p} does not exist (yet) — forward link, or fix the path"
+                        "warning: {relpath_str}: link target {p} does not exist (yet) — forward link, or fix the path"
                     );
                 }
                 // Prose links follow documents (Law 6): File → File, both
@@ -752,7 +721,7 @@ pub(crate) fn emit_spo_line_nquads(
             None => {
                 if warn {
                     eprintln!(
-                        "error: {relpath_str}: [[{object}]] escapes the repo root — links stay inside the repo"
+                        "error: {relpath_str}: link target {object:?} escapes the repo root — links stay inside the repo"
                     );
                 }
                 errors += 1;
@@ -1216,7 +1185,7 @@ mod tests {
             "<https://repolex.ai/git-lex/NamedGraph/now>",
             "Journal/day-1.md",
             &empty_paths, &obj_props, &datatypes, &declared, &namespaces, &ranges,
-            &std::collections::HashMap::new(), false, true,
+            &std::collections::HashMap::new(), true,
             &mut types, &mut out,
         );
         assert!(
@@ -1238,7 +1207,7 @@ mod tests {
             "<https://repolex.ai/git-lex/NamedGraph/now>",
             "friend/selkie.md",
             &empty_paths, &obj_props, &datatypes, &declared, &namespaces, &ranges,
-            &std::collections::HashMap::new(), false, true,
+            &std::collections::HashMap::new(), true,
             &mut types, &mut out2,
         );
         assert!(

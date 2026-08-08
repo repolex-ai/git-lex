@@ -1014,7 +1014,6 @@ fn cmd_extract() {
     let mut gate_files = 0usize;
     let mut gate_errors = 0usize;
     if let Some(root) = git_lex::find_git_root() {
-        let obsidian_links = git_lex::RepoYml::load(&root).obsidian_links();
         let mut stack = vec![root.join(".lex").join("extract")];
         while let Some(dir) = stack.pop() {
             let Ok(entries) = std::fs::read_dir(&dir) else { continue };
@@ -1025,7 +1024,7 @@ fn cmd_extract() {
                 } else if path.extension().and_then(|e| e.to_str()) == Some("spo") {
                     gate_files += 1;
                     let content = std::fs::read_to_string(&path).unwrap_or_default();
-                    for (lineno, err) in spo_events::validate_sidecar_v1(&content, obsidian_links) {
+                    for (lineno, err) in spo_events::validate_sidecar_v1(&content) {
                         let rel = path.strip_prefix(&root).unwrap_or(&path);
                         eprintln!("sidecar gate: {}:{}: {}", rel.display(), lineno, err);
                         gate_errors += 1;

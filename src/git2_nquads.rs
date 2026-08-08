@@ -219,7 +219,7 @@ pub(crate) fn generate_git2_nquads() -> String {
                     "first_commit" => {} // legacy duplicate of genesisSha (computed) — ignored by ruling
                     "genesis_sha" => {} // duplicate of genesisSha (computed) — ignored by ruling
                     "dev_history_horizon" => {} // CONFIG, not a fact (dev-only walk stopgap) — never emitted
-                    "link_semantics" => {} // CONFIG (migration fence, spec §5) — never emitted
+                    "link_semantics" => {} // RETIRED wikilink-era key, still in old repo.ymls — never emitted
                     "optional_kits" => current_list = Some("optionalKit"),
                     "substrates" => current_list = Some("substrate"),
                     "name" | "kit" | "version" | "agent_name" | "agent_email" | "created" => {} // known key, empty value

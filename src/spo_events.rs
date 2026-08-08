@@ -39,11 +39,12 @@ pub(crate) const SPO_OPERATORS_V1: &[&str] = &["hasValue", "linksTo"];
 ///   - object: no control characters (Unicode Cc — the standard property,
 ///     not a homegrown parser; format chars Cf stay legal)
 ///   - `hasValue` with empty object is LEGAL (present-but-empty field)
-///   - `linksTo`: non-empty target; under Obsidian link semantics
-///     (`obsidian_links` — repos stamped by init), a leading `/` is
-///     rejected (retired form); legacy repos accept both forms until
-///     their Phase-4 migration.
-pub(crate) fn validate_sidecar_v1(content: &str, obsidian_links: bool) -> Vec<(usize, String)> {
+///   - `linksTo`: non-empty target. ONE law (Rob-ruled 2026-08-08): the
+///     target is a repo-root-relative path; a historical leading `/`
+///     (retired repo-rooted form) names the same path and is normalized at
+///     emit, so it is tolerated here — the gate polices shape, the emitter
+///     owns resolution.
+pub(crate) fn validate_sidecar_v1(content: &str) -> Vec<(usize, String)> {
     let mut errors = Vec::new();
     for (idx, line) in content.lines().enumerate() {
         let lineno = idx + 1;
@@ -73,20 +74,8 @@ pub(crate) fn validate_sidecar_v1(content: &str, obsidian_links: bool) -> Vec<(u
                 "control character U+{:04X} in object value", c as u32
             )));
         }
-        if operator == "linksTo" {
-            if object.trim().is_empty() {
-                errors.push((lineno, "linksTo with an empty target".to_string()));
-            } else if obsidian_links && object.starts_with('/') {
-                errors.push((lineno, format!(
-                    "linksTo target {object:?} has a leading slash — retired \
-                     under Obsidian link semantics (spec §5); write the \
-                     repo-root-relative path"
-                )));
-            }
-            // Legacy (unstamped) repos: both forms accepted — under the
-            // 2026-07-28 law the slash is SEMANTIC (bare = source-folder-
-            // relative, `/` = repo-rooted). A blanket rejection here (tried
-            // 2026-08-01) outlawed valid data.
+        if operator == "linksTo" && object.trim().is_empty() {
+            errors.push((lineno, "linksTo with an empty target".to_string()));
         }
     }
     errors
@@ -1077,7 +1066,6 @@ pub(crate) fn onegraph_walk_engine(
                 &ctx.path_index, &ctx.obj_props,
                 &ctx.prop_datatypes, &ctx.declared_props,
                 &ctx.kit_namespaces, &ctx.ref_ranges, &ctx.deprecated_props,
-                ctx.obsidian_links,
                 false,
                 &mut emitted_types, &mut emit_buf,
             );
@@ -1298,19 +1286,19 @@ Copia/Texture/self.md | linksTo | Soul/Journal/day-15.md
 md.externalLink | hasValue | https://github.com/repolex-ai/git-lex
 soul.Memory.category | hasValue | \n";
         // Includes the legal empty-object hasValue on the last line.
-        assert!(validate_sidecar_v1(content, false).is_empty());
+        assert!(validate_sidecar_v1(content).is_empty());
     }
 
     #[test]
     fn gate_accepts_pipe_inside_object() {
         // splitn(3): the object may contain " | " verbatim.
         let content = "soul.Note.title | hasValue | a | b | c\n";
-        assert!(validate_sidecar_v1(content, false).is_empty());
+        assert!(validate_sidecar_v1(content).is_empty());
     }
 
     #[test]
     fn gate_rejects_wrong_field_count() {
-        let errs = validate_sidecar_v1("         uad/Squaddie/lspy\n", false);
+        let errs = validate_sidecar_v1("         uad/Squaddie/lspy\n");
         assert_eq!(errs.len(), 1);
         assert!(errs[0].1.contains("malformed line"));
     }
@@ -1318,44 +1306,34 @@ soul.Memory.category | hasValue | \n";
     #[test]
     fn gate_rejects_unknown_operator() {
         // The dormant jsonl session extractor's shape must not pass.
-        let errs = validate_sidecar_v1("session-abc123 | isA | session\n", false);
+        let errs = validate_sidecar_v1("session-abc123 | isA | session\n");
         assert_eq!(errs.len(), 1);
         assert!(errs[0].1.contains("closed vocabulary"));
     }
 
     #[test]
     fn gate_rejects_control_characters_in_object() {
-        let errs = validate_sidecar_v1("soul.Note.title | hasValue | tab\there\n", false);
+        let errs = validate_sidecar_v1("soul.Note.title | hasValue | tab\there\n");
         assert_eq!(errs.len(), 1);
         assert!(errs[0].1.contains("U+0009"));
     }
 
     #[test]
-    fn gate_accepts_rooted_linksto_rejects_empty() {
-        // LEGACY repos: leading slash is SEMANTIC under the 2026-07-28 path
-        // law (bare = source-folder-relative, `/` = repo-rooted) — the gate
-        // must accept both forms until the repo's Phase-4 migration.
+    fn gate_accepts_both_link_forms_rejects_empty() {
+        // ONE link law (Rob-ruled 2026-08-08): targets are repo-root-
+        // relative; a historical leading `/` names the same path and is
+        // normalized at emit — the gate tolerates both, rejects only the
+        // truly-broken (empty target).
         let errs = validate_sidecar_v1(
-            "A.md | linksTo | /Soul/Note/x.md\nB.md | linksTo |  \n", false);
+            "A.md | linksTo | /Soul/Note/x.md\nA.md | linksTo | Soul/Note/y.md\nB.md | linksTo |  \n");
         assert_eq!(errs.len(), 1);
+        assert_eq!(errs[0].0, 3);
         assert!(errs[0].1.contains("empty target"));
     }
 
     #[test]
-    fn gate_obsidian_mode_rejects_leading_slash() {
-        // OBSIDIAN repos (stamped by init, Rob-ruled 2026-08-01): bare is
-        // repo-root-relative and the `/` form is retired.
-        let errs = validate_sidecar_v1(
-            "A.md | linksTo | /Soul/Note/x.md\nA.md | linksTo | Soul/Note/y.md\n",
-            true);
-        assert_eq!(errs.len(), 1);
-        assert_eq!(errs[0].0, 1);
-        assert!(errs[0].1.contains("Obsidian"));
-    }
-
-    #[test]
     fn gate_reports_line_numbers_and_blank_lines() {
-        let errs = validate_sidecar_v1("a | hasValue | ok\n\nbroken line\n", false);
+        let errs = validate_sidecar_v1("a | hasValue | ok\n\nbroken line\n");
         assert_eq!(errs.len(), 2);
         assert_eq!(errs[0].0, 2); // blank line
         assert_eq!(errs[1].0, 3); // malformed
