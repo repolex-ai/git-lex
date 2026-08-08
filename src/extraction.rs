@@ -65,6 +65,31 @@ pub(crate) fn normalize_wikilink_path(target: &str, source_dir: &str) -> Option<
     Some(joined)
 }
 
+/// Decode `%XX` escapes in a markdown link destination — `[x](my%20file.md)`
+/// authors an on-disk path containing a space, and the file index holds the
+/// raw filename. An invalid escape (no two hex digits) passes through
+/// unchanged.
+pub(crate) fn percent_decode(s: &str) -> String {
+    let bytes = s.as_bytes();
+    let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            if let Ok(b) = u8::from_str_radix(
+                std::str::from_utf8(&bytes[i + 1..i + 3]).unwrap_or(""),
+                16,
+            ) {
+                out.push(b);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
 /// Render a YAML string value as ONE physical sidecar line. The `.spo`
 /// format is line-based (one triple = one physical line — the sync walker
 /// hard-fails on violations), so interior newlines in a multiline YAML
@@ -423,16 +448,22 @@ pub(crate) fn extract_markdown_links() {
                             // External link
                             lines.push(format!("md.externalLink | hasValue | {}", dest));
                         } else {
-                            // Internal link — resolve relative to doc's directory
-                            let resolved = if dest.starts_with('/') {
-                                dest[1..].to_string()
-                            } else if !doc_dir.is_empty() {
-                                format!("{}/{}", doc_dir, dest)
-                            } else {
-                                dest.clone()
-                            };
-
-                            if file_index.contains(&resolved) {
+                            // Internal link. Strip any #fragment (a section
+                            // link still targets the file), percent-decode
+                            // (`my%20file.md` authors an on-disk space), then
+                            // resolve against the doc's directory with `./`
+                            // and `../` collapsed (review #27: the old naive
+                            // string join made every `../` link silently
+                            // unresolvable — the same file already shipped
+                            // the collapser; this lane just never called it).
+                            let target = percent_decode(dest.split('#').next().unwrap_or(""));
+                            if target.is_empty() {
+                                // pure same-page anchor (`#section`) — not a
+                                // document reference, no line at all
+                            } else if let Some(resolved) =
+                                normalize_wikilink_path(&target, doc_dir)
+                                    .filter(|r| file_index.contains(r))
+                            {
                                 // Markdown links are THE document-reference
                                 // edge (Rob-ruled 2026-08-06): they emit
                                 // `linksTo`, the name the graph and viz
@@ -488,6 +519,38 @@ pub(crate) fn extract_markdown_links() {
 
     if total_links > 0 {
         eprintln!("Markdown links: {} from {} files", total_links, files.len());
+    }
+}
+
+#[cfg(test)]
+mod link_resolution_tests {
+    use super::*;
+
+    /// Review #27: the markdown-link lane resolves `../` and `./` segments
+    /// through the same collapser the frontmatter lane uses — a valid
+    /// relative link must never silently fail the index lookup.
+    #[test]
+    fn relative_segments_collapse_before_lookup() {
+        assert_eq!(
+            normalize_wikilink_path("../Pursuit/thread.md", "Soul/Journal"),
+            Some("Soul/Pursuit/thread.md".to_string())
+        );
+        assert_eq!(
+            normalize_wikilink_path("./sibling.md", "Soul/Note"),
+            Some("Soul/Note/sibling.md".to_string())
+        );
+        // Escaping the repo root is a real failure, not a silent guess.
+        assert_eq!(normalize_wikilink_path("../../up.md", "Soul"), None);
+    }
+
+    #[test]
+    fn percent_decode_covers_authored_escapes() {
+        assert_eq!(percent_decode("my%20file.md"), "my file.md");
+        assert_eq!(percent_decode("plain.md"), "plain.md");
+        // Invalid escape passes through unchanged.
+        assert_eq!(percent_decode("100%zz.md"), "100%zz.md");
+        // Encoded UTF-8 decodes to the real character.
+        assert_eq!(percent_decode("Caf%C3%A9.md"), "Café.md");
     }
 }
 
