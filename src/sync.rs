@@ -158,32 +158,46 @@ pub(crate) fn cmd_sync() {
     }
 
     // ─── One-graph resume point: read BEFORE Phase 1 clears the commits
-    // graph. The resume commit = the commit carrying MAX git2:ordinalDerived
-    // in the PREVIOUS sync's commits graph. No stored marker (Rob-ruled):
-    // the persisted commit data IS the marker — a no-change commit still
-    // lands in the commits graph, so "newest in store" is always the true
-    // high-water mark.
+    // graph. The resume commit = the NEWEST commit in the PREVIOUS sync's
+    // commits graph that is an ANCESTOR OF HEAD. No stored marker
+    // (Rob-ruled): the persisted commit data IS the marker — a no-change
+    // commit still lands in the commits graph, so "newest in store" is the
+    // true high-water mark. The ancestor gate matters (review-HIGH): the
+    // commits graph is built from ALL refs (branches, tags, remotes —
+    // git2_nquads push_glob("*")) while the walk covers only HEAD's line;
+    // taking the bare max ordinal let a feature-branch or fetched-ahead
+    // remote tip become the resume point, silently skipping the HEAD
+    // commits between the fork and now.
     let onegraph_resume: Option<String> = {
         let q = format!(
             "SELECT ?sha WHERE {{ GRAPH <{}> {{ \
                ?c <https://repolex.ai/ontology/git-lex/git2/ordinalDerived> ?o ; \
                   <https://repolex.ai/ontology/git-lex/git2/id> ?sha }} \
-             }} ORDER BY DESC(?o) LIMIT 1",
+             }} ORDER BY DESC(?o)",
             graph_uri("commits")
         );
+        let is_head_ancestor = |sha: &str| -> bool {
+            std::process::Command::new("git")
+                .args(["merge-base", "--is-ancestor", sha, "HEAD"])
+                .current_dir(&root)
+                .status()
+                .map(|s| s.success())
+                .unwrap_or(false)
+        };
         oxigraph::sparql::SparqlEvaluator::new()
             .parse_query(&q)
             .ok()
             .and_then(|q| q.on_store(&store).execute().ok())
             .and_then(|r| match r {
-                oxigraph::sparql::QueryResults::Solutions(mut sols) => {
-                    sols.next().and_then(|s| s.ok()).and_then(|s| {
+                oxigraph::sparql::QueryResults::Solutions(sols) => sols
+                    .flatten()
+                    .filter_map(|s| {
                         s.get("sha").map(|t| match t {
                             oxigraph::model::Term::Literal(l) => l.value().to_string(),
                             other => other.to_string(),
                         })
                     })
-                }
+                    .find(|sha| is_head_ancestor(sha)),
                 _ => None,
             })
     };
