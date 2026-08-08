@@ -1130,8 +1130,10 @@ fn cmd_extract() {
                 if !enforce {
                     continue;
                 }
-                for val in parts[2].split(',').map(|v| v.trim()).filter(|v| !v.is_empty()) {
-                    if let Some(target) = nquad::thing_iri_from_range(range_iri, val) {
+                // URL-aware split (review #26): same splitter as the emitter,
+                // so the gate checks the exact values sync will resolve.
+                for val in nquad::split_object_values(parts[2]) {
+                    if let Some(target) = nquad::thing_iri_from_range(range_iri, &val) {
                         if !owners.contains_key(&target) {
                             eprintln!(
                                 "identity gate: {}: `{}` references `{}` but no Thing {} exists \

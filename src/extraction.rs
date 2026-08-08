@@ -274,7 +274,9 @@ pub(crate) fn frontmatter_to_turtle(
             // logic here stripped `@`, slugified, and invented `entity/`
             // IRIs — so an `@mention` PASSED validation and then errored
             // at save time (review finding A5: two resolution policies).
-            let values: Vec<&str> = value.split(',').map(|v| v.trim()).filter(|v| !v.is_empty()).collect();
+            // URL-aware split (review #26) — the SAME splitter the emitter
+            // uses, so validate judges exactly the values sync will emit.
+            let values = crate::nquad::split_object_values(value);
             // Law 6 (identity model, 2026-07-30): a DECLARED RANGE makes the
             // authored value the target's ID — the range names the class, the
             // id names the Thing, nothing is guessed. This mirrors the sync
@@ -283,7 +285,8 @@ pub(crate) fn frontmatter_to_turtle(
             // will be emitted there). Path-law resolution applies only to
             // ObjectProperties with no declared class range.
             let range = ref_ranges.get(&format!("{}/{}", short, prop_name));
-            for val in values {
+            for val in &values {
+                let val = val.as_str();
                 if let Some(range_iri) = range {
                     match crate::nquad::thing_iri_from_range(range_iri, val) {
                         Some(target) => {

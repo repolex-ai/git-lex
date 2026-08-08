@@ -98,9 +98,12 @@ pub fn resolve_frontmatter_value(raw: &str) -> ResolveResult {
     // would make the IRI structurally invalid (spaces, parens, etc. that
     // appear in real-world URLs). Without this, oxigraph's strict NQuads
     // parser rejects entire history-walk batches when one external link
-    // contains an unencoded character.
+    // contains an unencoded character. `uri_encode_url` (not `_path`): an
+    // already-encoded URL's `%XX` escapes pass through untouched — the old
+    // unconditional `%`→`%25` silently rewrote `Caf%C3%A9` into a
+    // different URL than the author wrote.
     if raw.starts_with("http://") || raw.starts_with("https://") {
-        return ResolveResult::Iri(format!("<{}>", crate::nquad::uri_encode_path(raw)));
+        return ResolveResult::Iri(format!("<{}>", crate::nquad::uri_encode_url(raw)));
     }
 
     // Rule 5: path-style values
@@ -226,6 +229,31 @@ mod tests {
         let iri = "https://repolex.ai/git-lex/goodlux/claude-export/Conversation/4f10a178-c0a4-41c6-b397-655d222d6202";
         let result = resolve_frontmatter_value(iri);
         assert_eq!(result, ResolveResult::Iri(format!("<{}>", iri)));
+    }
+
+    /// Rule 4: an ALREADY-ENCODED URL passes through byte-identical — its
+    /// `%XX` escapes are not re-encoded (`%` → `%25` would mint a different
+    /// URL than the author wrote). A bare `%` that is NOT a valid escape
+    /// still encodes, keeping the emitted IRI parseable.
+    #[test]
+    fn full_iri_preserves_percent_encoding() {
+        let iri = "https://en.wikipedia.org/wiki/Caf%C3%A9";
+        assert_eq!(
+            resolve_frontmatter_value(iri),
+            ResolveResult::Iri(format!("<{}>", iri))
+        );
+        // Unencoded characters in the same URL still encode; valid escapes
+        // stay untouched.
+        assert_eq!(
+            resolve_frontmatter_value("https://example.com/a%20b and c"),
+            ResolveResult::Iri("<https://example.com/a%20b%20and%20c>".to_string())
+        );
+        // A stray `%` (not followed by two hex digits) is not a valid
+        // escape — it encodes so the IRI stays structurally valid.
+        assert_eq!(
+            resolve_frontmatter_value("https://example.com/100%"),
+            ResolveResult::Iri("<https://example.com/100%25>".to_string())
+        );
     }
 
     // ─── Rule 5: path-style values ────────────────────────────────────────

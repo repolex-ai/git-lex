@@ -66,34 +66,103 @@ pub(crate) fn nq_escape(s: &str) -> String {
         .replace('\r', "\\r")
 }
 
+/// Percent-encode one character into `out` (the shared table for both
+/// encoders below).
+fn push_uri_encoded(c: char, out: &mut String) {
+    match c {
+        '%' => out.push_str("%25"),
+        '"' => out.push_str("%22"),
+        '\\' => out.push_str("%5C"),
+        ' ' => out.push_str("%20"),
+        '<' => out.push_str("%3C"),
+        '>' => out.push_str("%3E"),
+        '{' => out.push_str("%7B"),
+        '}' => out.push_str("%7D"),
+        '|' => out.push_str("%7C"),
+        '^' => out.push_str("%5E"),
+        '`' => out.push_str("%60"),
+        '[' => out.push_str("%5B"),
+        ']' => out.push_str("%5D"),
+        c if !c.is_ascii() => {
+            let mut buf = [0u8; 4];
+            for b in c.encode_utf8(&mut buf).bytes() {
+                out.push_str(&format!("%{:02X}", b));
+            }
+        }
+        c => out.push(c),
+    }
+}
+
 /// Percent-encode a path for use in URIs (spaces, special chars, non-ASCII).
 pub(crate) fn uri_encode_path(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for c in s.chars() {
-        match c {
-            '%' => out.push_str("%25"),
-            '"' => out.push_str("%22"),
-            '\\' => out.push_str("%5C"),
-            ' ' => out.push_str("%20"),
-            '<' => out.push_str("%3C"),
-            '>' => out.push_str("%3E"),
-            '{' => out.push_str("%7B"),
-            '}' => out.push_str("%7D"),
-            '|' => out.push_str("%7C"),
-            '^' => out.push_str("%5E"),
-            '`' => out.push_str("%60"),
-            '[' => out.push_str("%5B"),
-            ']' => out.push_str("%5D"),
-            c if !c.is_ascii() => {
-                let mut buf = [0u8; 4];
-                for b in c.encode_utf8(&mut buf).bytes() {
-                    out.push_str(&format!("%{:02X}", b));
-                }
-            }
-            c => out.push(c),
-        }
+        push_uri_encoded(c, &mut out);
     }
     out
+}
+
+/// Percent-encode a full http(s) URL for IRI use — like `uri_encode_path`,
+/// but an EXISTING `%XX` escape passes through untouched. Rule-4 passthrough
+/// values often arrive already encoded (`Caf%C3%A9`); re-encoding the `%`
+/// mints a DIFFERENT URL (`Caf%25C3%25A9`) than the author wrote. A bare `%`
+/// not followed by two hex digits still encodes, so oxigraph's strict
+/// N-Quads parser never sees a structurally invalid IRI.
+pub(crate) fn uri_encode_url(s: &str) -> String {
+    let chars: Vec<char> = s.chars().collect();
+    let mut out = String::with_capacity(s.len());
+    let mut i = 0;
+    while i < chars.len() {
+        if chars[i] == '%'
+            && i + 2 < chars.len()
+            && chars[i + 1].is_ascii_hexdigit()
+            && chars[i + 2].is_ascii_hexdigit()
+        {
+            out.push('%');
+            i += 1;
+            continue;
+        }
+        push_uri_encoded(chars[i], &mut out);
+        i += 1;
+    }
+    out
+}
+
+/// Split a frontmatter ObjectProperty value into its list items.
+///
+/// Values are comma-separated lists — EXCEPT that a comma inside a URL is
+/// part of the URL (`https://en.wikipedia.org/wiki/Washington,_D.C.` is ONE
+/// value, not a wrong IRI plus a rejected `_D.C.`). When the value starts
+/// with `http(s)://`, a comma only starts a new item where the next item
+/// itself begins a new `http(s)://` URL; everything else keeps the plain
+/// comma split. Used by the emitter, the validate path, and the identity
+/// gate — ONE splitter, so validation judges exactly what sync will emit.
+pub(crate) fn split_object_values(object: &str) -> Vec<String> {
+    let is_url = |s: &str| s.starts_with("http://") || s.starts_with("https://");
+    if !is_url(object.trim()) {
+        return object
+            .split(',')
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+    }
+    let mut items: Vec<String> = Vec::new();
+    let mut current = String::new();
+    for piece in object.split(',') {
+        if is_url(piece.trim()) && !current.is_empty() {
+            items.push(current.trim().to_string());
+            current.clear();
+        }
+        if !current.is_empty() {
+            current.push(',');
+        }
+        current.push_str(piece);
+    }
+    if !current.trim().is_empty() {
+        items.push(current.trim().to_string());
+    }
+    items.retain(|s| !s.is_empty());
+    items
 }
 
 /// Load .lex/*.nq files and return their contents.
@@ -795,8 +864,11 @@ pub(crate) fn emit_spo_line_nquads(
                 // Thing IRI. Deterministic at every commit, dangling or
                 // not (existence is the save gate's job, not derivation's).
                 let range = ref_ranges.get(&format!("{}/{}", kit_name, prop_seg));
-                let values: Vec<&str> = object.split(',').map(|s| s.trim()).filter(|s| !s.is_empty()).collect();
-                for val in values {
+                // URL-aware split (review #26): a comma INSIDE a URL is part
+                // of the value, not a list separator.
+                let values = split_object_values(object);
+                for val in &values {
+                    let val = val.as_str();
                     if val.is_empty() { continue; }
                     if let Some(range_iri) = range {
                         match thing_iri_from_range(range_iri, val) {
@@ -1266,6 +1338,47 @@ mod tests {
     /// escape-significant) in IRIs — unencoded they made a file like
     /// `100%.md` panic every sync (deep-review HIGH #3). '%' must be
     /// encoded FIRST so already-encoded output is never double-mangled.
+    #[test]
+    /// Review #26: a comma INSIDE a URL is part of the value; a comma that
+    /// starts a new URL splits. Non-URL values keep the plain comma split.
+    #[test]
+    fn split_object_values_is_url_aware() {
+        // Single URL with a comma in it — ONE value, intact.
+        assert_eq!(
+            split_object_values("https://en.wikipedia.org/wiki/Washington,_D.C."),
+            vec!["https://en.wikipedia.org/wiki/Washington,_D.C."]
+        );
+        // A list of URLs still splits at the item boundaries.
+        assert_eq!(
+            split_object_values("https://a.com/x, https://b.com/y"),
+            vec!["https://a.com/x", "https://b.com/y"]
+        );
+        // A list of URLs where one ITEM contains a comma: the comma that
+        // does not start a new URL stays inside its item.
+        assert_eq!(
+            split_object_values("https://a.com/w,x, https://b.com/y"),
+            vec!["https://a.com/w,x", "https://b.com/y"]
+        );
+        // Plain (non-URL) values: unchanged comma-split semantics.
+        assert_eq!(
+            split_object_values("friend/a.md, friend/b.md"),
+            vec!["friend/a.md", "friend/b.md"]
+        );
+        assert_eq!(split_object_values("  , ,"), Vec::<String>::new());
+    }
+
+    #[test]
+    fn uri_encode_url_preserves_existing_escapes() {
+        assert_eq!(
+            uri_encode_url("https://en.wikipedia.org/wiki/Caf%C3%A9"),
+            "https://en.wikipedia.org/wiki/Caf%C3%A9"
+        );
+        // Stray % (no two hex digits after) still encodes.
+        assert_eq!(uri_encode_url("https://x.com/100%"), "https://x.com/100%25");
+        // Non-escape chars keep the path-encoder table.
+        assert_eq!(uri_encode_url("https://x.com/a b"), "https://x.com/a%20b");
+    }
+
     #[test]
     fn uri_encode_path_covers_iri_breaking_chars() {
         assert_eq!(uri_encode_path("100%.md"), "100%25.md");
