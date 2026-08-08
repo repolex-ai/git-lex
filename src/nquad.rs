@@ -526,9 +526,7 @@ pub(crate) fn generate_frontmatter_nquads_with(
     let repo = git2::Repository::discover(".").ok();
 
     let files = ctx.files.as_slice();
-    let path_index = &ctx.path_index;
-    let (obj_props, prop_datatypes, kit_namespaces) =
-        (&ctx.obj_props, &ctx.prop_datatypes, &ctx.kit_namespaces);
+    let (obj_props, kit_namespaces) = (&ctx.obj_props, &ctx.kit_namespaces);
 
     // entity_classes was used by the old range-aware resolver, which has been
     // replaced by src/resolve.rs. The range-check approach (matching class IRIs
@@ -660,13 +658,7 @@ pub(crate) fn generate_frontmatter_nquads_with(
                 &subjects,
                 &graph,
                 &relpath_str,
-                &path_index,
-                &obj_props,
-                &prop_datatypes,
-                &ctx.declared_props,
-                &kit_namespaces,
-                &ctx.ref_ranges,
-                &ctx.deprecated_props,
+                ctx,
                 true, // the now path is the save/sync moment — warn here
                 &mut emitted_types,
                 &mut nq,
@@ -697,32 +689,37 @@ pub(crate) fn generate_frontmatter_nquads_with(
 ///   File node so nothing is dropped; the drift is surfaced elsewhere.
 /// - `graph`: target graph IRI (with angle brackets)
 /// - `relpath_str`: source document path relative to repo root (for warnings)
-/// - `path_index`: repo-relative paths of every walked doc (dangling-link
-///   warnings only — resolution itself is pure path arithmetic)
-/// - `obj_props` / `prop_datatypes`: ontology-derived property metadata
-/// - `emitted_types`: in/out dedup set — the caller must zero this per doc
-///   so each document emits its `rdf:type` assertions at most once
+/// - `ctx`: the shared resolver context (path index + ontology tables),
+///   built once per run — the old signature exploded seven of its fields
+///   into positional params of identical types, so an argument swap
+///   compiled clean and silently broke the emitter (review #15)
 /// - `warn`: true on the live save/sync path (the moment the author can
 ///   act); false on the history walk, which revisits every commit — replay
 ///   must not repeat live to-dos (#73). Emission and the returned error
 ///   COUNT are identical either way; only the printing differs.
+/// - `emitted_types`: in/out dedup set — the caller must zero this per doc
+///   so each document emits its `rdf:type` assertions at most once
 /// - `out`: the N-Quad buffer being appended to
 pub(crate) fn emit_spo_line_nquads(
     line: &str,
     subjects: &FileSubjects,
     graph: &str,
     relpath_str: &str,
-    path_index: &HashSet<String>,
-    obj_props: &HashSet<String>,
-    prop_datatypes: &HashMap<String, String>,
-    declared_props: &HashSet<String>,
-    kit_namespaces: &HashMap<String, String>,
-    ref_ranges: &HashMap<String, String>,
-    deprecated_props: &HashMap<String, Option<String>>,
+    ctx: &ResolverContext,
     warn: bool,
     emitted_types: &mut HashSet<String>,
     out: &mut String,
 ) -> u32 {
+    let ResolverContext {
+        path_index,
+        obj_props,
+        prop_datatypes,
+        declared_props,
+        kit_namespaces,
+        ref_ranges,
+        deprecated_props,
+        ..
+    } = ctx;
     let mut errors: u32 = 0;
     let parts: Vec<&str> = line.splitn(3, " | ").collect();
     if parts.len() != 3 {
@@ -1232,17 +1229,22 @@ mod tests {
     /// with no installed declaration falls back to the conventional pattern.
     #[test]
     fn emitter_follows_declared_kit_namespace() {
-        let empty_paths: HashSet<String> = HashSet::new();
-        let obj_props: HashSet<String> = HashSet::new();
-        let datatypes: HashMap<String, String> = HashMap::new();
         let mut namespaces: HashMap<String, String> = HashMap::new();
         // The flip case: soul declares the migrated (kit-less) namespace.
         namespaces.insert("soul".into(), "https://repolex.ai/ontology/soul/".into());
-        let ranges: HashMap<String, String> = HashMap::new();
+        let ctx = ResolverContext {
+            files: Vec::new(),
+            path_index: HashSet::new(),
+            obj_props: HashSet::new(),
+            prop_datatypes: HashMap::new(),
+            declared_props: HashSet::new(),
+            kit_namespaces: namespaces,
+            ref_ranges: HashMap::new(),
+            deprecated_props: HashMap::new(),
+        };
 
         let mut types = HashSet::new();
         let mut out = String::new();
-        let declared = HashSet::new();
         let subjects = FileSubjects {
             file_uri: "<https://repolex.ai/git-lex/File/Journal/day-1.md>".into(),
             thing_uri: None,
@@ -1253,8 +1255,7 @@ mod tests {
             &subjects,
             "<https://repolex.ai/git-lex/NamedGraph/now>",
             "Journal/day-1.md",
-            &empty_paths, &obj_props, &datatypes, &declared, &namespaces, &ranges,
-            &std::collections::HashMap::new(), true,
+            &ctx, true,
             &mut types, &mut out,
         );
         assert!(
@@ -1275,8 +1276,7 @@ mod tests {
             &subjects2,
             "<https://repolex.ai/git-lex/NamedGraph/now>",
             "friend/selkie.md",
-            &empty_paths, &obj_props, &datatypes, &declared, &namespaces, &ranges,
-            &std::collections::HashMap::new(), true,
+            &ctx, true,
             &mut types, &mut out2,
         );
         assert!(
@@ -1346,11 +1346,6 @@ mod tests {
         assert!(s.thing_key.is_none());
     }
 
-    /// '%', '"', and '\' are legal in filenames but illegal (or
-    /// escape-significant) in IRIs — unencoded they made a file like
-    /// `100%.md` panic every sync (deep-review HIGH #3). '%' must be
-    /// encoded FIRST so already-encoded output is never double-mangled.
-    #[test]
     /// Review #26: a comma INSIDE a URL is part of the value; a comma that
     /// starts a new URL splits. Non-URL values keep the plain comma split.
     #[test]
@@ -1391,6 +1386,10 @@ mod tests {
         assert_eq!(uri_encode_url("https://x.com/a b"), "https://x.com/a%20b");
     }
 
+    /// '%', '"', and '\' are legal in filenames but illegal (or
+    /// escape-significant) in IRIs — unencoded they made a file like
+    /// `100%.md` panic every sync (deep-review HIGH #3). '%' must be
+    /// encoded FIRST so already-encoded output is never double-mangled.
     #[test]
     fn uri_encode_path_covers_iri_breaking_chars() {
         assert_eq!(uri_encode_path("100%.md"), "100%25.md");

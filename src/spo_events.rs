@@ -1105,10 +1105,7 @@ pub(crate) fn onegraph_walk_engine(
             // walk revisits every commit — replaying the save path's live
             // to-dos per visit is the #73 spam (the counts still land).
             acct.resolver_errors += crate::nquad::emit_spo_line_nquads(
-                line, &subjects, one_graph, relpath_str,
-                &ctx.path_index, &ctx.obj_props,
-                &ctx.prop_datatypes, &ctx.declared_props,
-                &ctx.kit_namespaces, &ctx.ref_ranges, &ctx.deprecated_props,
+                line, &subjects, one_graph, relpath_str, ctx,
                 false,
                 &mut emitted_types, &mut emit_buf,
             );
