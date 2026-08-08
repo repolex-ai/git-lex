@@ -463,6 +463,75 @@ pub(crate) fn cmd_kit_update(kit_arg: Option<String>) {
         }
     }
 
+    // #71: converge .lex/ontology/ to exactly what the installed kits own.
+    // Kit installs copy additively and never delete, so every layout era
+    // left fossils behind (top-level fm/ git/ lex/ lex-o/, retired optional
+    // kits, nested git-lex/git2/) — and the ontology loader walks the WHOLE
+    // tree, so stale vocabulary from retired eras kept loading into the
+    // ontology graph fleet-wide (lupov's find). Ownership derives from the
+    // installed kit payloads (.lex/kit/<org>/<repo>/ontology/<short>/):
+    // unowned top-level dirs are reaped, owned dirs converge to an exact
+    // MIRROR of their payload so nested fossils die too. The -shapes.ttl
+    // derived artifacts are regenerated just below, so the mirror losing
+    // them is part of the design, not a casualty.
+    {
+        fn copy_dir_recursive(src: &std::path::Path, dest: &std::path::Path) {
+            fs::create_dir_all(dest).ok();
+            if let Ok(entries) = fs::read_dir(src) {
+                for e in entries.filter_map(|e| e.ok()) {
+                    let d = dest.join(e.file_name());
+                    if e.path().is_dir() {
+                        copy_dir_recursive(&e.path(), &d);
+                    } else {
+                        fs::copy(e.path(), &d).ok();
+                    }
+                }
+            }
+        }
+        let kit_root = root.join(".lex").join("kit");
+        let mut payload_dirs: Vec<(String, std::path::PathBuf)> = Vec::new();
+        if let Ok(orgs) = fs::read_dir(&kit_root) {
+            for org in orgs.filter_map(|e| e.ok()).filter(|e| e.path().is_dir()) {
+                if let Ok(repos) = fs::read_dir(org.path()) {
+                    for repo in repos.filter_map(|e| e.ok()).filter(|e| e.path().is_dir()) {
+                        let ont = repo.path().join("ontology");
+                        if let Ok(shorts) = fs::read_dir(&ont) {
+                            for s in shorts.filter_map(|e| e.ok()).filter(|e| e.path().is_dir()) {
+                                payload_dirs.push((
+                                    s.file_name().to_string_lossy().to_string(),
+                                    s.path(),
+                                ));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        // Fail-safe: an empty payload set means the kit tree is in a state
+        // this sweep can't reason about — touch nothing.
+        if !payload_dirs.is_empty() {
+            let owned: std::collections::HashSet<&String> =
+                payload_dirs.iter().map(|(n, _)| n).collect();
+            let ont_root = root.join(".lex").join("ontology");
+            if let Ok(entries) = fs::read_dir(&ont_root) {
+                for e in entries.filter_map(|e| e.ok()).filter(|e| e.path().is_dir()) {
+                    let name = e.file_name().to_string_lossy().to_string();
+                    if !owned.contains(&name) && fs::remove_dir_all(e.path()).is_ok() {
+                        println!(
+                            "Reaped orphaned ontology dir (no installed kit owns it): .lex/ontology/{}",
+                            name
+                        );
+                    }
+                }
+            }
+            for (name, src) in &payload_dirs {
+                let dest = ont_root.join(name);
+                let _ = fs::remove_dir_all(&dest);
+                copy_dir_recursive(src, &dest);
+            }
+        }
+    }
+
     // Converge the engine runtime-dir gitignore on every existing soul. Souls
     // that predate the `.pool/`/`.copia/`/`.weave/` standard hand-wrote their
     // .gitignore and never got these lines — so their engine index stores leaked
