@@ -64,8 +64,23 @@ fn regenerate_kit_artifacts(kit_name: &str, root: &std::path::Path, create_folde
     let kit_types = get_kit_types(kit_name);
     let folder_base = kit_config_str(kit_name, "folder base");
     if let Some(ref base) = folder_base {
-        let expected: std::collections::HashSet<String> =
+        let declared_all: std::collections::HashSet<String> =
             kit_types.iter().map(|(name, _)| name.clone()).collect();
+        // The folder contract is `git-lex:foldered AND NOT owl:deprecated`
+        // (#74) — the same gate emit_class_templates applies. Unfoldered
+        // classes are graph-only by design, and a deprecated class keeps
+        // resolving (history replays) but must not demand its folder back:
+        // creating one would invite new writing into retired vocabulary.
+        // Auditing "every known class" instead printed phantom missing-
+        // folder lines fleet-wide after the soul 0.9.x deprecation appendix.
+        let deprecated = ontology::get_deprecated_classes(kit_name);
+        let expected: std::collections::HashSet<String> = declared_all
+            .iter()
+            .filter(|n| {
+                !deprecated.contains(*n) && ontology::get_class_foldered(kit_name, n)
+            })
+            .cloned()
+            .collect();
         let base_dir = root.join(base);
 
         let mut missing = Vec::new();
@@ -78,7 +93,11 @@ fn regenerate_kit_artifacts(kit_name: &str, root: &std::path::Path, create_folde
         if let Ok(entries) = fs::read_dir(&base_dir) {
             for entry in entries.filter_map(|e| e.ok()) {
                 let name = entry.file_name().to_string_lossy().to_string();
-                if entry.path().is_dir() && !expected.contains(&name) {
+                // Extra = a folder no declared class explains. A folder for
+                // a deprecated or unfoldered class is NOT extra — it's legal
+                // residue awaiting owner-paced evacuation, or the owner's
+                // choice to keep foldering a graph-only class.
+                if entry.path().is_dir() && !declared_all.contains(&name) {
                     extra.push(name);
                 }
             }

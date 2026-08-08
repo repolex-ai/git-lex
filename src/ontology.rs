@@ -734,6 +734,53 @@ fn parse_deprecated_properties(content: &str, short: &str) -> Vec<(String, Optio
     out
 }
 
+/// Class local-names this kit declares with `owl:deprecated true`. The
+/// folder audit consults this (#74): a deprecated class keeps resolving —
+/// that's what lets its history replay — but it must NOT demand a folder;
+/// creating one would invite new writing into retired vocabulary. Fleet
+/// receipt 2026-08-08: after the soul 0.9.x deprecation appendix, every
+/// repo's kit-update printed phantom missing-folder lines for the
+/// deprecated classes.
+pub(crate) fn get_deprecated_classes(kit: &str) -> std::collections::HashSet<String> {
+    let Some(root) = find_git_root() else { return Default::default() };
+    let (_, _, short) = resolve_kit_spec(kit);
+    let path = root
+        .join(".lex")
+        .join("ontology")
+        .join(&short)
+        .join(format!("{}.ttl", short));
+    let Ok(content) = fs::read_to_string(&path) else { return Default::default() };
+    parse_deprecated_classes(&content, &short)
+}
+
+/// Pure parser for `owl:deprecated true` classes in one kit TTL. Classes
+/// outside the kit's own namespace are skipped.
+fn parse_deprecated_classes(content: &str, short: &str) -> std::collections::HashSet<String> {
+    let kit_ns = kit_namespace_of(content, short);
+    let store = match crate::kit::load_ttl_str(content, &format!("{} ontology", short)) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("warning: {} — deprecated classes unreadable", e);
+            return Default::default();
+        }
+    };
+    let q = "SELECT ?c WHERE { \
+             ?c <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://www.w3.org/2002/07/owl#Class> . \
+             ?c <http://www.w3.org/2002/07/owl#deprecated> true }";
+    let mut out = std::collections::HashSet::new();
+    if let Ok(oxigraph::sparql::QueryResults::Solutions(sols)) = git_lex::eval_query(&store, q) {
+        for s in sols.flatten() {
+            let Some(Term::NamedNode(c)) = s.get("c") else { continue };
+            if let Some(name) = c.as_str().strip_prefix(kit_ns.as_str()) {
+                if !name.is_empty() {
+                    out.insert(name.to_string());
+                }
+            }
+        }
+    }
+    out
+}
+
 /// Pure parser for object-property ranges in one kit TTL. Returns
 /// `(property_local_name, range_class_iri)` pairs; XSD ranges and
 /// properties outside the kit's own namespace are skipped.
@@ -987,6 +1034,21 @@ copia:NocturneActivity a owl:Class ;
         );
         assert_eq!(parse_class_type_label(&content, "soul", "Note"), "Note");
         assert_eq!(parse_class_type_label(&content, "soul", "Journal"), "Journal");
+    }
+
+    #[test]
+    fn deprecated_classes_parse_real_kit_soul() {
+        // Receipt check against the live kit-soul ontology: the 0.9.x
+        // appendix re-declared retired classes with owl:deprecated true
+        // (deprecate-never-delete). The folder audit (#74) keys off this —
+        // deprecated classes must not demand folders.
+        let path = std::path::PathBuf::from("/Users/rob/repos/repolex-ai/git-lex-kit-soul/ontology/soul/soul.ttl");
+        let Ok(content) = fs::read_to_string(&path) else { return };
+        let dep = parse_deprecated_classes(&content, "soul");
+        assert!(dep.contains("Decision"), "Decision deprecated at 0.9.0: {dep:?}");
+        assert!(dep.contains("Friend"), "Friend deprecated at 0.9.1: {dep:?}");
+        assert!(!dep.contains("Note"), "Note is live vocabulary: {dep:?}");
+        assert!(!dep.contains("Journal"), "Journal is live vocabulary: {dep:?}");
     }
 
     #[test]
