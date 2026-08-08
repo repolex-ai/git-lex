@@ -161,7 +161,9 @@ git-lex keeps a clean split between **what you write**, **the index**, and
 
 - **Content** — normal Markdown in your repo. Structure goes in YAML frontmatter
   using dot notation: `soul.Memory.confidence: "certain"` (class names are
-  case-sensitive). In the body, link documents with `[[wikilinks]]`.
+  case-sensitive). In the body, link documents with standard markdown links
+  to repo-root-relative paths: `[selkie](friend/selkie.md)`. (`[[...]]` is
+  not read — it's plain prose.)
 
 - **`.lex/`** — the git-*tracked* index. Holds extraction sidecars
   (`.lex/extract/**.spo`), the installed kit(s) (`.lex/kit/`), generated SHACL

@@ -11,7 +11,7 @@ became true and when it stopped*.
 
 - [Getting started](getting-started.md) — install to first query in five minutes
 - [Commands](commands.md) — the full command reference
-- [Writing documents](writing-documents.md) — frontmatter, wikilinks, document types
+- [Writing documents](writing-documents.md) — frontmatter, markdown links, document types
 - [Kits](kits.md) — the vocabulary packs that define your document types
 - [Kit authoring](kit-authoring.md) — building kits: layout, file ownership, the full hook development flow
 - [Kit ontology design](kit-ontology.md) — defining your document types: classes, ids, enums, references
