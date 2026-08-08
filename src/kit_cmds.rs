@@ -145,19 +145,28 @@ fn regenerate_kit_artifacts(kit_name: &str, root: &std::path::Path, create_folde
         // matched exact-case — never "looks like a class folder"; only
         // `<folder_base>/<Name>/` is eligible — the filesystem knows
         // nothing, only the ontology knows which names are dead; and a
-        // candidate that is (or contains) a SYMLINK is never mentioned —
+        // candidate that is (or contains) a SYMLINK is never DESCRIBED —
         // these repos carry live symlinked infrastructure, and a walker
         // that doesn't check will eventually be confidently wrong about
-        // someone's working setup.
+        // someone's working setup. The skip itself is COUNTED, though
+        // (tr1p's refinement): silence about the content, but not silence
+        // about the existence of doubt — an unnamed blind spot becomes a
+        // surprise later, and the owner's eyes stay the fallback detector
+        // exactly where the tool has chosen not to look.
         let deprecated = ontology::get_deprecated_classes(kit_name);
         let mut residue: Vec<String> = Vec::new();
+        let mut skipped_symlink = 0usize;
         // BTreeMap iteration → stable alphabetical order in the receipt.
         for (name, replaced_by) in deprecated.iter().collect::<std::collections::BTreeMap<_, _>>() {
             let dir = base_dir.join(name);
             // symlink_metadata first: is_dir() would FOLLOW a symlink.
             let Ok(meta) = fs::symlink_metadata(&dir) else { continue };
-            if meta.file_type().is_symlink() || !meta.is_dir() || tree_has_symlink(&dir) {
+            if meta.file_type().is_symlink() || (meta.is_dir() && tree_has_symlink(&dir)) {
+                skipped_symlink += 1;
                 continue;
+            }
+            if !meta.is_dir() {
+                continue; // a plain file where a folder would be — not a folder
             }
             residue.push(match replaced_by {
                 Some(r) => format!("{} (replaced by {})", name, r),
@@ -165,11 +174,28 @@ fn regenerate_kit_artifacts(kit_name: &str, root: &std::path::Path, create_folde
             });
         }
         if !residue.is_empty() {
+            let skip_note = if skipped_symlink > 0 {
+                format!(
+                    " ({} candidate(s) skipped: symlink inside — the tool asserts \
+                     nothing about symlinked trees; check those by eye)",
+                    skipped_symlink
+                )
+            } else {
+                String::new()
+            };
             println!(
                 "  Retired-class folders present: {} — deprecated classes; their \
                  content awaits your evacuation, at your pace (git-lex never \
-                 deletes content folders).",
-                residue.join(", ")
+                 deletes content folders).{}",
+                residue.join(", "),
+                skip_note
+            );
+        } else if skipped_symlink > 0 {
+            println!(
+                "  Retired-class folder check: {} candidate(s) skipped (symlink \
+                 inside) — the tool asserts nothing about symlinked trees; check \
+                 those by eye if you expect residue.",
+                skipped_symlink
             );
         }
     }
