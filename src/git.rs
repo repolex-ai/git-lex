@@ -48,7 +48,7 @@ pub(crate) fn genesis_sha() -> Option<String> {
 /// Three cases: canonical key present → no-op; legacy `first_commit:` line
 /// present → rewritten in place to the canonical key (self-migration);
 /// neither → appended.
-fn ensure_repo_yml_genesis(sha: &str) -> std::io::Result<()> {
+pub(crate) fn ensure_repo_yml_genesis(sha: &str) -> std::io::Result<()> {
     let Some(root) = find_git_root() else { return Ok(()) };
     let path = root.join(".lex").join("repo.yml");
     let existing = fs::read_to_string(&path).unwrap_or_default();

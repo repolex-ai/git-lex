@@ -556,27 +556,25 @@ pub(crate) fn cmd_init(directory: Option<String>, kit: Option<String>) {
     }
 
     // Capture the genesis (first-commit) SHA — the cryptographic anchor —
-    // and append it to repo.yml as `genesis_sha:` (Rob-ruled 2026-08-01;
-    // one file holds all repo metadata, same key name identity.yml used).
-    // Existing repos carrying the legacy `first_commit:` key self-migrate
-    // at sync (git.rs::ensure_genesis_recorded).
-    let first_sha = Command::new("git")
-        .args(["rev-list", "--max-parents=0", "HEAD"])
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-        .unwrap_or_default();
+    // and record it in repo.yml as `genesis_sha:` through git.rs, the ONE
+    // authority (review #10). The inline copy that lived here took
+    // `git rev-list`'s WHOLE stdout, so a multi-root repo appended
+    // "sha1\nsha2" — invalid YAML that made RepoYml::load warn-discard the
+    // entire repo.yml (kit, identity, everything), permanently: the repair
+    // check matches the first line and never fires. git.rs handles
+    // multi-root (last line = earliest commit), validates the sha, and
+    // owns the textual append including the legacy `first_commit:`
+    // self-migration.
+    let first_sha = crate::git::genesis_sha().unwrap_or_default();
 
     if !first_sha.is_empty() {
         let existing = fs::read_to_string(&repo_yml_path).unwrap_or_default();
         let mut identity_paths: Vec<&str> = Vec::new();
         if !existing.contains("genesis_sha:") && !existing.contains("first_commit:") {
-            let updated = format!("{}genesis_sha: {}\n", existing, first_sha);
-            fs::write(&repo_yml_path, &updated).unwrap_or_else(|e| {
+            if let Err(e) = crate::git::ensure_repo_yml_genesis(&first_sha) {
                 eprintln!("fatal: could not record genesis_sha identity in .lex/repo.yml: {}", e);
                 exit(1);
-            });
+            }
             identity_paths.push(".lex/repo.yml");
             println!("Identity: {}", first_sha);
         }
@@ -592,7 +590,22 @@ pub(crate) fn cmd_init(directory: Option<String>, kit: Option<String>) {
             for p in &identity_paths {
                 let _ = Command::new("git").args(["add", p]).status();
             }
-            let _ = Command::new("git").args(["commit", "-m", "git lex identity"]).status();
+            // Identity is the anchor engines (Pool) join on — a failed
+            // commit here must not exit 0 silently (review #50). The data
+            // survives on disk and sync/kit-update self-heal the content,
+            // but the user has to know it's riding uncommitted.
+            let committed = Command::new("git")
+                .args(["commit", "-m", "git lex identity"])
+                .status()
+                .map(|s| s.success())
+                .unwrap_or(false);
+            if !committed {
+                eprintln!(
+                    "warning: identity commit failed — genesis_sha/soulId are on disk \
+                     but UNCOMMITTED (see git output above). Commit .lex/repo.yml and \
+                     SOUL.md yourself, or the identity rides into your next commit."
+                );
+            }
         }
     }
 
