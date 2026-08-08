@@ -67,18 +67,17 @@ fn regenerate_kit_artifacts(kit_name: &str, root: &std::path::Path, create_folde
         let declared_all: std::collections::HashSet<String> =
             kit_types.iter().map(|(name, _)| name.clone()).collect();
         // The folder contract is `git-lex:foldered AND NOT owl:deprecated`
-        // (#74) — the same gate emit_class_templates applies. Unfoldered
-        // classes are graph-only by design, and a deprecated class keeps
-        // resolving (history replays) but must not demand its folder back:
-        // creating one would invite new writing into retired vocabulary.
-        // Auditing "every known class" instead printed phantom missing-
-        // folder lines fleet-wide after the soul 0.9.x deprecation appendix.
-        let deprecated = ontology::get_deprecated_classes(kit_name);
+        // (#74) — the SAME shared predicate emit_class_templates applies
+        // (ontology::class_gets_folder; the two gates once computed it
+        // separately and could drift). Unfoldered classes are graph-only by
+        // design, and a deprecated class keeps resolving (history replays)
+        // but must not demand its folder back: creating one would invite
+        // new writing into retired vocabulary. Auditing "every known class"
+        // instead printed phantom missing-folder lines fleet-wide after the
+        // soul 0.9.x deprecation appendix.
         let expected: std::collections::HashSet<String> = declared_all
             .iter()
-            .filter(|n| {
-                !deprecated.contains_key(*n) && ontology::get_class_foldered(kit_name, n)
-            })
+            .filter(|n| ontology::class_gets_folder(kit_name, n))
             .cloned()
             .collect();
         let base_dir = root.join(base);
@@ -169,7 +168,7 @@ fn folders_declared_by_installed_kits(root: &Path) -> std::collections::HashSet<
     for kit in collect_kits_for_update(root, None) {
         let base = kit_config_str(&kit, "folder base");
         for (type_name, _) in &get_kit_types(&kit) {
-            if !ontology::get_class_foldered(&kit, type_name) {
+            if !ontology::class_gets_folder(&kit, type_name) {
                 continue;
             }
             let dir = match &base {
@@ -202,12 +201,15 @@ pub(crate) fn emit_class_templates(kit_name: &str, root: &std::path::Path, creat
     let folder_base = kit_config_str(kit_name, "folder base");
     let mut templates_updated = 0usize;
     for (type_name, properties) in &kit_types {
-        // Foldered gate (git-lex:foldered, opt-IN — Rob's ruling, replaces
-        // lex-o:instantiation): classes exist in the ontology / SHACL
-        // surface but get a folder + `__ClassName.md` template ONLY when
-        // tagged `git-lex:foldered true`. The quiet default is graph-only,
-        // so vocabulary classes never litter empty folders.
-        if !ontology::get_class_foldered(kit_name, type_name) {
+        // Foldered gate — the shared predicate (foldered AND NOT
+        // deprecated, #74). This emitter once tested `foldered` alone and
+        // agreed with the audit only by the kit author's habit of never
+        // leaving `foldered` on a deprecated class; one slip would have
+        // rebuilt the retired folder AND written a fresh template into it
+        // on every seat at kit-update (tr1p's §2j filing). The quiet
+        // default stays graph-only, so vocabulary classes never litter
+        // empty folders.
+        if !ontology::class_gets_folder(kit_name, type_name) {
             continue;
         }
 

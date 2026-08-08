@@ -295,11 +295,11 @@ pub(crate) fn cmd_init(directory: Option<String>, kit: Option<String>) {
         if create_folders {
             let mut created: Vec<String> = Vec::new();
             for (type_name, _) in &kit_types {
-                // Foldered gate (git-lex:foldered, opt-IN — Rob's ruling,
-                // replaces lex-o:instantiation): a class earns a scaffolded
-                // folder ONLY when tagged `git-lex:foldered true`. Untagged =
-                // graph-only, no folder.
-                if !ontology::get_class_foldered(kit_name, type_name) {
+                // Foldered gate — the shared predicate (foldered AND NOT
+                // deprecated, #74): a class earns a scaffolded folder ONLY
+                // when tagged `git-lex:foldered true` and not retired.
+                // Untagged = graph-only, no folder.
+                if !ontology::class_gets_folder(kit_name, type_name) {
                     continue;
                 }
                 let type_dir = if let Some(ref base) = folder_base {

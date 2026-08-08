@@ -590,6 +590,20 @@ pub(crate) fn get_class_foldered(kit: &str, class_name: &str) -> bool {
     parse_class_foldered(&content, &short, class_name)
 }
 
+/// THE folder-contract predicate (#74; tr1p field-notes §2j): a class gets
+/// a folder — and templates emitted into it — iff it is `git-lex:foldered
+/// true` AND NOT `owl:deprecated`. The folder audit, the template emitter,
+/// init's folder scaffolding, and the cross-kit folder registry all
+/// dispatch through THIS function. Two of them once computed the predicate
+/// separately and agreed only because the kit author's habit never left
+/// `foldered` on a deprecated class — the first tired-author slip would
+/// have silently rebuilt retired folders on every seat at kit-update.
+/// Habits drift; a shared predicate can't.
+pub(crate) fn class_gets_folder(kit: &str, class_name: &str) -> bool {
+    get_class_foldered(kit, class_name)
+        && !get_deprecated_classes(kit).contains_key(class_name)
+}
+
 /// Look up the display type label for a class — used at `git lex create` time to
 /// emit the `type:` field at the top of the YAML frontmatter.
 ///
