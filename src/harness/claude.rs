@@ -375,11 +375,32 @@ fn hook_event_for(filename: &str) -> Result<Option<&'static str>, String> {
 /// this soul, which is the correct semantics: the soul *is* the agent.
 pub(crate) fn setup_substrate_claude(root: &std::path::Path, agent_name: &str) {
     let settings_path = root.join(".claude").join("settings.json");
-    fs::create_dir_all(settings_path.parent().unwrap()).ok();
+    if let Err(e) = fs::create_dir_all(settings_path.parent().unwrap()) {
+        eprintln!(
+            "ERROR: could not create .claude/ under {}: {e} — substrate setup cannot proceed.",
+            root.display()
+        );
+        std::process::exit(1);
+    }
 
     let mut settings: serde_json::Value = if settings_path.exists() {
         let content = fs::read_to_string(&settings_path).unwrap_or_default();
-        serde_json::from_str(&content).unwrap_or(serde_json::json!({}))
+        // A file that exists but doesn't parse is the USER'S config in a
+        // damaged state — replacing it wholesale would silently wipe every
+        // setting they hand-authored. Refuse and teach instead.
+        match serde_json::from_str(&content) {
+            Ok(v) => v,
+            Err(e) => {
+                eprintln!(
+                    "ERROR: {} exists but is not valid JSON ({e}).\n\
+                     Refusing to overwrite it — that would wipe your hand-authored \
+                     settings. Fix the JSON (or move the file aside), then re-run \
+                     `git lex kit-update`.",
+                    settings_path.display()
+                );
+                std::process::exit(1);
+            }
+        }
     } else {
         serde_json::json!({})
     };
@@ -469,8 +490,25 @@ pub(crate) fn setup_substrate_claude(root: &std::path::Path, agent_name: &str) {
     }
 
     let json_str = serde_json::to_string_pretty(&settings).unwrap();
-    fs::write(&settings_path, json_str + "\n").ok();
-    println!("Claude Code: identity and hooks written to .claude/settings.json");
+    // A swallowed failure here is the worst well-dressed-dead in the crate:
+    // this write is what makes commits attribute correctly and hooks FIRE.
+    // Printing success over a failed write left an installed-LOOKING repo
+    // with a dead hook layer (the #67 disease, at the writer itself).
+    match fs::write(&settings_path, json_str + "\n") {
+        Ok(()) => {
+            println!("Claude Code: identity and hooks written to .claude/settings.json");
+        }
+        Err(e) => {
+            eprintln!(
+                "ERROR: could not write {}: {e}\n\
+                 Identity env and hook registrations did NOT land — commits may \
+                 attribute to the wrong author and kit hooks will not fire. Fix the \
+                 underlying problem (permissions/disk), then re-run `git lex kit-update`.",
+                settings_path.display()
+            );
+            std::process::exit(1);
+        }
+    }
 
     // Warn if a stale .claude/settings.local.json exists. Older versions
     // wrote identity to that file (gitignored), but souls are portable so

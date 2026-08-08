@@ -795,35 +795,34 @@ fn cmd_validate() -> bool {
     use shacl_validation::shacl_processor::{GraphValidation, ShaclProcessor, ShaclValidationMode};
     use shacl_validation::store::Graph;
 
+    // CORRUPT shapes = same law as MISSING shapes (twenty lines up): a gate
+    // that can't run must not pretend it passed (Rob-ruled 2026-07-29).
+    // These four arms used to `return true` — a broken shapes file waved
+    // every save through while printing an error nobody was required to
+    // read. All four are the identical cure: kit-update regenerates shapes.
+    let shapes_broken = |stage: &str, e: &dyn std::fmt::Display| -> bool {
+        eprintln!("fatal: kit '{}' shapes are installed but unusable — {stage}: {e}", kit);
+        eprintln!("Validation cannot run, so the save is blocked (a gate that can't run must not pretend it passed).");
+        eprintln!("Fix: `git lex kit-update` (regenerates the kit's shapes), then retry.");
+        false
+    };
     let shapes_graph = match InMemoryGraph::from_reader(
         &mut shapes_ttl.as_bytes(), "shapes", &RDFFormat::Turtle, None, &ReaderMode::Lax,
     ) {
         Ok(g) => g,
-        Err(e) => {
-            eprintln!("Failed to parse SHACL shapes: {}", e);
-            return true;
-        }
+        Err(e) => return shapes_broken("Turtle parse failed", &e),
     };
     let shapes_rdf = match RdfData::from_graph(shapes_graph) {
         Ok(d) => d,
-        Err(e) => {
-            eprintln!("Failed to load SHACL shapes: {}", e);
-            return true;
-        }
+        Err(e) => return shapes_broken("graph load failed", &e),
     };
     let shapes_schema = match ShaclParser::new(shapes_rdf).parse() {
         Ok(s) => s,
-        Err(e) => {
-            eprintln!("Failed to parse SHACL schema: {}", e);
-            return true;
-        }
+        Err(e) => return shapes_broken("SHACL parse failed", &e),
     };
     let compiled_shapes = match ShaclSchemaIR::compile(&shapes_schema) {
         Ok(c) => c,
-        Err(e) => {
-            eprintln!("Failed to compile SHACL shapes: {}", e);
-            return true;
-        }
+        Err(e) => return shapes_broken("schema compile failed", &e),
     };
 
     let mut total_files = 0;
