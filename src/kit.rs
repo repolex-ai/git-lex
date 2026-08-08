@@ -615,6 +615,10 @@ pub(crate) struct ScaffoldInstallReport {
     pub installed: usize,
     pub skipped: usize,
     pub updated: Vec<String>,
+    /// `<file>.bak` residue of the RETIRED convergence-backup mechanism
+    /// swept beside kit-owned paths (Rob-ruled 2026-08-08: these are
+    /// tracked files in a git repo — git history IS the backup).
+    pub swept_baks: usize,
 }
 
 /// `YYYYMMDD-HHMMSS` (UTC) from `SystemTime`. Test-only: unique tmp-dir names.
@@ -842,6 +846,19 @@ pub(crate) fn install_scaffold_files_from_skip_existing(
             let dest_is_regular_file = dest_exists
                 && dest.symlink_metadata().ok().map(|m| m.file_type().is_file()).unwrap_or(false);
 
+            // Residue sweep: `<file>.bak` beside a kit-owned path is litter
+            // from the RETIRED convergence-backup mechanism (Rob-ruled
+            // 2026-08-08: tracked files in a git repo — git history IS the
+            // backup; a parallel backup beside git was reinventing it).
+            {
+                let mut bak = dest.clone().into_os_string();
+                bak.push(".bak");
+                let bak = PathBuf::from(bak);
+                if bak.is_file() && fs::remove_file(&bak).is_ok() {
+                    report.swept_baks += 1;
+                }
+            }
+
             if !dest_exists {
                 // Missing → install.
                 if fs::copy(&src, &dest).is_ok() {
@@ -857,25 +874,35 @@ pub(crate) fn install_scaffold_files_from_skip_existing(
                 continue;
             }
 
-            // Differs → old copy becomes <file>.bak, kit version goes in place.
             let rel = dest
                 .strip_prefix(ctx.repo_root)
                 .unwrap_or(&dest)
                 .to_string_lossy()
                 .to_string();
-            let mut bak = dest.clone().into_os_string();
-            bak.push(".bak");
-            let bak = PathBuf::from(bak);
-            let _ = fs::remove_file(&bak);
             if dest.is_dir() && !dest.is_symlink() {
-                // Odd type (dir where kit ships a file): move aside the same way.
-                let _ = fs::remove_dir_all(&bak);
+                // Odd type: a DIRECTORY sits where the kit ships a file.
+                // Deleting a directory wholesale could destroy untracked
+                // user files — refuse loudly instead of guessing.
+                eprintln!(
+                    "warning: {rel} is a directory but the kit ships a file there — \
+                     left untouched. Move the directory aside and re-run `git lex kit-update`."
+                );
+                continue;
             }
-            if fs::rename(&dest, &bak).is_err() {
-                continue; // can't move the old one aside — leave it untouched
-            }
-            if fs::copy(&src, &dest).is_ok() {
-                report.updated.push(rel);
+            // Differs → converge to the kit version, no .bak: the old bytes
+            // live in git history. Copy-to-temp + rename so a failed write
+            // can never leave the live file truncated (the old rename-then-
+            // copy could lose the file entirely on a failed second step),
+            // and failure is LOUD instead of the old silent `.ok()`.
+            let mut tmp = dest.clone().into_os_string();
+            tmp.push(".kit-tmp");
+            let tmp = PathBuf::from(tmp);
+            match fs::copy(&src, &tmp).and_then(|_| fs::rename(&tmp, &dest)) {
+                Ok(_) => report.updated.push(rel),
+                Err(e) => {
+                    let _ = fs::remove_file(&tmp);
+                    eprintln!("ERROR: could not converge {rel}: {e} — local copy left as-is.");
+                }
             }
         }
     }

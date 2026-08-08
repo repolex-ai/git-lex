@@ -319,11 +319,12 @@ pub(crate) fn cmd_kit_update(kit_arg: Option<String>) {
     }
 
     // Install each kit's files. Missing → installed; identical → no-op;
-    // differing → old copy renamed <file>.bak, kit version put in place.
-    // (SOUL.md is never overwritten.)
+    // differing → converged to the kit version (no backup — git history is
+    // the backup, Rob-ruled 2026-08-08). SOUL.md is never overwritten.
     let mut total_installed = 0usize;
     let mut total_skipped = 0usize;
     let mut all_updated: Vec<String> = Vec::new();
+    let mut total_swept_baks = 0usize;
     // #72: which kit(s) converged each path this run. Two kits shipping the
     // SAME path with different content flip the file back and forth every
     // update — the last kit silently wins by install order, not intent, and
@@ -338,10 +339,17 @@ pub(crate) fn cmd_kit_update(kit_arg: Option<String>) {
         let report = install_scaffold_files_from_skip_existing(&kit_dir);
         total_installed += report.installed;
         total_skipped += report.skipped;
+        total_swept_baks += report.swept_baks;
         for path in &report.updated {
             converged_by.entry(path.clone()).or_default().push(repo.clone());
         }
         all_updated.extend(report.updated);
+    }
+    if total_swept_baks > 0 {
+        println!(
+            "Swept {} retired .bak convergence backup(s) — git history is the backup",
+            total_swept_baks
+        );
     }
     for (path, kits) in &converged_by {
         if kits.len() > 1 {
@@ -413,7 +421,7 @@ pub(crate) fn cmd_kit_update(kit_arg: Option<String>) {
         println!("Scaffold: {} file(s) installed, {} unchanged", total_installed, total_skipped);
         if !all_updated.is_empty() {
             println!(
-                "Updated {} file(s) to the kit's version (old copy kept as <file>.bak):",
+                "Updated {} file(s) to the kit's version:",
                 all_updated.len()
             );
             for path in &all_updated {
@@ -867,7 +875,7 @@ pub(crate) fn cmd_kit_add(kit_spec: String) {
     // Install scaffold. For a new optional kit nothing should exist locally
     // yet, so this is almost entirely fresh-install — but if the agent has
     // already hand-authored files matching the kit's paths, those converge to
-    // the kit version (old copy kept as <file>.bak).
+    // the kit version (no backup — git history is the backup, Rob-ruled 2026-08-08).
     let report = install_scaffold_files_from_skip_existing(&kit_dir);
     if report.installed > 0 || report.skipped > 0 || !report.updated.is_empty() {
         println!(
@@ -876,7 +884,7 @@ pub(crate) fn cmd_kit_add(kit_spec: String) {
         );
         if !report.updated.is_empty() {
             println!(
-                "Updated {} file(s) to the kit's version (old copy kept as <file>.bak):",
+                "Updated {} file(s) to the kit's version:",
                 report.updated.len()
             );
             for path in &report.updated {
