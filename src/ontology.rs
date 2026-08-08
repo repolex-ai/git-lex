@@ -38,7 +38,7 @@ use git_lex::{find_git_root, resolve_kit_spec};
 ///
 /// Now: only the canonical path is read. Anywhere else is ignored —
 /// `kit-update` sweeps the legacy `.lex/ontology/kit/` directory.
-fn read_kit_shapes(kit: &str) -> String {
+pub(crate) fn read_kit_shapes(kit: &str) -> String {
     let Some(root) = find_git_root() else { return String::new() };
     let (_, _, short) = resolve_kit_spec(kit);
     let target = format!("{}-shapes.ttl", short);

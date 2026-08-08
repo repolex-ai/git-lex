@@ -3,7 +3,6 @@ use oxigraph::io::RdfFormat;
 use oxigraph::model::*;
 use oxigraph::store::Store;
 use std::io::Cursor;
-use std::path::PathBuf;
 use std::process::{Command, exit};
 use std::time::Instant;
 use std::fs;
@@ -756,18 +755,20 @@ fn cmd_validate() -> bool {
         }
     };
 
-    // Collect SHACL shapes TTL from .lex/ontology/{short}/ (kit-owned, built
-    // at kit install time).
-    let (_, _, short) = resolve_kit_spec(&kit);
-    let mut shapes_sources: Vec<(PathBuf, String)> = Vec::new();
+    // Shapes come from ontology.rs's canonical resolver (review #14) — the
+    // ONE owner of the shapes-path rule. This fn used to hand-build the
+    // path, re-creating the exact divergence the resolver's own doc records
+    // (task #29: a stale kit/-tier copy shadowing canonical shapes) and
+    // skipping its shadow-fossil audit warning.
+    //
+    // SCOPE: validation runs against the DOMAIN kit only, deliberately for
+    // now — frontmatter_to_turtle extracts only domain-kit keys, so
+    // optional-kit facts are neither emitted nor judged by this gate.
+    // Widening to all_shape_files() must land TOGETHER with multi-kit
+    // extraction (board #82's domain-less-property rework), not alone.
+    let shapes_ttl = ontology::read_kit_shapes(&kit);
 
-    let kit_shapes = root.join(".lex").join("ontology").join(&short)
-        .join(format!("{}-shapes.ttl", short));
-    if let Ok(ttl) = fs::read_to_string(&kit_shapes) {
-        shapes_sources.push((kit_shapes, ttl));
-    }
-
-    if shapes_sources.is_empty() {
+    if shapes_ttl.is_empty() {
         // A kit IS configured but its shapes are gone (broken/partial
         // install). A gate that can't run must not pretend it passed
         // (Rob-ruled 2026-07-29) — fail the save and name the fix.
@@ -775,11 +776,6 @@ fn cmd_validate() -> bool {
         eprintln!("Fix: `git lex kit-update` (reinstalls the kit's ontology and shapes), then retry.");
         return false;
     }
-
-    let shapes_ttl: String = shapes_sources.iter()
-        .map(|(_, ttl)| ttl.as_str())
-        .collect::<Vec<_>>()
-        .join("\n");
 
     // One walker for the whole codebase; `.txt` files ride along for the
     // slug index (sync's resolver indexes them as link targets, so validate
