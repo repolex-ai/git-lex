@@ -904,7 +904,33 @@ pub(crate) fn emit_spo_line_nquads(
                     // The whole block below is teaching, no emission — one
                     // `warn` gate covers the wrong-class, deprecated-note,
                     // and does-not-exist branches together.
-                    if warn && !declared_props.contains(key) && !obj_props.contains(key) {
+                    //
+                    // Deprecated check FIRST, before the declared test (#83):
+                    // whether a deprecated prop still sits in the generated
+                    // shapes depends on whether its CLASS survived (a class
+                    // deprecated whole keeps its shape + props; a bare
+                    // appendix prop lands on no shape) — so gating the note
+                    // behind not-declared made the Texture family silently
+                    // invisible while writtenFrom whispered. Deprecated
+                    // whispers regardless of shapes state: one note, the
+                    // line still saves, history replays.
+                    if warn {
+                        if let Some(replaced) =
+                            deprecated_props.get(&format!("{}/{}", kit_name, prop_seg))
+                        {
+                            let repl = replaced
+                                .as_ref()
+                                .map(|r| format!(" — replacement: `{}`", r))
+                                .unwrap_or_default();
+                            eprintln!(
+                                "note: {}: the key `{}.{}.{}` is deprecated (the \
+                                 `{}` ontology retired it{}). The line still saves \
+                                 and history replays; don't use it in new writing — \
+                                 migrate or delete when you next edit this file.",
+                                relpath_str, kit_name, class_seg, prop_seg,
+                                kit_name, repl
+                            );
+                        } else if !declared_props.contains(key) && !obj_props.contains(key) {
                         let kit_scope = format!("{}/", kit_name);
                         let prop_tail = format!("/{}", prop_seg);
                         let class_for_msg = canonical_class.as_deref().unwrap_or(class_seg);
@@ -959,30 +985,10 @@ pub(crate) fn emit_spo_line_nquads(
                             // plausibly mean the same thing (the renamed-by-
                             // the-ontology case, e.g. kind → textureKind) —
                             // case-insensitive containment either way, 4+
-                            // chars so single letters never match.
-                            // Deprecated lane FIRST: a retired-by-deprecation
-                            // key EXISTS in the ontology (deprecate-never-
-                            // delete — the 0.9.0 Friend incident proved
-                            // deletion breaks history replay), so "does not
-                            // exist" would be false. One informational line,
-                            // not the four-branch teaching: existing lines
-                            // are legal history; the nudge is for new writing.
-                            if let Some(replaced) =
-                                deprecated_props.get(&format!("{}/{}", kit_name, prop_seg))
-                            {
-                                let repl = replaced
-                                    .as_ref()
-                                    .map(|r| format!(" — replacement: `{}`", r))
-                                    .unwrap_or_default();
-                                eprintln!(
-                                    "note: {}: the key `{}.{}.{}` is deprecated (the \
-                                     `{}` ontology retired it{}). The line still saves \
-                                     and history replays; don't use it in new writing — \
-                                     migrate or delete when you next edit this file.",
-                                    relpath_str, kit_name, class_seg, prop_seg,
-                                    kit_name, repl
-                                );
-                            } else {
+                            // chars so single letters never match. (The
+                            // deprecated-note lane moved ABOVE the declared
+                            // test — #83 — so this branch only sees keys the
+                            // ontology has truly never heard of.)
                             let class_prefix =
                                 format!("{}/{}/", kit_name, class_for_msg);
                             let prop_lower = prop_seg.to_lowercase();
