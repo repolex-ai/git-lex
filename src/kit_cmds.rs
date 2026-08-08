@@ -131,11 +131,71 @@ fn regenerate_kit_artifacts(kit_name: &str, root: &std::path::Path, create_folde
         if missing.is_empty() && extra.is_empty() && !expected.is_empty() {
             println!("  Folders: {}/{} match ontology ✓", expected.len(), expected.len());
         }
+
+        // Residue receipt (tr1p's ask, Rob-approved 2026-08-08): name the
+        // deprecated-class folders still on disk, so retired residue stops
+        // being detectable only by a human reading the repo — quiet reads
+        // as clean. Informational ONLY: no deletion, no prompt (content
+        // evacuation is the owner's, at the owner's pace).
+        //
+        // Three safety constraints, per the w3blord `skill/` near-miss (a
+        // repo-root lowercase dir full of live symlinked skill packages
+        // that LOOKED like residue): the candidate set is EXACTLY the
+        // `owl:deprecated` class names declared in the loaded ontology,
+        // matched exact-case — never "looks like a class folder"; only
+        // `<folder_base>/<Name>/` is eligible — the filesystem knows
+        // nothing, only the ontology knows which names are dead; and a
+        // candidate that is (or contains) a SYMLINK is never mentioned —
+        // these repos carry live symlinked infrastructure, and a walker
+        // that doesn't check will eventually be confidently wrong about
+        // someone's working setup.
+        let deprecated = ontology::get_deprecated_classes(kit_name);
+        let mut residue: Vec<String> = Vec::new();
+        // BTreeMap iteration → stable alphabetical order in the receipt.
+        for (name, replaced_by) in deprecated.iter().collect::<std::collections::BTreeMap<_, _>>() {
+            let dir = base_dir.join(name);
+            // symlink_metadata first: is_dir() would FOLLOW a symlink.
+            let Ok(meta) = fs::symlink_metadata(&dir) else { continue };
+            if meta.file_type().is_symlink() || !meta.is_dir() || tree_has_symlink(&dir) {
+                continue;
+            }
+            residue.push(match replaced_by {
+                Some(r) => format!("{} (replaced by {})", name, r),
+                None => name.clone(),
+            });
+        }
+        if !residue.is_empty() {
+            println!(
+                "  Retired-class folders present: {} — deprecated classes; their \
+                 content awaits your evacuation, at your pace (git-lex never \
+                 deletes content folders).",
+                residue.join(", ")
+            );
+        }
     }
 
     if templates_updated > 0 {
         println!("  {} class template(s) regenerated.", templates_updated);
     }
+}
+
+/// True when `dir` itself, or ANYTHING beneath it, is a symlink — or when
+/// any of it can't be read (doubt = true: the residue receipt says nothing
+/// rather than risk describing live symlinked infrastructure as residue).
+fn tree_has_symlink(dir: &Path) -> bool {
+    let Ok(meta) = fs::symlink_metadata(dir) else { return true };
+    if meta.file_type().is_symlink() {
+        return true;
+    }
+    if meta.is_dir() {
+        let Ok(entries) = fs::read_dir(dir) else { return true };
+        for e in entries.filter_map(|e| e.ok()) {
+            if tree_has_symlink(&e.path()) {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 /// True when `dir` contains nothing except its own class template
@@ -1059,6 +1119,53 @@ pub(crate) fn cmd_kit_remove(kit_spec: String, force: bool) {
     }
 
     println!("Kit '{}' removed.", canonical_spec);
+}
+
+#[cfg(test)]
+mod residue_receipt_tests {
+    use super::tree_has_symlink;
+    use std::fs;
+
+    /// PIN (residue receipt, Rob-approved 2026-08-08): the symlink guard.
+    /// A plain tree is mentionable; a tree that IS or CONTAINS a symlink
+    /// is never mentioned — live symlinked infrastructure must not be
+    /// described as residue (the w3blord `skill/` near-miss).
+    #[test]
+    fn symlink_anywhere_in_tree_silences_the_receipt() {
+        let base = std::env::temp_dir().join(format!(
+            "git-lex-residue-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::SystemTime::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        let plain = base.join("Plain");
+        fs::create_dir_all(plain.join("sub")).unwrap();
+        fs::write(plain.join("__Plain.md"), "x").unwrap();
+        fs::write(plain.join("sub").join("note.md"), "x").unwrap();
+        assert!(!tree_has_symlink(&plain), "plain tree must be mentionable");
+
+        #[cfg(unix)]
+        {
+            let linked = base.join("Linked");
+            fs::create_dir_all(&linked).unwrap();
+            std::os::unix::fs::symlink(&plain, linked.join("pkg")).unwrap();
+            assert!(
+                tree_has_symlink(&linked),
+                "a symlink ANYWHERE beneath silences the receipt"
+            );
+            // The dir itself being a symlink silences it too.
+            let alias = base.join("Alias");
+            std::os::unix::fs::symlink(&plain, &alias).unwrap();
+            assert!(tree_has_symlink(&alias));
+        }
+
+        // Nonexistent/unreadable = doubt = silence.
+        assert!(tree_has_symlink(&base.join("NoSuch")));
+
+        let _ = fs::remove_dir_all(&base);
+    }
 }
 
 #[cfg(test)]
