@@ -254,6 +254,24 @@ fn transform_subagent(content: &str, name: &str) -> String {
     format!("{}{}", fm, body)
 }
 
+/// Read the agent identity from the settings.json env block this module
+/// WRITES (setup_substrate_claude). Reader and writer of the env schema
+/// live in one file (review #38) — which file, which keys — so the schema
+/// cannot drift across a module boundary; resolve_agent_identity calls
+/// this as its last-fallback tier 3.
+pub(crate) fn read_identity_env(root: &Path) -> Option<(String, String)> {
+    let path = root.join(".claude").join("settings.json");
+    let content = fs::read_to_string(&path).ok()?;
+    let v: serde_json::Value = serde_json::from_str(&content).ok()?;
+    let env = v.get("env")?.as_object()?;
+    let name = env.get("GIT_AUTHOR_NAME")?.as_str()?.to_string();
+    let email = env.get("GIT_AUTHOR_EMAIL")?.as_str()?.to_string();
+    if name.is_empty() || email.is_empty() {
+        return None;
+    }
+    Some((name, email))
+}
+
 /// Split YAML frontmatter from body — thin adapter over the crate-wide
 /// fence parser (git_lex::split_frontmatter, review #9). The old local
 /// scanner rejected CRLF openers, so a CRLF Skill/Subagent doc silently

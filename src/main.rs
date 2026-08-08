@@ -629,17 +629,12 @@ fn resolve_agent_identity(root: &std::path::Path) -> Option<(String, String)> {
         }
     }
 
-    // 3. .claude/settings.json env block (read as data) — last fallback.
-    let path = root.join(".claude").join("settings.json");
-    let content = fs::read_to_string(&path).ok()?;
-    let v: serde_json::Value = serde_json::from_str(&content).ok()?;
-    let env = v.get("env")?.as_object()?;
-    let name = env.get("GIT_AUTHOR_NAME")?.as_str()?.to_string();
-    let email = env.get("GIT_AUTHOR_EMAIL")?.as_str()?.to_string();
-    if name.is_empty() || email.is_empty() {
-        return None;
-    }
-    Some((name, email))
+    // 3. .claude/settings.json env block — last fallback, read through the
+    //    module that WRITES that block (review #38: reader and writer of
+    //    the env schema live in one file, so the schema can't drift apart
+    //    across an unrelated module boundary again — the .env retirement
+    //    already proved this block's location migrates).
+    harness::claude::read_identity_env(&root)
 }
 
 fn cmd_save(message: &str, dry_run: bool) {
@@ -1038,30 +1033,45 @@ fn cmd_extract() {
     // produced in any live repo. Deleted Rob-ruled 2026-08-01 — transcript
     // analytics is ravel's domain.)
 
-    // The v1 write-gate: re-read EVERY sidecar (extraction rewrites the
-    // full tree each save) and validate against the format spec using the
-    // walker's own line rules. Nothing gets committed that history can't
-    // later read — the enforcement brick whose absence let one wrapped
-    // line ride 549 commits of lUX history.
-    let mut gate_files = 0usize;
-    let mut gate_errors = 0usize;
-    if let Some(root) = git_lex::find_git_root() {
-        let mut stack = vec![root.join(".lex").join("extract")];
-        while let Some(dir) = stack.pop() {
-            let Ok(entries) = std::fs::read_dir(&dir) else { continue };
-            for entry in entries.filter_map(|e| e.ok()) {
-                let path = entry.path();
-                if path.is_dir() {
-                    stack.push(path);
-                } else if path.extension().and_then(|e| e.to_str()) == Some("spo") {
-                    gate_files += 1;
-                    let content = std::fs::read_to_string(&path).unwrap_or_default();
-                    for (lineno, err) in spo_events::validate_sidecar_v1(&content) {
-                        let rel = path.strip_prefix(&root).unwrap_or(&path);
-                        eprintln!("sidecar gate: {}:{}: {}", rel.display(), lineno, err);
-                        gate_errors += 1;
+    // ONE walk of .lex/extract/ (review #37): every sidecar's path +
+    // content is collected once and feeds BOTH gates below — the v1
+    // write-gate reads all .spo, the identity gate filters the .fm.spo
+    // subset. The two copy-pasted walkers this replaces re-read the same
+    // files and had to be kept in sync by hand.
+    let all_spo: Vec<(std::path::PathBuf, String)> = {
+        let mut out = Vec::new();
+        if let Some(root) = &ctx_root {
+            let mut stack = vec![root.join(".lex").join("extract")];
+            while let Some(dir) = stack.pop() {
+                let Ok(entries) = std::fs::read_dir(&dir) else { continue };
+                for entry in entries.filter_map(|e| e.ok()) {
+                    let path = entry.path();
+                    if path.is_dir() {
+                        stack.push(path);
+                    } else if path.extension().and_then(|e| e.to_str()) == Some("spo") {
+                        let content = std::fs::read_to_string(&path).unwrap_or_default();
+                        out.push((path, content));
                     }
                 }
+            }
+        }
+        out
+    };
+
+    // The v1 write-gate: validate EVERY sidecar (extraction rewrites the
+    // full tree each save) against the format spec using the walker's own
+    // line rules. Nothing gets committed that history can't later read —
+    // the enforcement brick whose absence let one wrapped line ride 549
+    // commits of lUX history.
+    let mut gate_files = 0usize;
+    let mut gate_errors = 0usize;
+    if let Some(root) = &ctx_root {
+        for (path, content) in &all_spo {
+            gate_files += 1;
+            for (lineno, err) in spo_events::validate_sidecar_v1(content) {
+                let rel = path.strip_prefix(root).unwrap_or(path);
+                eprintln!("sidecar gate: {}:{}: {}", rel.display(), lineno, err);
+                gate_errors += 1;
             }
         }
     }
@@ -1092,21 +1102,15 @@ fn cmd_extract() {
         let mut id_errors = 0usize;
         let mut owners: std::collections::HashMap<String, String> = std::collections::HashMap::new();
         let mut all_sidecars: Vec<(String, Vec<String>)> = Vec::new();
-        let mut stack = vec![root.join(".lex").join("extract")];
-        while let Some(dir) = stack.pop() {
-            let Ok(entries) = std::fs::read_dir(&dir) else { continue };
-            for entry in entries.filter_map(|e| e.ok()) {
-                let path = entry.path();
-                if path.is_dir() {
-                    stack.push(path);
-                    continue;
-                }
+        // Consumes the shared walk's collection (review #37): the identity
+        // gate is the .fm.spo view of the same file set the v1 gate read.
+        {
+            for (path, content) in &all_spo {
                 let Some(rel) = path.strip_prefix(root).ok().map(|p| p.to_string_lossy().to_string()) else { continue };
                 let Some(src) = rel
                     .strip_prefix(".lex/extract/")
                     .and_then(|s| s.strip_suffix(".fm.spo"))
                 else { continue };
-                let content = std::fs::read_to_string(&path).unwrap_or_default();
                 let lines: Vec<String> = content.lines().map(String::from).collect();
                 let subjects = nquad::derive_file_subjects(
                     &lines, src, &ctx.declared_props,
