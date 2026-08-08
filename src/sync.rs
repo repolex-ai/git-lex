@@ -262,6 +262,32 @@ pub(crate) fn cmd_sync() {
         }
     }
 
+    // t-box self-heal (#81): the repo-ontology graph persists and is loaded
+    // at init/kit-update ("stays put", Rob Day-50) — but a fresh store
+    // (deleted for a rebuild) starts EMPTY, which forced the cure sequence
+    // "kit-update → rm store → sync → kit-update": the second update only
+    // reloaded vocabulary already sitting on disk. If the graph is empty
+    // and installed TTLs exist, load them now. Verify's empty-graph refusal
+    // still stands when no kits are installed (nothing on disk to load).
+    let ont_empty = match oxigraph::model::NamedNode::new(
+        "https://repolex.ai/git-lex/NamedGraph/repo-ontology",
+    ) {
+        Ok(g) => store
+            .quads_for_pattern(None, None, None, Some(g.as_ref().into()))
+            .next()
+            .is_none(),
+        Err(_) => false,
+    };
+    if ont_empty {
+        let n = crate::nquad::load_ontology_graph(&store);
+        if n > 0 {
+            println!(
+                "Ontology graph was empty (fresh store) — loaded {} kit ttl file(s) from disk",
+                n
+            );
+        }
+    }
+
     // Regenerate the git2 machinery layer (commits/signatures/refs/filetree)
     let git_nq = crate::git2_nquads::generate_git2_nquads();
     let git_count = git_nq.lines().count();
