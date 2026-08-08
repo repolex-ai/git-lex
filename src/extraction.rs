@@ -381,15 +381,19 @@ pub(crate) fn frontmatter_to_turtle(
 
 /// Extract markdown links from body text using tree-sitter.
 /// Writes `.md.spo` sidecars with link type (internal/external/unresolved)
-/// and destination.
-pub(crate) fn extract_markdown_links() {
+/// and destination. Returns the number of extraction ERRORS (unreadable or
+/// unparseable docs) — the caller folds them into the save gate, because a
+/// doc that can't be re-extracted keeps its stale sidecar and a stale
+/// sidecar keeps dead links alive in the graph forever (review #23).
+pub(crate) fn extract_markdown_links() -> u32 {
     use std::collections::HashSet;
     use std::path::PathBuf;
     use git_lex::find_git_root;
 
+    let mut errors: u32 = 0;
     let root = match find_git_root() {
         Some(r) => r,
-        None => return,
+        None => return 0,
     };
 
     let extract_dir = root.join(".lex").join("extract");
@@ -417,9 +421,22 @@ pub(crate) fn extract_markdown_links() {
     let mut total_links = 0;
 
     for filepath in &files {
+        // Unreadable/unparseable docs are LOUD and counted (review #23):
+        // the skip bypasses the sidecar-removal branch below, so the doc's
+        // existing sidecar keeps asserting facts the doc may no longer
+        // carry — and the sync diff never sees them vanish.
         let content = match fs::read_to_string(filepath) {
             Ok(c) => c,
-            Err(_) => continue,
+            Err(e) => {
+                eprintln!(
+                    "error: cannot read {} for link extraction ({e}) — its \
+                     existing sidecar (if any) is NOT updated; fix the file \
+                     (permissions / invalid UTF-8) or delete it",
+                    filepath.display()
+                );
+                errors += 1;
+                continue;
+            }
         };
 
         let relpath = filepath.strip_prefix(&root).unwrap_or(filepath);
@@ -427,7 +444,15 @@ pub(crate) fn extract_markdown_links() {
 
         let tree = match parser.parse(content.as_bytes(), None) {
             Some(t) => t,
-            None => continue,
+            None => {
+                eprintln!(
+                    "error: tree-sitter could not parse {} — its existing \
+                     sidecar (if any) is NOT updated",
+                    filepath.display()
+                );
+                errors += 1;
+                continue;
+            }
         };
 
         let mut spo_lines: Vec<String> = Vec::new();
@@ -520,6 +545,7 @@ pub(crate) fn extract_markdown_links() {
     if total_links > 0 {
         eprintln!("Markdown links: {} from {} files", total_links, files.len());
     }
+    errors
 }
 
 #[cfg(test)]

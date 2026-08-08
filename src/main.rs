@@ -845,12 +845,18 @@ fn cmd_validate() -> bool {
         total_files += 1;
 
         // Parse this file's Turtle into RdfData
+        // Every failure arm below COUNTS as a violation (review #24): a
+        // file whose extracted Turtle can't parse, load, or validate is a
+        // file the gate could not judge — and a gate that can't run must
+        // not pretend it passed (same law as the missing-shapes arm above).
         let data_graph = match InMemoryGraph::from_reader(
             &mut ttl.as_bytes(), &filepath.to_string_lossy(), &RDFFormat::Turtle, None, &ReaderMode::Strict,
         ) {
             Ok(g) => g,
             Err(e) => {
                 eprintln!("  Parse error in {}: {}", filepath.display(), e);
+                total_violations += 1;
+                failed_files.push(filepath.display().to_string());
                 continue;
             }
         };
@@ -858,6 +864,8 @@ fn cmd_validate() -> bool {
             Ok(d) => d,
             Err(e) => {
                 eprintln!("  Data load error in {}: {}", filepath.display(), e);
+                total_violations += 1;
+                failed_files.push(filepath.display().to_string());
                 continue;
             }
         };
@@ -882,6 +890,8 @@ fn cmd_validate() -> bool {
             }
             Err(e) => {
                 eprintln!("  Validation error for {}: {}", filepath.display(), e);
+                total_violations += 1;
+                failed_files.push(filepath.display().to_string());
             }
         }
     }
@@ -986,7 +996,7 @@ fn cmd_extract() {
     // Run frontmatter extraction (writes .spo sidecars as a side effect).
     // The context is built here and shared with the identity gate below.
     let ctx_root = git_lex::find_git_root();
-    let (_nq, extraction_errors, extract_ctx) = match &ctx_root {
+    let (_nq, mut extraction_errors, extract_ctx) = match &ctx_root {
         Some(root) => {
             let ctx = nquad::ResolverContext::build(root);
             let (nq, errs) = nquad::generate_frontmatter_nquads_with(root, &ctx);
@@ -998,8 +1008,9 @@ fn cmd_extract() {
         }
     };
 
-    // Run markdown link extraction via tree-sitter
-    extract_markdown_links();
+    // Run markdown link extraction via tree-sitter. Its errors join the
+    // save gate (review #23): an unextractable doc keeps a stale sidecar.
+    extraction_errors += extract_markdown_links();
 
     // (The .jsonl session extractor ran here 2026-04→08: claude-code-kit
     // only, 13 ad-hoc operators no ontology declared, zero sidecars ever

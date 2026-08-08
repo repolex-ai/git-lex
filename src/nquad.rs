@@ -541,9 +541,21 @@ pub(crate) fn generate_frontmatter_nquads_with(
     fs::create_dir_all(&extract_dir).ok();
 
     for filepath in files {
+        // Unreadable docs are LOUD and counted (review #23): skipping one
+        // bypasses the stale-sidecar removal below, so its existing sidecar
+        // keeps asserting facts the sync diff never sees vanish.
         let content = match fs::read_to_string(filepath) {
             Ok(c) => c,
-            Err(_) => continue,
+            Err(e) => {
+                eprintln!(
+                    "error: cannot read {} for extraction ({e}) — its \
+                     existing sidecar (if any) is NOT updated; fix the file \
+                     (permissions / invalid UTF-8) or delete it",
+                    filepath.display()
+                );
+                total_errors += 1;
+                continue;
+            }
         };
 
         let relpath = filepath.strip_prefix(&root).unwrap_or(filepath);

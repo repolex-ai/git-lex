@@ -529,18 +529,25 @@ pub(crate) fn cmd_kit_update(kit_arg: Option<String>) {
     // derived artifacts are regenerated just below, so the mirror losing
     // them is part of the design, not a casualty.
     {
-        fn copy_dir_recursive(src: &std::path::Path, dest: &std::path::Path) {
-            fs::create_dir_all(dest).ok();
-            if let Ok(entries) = fs::read_dir(src) {
-                for e in entries.filter_map(|e| e.ok()) {
-                    let d = dest.join(e.file_name());
-                    if e.path().is_dir() {
-                        copy_dir_recursive(&e.path(), &d);
-                    } else {
-                        fs::copy(e.path(), &d).ok();
-                    }
+        // Every error propagates (review #22): this copier rebuilds a dir
+        // the sweep deletes, so a swallowed failure guts the live ontology
+        // and the loader then reads "kit ships no ontology" — validation
+        // silently skipped, object properties emitted as string literals.
+        fn copy_dir_recursive(
+            src: &std::path::Path,
+            dest: &std::path::Path,
+        ) -> std::io::Result<()> {
+            fs::create_dir_all(dest)?;
+            for e in fs::read_dir(src)? {
+                let e = e?;
+                let d = dest.join(e.file_name());
+                if e.path().is_dir() {
+                    copy_dir_recursive(&e.path(), &d)?;
+                } else {
+                    fs::copy(e.path(), &d)?;
                 }
             }
+            Ok(())
         }
         let kit_root = root.join(".lex").join("kit");
         let mut payload_dirs: Vec<(String, std::path::PathBuf)> = Vec::new();
@@ -580,8 +587,42 @@ pub(crate) fn cmd_kit_update(kit_arg: Option<String>) {
             }
             for (name, src) in &payload_dirs {
                 let dest = ont_root.join(name);
-                let _ = fs::remove_dir_all(&dest);
-                copy_dir_recursive(src, &dest);
+                // Build the mirror BESIDE the live dir, then swap (review
+                // #22). The old order — delete live, then copy with
+                // swallowed errors — meant one failed copy left
+                // .lex/ontology/<short>/ empty while kit-update reported
+                // success, and that path is the documented contract external
+                // consumers (Pool) read alone. Now a failure leaves the live
+                // dir untouched and says so.
+                let tmp = ont_root.join(format!(".{}.kit-tmp", name));
+                let _ = fs::remove_dir_all(&tmp);
+                if let Err(e) = copy_dir_recursive(src, &tmp) {
+                    eprintln!(
+                        "ERROR: building the ontology mirror for `{name}` failed ({e}) — \
+                         the live .lex/ontology/{name}/ is UNTOUCHED. Fix the error \
+                         (disk/permissions) and re-run `git lex kit-update`."
+                    );
+                    let _ = fs::remove_dir_all(&tmp);
+                    continue;
+                }
+                if dest.exists() {
+                    if let Err(e) = fs::remove_dir_all(&dest) {
+                        eprintln!(
+                            "ERROR: could not clear .lex/ontology/{name}/ for convergence \
+                             ({e}) — left as-is; re-run `git lex kit-update` after fixing."
+                        );
+                        let _ = fs::remove_dir_all(&tmp);
+                        continue;
+                    }
+                }
+                if let Err(e) = fs::rename(&tmp, &dest) {
+                    eprintln!(
+                        "ERROR: ontology mirror swap for `{name}` failed ({e}) — \
+                         .lex/ontology/{name}/ is MISSING until a re-run of \
+                         `git lex kit-update` succeeds. The kit payload copy is intact."
+                    );
+                    let _ = fs::remove_dir_all(&tmp);
+                }
             }
         }
     }
