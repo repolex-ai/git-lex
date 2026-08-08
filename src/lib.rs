@@ -92,6 +92,26 @@ pub fn eval_query<'a>(
         .map_err(|e| format!("eval: {e}"))
 }
 
+/// [`eval_query`] with the default graph set to the UNION of all named
+/// graphs — the exploration semantics `git lex query` and the viz use
+/// deliberately (those surfaces browse the whole store; the W3C protocol
+/// endpoint keeps standard dataset semantics). ONE parse/execute for both
+/// union surfaces (review #8); the error keeps its parse-vs-eval identity
+/// so callers can report a 400-class and 500-class failure differently.
+pub fn eval_query_union<'a>(
+    store: &'a Store,
+    q: &str,
+) -> Result<oxigraph::sparql::QueryResults<'a>, W3cQueryError> {
+    let mut parsed = oxigraph::sparql::SparqlEvaluator::new()
+        .parse_query(q)
+        .map_err(|e| W3cQueryError::Parse(e.to_string()))?;
+    parsed.dataset_mut().set_default_graph_as_union();
+    parsed
+        .on_store(store)
+        .execute()
+        .map_err(|e| W3cQueryError::Eval(e.to_string()))
+}
+
 
 // ─── repo.yml — the ONE reader ─────────────────────────────────
 
@@ -539,9 +559,16 @@ pub fn add_prefixes_at(root: Option<&std::path::Path>, query: &str) -> String {
 
 
 // ─── W3C SPARQL query surface (Task 2 Part B) ────────────────────────────────
-// ONE implementation shared by the CLI (`git lex query`) and the protocol
-// endpoint (`git lex serve sparql`) — two SPARQL paths drifting was the bug
-// class this kills.
+// Shared machinery for every SPARQL surface: term serialization
+// (term_to_json), the W3C SELECT envelope (solutions_to_w3c_json), and
+// parse/execute (eval_query / eval_query_union). The SURFACES deliberately
+// differ in dataset semantics — `git lex query` and the viz set the default
+// graph to the union of all graphs (exploration), while the protocol
+// endpoint (`git lex serve sparql`) keeps standard W3C semantics; the viz
+// also emits its own simplified payload for the UI. But they all assemble
+// through these one-per-job functions, so the shapes can't drift (two
+// SPARQL paths drifting was the bug class this section kills — review #8
+// caught the old header claiming more sharing than existed).
 
 /// One RDF term → W3C SPARQL 1.1 Query Results JSON object.
 pub fn term_to_json(term: &oxigraph::model::Term) -> serde_json::Value {
@@ -638,28 +665,9 @@ pub fn w3c_query_at(
         .execute()
         .map_err(|e| W3cQueryError::Eval(e.to_string()))?;
     match results {
-        oxigraph::sparql::QueryResults::Solutions(solutions) => {
-            let vars: Vec<String> = solutions
-                .variables()
-                .iter()
-                .map(|v| v.as_str().to_string())
-                .collect();
-            let mut bindings = Vec::new();
-            for sol in solutions {
-                let sol = sol.map_err(|e| W3cQueryError::Eval(e.to_string()))?;
-                let mut row = serde_json::Map::new();
-                for var in &vars {
-                    if let Some(term) = sol.get(var.as_str()) {
-                        row.insert(var.clone(), term_to_json(term));
-                    }
-                }
-                bindings.push(serde_json::Value::Object(row));
-            }
-            Ok(W3cQueryOutcome::Solutions(serde_json::json!({
-                "head": { "vars": vars },
-                "results": { "bindings": bindings },
-            })))
-        }
+        oxigraph::sparql::QueryResults::Solutions(solutions) => Ok(W3cQueryOutcome::Solutions(
+            solutions_to_w3c_json(solutions).map_err(W3cQueryError::Eval)?,
+        )),
         oxigraph::sparql::QueryResults::Boolean(b) => Ok(W3cQueryOutcome::Boolean(
             serde_json::json!({ "head": {}, "boolean": b }),
         )),
@@ -673,6 +681,37 @@ pub fn w3c_query_at(
             Ok(W3cQueryOutcome::Graph(out))
         }
     }
+}
+
+/// SELECT solutions → the W3C SPARQL 1.1 Query Results JSON envelope
+/// (`{"head":{"vars":[…]},"results":{"bindings":[…]}}`). ONE assembler for
+/// the protocol endpoint and the CLI's `--json` output, so the envelope
+/// shape can't drift between them (review #8; per-term serialization is
+/// already shared via `term_to_json`). A per-solution error aborts with
+/// `Err` — a partial result must never present as a complete one.
+pub fn solutions_to_w3c_json(
+    solutions: oxigraph::sparql::QuerySolutionIter<'_>,
+) -> Result<serde_json::Value, String> {
+    let vars: Vec<String> = solutions
+        .variables()
+        .iter()
+        .map(|v| v.as_str().to_string())
+        .collect();
+    let mut bindings = Vec::new();
+    for sol in solutions {
+        let sol = sol.map_err(|e| e.to_string())?;
+        let mut row = serde_json::Map::new();
+        for var in &vars {
+            if let Some(term) = sol.get(var.as_str()) {
+                row.insert(var.clone(), term_to_json(term));
+            }
+        }
+        bindings.push(serde_json::Value::Object(row));
+    }
+    Ok(serde_json::json!({
+        "head": { "vars": vars },
+        "results": { "bindings": bindings },
+    }))
 }
 
 /// The `optional_kits:` list from a repo.yml (serve + kit commands).

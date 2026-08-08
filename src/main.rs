@@ -1166,31 +1166,26 @@ fn cmd_extract() {
 }
 
 
-use git_lex::term_to_json;
-
-
 fn run_query(store: &Store, query: &str, store_type: &str, json: bool) {
     let start = Instant::now();
     let prefixed = add_prefixes(query);
 
-    let mut parsed_query = match oxigraph::sparql::SparqlEvaluator::new().parse_query(&prefixed) {
-        Ok(e) => e,
-        Err(e) => {
+    // Shared parse/execute with the deliberate union-default-graph
+    // semantics (review #8): this surface explores the whole store. The
+    // parse-vs-eval error identity survives for the JSON error object.
+    let results = match git_lex::eval_query_union(store, &prefixed) {
+        Ok(r) => r,
+        Err(git_lex::W3cQueryError::Parse(e)) => {
             if json {
-                eprintln!("{}", serde_json::json!({"error": "parse", "message": e.to_string()}));
+                eprintln!("{}", serde_json::json!({"error": "parse", "message": e}));
             } else {
                 eprintln!("SPARQL parse error: {}", e);
             }
             exit(1);
         }
-    };
-    parsed_query.dataset_mut().set_default_graph_as_union();
-
-    let results = match parsed_query.on_store(store).execute() {
-        Ok(r) => r,
-        Err(e) => {
+        Err(git_lex::W3cQueryError::Eval(e)) => {
             if json {
-                eprintln!("{}", serde_json::json!({"error": "eval", "message": e.to_string()}));
+                eprintln!("{}", serde_json::json!({"error": "eval", "message": e}));
             } else {
                 eprintln!("SPARQL evaluation error: {}", e);
             }
@@ -1201,39 +1196,29 @@ fn run_query(store: &Store, query: &str, store_type: &str, json: bool) {
     let mut count = 0;
     match results {
         oxigraph::sparql::QueryResults::Solutions(solutions) => {
-            let vars: Vec<String> = solutions
-                .variables()
-                .iter()
-                .map(|v| v.as_str().to_string())
-                .collect();
-
             if json {
-                // W3C SPARQL 1.1 Query Results JSON Format.
-                // Stream bindings directly — don't buffer for table layout.
-                let mut bindings: Vec<serde_json::Value> = Vec::new();
-                for solution in solutions {
-                    let solution = match solution {
-                        Ok(s) => s,
-                        Err(e) => {
-                            eprintln!("Error reading solution: {}", e);
-                            continue;
-                        }
-                    };
-                    count += 1;
-                    let mut binding = serde_json::Map::new();
-                    for var in &vars {
-                        if let Some(term) = solution.get(var.as_str()) {
-                            binding.insert(var.clone(), term_to_json(term));
-                        }
+                // W3C envelope through the ONE shared assembler (review
+                // #8) — the CLI's --json and the protocol endpoint emit
+                // the same shape by construction.
+                match git_lex::solutions_to_w3c_json(solutions) {
+                    Ok(out) => {
+                        count = out["results"]["bindings"]
+                            .as_array()
+                            .map(|b| b.len())
+                            .unwrap_or(0);
+                        println!("{}", serde_json::to_string(&out).unwrap());
                     }
-                    bindings.push(serde_json::Value::Object(binding));
+                    Err(e) => {
+                        eprintln!("{}", serde_json::json!({"error": "eval", "message": e}));
+                        exit(1);
+                    }
                 }
-                let out = serde_json::json!({
-                    "head": { "vars": vars },
-                    "results": { "bindings": bindings },
-                });
-                println!("{}", serde_json::to_string(&out).unwrap());
             } else {
+                let vars: Vec<String> = solutions
+                    .variables()
+                    .iter()
+                    .map(|v| v.as_str().to_string())
+                    .collect();
                 let mut all_rows = Vec::new();
                 for solution in solutions {
                     let solution = match solution {

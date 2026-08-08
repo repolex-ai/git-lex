@@ -67,15 +67,17 @@ struct VizState {
 
 fn run_sparql_to_json(store: &Store, query: &str) -> serde_json::Value {
     let prefixed = add_prefixes(query);
-    let mut parsed = match oxigraph::sparql::SparqlEvaluator::new().parse_query(&prefixed) {
-        Ok(p) => p,
-        Err(e) => return serde_json::json!({"error": format!("parse error: {}", e)}),
-    };
-    parsed.dataset_mut().set_default_graph_as_union();
-
-    let results = match parsed.on_store(store).execute() {
+    // Shared parse/execute with union-default-graph semantics (review #8).
+    // The PAYLOAD below stays viz-specific on purpose — a simplified
+    // {vars, results} shape for the UI, not the W3C envelope.
+    let results = match git_lex::eval_query_union(store, &prefixed) {
         Ok(r) => r,
-        Err(e) => return serde_json::json!({"error": format!("query error: {}", e)}),
+        Err(git_lex::W3cQueryError::Parse(e)) => {
+            return serde_json::json!({"error": format!("parse error: {}", e)})
+        }
+        Err(git_lex::W3cQueryError::Eval(e)) => {
+            return serde_json::json!({"error": format!("query error: {}", e)})
+        }
     };
 
     match results {
