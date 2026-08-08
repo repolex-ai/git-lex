@@ -581,20 +581,17 @@ pub(crate) fn generate_frontmatter_nquads_with(
         // emitter below — history doesn't un-happen.
         let mut spo_lines = Vec::new();
 
-        if content.starts_with("---\n") || content.starts_with("---\r\n") {
-            let rest = &content[4..];
-            if let Some(end) = rest.find("\n---") {
-                let yaml_str = &rest[..end];
-                match serde_yaml::from_str::<HashMap<String, serde_yaml::Value>>(yaml_str) {
-                    Ok(yaml) => {
-                        for (key, value) in &yaml {
-                            flatten_yaml(key, value, &mut spo_lines);
-                        }
+        // ONE frontmatter parser (review #9): the shared fence rule in lib.rs.
+        if let (Some(yaml_str), _) = git_lex::split_frontmatter(&content) {
+            match serde_yaml::from_str::<HashMap<String, serde_yaml::Value>>(yaml_str) {
+                Ok(yaml) => {
+                    for (key, value) in &yaml {
+                        flatten_yaml(key, value, &mut spo_lines);
                     }
-                    Err(e) => {
-                        eprintln!("error: {}: malformed YAML frontmatter: {}", relpath_str, e);
-                        total_errors += 1;
-                    }
+                }
+                Err(e) => {
+                    eprintln!("error: {}: malformed YAML frontmatter: {}", relpath_str, e);
+                    total_errors += 1;
                 }
             }
         }

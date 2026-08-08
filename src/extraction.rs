@@ -157,16 +157,10 @@ pub(crate) fn frontmatter_to_turtle(
     let content = fs::read_to_string(filepath)
         .map_err(|e| format!("cannot read file: {}", e))?;
 
-    if !content.starts_with("---\n") && !content.starts_with("---\r\n") {
+    // ONE frontmatter parser (review #9): the shared fence rule in lib.rs.
+    let Some(yaml_str) = git_lex::split_frontmatter(&content).0 else {
         return Ok(None);
-    }
-
-    let rest = &content[4..];
-    let end = match rest.find("\n---") {
-        Some(e) => e,
-        None => return Ok(None),
     };
-    let yaml_str = &rest[..end];
 
     let yaml: HashMap<String, serde_yaml::Value> = serde_yaml::from_str(yaml_str)
         .map_err(|e| format!("malformed YAML frontmatter: {}", e))?;

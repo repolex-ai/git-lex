@@ -198,6 +198,44 @@ impl RepoYml {
     }
 }
 
+// ─── Frontmatter framing (ONE authority) ───────────────────────
+
+/// Split a document into `(frontmatter, body)` — THE frontmatter-delimiter
+/// parser. Five hand-rolled scanners with divergent CRLF and closing-fence
+/// rules used to live across the crate (review #9 — the same disease the
+/// repo.yml SEVEN-scanner consolidation cured): a CRLF file's frontmatter
+/// parsed in extraction but read as body in the viz `/api/file` endpoint
+/// and in harness skill/subagent sync, silently dropping its keys.
+///
+/// Rules, written down once:
+/// - The opener is `---` as the FIRST line (`---\n` or `---\r\n`).
+/// - The closer is the first subsequent line that is exactly `---`
+///   (trailing whitespace/CR tolerated) — the Jekyll/Obsidian fence rule.
+/// - Returns `(Some(yaml), body)` with `yaml` keeping its trailing
+///   newline and `body` starting after the closer line.
+/// - No opener, or an opener with no closer (a doc that TRIED to fence and
+///   failed), returns `(None, content)` — callers that must be loud about
+///   the malformed case check the opener themselves first.
+pub fn split_frontmatter(content: &str) -> (Option<&str>, &str) {
+    let after = if let Some(r) = content.strip_prefix("---\n") {
+        r
+    } else if let Some(r) = content.strip_prefix("---\r\n") {
+        r
+    } else {
+        return (None, content);
+    };
+    let mut offset = 0usize;
+    for line in after.split_inclusive('\n') {
+        if line.trim_end() == "---" {
+            let fm = &after[..offset];
+            let body = &after[offset + line.len()..];
+            return (Some(fm), body);
+        }
+        offset += line.len();
+    }
+    (None, content)
+}
+
 // ─── Kit namespace derivation (ONE authority) ──────────────────
 
 /// The conventional kit namespace, used ONLY as a fallback when no installed
@@ -642,6 +680,43 @@ pub fn read_repo_yml_optional_kits(path: &std::path::Path) -> Vec<String> {
     RepoYml::load_path(path).optional_kits
 }
 
+
+#[cfg(test)]
+mod split_frontmatter_tests {
+    use super::split_frontmatter;
+
+    /// PIN (review #9): ONE fence rule for the whole crate. LF and CRLF
+    /// openers both parse; the closer is a line that is exactly `---`;
+    /// no opener or an unterminated fence means no frontmatter.
+    #[test]
+    fn one_fence_rule_for_every_consumer() {
+        // LF
+        let (fm, body) = split_frontmatter("---\nkey: v\n---\nbody\n");
+        assert_eq!(fm, Some("key: v\n"));
+        assert_eq!(body, "body\n");
+        // CRLF opener — the case three of the five old scanners rejected.
+        let (fm, body) = split_frontmatter("---\r\nkey: v\r\n---\r\nbody");
+        assert_eq!(fm, Some("key: v\r\n"));
+        assert_eq!(body, "body");
+        // Closer at EOF without trailing newline.
+        let (fm, body) = split_frontmatter("---\nkey: v\n---");
+        assert_eq!(fm, Some("key: v\n"));
+        assert_eq!(body, "");
+        // No opener.
+        assert_eq!(split_frontmatter("plain text"), (None, "plain text"));
+        // Opener but no closer: a doc that tried to fence and failed has
+        // NO frontmatter — callers that must be loud check the opener.
+        assert_eq!(
+            split_frontmatter("---\nkey: v\nbody"),
+            (None, "---\nkey: v\nbody")
+        );
+        // A `----` divider is NOT a closer (exact-line fence rule).
+        assert_eq!(
+            split_frontmatter("---\nkey: v\n----\nx").0,
+            None
+        );
+    }
+}
 
 #[cfg(test)]
 mod w3c_query_tests {

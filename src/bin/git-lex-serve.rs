@@ -194,20 +194,12 @@ fn api_file_for_uri(state: &VizState, uri: Option<&str>) -> serde_json::Value {
         Err(e) => return serde_json::json!({"error": format!("read failed: {}", e), "path": rel}),
     };
 
-    let (frontmatter, body) = if raw.starts_with("---\n") {
-        if let Some(end) = raw[4..].find("\n---\n") {
-            let fm_text = &raw[4..4 + end];
-            let body_text = &raw[4 + end + 5..];
-            (Some(fm_text.to_string()), body_text.to_string())
-        } else if let Some(end) = raw[4..].find("\n---") {
-            let fm_text = &raw[4..4 + end];
-            let body_text = raw.get(4 + end + 4..).unwrap_or("");
-            (Some(fm_text.to_string()), body_text.to_string())
-        } else {
-            (None, raw.clone())
-        }
-    } else {
-        (None, raw.clone())
+    // ONE frontmatter parser (review #9): the shared fence rule in the lib —
+    // this endpoint used to reject CRLF openers and report frontmatter=null
+    // for files the extractor parsed fine.
+    let (frontmatter, body) = {
+        let (fm, body) = git_lex::split_frontmatter(&raw);
+        (fm.map(|s| s.to_string()), body.to_string())
     };
 
     serde_json::json!({

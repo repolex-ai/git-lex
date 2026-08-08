@@ -254,22 +254,15 @@ fn transform_subagent(content: &str, name: &str) -> String {
     format!("{}{}", fm, body)
 }
 
-/// Split YAML frontmatter from body.
+/// Split YAML frontmatter from body — thin adapter over the crate-wide
+/// fence parser (git_lex::split_frontmatter, review #9). The old local
+/// scanner rejected CRLF openers, so a CRLF Skill/Subagent doc silently
+/// lost all its soul.* keys and dumped the raw `---` block into the
+/// generated .claude/ file body. This module's callers want owned strings
+/// and an empty string for "no frontmatter".
 fn split_frontmatter(content: &str) -> (String, String) {
-    if !content.starts_with("---\n") {
-        return (String::new(), content.to_string());
-    }
-    if let Some(end) = content[4..].find("\n---\n") {
-        let fm = content[4..4 + end].to_string();
-        let body = content[4 + end + 4..].to_string();
-        (fm, body)
-    } else if let Some(end) = content[4..].find("\n---") {
-        let fm = content[4..4 + end].to_string();
-        let body = content.get(4 + end + 4..).unwrap_or("").to_string();
-        (fm, body)
-    } else {
-        (String::new(), content.to_string())
-    }
+    let (fm, body) = git_lex::split_frontmatter(content);
+    (fm.unwrap_or("").to_string(), body.to_string())
 }
 
 /// Extract a value from a YAML frontmatter line like `key: "value"` or `key: value`.

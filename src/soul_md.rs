@@ -105,9 +105,8 @@ pub(crate) fn require_soul_md(root: &Path) {
 /// `previous_value` is `Some(old)` for a corrected wrong value and `None`
 /// for a fill (empty or absent line).
 ///
-/// Rules, matching the extractor's frontmatter framing
-/// (extraction.rs::frontmatter_to_turtle — `---\n` opener, closer found via
-/// `\n---`):
+/// Rules, matching the extractor's frontmatter framing (the ONE shared
+/// fence parser, git_lex::split_frontmatter — review #9):
 /// - soulId line present: replace the value, PRESERVING any trailing
 ///   `# comment` (the kit template's "never type it by hand" warning
 ///   survives the fill). serde_yaml strips the comment at read time.
@@ -125,16 +124,16 @@ fn healed_content(content: &str, sha: &str) -> Option<(String, Option<String>)> 
         ));
     }
 
-    // Frontmatter framing identical to the extractor: body starts after the
-    // opener line; the closer is the next line beginning `---`.
-    let opener_len = if content.starts_with("---\r\n") { 5 } else { 4 };
-    let rest = &content[opener_len..];
-    let Some(close) = rest.find("\n---") else {
-        // Unterminated frontmatter — malformed; extraction would fail loud.
+    // Frontmatter framing = the shared fence parser, so heal and extraction
+    // can never frame the same file differently. A heal rewrite normalizes
+    // the fences themselves to `---\n`; block content and body are spliced
+    // byte-exact.
+    let (fm, body) = git_lex::split_frontmatter(content);
+    let Some(block) = fm else {
+        // Opener with no closer — malformed; extraction would fail loud.
         // Don't compound it by editing.
         return None;
     };
-    let block = &rest[..close];
 
     let key_prefix = format!("{}:", SOUL_ID_KEY);
     let mut found: Option<(usize, &str)> = None;
@@ -169,16 +168,19 @@ fn healed_content(content: &str, sha: &str) -> Option<(String, Option<String>)> 
                 .map(|(i, l)| if i == idx { new_line.clone() } else { l.to_string() })
                 .collect();
             let mut out = String::with_capacity(content.len() + sha.len());
-            out.push_str(&content[..opener_len]);
+            out.push_str("---\n");
             out.push_str(&new_block.join("\n"));
-            out.push_str(&rest[close..]);
+            out.push_str("\n---\n");
+            out.push_str(body);
             Some((out, previous))
         }
         None => {
             let mut out = String::with_capacity(content.len() + sha.len() + 32);
-            out.push_str(&content[..opener_len]);
+            out.push_str("---\n");
             out.push_str(&format!("{}: {}\n", SOUL_ID_KEY, sha));
-            out.push_str(rest);
+            out.push_str(block);
+            out.push_str("---\n");
+            out.push_str(body);
             Some((out, None))
         }
     }
