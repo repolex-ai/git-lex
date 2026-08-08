@@ -128,14 +128,16 @@ pub struct RepoYml {
     /// this.
     #[serde(default)]
     pub dev_history_horizon: Option<String>,
-    /// Wikilink resolution semantics — a MIGRATION FENCE, not user config
-    /// (same lifecycle as dev_history_horizon: deletable once every repo
-    /// has crossed). `git lex init` stamps "obsidian" on NEW repos: bare
-    /// targets are repo-root-relative, leading `/` is rejected at save
-    /// (Rob-ruled 2026-08-01). Absent = the legacy 2026-07-28 markdown
-    /// semantics (bare = source-folder-relative, `/` = repo-rooted) —
-    /// pre-existing repos keep it until their Phase-4 migration flips
-    /// them. KEY NAME PENDING ROB — nothing writes it until he picks.
+    /// HISTORY-REPLAY FENCE, not user config. The wikilink reader is
+    /// retired (Rob-ruled 2026-08-06) — nothing writes this key anymore —
+    /// but wikilink-era sidecars still exist in repo HISTORY, and the walk
+    /// must resolve their linksTo operands the way the era they were
+    /// written under resolved them: "obsidian" = bare targets repo-root-
+    /// relative (2026-08-01 ruling), absent = legacy 2026-07-28 semantics
+    /// (bare = source-folder-relative, `/` = repo-rooted). Same lifecycle
+    /// as dev_history_horizon: deletable from a repo.yml only when that
+    /// repo's history holds no wikilink-era sidecars the two semantics
+    /// would resolve differently.
     #[serde(default)]
     pub link_semantics: Option<String>,
     #[serde(default)]
