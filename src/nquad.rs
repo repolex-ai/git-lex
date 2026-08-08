@@ -915,8 +915,22 @@ pub(crate) fn emit_spo_line_nquads(
                             .filter_map(|k| k.split('/').nth(1).map(str::to_string))
                             .collect();
                         if !owners.is_empty() {
-                            let owner_list =
-                                owners.into_iter().collect::<Vec<_>>().join(", ");
+                            // #85: owners that are deprecated classes get
+                            // tagged — "exists on class Texture" read as
+                            // Texture being live vocabulary, and it isn't.
+                            let dep_classes =
+                                crate::ontology::get_deprecated_classes(kit_name);
+                            let owner_list = owners
+                                .into_iter()
+                                .map(|c| match dep_classes.get(&c) {
+                                    Some(Some(succ)) => {
+                                        format!("{c} (deprecated → {succ})")
+                                    }
+                                    Some(None) => format!("{c} (deprecated)"),
+                                    None => c,
+                                })
+                                .collect::<Vec<_>>()
+                                .join(", ");
                             eprintln!(
                                 "warning: {}: the key `{}.{}.{}` — `{}` exists in the \
                                  `{}` ontology, but on class {}, not on {}. Fix, pick \
@@ -984,6 +998,15 @@ pub(crate) fn emit_spo_line_nquads(
                                             && cl.contains(&prop_lower))
                                             || (cl.len() >= 4
                                                 && prop_lower.contains(&cl)))
+                                })
+                                // #85: never SUGGEST a deprecated key —
+                                // did-you-mean is a destination menu for
+                                // new writing.
+                                .filter(|cand| {
+                                    !deprecated_props.contains_key(&format!(
+                                        "{}/{}",
+                                        kit_name, cand
+                                    ))
                                 })
                                 .map(str::to_string)
                                 .collect();

@@ -77,7 +77,7 @@ fn regenerate_kit_artifacts(kit_name: &str, root: &std::path::Path, create_folde
         let expected: std::collections::HashSet<String> = declared_all
             .iter()
             .filter(|n| {
-                !deprecated.contains(*n) && ontology::get_class_foldered(kit_name, n)
+                !deprecated.contains_key(*n) && ontology::get_class_foldered(kit_name, n)
             })
             .cloned()
             .collect();
