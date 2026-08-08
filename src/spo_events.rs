@@ -980,6 +980,15 @@ pub(crate) fn onegraph_walk_engine(
             return Ok(HashSet::new());
         };
         let lines = read_sidecar_at_commit(commit, sidecar_path)?;
+        // ABSENT (or empty) sidecar = NO anchors (review-critical fix): the
+        // File rdf:type used to emit unconditionally even for the verified-
+        // empty set of a path absent at this commit — identical on both
+        // diff sides, so a file's anchor facts never diffed: a new file
+        // under-reported its events and a deletion never retracted its
+        // anchors. No sidecar lines, no facts of any kind.
+        if lines.is_empty() {
+            return Ok(HashSet::new());
+        }
         acct.lines_in += lines.len();
         let mut triples: HashSet<String> = HashSet::new();
         let mut emitted_types: HashSet<String> = HashSet::new();
