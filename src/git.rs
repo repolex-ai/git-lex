@@ -332,8 +332,24 @@ pub(crate) fn auto_commit_snapshot(reason: &str) {
         return; // Clean working tree, nothing to snapshot
     }
 
-    // Stage everything and commit
-    let _ = Command::new("git").args(["add", "-A"]).status();
+    // Stage everything and commit. The add's exit status is CHECKED
+    // (review #52): with `--allow-empty`, a failed add still let the
+    // commit exit 0 with nothing staged — and the user was told their
+    // working tree was snapshotted right before the destructive operation
+    // proceeded. A false safety receipt is worse than none.
+    let add_ok = Command::new("git")
+        .args(["add", "-A"])
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+    if !add_ok {
+        eprintln!(
+            "Warning: `git add -A` failed — the working tree was NOT snapshotted \
+             before {}. Commit your changes yourself if you want them kept. Continuing.",
+            reason
+        );
+        return;
+    }
     let msg = format!("git lex auto-snapshot: {}", reason);
     let commit = Command::new("git").args(["commit", "-m", &msg, "--allow-empty"]).output();
     match commit {

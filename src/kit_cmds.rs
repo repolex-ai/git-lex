@@ -248,8 +248,17 @@ pub(crate) fn emit_class_templates(kit_name: &str, root: &std::path::Path, creat
             tmpl.push_str(&format!("{}: {}\n", key, comment.trim_start()));
         }
         tmpl.push_str("---\n");
-        fs::write(&template_path, &tmpl).ok();
-        templates_updated += 1;
+        // Count only what actually landed (review #54): a swallowed write
+        // still counted, so "N template(s) regenerated" could be a lie —
+        // leaving a stale __Class.md that scaffolds docs with retired keys.
+        match fs::write(&template_path, &tmpl) {
+            Ok(()) => templates_updated += 1,
+            Err(e) => eprintln!(
+                "warning: could not write class template {} ({e}) — the on-disk \
+                 template is STALE; fix the error and re-run `git lex kit-update`",
+                template_path.display()
+            ),
+        }
     }
 
     templates_updated

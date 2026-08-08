@@ -641,10 +641,17 @@ pub(crate) fn generate_frontmatter_nquads_with(
             "{} <https://repolex.ai/ontology/git-lex/git/path> \"{}\" {} .\n",
             subjects.file_uri, nq_escape(&relpath_str), graph
         ));
-        nq.push_str(&format!(
-            "{} <https://repolex.ai/ontology/git-lex/git/blobHash> \"{}\" {} .\n",
-            subjects.file_uri, blob_hash, graph
-        ));
+        // Omit the triple when the hash is unknown (review #51): an
+        // untracked new doc (or a failed repo discovery) used to assert
+        // `git/blobHash ""` — a false fact all untracked files SHARED,
+        // enabling spurious joins. Absence is the honest statement; the
+        // post-save sync fills it in.
+        if !blob_hash.is_empty() {
+            nq.push_str(&format!(
+                "{} <https://repolex.ai/ontology/git-lex/git/blobHash> \"{}\" {} .\n",
+                subjects.file_uri, blob_hash, graph
+            ));
+        }
 
         // Track which kit types we've seen for rdf:type emission (dedup)
         let mut emitted_types: HashSet<String> = HashSet::new();

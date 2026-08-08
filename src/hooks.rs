@@ -206,11 +206,24 @@ pub(crate) fn remove_hook() {
     let cleaned = replace_managed_section(&existing, "");
     let trimmed = cleaned.trim();
 
-    // If only the shebang remains, remove the file entirely
-    if trimmed.is_empty() || trimmed == "#!/bin/sh" || trimmed == "#!/bin/bash" {
-        fs::remove_file(&hook_path).ok();
+    // If only the shebang remains, remove the file entirely. Failures are
+    // LOUD with the manual cure (review #55): remove_hook's caller is
+    // `git lex nuke`, which ends with "git-lex is no longer active in this
+    // repo" — a surviving managed section keeps invoking `git-lex hook
+    // pre-commit` against the nuked repo and breaks every future commit
+    // with no hint at nuke time.
+    let result = if trimmed.is_empty() || trimmed == "#!/bin/sh" || trimmed == "#!/bin/bash" {
+        fs::remove_file(&hook_path)
     } else {
-        fs::write(&hook_path, &cleaned).ok();
+        fs::write(&hook_path, &cleaned)
+    };
+    if let Err(e) = result {
+        eprintln!(
+            "warning: could not remove the git-lex section from {} ({e}) — the \
+             pre-commit hook will KEEP calling git-lex and block commits. Delete \
+             .git/hooks/pre-commit (or its git-lex section) by hand.",
+            hook_path.display()
+        );
     }
 }
 

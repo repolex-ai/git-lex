@@ -57,9 +57,28 @@ pub fn legacy_store_path_at(root: &std::path::Path) -> PathBuf {
 
 /// [`open_store_read_only`] for an explicit repo root.
 pub fn open_store_read_only_at(root: &std::path::Path) -> Option<Store> {
+    // Exists-but-unopenable is NOT "no store" (review #53): consumers map
+    // None to "run `git lex sync` first", which is wrong advice for a
+    // corrupt/locked store — so the open error is named before the two
+    // cases collapse into one return type.
+    let open_loud = |path: &std::path::Path| -> Option<Store> {
+        match Store::open_read_only(path) {
+            Ok(s) => Some(s),
+            Err(e) => {
+                eprintln!(
+                    "warning: a store EXISTS at {} but failed to open: {e}\n\
+                     This is not a missing store — `git lex sync` will not fix an \
+                     open error. If the store is corrupt, delete the directory and \
+                     re-run `git lex sync` to rebuild it.",
+                    path.display()
+                );
+                None
+            }
+        }
+    };
     let path = store_path_at(root);
     if path.exists() {
-        return Store::open_read_only(&path).ok();
+        return open_loud(&path);
     }
     // Both-shapes read window: a repo whose store predates the pocket law
     // still has it at the legacy path until its next sync/kit-update
@@ -67,7 +86,7 @@ pub fn open_store_read_only_at(root: &std::path::Path) -> Option<Store> {
     // `legacy_store_path_at`.
     let legacy = legacy_store_path_at(root);
     if legacy.exists() {
-        return Store::open_read_only(&legacy).ok();
+        return open_loud(&legacy);
     }
     None
 }
@@ -401,7 +420,15 @@ pub fn registry_add(repo_path: &std::path::Path) {
         .open(&reg)
         .expect("failed to open ~/.lex/repos");
     use std::io::Write;
-    writeln!(file, "{}", canonical).ok();
+    // A failed registry write warns (review #55): a missing entry means
+    // multi-repo serve silently doesn't see this repo.
+    if let Err(e) = writeln!(file, "{}", canonical) {
+        eprintln!(
+            "warning: could not register {} in ~/.lex/repos ({e}) — \
+             multi-repo serve will not see this repo until it is added",
+            canonical
+        );
+    }
 }
 
 /// Remove a repo path from `~/.lex/repos`. No-op if not found.
@@ -424,7 +451,15 @@ pub fn registry_remove(repo_path: &std::path::Path) {
     let filtered: Vec<&str> = existing.lines()
         .filter(|l| l.trim() != canonical)
         .collect();
-    fs::write(&reg, filtered.join("\n") + "\n").ok();
+    // A failed rewrite warns (review #55): a stale entry means multi-repo
+    // serve keeps trying a repo that no longer wants to be served.
+    if let Err(e) = fs::write(&reg, filtered.join("\n") + "\n") {
+        eprintln!(
+            "warning: could not update ~/.lex/repos ({e}) — the stale entry for \
+             {} remains; edit the file by hand to drop it",
+            canonical
+        );
+    }
 }
 
 /// Resolve a kit spec into (org, repo, short_name). Accepts either a short
