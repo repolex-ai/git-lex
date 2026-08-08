@@ -486,7 +486,12 @@ pub(crate) fn get_kit_types(kit: &str) -> Vec<(String, Vec<(String, String, bool
 /// kit with only properties, or shapes not yet generated), validation is
 /// skipped and the segment passes through unchanged, preserving prior
 /// behavior for kits this check can't speak to.
-pub(crate) fn resolve_class_segment(kit: &str, class_seg: &str) -> Result<String, String> {
+pub(crate) fn resolve_class_segment(
+    kit: &str,
+    class_seg: &str,
+    context: &str,
+    warn: bool,
+) -> Result<String, String> {
     let classes: Vec<String> = get_kit_types(kit).into_iter().map(|(name, _)| name).collect();
     match resolve_class_against(&classes, class_seg) {
         ClassMatch::Exact(name) | ClassMatch::PassThrough(name) => Ok(name),
@@ -494,19 +499,38 @@ pub(crate) fn resolve_class_segment(kit: &str, class_seg: &str) -> Result<String
             // Recover to the canonical name, but warn loudly so the author
             // corrects the frontmatter (and so this never silently masks a
             // future real typo that happens to differ only in case).
-            eprintln!(
-                "warning: frontmatter class segment `{kit}.{given}.…` does not match \
-                 the ontology class casing; using canonical `{kit}.{canonical}.…`. \
-                 Fix the frontmatter prefix to `{canonical}` (class names are \
-                 case-sensitive in the graph)."
-            );
+            // `warn: false` = the history walk, which revisits every commit:
+            // the save path already taught this once, at the moment the
+            // author could act on it (#73 — replay must not repeat live
+            // to-dos). Recovery behavior is identical either way.
+            if warn {
+                eprintln!(
+                    "warning: {context}: the key prefix `{kit}.{given}.` has the wrong \
+                     capitalization. Fix: edit it to `{kit}.{canonical}.` exactly \
+                     (capitalization matters). Auto-corrected for this run only."
+                );
+            }
             Ok(canonical)
         }
-        ClassMatch::NoMatch => Err(format!(
-            "frontmatter class segment `{class_seg}` is not a class in kit `{kit}`. \
-             Known classes: {}. (Class names are case-sensitive; check the prefix.)",
-            classes.join(", ")
-        )),
+        ClassMatch::NoMatch => {
+            // The class menu is a SUGGESTION surface, so deprecated classes
+            // are excluded (#85): they stay declared so history replays, but
+            // they are not destinations for new writing — printed untagged,
+            // three seats read appendix entries as live vocabulary in one
+            // night and one nearly migrated data INTO them.
+            let deprecated = get_deprecated_classes(kit);
+            let live: Vec<&String> =
+                classes.iter().filter(|c| !deprecated.contains_key(*c)).collect();
+            Err(format!(
+                "`{class_seg}` is not a live class in kit `{kit}` (live classes: {}). \
+                 Fix, pick one: (a) this document really is one of the live classes \
+                 — edit its keys to use that class name; (b) its class belongs to a kit \
+                 that is not installed in this repo — leave the file as-is and report it \
+                 to the kit owner. Until fixed, this document's facts are skipped, \
+                 not lost.",
+                live.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", ")
+            ))
+        }
     }
 }
 
@@ -651,6 +675,146 @@ pub(crate) fn get_reference_ranges_all_kits() -> HashMap<String, String> {
         let Ok(content) = fs::read_to_string(&ttl) else { continue };
         for (prop, range) in parse_reference_ranges(&content, &short) {
             out.insert(format!("{}/{}", short, prop), range);
+        }
+    }
+    out
+}
+
+/// `"{kit}/{prop}"` → optional replacement (dcterms:isReplacedBy) for every
+/// property any installed kit declares with `owl:deprecated true`. The
+/// deprecated-key note at save consults this: a retired key EXISTS in the
+/// ontology (deprecate-never-delete keeps history replayable — the 0.9.0
+/// Friend incident), so telling the author it "does not exist" is a lie;
+/// it gets the deprecation teaching instead. Replacement values in the
+/// kit's own namespace are shortened to the local name.
+pub(crate) fn get_deprecated_properties_all_kits() -> HashMap<String, Option<String>> {
+    let mut out = HashMap::new();
+    let Some(root) = find_git_root() else { return out };
+    let ont_root = root.join(".lex").join("ontology");
+    let Ok(entries) = fs::read_dir(&ont_root) else { return out };
+    for e in entries.filter_map(|e| e.ok()) {
+        let dir = e.path();
+        if !dir.is_dir() { continue }
+        let Some(short) = dir.file_name().and_then(|n| n.to_str()).map(String::from) else { continue };
+        let ttl = dir.join(format!("{}.ttl", short));
+        let Ok(content) = fs::read_to_string(&ttl) else { continue };
+        for (prop, replaced) in parse_deprecated_properties(&content, &short) {
+            out.insert(format!("{}/{}", short, prop), replaced);
+        }
+    }
+    out
+}
+
+/// Shorten a successor IRI (dcterms:isReplacedBy) for teaching output:
+/// the kit's own namespace → bare local name; another kit's app-tier
+/// namespace (the `conventional_kit_namespace` pattern,
+/// `https://repolex.ai/ontology/<kit>/<Name>`) → `kit:Name`; anything
+/// else stays a full IRI. A successor that moved kits (soul:Texture →
+/// copia:Texture) printed as a raw URL otherwise.
+fn shorten_successor(iri: &str, kit_ns: &str) -> String {
+    if let Some(local) = iri.strip_prefix(kit_ns) {
+        if !local.is_empty() {
+            return local.to_string();
+        }
+    }
+    if let Some(rest) = iri.strip_prefix("https://repolex.ai/ontology/") {
+        let parts: Vec<&str> = rest.split('/').collect();
+        if parts.len() == 2 && !parts[0].is_empty() && !parts[1].is_empty() {
+            return format!("{}:{}", parts[0], parts[1]);
+        }
+    }
+    iri.to_string()
+}
+
+/// Pure parser for `owl:deprecated true` properties in one kit TTL.
+/// Returns `(property_local_name, Option<replacement>)` pairs; properties
+/// outside the kit's own namespace are skipped.
+fn parse_deprecated_properties(content: &str, short: &str) -> Vec<(String, Option<String>)> {
+    let kit_ns = kit_namespace_of(content, short);
+    let store = match crate::kit::load_ttl_str(content, &format!("{} ontology", short)) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("warning: {} — deprecated properties unreadable", e);
+            return Vec::new();
+        }
+    };
+    let q = "SELECT ?p ?r WHERE { \
+             ?p <http://www.w3.org/2002/07/owl#deprecated> true . \
+             OPTIONAL { ?p <http://purl.org/dc/terms/isReplacedBy> ?r } }";
+    let mut out = Vec::new();
+    if let Ok(oxigraph::sparql::QueryResults::Solutions(sols)) = git_lex::eval_query(&store, q) {
+        for s in sols.flatten() {
+            let Some(Term::NamedNode(p)) = s.get("p") else { continue };
+            let Some(prop) = p.as_str().strip_prefix(kit_ns.as_str()) else { continue };
+            if prop.is_empty() {
+                continue;
+            }
+            let replaced = match s.get("r") {
+                Some(Term::NamedNode(r)) => Some(shorten_successor(r.as_str(), &kit_ns)),
+                Some(Term::Literal(l)) => Some(l.value().to_string()),
+                _ => None,
+            };
+            out.push((prop.to_string(), replaced));
+        }
+    }
+    out
+}
+
+/// Class local-names this kit declares with `owl:deprecated true`. The
+/// folder audit consults this (#74): a deprecated class keeps resolving —
+/// that's what lets its history replay — but it must NOT demand a folder;
+/// creating one would invite new writing into retired vocabulary. Fleet
+/// receipt 2026-08-08: after the soul 0.9.x deprecation appendix, every
+/// repo's kit-update printed phantom missing-folder lines for the
+/// deprecated classes.
+pub(crate) fn get_deprecated_classes(
+    kit: &str,
+) -> std::collections::HashMap<String, Option<String>> {
+    let Some(root) = find_git_root() else { return Default::default() };
+    let (_, _, short) = resolve_kit_spec(kit);
+    let path = root
+        .join(".lex")
+        .join("ontology")
+        .join(&short)
+        .join(format!("{}.ttl", short));
+    let Ok(content) = fs::read_to_string(&path) else { return Default::default() };
+    parse_deprecated_classes(&content, &short)
+}
+
+/// Pure parser for `owl:deprecated true` classes in one kit TTL. Returns
+/// class local-name → optional successor (dcterms:isReplacedBy, shortened
+/// to the local name when in the kit's own namespace). Classes outside the
+/// kit's namespace are skipped.
+fn parse_deprecated_classes(
+    content: &str,
+    short: &str,
+) -> std::collections::HashMap<String, Option<String>> {
+    let kit_ns = kit_namespace_of(content, short);
+    let store = match crate::kit::load_ttl_str(content, &format!("{} ontology", short)) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("warning: {} — deprecated classes unreadable", e);
+            return Default::default();
+        }
+    };
+    let q = "SELECT ?c ?r WHERE { \
+             ?c <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://www.w3.org/2002/07/owl#Class> . \
+             ?c <http://www.w3.org/2002/07/owl#deprecated> true . \
+             OPTIONAL { ?c <http://purl.org/dc/terms/isReplacedBy> ?r } }";
+    let mut out = std::collections::HashMap::new();
+    if let Ok(oxigraph::sparql::QueryResults::Solutions(sols)) = git_lex::eval_query(&store, q) {
+        for s in sols.flatten() {
+            let Some(Term::NamedNode(c)) = s.get("c") else { continue };
+            let Some(name) = c.as_str().strip_prefix(kit_ns.as_str()) else { continue };
+            if name.is_empty() {
+                continue;
+            }
+            let replaced = match s.get("r") {
+                Some(Term::NamedNode(r)) => Some(shorten_successor(r.as_str(), &kit_ns)),
+                Some(Term::Literal(l)) => Some(l.value().to_string()),
+                _ => None,
+            };
+            out.insert(name.to_string(), replaced);
         }
     }
     out
@@ -901,9 +1065,34 @@ copia:NocturneActivity a owl:Class ;
         let path = std::path::PathBuf::from("/Users/rob/repos/repolex-ai/git-lex-kit-soul/ontology/soul/soul.ttl");
         let Ok(content) = fs::read_to_string(&path) else { return };
         assert_eq!(parse_class_type_label(&content, "soul", "Memory"), "Memory");
-        assert_eq!(parse_class_type_label(&content, "soul", "Decision"), "Decision");
+        // Decision deprecated at soul 0.9.0 (isReplacedBy soul:Note) — the
+        // label honestly says so; deprecate-never-delete keeps the stanza.
+        assert_eq!(
+            parse_class_type_label(&content, "soul", "Decision"),
+            "Decision (deprecated)"
+        );
         assert_eq!(parse_class_type_label(&content, "soul", "Note"), "Note");
         assert_eq!(parse_class_type_label(&content, "soul", "Journal"), "Journal");
+    }
+
+    #[test]
+    fn deprecated_classes_parse_real_kit_soul() {
+        // Receipt check against the live kit-soul ontology: the 0.9.x
+        // appendix re-declared retired classes with owl:deprecated true
+        // (deprecate-never-delete). The folder audit (#74) keys off this —
+        // deprecated classes must not demand folders.
+        let path = std::path::PathBuf::from("/Users/rob/repos/repolex-ai/git-lex-kit-soul/ontology/soul/soul.ttl");
+        let Ok(content) = fs::read_to_string(&path) else { return };
+        let dep = parse_deprecated_classes(&content, "soul");
+        assert!(dep.contains_key("Decision"), "Decision deprecated at 0.9.0: {dep:?}");
+        assert_eq!(
+            dep.get("Decision"),
+            Some(&Some("Note".to_string())),
+            "Decision's isReplacedBy names its successor: {dep:?}"
+        );
+        assert!(dep.contains_key("Friend"), "Friend deprecated at 0.9.1: {dep:?}");
+        assert!(!dep.contains_key("Note"), "Note is live vocabulary: {dep:?}");
+        assert!(!dep.contains_key("Journal"), "Journal is live vocabulary: {dep:?}");
     }
 
     #[test]

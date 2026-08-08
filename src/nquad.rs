@@ -4,7 +4,8 @@
 //! generators that produce git-lex's "now" view of the world:
 //!
 //! - `generate_frontmatter_nquads` — the "now" graph: current-state frontmatter
-//!   extraction, body wikilinks.
+//!   extraction. (Body links are markdown links, extracted in `extraction.rs`;
+//!   the wikilink reader was retired 2026-08-06, Rob-ruled.)
 //! - `load_lex_nquads` — slurp any `.lex/**/*.nq` files the user wrote by hand.
 //!
 //! The git machinery layer lives in `git2_nquads` (library reads, `git2:`
@@ -17,95 +18,9 @@
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::PathBuf;
-use std::process::Command;
-
 use git_lex::find_git_root;
 
 use crate::git::graph_uri;
-
-/// The one wikilink pattern, shared by every extraction site. `[^\]\n]+`:
-/// a link target NEVER spans lines. A `[[...]]` token broken across two
-/// physical lines (e.g. a wrapped terminal paste inside a transcript doc)
-/// is prose, not a link — capturing it used to put a raw newline inside a
-/// sidecar value, splitting one triple across two physical lines and
-/// aborting sync (Selkie's day-10 transcript, 2026-07-30).
-pub(crate) const WIKILINK_PATTERN: &str = r"\[\[([^\]\n]+)\]\]";
-
-/// Blank out fenced code blocks and inline code spans before the wikilink
-/// scan: backticked text is quotation, not linkage. A doc ABOUT the link
-/// rules must be able to show a literal `[[..]]` without creating a link —
-/// the kit's Harness/Memory README did exactly that and fataled every
-/// fresh `init` under Obsidian semantics (2026-08-03, Rob-ruled fix B).
-/// Masked characters become spaces; newlines survive so nothing shifts.
-pub(crate) fn mask_code_spans(text: &str) -> String {
-    // Fenced blocks first (line-based, CommonMark): an opening fence of N
-    // backticks/tildes closes only on a same-char run of >= N.
-    let mut fenced = String::with_capacity(text.len());
-    let mut fence: Option<(char, usize)> = None;
-    for line in text.split_inclusive('\n') {
-        let trimmed = line.trim_start();
-        let fence_here = ['`', '~'].iter().copied().find_map(|c| {
-            let n = trimmed.chars().take_while(|&x| x == c).count();
-            (n >= 3).then_some((c, n))
-        });
-        let blank = match (fence, fence_here) {
-            (None, Some(open)) => { fence = Some(open); true }
-            (Some((c, n)), Some((c2, n2))) if c2 == c && n2 >= n => { fence = None; true }
-            (Some(_), _) => true,
-            (None, None) => false,
-        };
-        if blank {
-            fenced.extend(line.chars().map(|ch| if ch == '\n' { '\n' } else { ' ' }));
-        } else {
-            fenced.push_str(line);
-        }
-    }
-    // Inline code spans: a run of N backticks closes at the next run of
-    // exactly N (CommonMark; spans may cross lines). An unclosed run is
-    // literal text and masks nothing.
-    let chars: Vec<char> = fenced.chars().collect();
-    let mut out = String::with_capacity(fenced.len());
-    let mut i = 0;
-    while i < chars.len() {
-        if chars[i] != '`' {
-            out.push(chars[i]);
-            i += 1;
-            continue;
-        }
-        let start = i;
-        while i < chars.len() && chars[i] == '`' { i += 1; }
-        let n = i - start;
-        let mut j = i;
-        let mut close_end = None;
-        while j < chars.len() {
-            if chars[j] == '`' {
-                let cstart = j;
-                while j < chars.len() && chars[j] == '`' { j += 1; }
-                if j - cstart == n { close_end = Some(j); break; }
-            } else {
-                j += 1;
-            }
-        }
-        if let Some(end) = close_end {
-            out.extend(chars[start..end].iter().map(|&ch| if ch == '\n' { '\n' } else { ' ' }));
-            i = end;
-        } else {
-            out.extend(&chars[start..i]);
-        }
-    }
-    out
-}
-/// A wikilink capture may carry an Obsidian alias — `[[target|display]]`.
-/// The link target is everything before the FIRST pipe; the display text is
-/// presentation, not linkage. Without this split the pipe rode into the
-/// linksTo target and resolved nowhere (Selkie's lUX stress-test, 2026-08-04,
-/// Rob-prioritized pre-release).
-pub(crate) fn link_target(captured: &str) -> &str {
-    match captured.split_once('|') {
-        Some((target, _display)) => target.trim_end(),
-        None => captured,
-    }
-}
 
 use crate::extraction::{flatten_yaml, normalize_wikilink_path};
 use crate::ontology::{get_kit_namespaces_all_kits, get_object_properties_all_kits,
@@ -276,6 +191,11 @@ pub(crate) struct ResolverContext {
     /// resolved to `<range-app>/<RangeClass>/<id>` at emission; without
     /// one, the legacy path/IRI resolver applies (resolve.rs).
     pub ref_ranges: HashMap<String, String>,
+    /// "{kit}/{prop}" → optional replacement for owl:deprecated properties.
+    /// Retired-by-deprecation keys are DECLARED (history stays replayable);
+    /// the save-time note teaches the deprecation instead of falsely
+    /// claiming the key does not exist.
+    pub deprecated_props: HashMap<String, Option<String>>,
 }
 
 impl ResolverContext {
@@ -291,6 +211,7 @@ impl ResolverContext {
             kit_namespaces: get_kit_namespaces_all_kits(),
             obsidian_links: git_lex::RepoYml::load(root).obsidian_links(),
             ref_ranges: crate::ontology::get_reference_ranges_all_kits(),
+            deprecated_props: crate::ontology::get_deprecated_properties_all_kits(),
         }
     }
 }
@@ -384,7 +305,9 @@ pub(crate) fn derive_file_subjects(
         if segments.len() != 3 {
             continue;
         }
-        if let Ok(canonical) = crate::ontology::resolve_class_segment(segments[0], segments[1]) {
+        if let Ok(canonical) =
+            crate::ontology::resolve_class_segment(segments[0], segments[1], relpath_str, warn)
+        {
             anchor = Some((segments[0].to_string(), canonical));
             break;
         }
@@ -408,9 +331,11 @@ pub(crate) fn derive_file_subjects(
     if !declared_props.contains(&prop_key) && !obj_props.contains(&prop_key) {
         if warn {
             eprintln!(
-                "warning: {relpath_str}: class {kit}.{class} declares no `{id_prop}` \
-                 property — files of this class cannot anchor Things (kit bug: every \
-                 file-expressed class must declare its `<class>Id`)"
+                "warning: {relpath_str}: the class `{kit}.{class}` has no `{id_prop}` \
+                 key in its ontology, so documents of this class cannot get their own \
+                 identity in the graph. You cannot fix this by editing this file — \
+                 report it to the `{kit}` ontology owner. (The document's facts still \
+                 save, attached to the file itself.)"
             );
         }
         return FileSubjects { file_uri, thing_uri: None, thing_key: None };
@@ -432,10 +357,14 @@ pub(crate) fn derive_file_subjects(
     });
     let Some(id_value) = id_value else {
         if warn {
+            let stem = std::path::Path::new(relpath_str)
+                .file_stem()
+                .map(|s| s.to_string_lossy().to_string())
+                .unwrap_or_else(|| relpath_str.to_string());
             eprintln!(
-                "warning: {relpath_str}: classed as {kit}.{class} but carries no \
-                 `{id_line_key}` — facts anchor to the File node until the id is authored \
-                 (Phase-4 migration work list)"
+                "warning: {relpath_str}: this {kit}.{class} document has no id. Fix: \
+                 add this line to the YAML block at the top of the file: \
+                 {id_line_key}: \"{stem}\""
             );
         }
         return FileSubjects { file_uri, thing_uri: None, thing_key: None };
@@ -552,7 +481,6 @@ pub(crate) fn generate_frontmatter_nquads_with(
     // Regex pattern for [[wikilinks]].
     // @mentions removed — they were blog inheritance with no job in a system
     // where everything is a document. Canonical direction: [[Class/id]].
-    let wikilink_re = regex::Regex::new(WIKILINK_PATTERN).unwrap();
 
     for filepath in files {
         let content = match fs::read_to_string(filepath) {
@@ -605,28 +533,14 @@ pub(crate) fn generate_frontmatter_nquads_with(
             body_text = content.clone();
         }
 
-        // --- [[wikilink]] extraction ---
-        // The target passes through VERBATIM: under the 2026-07-28 path law
-        // a bare target is relative to the source file's folder and a
-        // leading `/` anchors at the repo root, so the slash is SEMANTIC —
-        // stripping it here (tried 2026-08-01) silently re-bound every
-        // root-anchored link to doc-relative. Canonical-form unification is
-        // a path-law decision (Rob's), not an extraction-time rewrite.
-        let mut links_seen = HashSet::new();
-        let scannable_body = mask_code_spans(&body_text);
-        for cap in wikilink_re.captures_iter(&scannable_body) {
-            let link = link_target(&cap[1]).to_string();
-            if link.is_empty() {
-                eprintln!(
-                    "warning: {relpath_str}: [[{}]] has an empty link target — skipped",
-                    &cap[1]
-                );
-                continue;
-            }
-            if links_seen.insert(link.clone()) {
-                spo_lines.push(format!("{} | linksTo | {}", relpath_str, link));
-            }
-        }
+        // --- [[wikilink]] extraction: RETIRED (Rob-ruled 2026-08-06) ---
+        // git-lex no longer reads wikilinks. Markdown links are the linking
+        // story (extraction.rs emits their `linksTo` lines); `[[...]]` in a
+        // body is plain prose. The ONLY sanctioned wikilink use is Claude
+        // Code's Harness/Memory notation, which no resolver ever reads.
+        // Historical sidecar lines with `linksTo` targets still replay
+        // through the quad emitter below — history doesn't un-happen.
+        let _ = &body_text;
 
         // Sort and dedup
         spo_lines.sort();
@@ -693,40 +607,18 @@ pub(crate) fn generate_frontmatter_nquads_with(
                 &ctx.declared_props,
                 &kit_namespaces,
                 &ctx.ref_ranges,
+                &ctx.deprecated_props,
                 ctx.obsidian_links,
+                true, // the now path is the save/sync moment — warn here
                 &mut emitted_types,
                 &mut nq,
             );
         }
     }
 
-    // --- Scan commit messages for [[wikilinks]] ---
-    let commit_output = Command::new("git")
-        .args(["log", "--all", "--format=%H%x00%s"])
-        .output();
-    if let Ok(o) = commit_output {
-        if o.status.success() {
-            let stdout = String::from_utf8_lossy(&o.stdout);
-            for line in stdout.lines() {
-                let parts: Vec<&str> = line.splitn(2, '\x00').collect();
-                if parts.len() < 2 { continue; }
-                let (sha, message) = (parts[0], parts[1]);
-                let commit_uri = format!("<{}>", crate::git2_nquads::git2_uri(&format!("Commit/{}", sha)));
-
-                let scannable_message = mask_code_spans(message);
-                for cap in wikilink_re.captures_iter(&scannable_message) {
-                    let link = link_target(&cap[1]);
-                    if link.is_empty() {
-                        continue;
-                    }
-                    nq.push_str(&format!(
-                        "{} <https://repolex.ai/ontology/git-lex/md/linksTo> \"{}\" {} .\n",
-                        commit_uri, nq_escape(link), graph
-                    ));
-                }
-            }
-        }
-    }
+    // Commit-message [[wikilink]] scanning: RETIRED with the wikilink reader
+    // (Rob-ruled 2026-08-06). git-lex reads no wikilinks anywhere; a
+    // bracketed name in a commit subject is prose.
 
     (nq, total_errors)
 }
@@ -752,6 +644,10 @@ pub(crate) fn generate_frontmatter_nquads_with(
 /// - `obj_props` / `prop_datatypes`: ontology-derived property metadata
 /// - `emitted_types`: in/out dedup set — the caller must zero this per doc
 ///   so each document emits its `rdf:type` assertions at most once
+/// - `warn`: true on the live save/sync path (the moment the author can
+///   act); false on the history walk, which revisits every commit — replay
+///   must not repeat live to-dos (#73). Emission and the returned error
+///   COUNT are identical either way; only the printing differs.
 /// - `out`: the N-Quad buffer being appended to
 pub(crate) fn emit_spo_line_nquads(
     line: &str,
@@ -764,7 +660,9 @@ pub(crate) fn emit_spo_line_nquads(
     declared_props: &HashSet<String>,
     kit_namespaces: &HashMap<String, String>,
     ref_ranges: &HashMap<String, String>,
+    deprecated_props: &HashMap<String, Option<String>>,
     obsidian_links: bool,
+    warn: bool,
     emitted_types: &mut HashSet<String>,
     out: &mut String,
 ) -> u32 {
@@ -784,10 +682,12 @@ pub(crate) fn emit_spo_line_nquads(
 
     // Hard-fail: [[wikilinks]] in frontmatter values corrupt the graph
     if predicate != "linksTo" && (object.contains("[[") || object.contains("]]")) {
-        eprintln!(
-            "error: {}: {} — wikilink syntax [[...]] is not allowed in frontmatter values. Write the repo-relative path (e.g. friend/selkie.md).",
-            relpath_str, subject
-        );
+        if warn {
+            eprintln!(
+                "error: {}: {} — wikilink syntax [[...]] is not allowed in frontmatter values. Write the repo-relative path (e.g. friend/selkie.md).",
+                relpath_str, subject
+            );
+        }
         return 1;
     }
 
@@ -813,12 +713,14 @@ pub(crate) fn emit_spo_line_nquads(
         // repo) — deleted because search-based resolution rebinds silently
         // as files come and go and makes history non-deterministic.
         if obsidian_links && object.starts_with('/') {
-            eprintln!(
-                "error: {relpath_str}: [[{object}]] — leading `/` is retired under \
-                 Obsidian link semantics; write the repo-root-relative path \
-                 (e.g. [[{}]])",
-                object.trim_start_matches('/')
-            );
+            if warn {
+                eprintln!(
+                    "error: {relpath_str}: [[{object}]] — leading `/` is retired under \
+                     Obsidian link semantics; write the repo-root-relative path \
+                     (e.g. [[{}]])",
+                    object.trim_start_matches('/')
+                );
+            }
             return errors + 1;
         }
         let source_dir = if obsidian_links {
@@ -848,9 +750,11 @@ pub(crate) fn emit_spo_line_nquads(
                 ));
             }
             None => {
-                eprintln!(
-                    "error: {relpath_str}: [[{object}]] escapes the repo root — links stay inside the repo"
-                );
+                if warn {
+                    eprintln!(
+                        "error: {relpath_str}: [[{object}]] escapes the repo root — links stay inside the repo"
+                    );
+                }
                 errors += 1;
             }
         }
@@ -876,10 +780,12 @@ pub(crate) fn emit_spo_line_nquads(
             // phantom `a soul:memory`. The doc's properties still emit; only
             // the bad type is withheld until the frontmatter is fixed.
             let canonical_class: Option<String> =
-                match crate::ontology::resolve_class_segment(kit_name, class_seg) {
+                match crate::ontology::resolve_class_segment(kit_name, class_seg, relpath_str, warn) {
                     Ok(canonical) => Some(canonical),
                     Err(msg) => {
-                        eprintln!("warning: {msg} (skipping type emission for this doc)");
+                        if warn {
+                            eprintln!("warning: {relpath_str}: {msg}");
+                        }
                         None
                     }
                 };
@@ -947,10 +853,12 @@ pub(crate) fn emit_spo_line_nquads(
                                 ));
                             }
                             None => {
-                                eprintln!(
-                                    "error: {}: {} — declared range `{}` is not a resolvable class IRI",
-                                    relpath_str, prop_seg, range_iri
-                                );
+                                if warn {
+                                    eprintln!(
+                                        "error: {}: {} — declared range `{}` is not a resolvable class IRI",
+                                        relpath_str, prop_seg, range_iri
+                                    );
+                                }
                                 errors += 1;
                             }
                         }
@@ -971,10 +879,12 @@ pub(crate) fn emit_spo_line_nquads(
                             ));
                         }
                         resolve::ResolveResult::Rejected(msg) => {
-                            eprintln!(
-                                "error: {}: {} — {}",
-                                relpath_str, prop_seg, msg
-                            );
+                            if warn {
+                                eprintln!(
+                                    "error: {}: {} — {}",
+                                    relpath_str, prop_seg, msg
+                                );
+                            }
                             errors += 1;
                         }
                     }
@@ -991,18 +901,73 @@ pub(crate) fn emit_spo_line_nquads(
                     // generator omits sh:datatype for strings): 412 bogus
                     // "not declared" warnings per save in W4R3Z alone
                     // (found 2026-08-01).
-                    if !declared_props.contains(key) && !obj_props.contains(key) {
+                    // The whole block below is teaching, no emission — one
+                    // `warn` gate covers the wrong-class, deprecated-note,
+                    // and does-not-exist branches together.
+                    //
+                    // Deprecated check FIRST, before the declared test (#83):
+                    // whether a deprecated prop still sits in the generated
+                    // shapes depends on whether its CLASS survived (a class
+                    // deprecated whole keeps its shape + props; a bare
+                    // appendix prop lands on no shape) — so gating the note
+                    // behind not-declared made the Texture family silently
+                    // invisible while writtenFrom whispered. Deprecated
+                    // whispers regardless of shapes state: one note, the
+                    // line still saves, history replays.
+                    if warn {
+                        if let Some(replaced) =
+                            deprecated_props.get(&format!("{}/{}", kit_name, prop_seg))
+                        {
+                            let repl = replaced
+                                .as_ref()
+                                .map(|r| format!(" — replacement: `{}`", r))
+                                .unwrap_or_default();
+                            eprintln!(
+                                "note: {}: the key `{}.{}.{}` is deprecated (the \
+                                 `{}` ontology retired it{}). The line still saves \
+                                 and history replays; don't use it in new writing — \
+                                 migrate or delete when you next edit this file.",
+                                relpath_str, kit_name, class_seg, prop_seg,
+                                kit_name, repl
+                            );
+                        } else if !declared_props.contains(key) && !obj_props.contains(key) {
                         let kit_scope = format!("{}/", kit_name);
                         let prop_tail = format!("/{}", prop_seg);
-                        let declared_elsewhere_in_kit = obj_props
+                        let class_for_msg = canonical_class.as_deref().unwrap_or(class_seg);
+                        let owners: std::collections::BTreeSet<String> = obj_props
                             .iter()
                             .chain(declared_props.iter())
-                            .any(|k| k.starts_with(&kit_scope) && k.ends_with(&prop_tail));
-                        if declared_elsewhere_in_kit {
+                            .filter(|k| k.starts_with(&kit_scope) && k.ends_with(&prop_tail))
+                            .filter_map(|k| k.split('/').nth(1).map(str::to_string))
+                            .collect();
+                        if !owners.is_empty() {
+                            // #85: owners that are deprecated classes get
+                            // tagged — "exists on class Texture" read as
+                            // Texture being live vocabulary, and it isn't.
+                            let dep_classes =
+                                crate::ontology::get_deprecated_classes(kit_name);
+                            let owner_list = owners
+                                .into_iter()
+                                .map(|c| match dep_classes.get(&c) {
+                                    Some(Some(succ)) => {
+                                        format!("{c} (deprecated → {succ})")
+                                    }
+                                    Some(None) => format!("{c} (deprecated)"),
+                                    None => c,
+                                })
+                                .collect::<Vec<_>>()
+                                .join(", ");
                             eprintln!(
-                                "warning: {}: `{}.{}.{}` — property `{}` is not declared on class `{}` in kit `{}` (declared on another class); emitted as a plain literal until the shape or frontmatter is aligned",
+                                "warning: {}: the key `{}.{}.{}` — `{}` exists in the \
+                                 `{}` ontology, but on class {}, not on {}. Fix, pick \
+                                 one: (a) this line belongs in a {} document — move it \
+                                 there; (b) this key genuinely belongs on {} too — \
+                                 keep the line and report it to the `{}` ontology \
+                                 owner; (c) the line no longer matters — delete it. \
+                                 Until fixed, the value saves as plain ungoverned data.",
                                 relpath_str, kit_name, class_seg, prop_seg, prop_seg,
-                                canonical_class.as_deref().unwrap_or(class_seg), kit_name
+                                kit_name, owner_list, class_for_msg, owner_list,
+                                class_for_msg, kit_name
                             );
                         } else if !kit_namespaces.contains_key(kit_name)
                             || obj_props.iter().chain(prop_datatypes.keys())
@@ -1015,10 +980,72 @@ pub(crate) fn emit_spo_line_nquads(
                             // title, …) accumulated invisibly (Rob-ruled
                             // 2026-07-29: warn at save). Bare keys (title:)
                             // stay free — the open fm: lane is one line up.
+                            //
+                            // did-you-mean: declared keys on THIS class that
+                            // plausibly mean the same thing (the renamed-by-
+                            // the-ontology case, e.g. kind → textureKind) —
+                            // case-insensitive containment either way, 4+
+                            // chars so single letters never match. (The
+                            // deprecated-note lane moved ABOVE the declared
+                            // test — #83 — so this branch only sees keys the
+                            // ontology has truly never heard of.)
+                            let class_prefix =
+                                format!("{}/{}/", kit_name, class_for_msg);
+                            let prop_lower = prop_seg.to_lowercase();
+                            let mut candidates: Vec<String> = obj_props
+                                .iter()
+                                .chain(declared_props.iter())
+                                .filter(|k| k.starts_with(&class_prefix))
+                                .filter_map(|k| k.split('/').nth(2))
+                                .filter(|cand| {
+                                    let cl = cand.to_lowercase();
+                                    cl != prop_lower
+                                        && ((prop_lower.len() >= 4
+                                            && cl.contains(&prop_lower))
+                                            || (cl.len() >= 4
+                                                && prop_lower.contains(&cl)))
+                                })
+                                // #85: never SUGGEST a deprecated key —
+                                // did-you-mean is a destination menu for
+                                // new writing.
+                                .filter(|cand| {
+                                    !deprecated_props.contains_key(&format!(
+                                        "{}/{}",
+                                        kit_name, cand
+                                    ))
+                                })
+                                .map(str::to_string)
+                                .collect();
+                            candidates.sort();
+                            candidates.dedup();
+                            candidates.truncate(3);
+                            let hint = if candidates.is_empty() {
+                                format!(
+                                    " (the `__{}.md` template in this class's folder \
+                                     lists every declared key)",
+                                    class_for_msg
+                                )
+                            } else {
+                                format!(
+                                    " — closest declared keys on {}: {}",
+                                    class_for_msg,
+                                    candidates.join(", ")
+                                )
+                            };
                             eprintln!(
-                                "warning: {}: `{}.{}.{}` is not declared in the `{}` ontology — emitted as plain data; fix the key (or drop the `{}.` prefix to use plain metadata)",
-                                relpath_str, kit_name, class_seg, prop_seg, kit_name, kit_name
+                                "warning: {}: the key `{}.{}.{}` does not exist in \
+                                 the `{}` ontology. Fix, pick one: (a) the ontology \
+                                 may use a different name for this{} — if one means \
+                                 the same thing, edit this line to use it; (b) no \
+                                 current key fits and the information matters — keep \
+                                 the line and report the missing key to the `{}` \
+                                 ontology owner; (c) the line no longer matters — \
+                                 delete it. Until fixed, the value saves as plain \
+                                 ungoverned data.",
+                                relpath_str, kit_name, class_seg, prop_seg, kit_name,
+                                hint, kit_name
                             );
+                            }
                         }
                     }
                 }
@@ -1100,8 +1127,11 @@ pub(crate) fn build_path_index(
 /// into the self-describing ontology graph
 /// `<https://repolex.ai/git-lex/NamedGraph/repo-ontology>` of `store`.
 ///
-/// Runs at INIT and KIT-UPDATE only (Rob Day-50): the graph persists in the
-/// store ("stays put") — sync does not touch it, query does not rebuild it.
+/// Runs at INIT and KIT-UPDATE (Rob Day-50): the graph persists in the
+/// store ("stays put") — sync does not rebuild it, query does not touch it.
+/// One exception (#81): sync self-heals an EMPTY graph (fresh store after a
+/// deliberate delete) by loading the TTLs already installed on disk, so a
+/// store rebuild doesn't require a second kit-update.
 /// The graph is cleared first so a kit-update fully refreshes the vocabulary.
 /// LOUD but not fatal on a broken TTL. Returns the number of files loaded.
 pub(crate) fn load_ontology_graph(store: &oxigraph::store::Store) -> usize {
@@ -1185,7 +1215,8 @@ mod tests {
             &subjects,
             "<https://repolex.ai/git-lex/NamedGraph/now>",
             "Journal/day-1.md",
-            &empty_paths, &obj_props, &datatypes, &declared, &namespaces, &ranges, false,
+            &empty_paths, &obj_props, &datatypes, &declared, &namespaces, &ranges,
+            &std::collections::HashMap::new(), false, true,
             &mut types, &mut out,
         );
         assert!(
@@ -1206,7 +1237,8 @@ mod tests {
             &subjects2,
             "<https://repolex.ai/git-lex/NamedGraph/now>",
             "friend/selkie.md",
-            &empty_paths, &obj_props, &datatypes, &declared, &namespaces, &ranges, false,
+            &empty_paths, &obj_props, &datatypes, &declared, &namespaces, &ranges,
+            &std::collections::HashMap::new(), false, true,
             &mut types, &mut out2,
         );
         assert!(
@@ -1302,81 +1334,3 @@ mod tests {
     }
 }
 
-#[cfg(test)]
-mod wikilink_pattern_tests {
-    use super::WIKILINK_PATTERN;
-
-    /// PIN: a wikilink target never spans lines. A `[[...]]` token broken
-    /// across two physical lines (wrapped terminal paste in a transcript
-    /// doc) is prose, not a link — matching it used to write a raw newline
-    /// into a sidecar value and abort sync (Selkie's day-10 transcript).
-    #[test]
-    fn wikilink_never_matches_across_newlines() {
-        let re = regex::Regex::new(WIKILINK_PATTERN).unwrap();
-        assert!(re.captures("see [[Squad/Squaddie/lspy]] there").is_some());
-        // The day-10 failure shape: link broken by source-level wrapping.
-        let wrapped = "prefix [[Sq\n         uad/Squaddie/lspy]] suffix";
-        assert!(re.captures(wrapped).is_none(), "split token must NOT be a link");
-    }
-
-    /// PIN: the wikilink target passes into the sidecar VERBATIM, leading
-    /// slash included. Under the 2026-07-28 path law the slash is semantic
-    /// (bare = source-folder-relative, `/` = repo-rooted); an extraction-
-    /// time strip (tried and reverted 2026-08-01) silently re-bound every
-    /// root-anchored link to doc-relative.
-    #[test]
-    fn wikilink_target_passes_through_verbatim() {
-        let re = regex::Regex::new(WIKILINK_PATTERN).unwrap();
-        let cap = re.captures("see [[/Soul/Note/x.md]]").unwrap();
-        assert_eq!(&cap[1], "/Soul/Note/x.md");
-    }
-
-    /// PIN: backticked text is quotation, not linkage. The kit's
-    /// Harness/Memory README shows a literal `[[..]]` while documenting
-    /// the write-gate rule; scanning it as a link fataled every fresh
-    /// `init` under Obsidian semantics (birth blocker, 2026-08-03).
-    #[test]
-    fn code_spans_never_link() {
-        use super::mask_code_spans;
-        let re = regex::Regex::new(WIKILINK_PATTERN).unwrap();
-
-        // The exact birth-blocker shape: inline code in prose.
-        let readme = "no `[[..]]` in a frontmatter value. The gate names it.";
-        assert!(re.captures(&mask_code_spans(readme)).is_none());
-
-        // Fenced block, any info string; link outside the fence survives.
-        let fenced = "see [[Soul/Note/x.md]]\n```markdown\n[[Class/id]]\n```\n";
-        let masked = mask_code_spans(fenced);
-        let links: Vec<_> = re.captures_iter(&masked).map(|c| c[1].to_string()).collect();
-        assert_eq!(links, vec!["Soul/Note/x.md"]);
-
-        // Double-backtick span holding a single backtick + link inside.
-        let double = "quote `` ` [[x]] `` end, real [[y]] after";
-        let links: Vec<_> = re.captures_iter(&mask_code_spans(double)).map(|c| c[1].to_string()).collect();
-        assert_eq!(links, vec!["y"]);
-
-        // An UNCLOSED backtick is literal text and masks nothing.
-        let unclosed = "stray ` tick then [[real/link]] here";
-        assert!(re.captures(&mask_code_spans(unclosed)).is_some());
-
-        // Masking preserves newlines so nothing shifts lines.
-        assert_eq!(mask_code_spans("a\n```\nb\n```\nc").matches('\n').count(), 4);
-    }
-
-    /// PIN: `[[target|display]]` links on the TARGET — the display text is
-    /// presentation, not linkage. Pre-fix the pipe rode into the linksTo
-    /// target and resolved nowhere (Selkie's lUX, Rob-prioritized
-    /// pre-release, 2026-08-04).
-    #[test]
-    fn alias_links_on_target_not_display() {
-        use super::link_target;
-        assert_eq!(link_target("Soul/Note/x.md"), "Soul/Note/x.md");
-        assert_eq!(link_target("Soul/Note/x.md|the note"), "Soul/Note/x.md");
-        // Trailing space before the pipe is trimmed off the target.
-        assert_eq!(link_target("Soul/Note/x.md |shown"), "Soul/Note/x.md");
-        // Split at the FIRST pipe — display may itself contain pipes.
-        assert_eq!(link_target("a/b|x|y"), "a/b");
-        // Pathological: no target at all — empty, callers skip with a warning.
-        assert_eq!(link_target("|display only"), "");
-    }
-}

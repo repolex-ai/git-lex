@@ -86,7 +86,7 @@ pub(crate) fn cmd_sync() {
     // changes), every phase of sync would rebuild identical state. Skip.
     //
     // Contract this depends on: the oxigraph store is derived. If you've
-    // manually mutated it, rebuild via `rm -rf .git/lex/oxigraph`.
+    // manually mutated it, rebuild via `rm -rf .lex/_ignore/oxigraph`.
     {
         let probe = format!(
             "ASK {{ GRAPH <{}> {{ <https://repolex.ai/git-lex/git2/Commit/{}> ?p ?o }} }}",
@@ -259,6 +259,32 @@ pub(crate) fn cmd_sync() {
                     eprintln!("warning: failed to clear graph {}: {} — stale triples may mix with the regeneration", graph_uri, e);
                 }
             }
+        }
+    }
+
+    // t-box self-heal (#81): the repo-ontology graph persists and is loaded
+    // at init/kit-update ("stays put", Rob Day-50) — but a fresh store
+    // (deleted for a rebuild) starts EMPTY, which forced the cure sequence
+    // "kit-update → rm store → sync → kit-update": the second update only
+    // reloaded vocabulary already sitting on disk. If the graph is empty
+    // and installed TTLs exist, load them now. Verify's empty-graph refusal
+    // still stands when no kits are installed (nothing on disk to load).
+    let ont_empty = match oxigraph::model::NamedNode::new(
+        "https://repolex.ai/git-lex/NamedGraph/repo-ontology",
+    ) {
+        Ok(g) => store
+            .quads_for_pattern(None, None, None, Some(g.as_ref().into()))
+            .next()
+            .is_none(),
+        Err(_) => false,
+    };
+    if ont_empty {
+        let n = crate::nquad::load_ontology_graph(&store);
+        if n > 0 {
+            println!(
+                "Ontology graph was empty (fresh store) — loaded {} kit ttl file(s) from disk",
+                n
+            );
         }
     }
 
@@ -568,7 +594,7 @@ fn sync_onegraph_phase(store: &Store, root: &std::path::Path, resume_sha: Option
             std::process::exit(1);
         }
         (_, Some(b), Some(d)) => {
-            eprintln!("ERROR: current state ({b} facts) disagrees with what the history derives ({d}) — the store is corrupt. Delete .git/lex and re-run `git lex sync` to rebuild.");
+            eprintln!("ERROR: current state ({b} facts) disagrees with what the history derives ({d}) — the store is corrupt. Delete .lex/_ignore/oxigraph and re-run `git lex sync` to rebuild.");
             std::process::exit(1);
         }
     }

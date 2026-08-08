@@ -9,7 +9,7 @@ use std::time::Instant;
 use std::fs;
 
 // Shared utilities (also used by git-lex-serve)
-use git_lex::{find_git_root, store_path, get_kit,
+use git_lex::{find_git_root, get_kit,
               resolve_kit_spec, add_prefixes,
               registry_remove};
 
@@ -130,6 +130,10 @@ enum Commands {
         /// Commit message
         #[arg(default_value = "git lex save")]
         message: String,
+        /// Probe write-health: run extraction and every save gate, commit
+        /// nothing. Exit 0 means a real save would pass its gates.
+        #[arg(long)]
+        dry_run: bool,
     },
     /// Remove .lex/ entirely (content files and git history are preserved).
     Nuke,
@@ -198,8 +202,7 @@ pub(crate) const BASE_KIT: &str = "repolex-ai/git-lex-kit-base";
 // ─── git lex query ─────────────────────────────────────────────
 
 
-/// Get the persistent store path.
-// store_path and open_store_read_only imported from git_lex lib
+// store paths and open_store_read_only come from the git_lex lib
 
 /// Exit with a clean one-line error when run outside a git repository —
 /// a panic + backtrace here is a crash report for a user mistake.
@@ -215,11 +218,16 @@ pub(crate) fn require_git_root() -> std::path::PathBuf {
 
 /// Create or open the persistent store, with clean errors (no panics) for
 /// the two user-reachable failures: not-a-repo and a locked/broken store.
+/// Every write path enters here, so this is also where a pre-pocket store
+/// migrates into `.lex/_ignore/` (the ravel pattern: migrate at the top of
+/// every write, loud on action, refuse ambiguity).
 pub(crate) fn open_or_create_store() -> Store {
-    let Some(path) = store_path() else {
-        eprintln!("fatal: not a git repository (run this inside a repo)");
+    let root = require_git_root();
+    if let Err(e) = migrate_legacy_store(&root) {
+        eprintln!("fatal: {e}");
         exit(1);
-    };
+    }
+    let path = git_lex::store_path_at(&root);
     if let Err(e) = fs::create_dir_all(&path) {
         eprintln!("fatal: cannot create store directory {}: {e}", path.display());
         exit(1);
@@ -232,6 +240,47 @@ pub(crate) fn open_or_create_store() -> Store {
             exit(1);
         }
     }
+}
+
+/// Move a pre-pocket store (`.git/lex/oxigraph`) into `.lex/_ignore/oxigraph`
+/// (pocket law, Rob 2026-08-05). No-op when there is nothing legacy to move.
+/// Refuses an ambiguous dual layout rather than guessing which store is
+/// current. TRANSITIONAL — dies in ship-prep with `legacy_store_path_at`.
+pub(crate) fn migrate_legacy_store(root: &std::path::Path) -> Result<(), String> {
+    let legacy = git_lex::legacy_store_path_at(root);
+    let pocket = git_lex::store_path_at(root);
+    if !legacy.exists() {
+        return Ok(());
+    }
+    if pocket.exists() {
+        return Err(format!(
+            "both {} and {} exist — ambiguous store layout, refusing to guess which is current. \
+             The pocket path is canonical: if it is current, delete the legacy dir; \
+             if unsure, delete BOTH and re-run `git lex sync` (the store is derived).",
+            legacy.display(),
+            pocket.display()
+        ));
+    }
+    // Ignore entry FIRST: the pocket must never exist on disk without its
+    // gitignore line, or the store is committable until the next kit-update
+    // (the inverted-82fe1d7 hazard, pointed at ourselves).
+    kit_cmds::ensure_engine_gitignore(root);
+    if let Some(parent) = pocket.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|e| format!("cannot create {}: {e}", parent.display()))?;
+    }
+    fs::rename(&legacy, &pocket)
+        .map_err(|e| format!("cannot move store {} → {}: {e}", legacy.display(), pocket.display()))?;
+    println!(
+        "Store migrated into the pocket: {} → {}",
+        legacy.display(),
+        pocket.display()
+    );
+    // The legacy shell (.git/lex/) only ever held the store; drop it if empty.
+    if let Some(shell) = legacy.parent() {
+        let _ = fs::remove_dir(shell);
+    }
+    Ok(())
 }
 
 
@@ -593,7 +642,7 @@ fn resolve_agent_identity(root: &std::path::Path) -> Option<(String, String)> {
     Some((name, email))
 }
 
-fn cmd_save(message: &str) {
+fn cmd_save(message: &str, dry_run: bool) {
     let root = require_git_root();
 
     // Identity floor: a soul repo without its root SOUL.md must not save
@@ -621,6 +670,31 @@ fn cmd_save(message: &str) {
         }
     };
     let author = format!("{} <{}>", author_name, author_email);
+
+    // The write-health probe: run the exact gates a real save runs —
+    // extraction (which refreshes derived sidecars on disk), the sidecar
+    // write-gate, the identity gate, SHACL validation — and commit nothing.
+    // Exists because `verify` audits the STORE while the gates live on the
+    // WRITE path, and a clean-tree save short-circuits before any gate: a
+    // repo could be write-dead with NO command able to say so until the
+    // moment a real write is needed (W3BL0RD's receipt, 2026-08-06: verify
+    // ALL CHECKS PASSED on a repo that could not save). Known fidelity gap:
+    // a real save stages deletions before the hook, so its sidecar cleanup
+    // sees them; the probe stages nothing and skips that pass.
+    if dry_run {
+        cmd_extract();
+        if !cmd_validate() {
+            eprintln!("DRY RUN: a real `git lex save` would FAIL validation in {}.", root.display());
+            exit(1);
+        }
+        println!(
+            "DRY RUN: all save gates pass in {} — a real save would proceed [as {}].",
+            root.display(),
+            author
+        );
+        println!("(nothing was committed; derived sidecars under .lex/extract/ may have been refreshed)");
+        return;
+    }
 
     // Sync skills/subagents into every active substrate's harness. The
     // substrate list comes from `.lex/repo.yml`'s `substrates:` field
@@ -1311,7 +1385,7 @@ fn main() {
         Commands::Init { directory, kit } => init::cmd_init(directory, kit),
         Commands::Create { doctype, instance_id, json } => cmd_create(&doctype, instance_id.as_deref(), json),
         Commands::List { json } => cmd_list(json),
-        Commands::Save { message } => cmd_save(&message),
+        Commands::Save { message, dry_run } => cmd_save(&message, dry_run),
         Commands::Query { query, json } => cmd_query(query, json),
         Commands::Hook { event } => {
             match event.as_str() {
@@ -1366,14 +1440,14 @@ fn cmd_nuke() {
 
     eprintln!("╔══════════════════════════════════════════════════════════╗");
     eprintln!("║  WARNING: This will completely remove git-lex from      ║");
-    eprintln!("║  this repo by deleting .lex/ and .git/lex/.             ║");
+    eprintln!("║  this repo by deleting .lex/.                           ║");
     eprintln!("║                                                         ║");
     eprintln!("║  DELETED:                                               ║");
     eprintln!("║    • .lex/extract/     (extraction sidecars)            ║");
     eprintln!("║    • .lex/kit/         (installed kit)                  ║");
     eprintln!("║    • .lex/ontology/    (ontology files)                 ║");
     eprintln!("║    • .lex/repo.yml     (configuration)                  ║");
-    eprintln!("║    • .git/lex/         (SPARQL store)                   ║");
+    eprintln!("║    • .lex/_ignore/     (SPARQL store)                   ║");
     eprintln!("║                                                         ║");
     eprintln!("║  NOT DELETED:                                           ║");
     eprintln!("║    • Your content files (markdown, etc.)                ║");
@@ -1417,11 +1491,13 @@ fn cmd_nuke() {
     }
     println!(".lex/ removed.");
 
-    // Remove .git/lex/ (oxigraph store and other derived data, never tracked)
+    // Sweep the legacy pre-pocket store location too (a repo nuked before
+    // ever migrating still has its store at .git/lex/). TRANSITIONAL — dies
+    // in ship-prep with legacy_store_path_at.
     let git_lex_dir = root.join(".git").join("lex");
     if git_lex_dir.exists() {
         match fs::remove_dir_all(&git_lex_dir) {
-            Ok(_) => println!(".git/lex/ removed."),
+            Ok(_) => println!(".git/lex/ removed (legacy store location)."),
             Err(e) => eprintln!("Warning: failed to remove .git/lex/: {}", e),
         }
     }
@@ -1455,4 +1531,69 @@ fn cmd_nuke() {
     }
 
     println!("git-lex is no longer active in this repo.");
+}
+
+#[cfg(test)]
+mod store_migration_tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    // ---- migrate_legacy_store: pre-pocket store → .lex/_ignore/oxigraph ----
+
+    fn tmp_root(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "gitlex-store-migrate-{}-{}",
+            tag,
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn migrates_legacy_store_into_pocket_with_ignore_entry_first() {
+        let root = tmp_root("moves");
+        let legacy = git_lex::legacy_store_path_at(&root);
+        fs::create_dir_all(&legacy).unwrap();
+        fs::write(legacy.join("CURRENT"), "rocksdb").unwrap();
+        migrate_legacy_store(&root).unwrap();
+        let pocket = git_lex::store_path_at(&root);
+        assert!(pocket.join("CURRENT").exists(), "store contents must move");
+        assert!(!legacy.exists(), "legacy dir must be gone");
+        assert!(!root.join(".git").join("lex").exists(), "empty legacy shell removed");
+        // The pocket must never exist without its ignore line (the
+        // inverted-82fe1d7 hazard pointed at ourselves).
+        let gi = fs::read_to_string(root.join(".gitignore")).unwrap();
+        assert!(gi.lines().any(|l| l == ".lex/_ignore/"), "ignore entry required: {gi}");
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn migrate_is_noop_without_legacy_store() {
+        let root = tmp_root("noop");
+        // Nothing at all → Ok, nothing created.
+        migrate_legacy_store(&root).unwrap();
+        assert!(!git_lex::store_path_at(&root).exists());
+        // Pocket-only (already migrated) → Ok, untouched.
+        let pocket = git_lex::store_path_at(&root);
+        fs::create_dir_all(&pocket).unwrap();
+        fs::write(pocket.join("CURRENT"), "rocksdb").unwrap();
+        migrate_legacy_store(&root).unwrap();
+        assert!(pocket.join("CURRENT").exists());
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn migrate_refuses_ambiguous_dual_layout() {
+        let root = tmp_root("dual");
+        fs::create_dir_all(git_lex::legacy_store_path_at(&root)).unwrap();
+        fs::create_dir_all(git_lex::store_path_at(&root)).unwrap();
+        let err = migrate_legacy_store(&root).unwrap_err();
+        assert!(err.contains("ambiguous"), "must refuse to guess: {err}");
+        // Both layouts still present — refusal must not mutate either.
+        assert!(git_lex::legacy_store_path_at(&root).exists());
+        assert!(git_lex::store_path_at(&root).exists());
+        fs::remove_dir_all(&root).ok();
+    }
 }

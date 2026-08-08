@@ -174,10 +174,15 @@ pub(crate) fn frontmatter_to_turtle(
                 // a bad class prefix; we warn and emit nothing for it (return
                 // None) rather than stamp a phantom type.
                 if doc_type.is_none() {
-                    match crate::ontology::resolve_class_segment(kit, class_seg) {
+                    match crate::ontology::resolve_class_segment(
+                        kit,
+                        class_seg,
+                        &filepath.display().to_string(),
+                        true, // extraction runs at save — the author can act
+                    ) {
                         Ok(canonical) => doc_type = Some(canonical),
                         Err(msg) => {
-                            eprintln!("warning: {msg} (skipping {})", filepath.display());
+                            eprintln!("warning: {}: {msg}", filepath.display());
                             return Ok(None);
                         }
                     }
@@ -237,6 +242,7 @@ pub(crate) fn frontmatter_to_turtle(
     // Build ObjectProperty set and datatype map for proper literal emission
     let obj_props = get_object_properties(kit);
     let prop_datatypes = get_property_datatypes(kit);
+    let ref_ranges = crate::ontology::get_reference_ranges_all_kits();
 
     // Build Turtle RDF for this document. Subjects use the same minting
     // authority as the now-graph (resource_uri) — no urn: anywhere. SHACL
@@ -269,7 +275,32 @@ pub(crate) fn frontmatter_to_turtle(
             // IRIs — so an `@mention` PASSED validation and then errored
             // at save time (review finding A5: two resolution policies).
             let values: Vec<&str> = value.split(',').map(|v| v.trim()).filter(|v| !v.is_empty()).collect();
+            // Law 6 (identity model, 2026-07-30): a DECLARED RANGE makes the
+            // authored value the target's ID — the range names the class, the
+            // id names the Thing, nothing is guessed. This mirrors the sync
+            // emitter's range branch in nquad.rs EXACTLY (the A5 rule this
+            // comment block cites: one resolution policy, judged here as it
+            // will be emitted there). Path-law resolution applies only to
+            // ObjectProperties with no declared class range.
+            let range = ref_ranges.get(&format!("{}/{}", short, prop_name));
             for val in values {
+                if let Some(range_iri) = range {
+                    match crate::nquad::thing_iri_from_range(range_iri, val) {
+                        Some(target) => {
+                            ttl.push_str(&format!(
+                                "<{}> {}:{} {} .\n",
+                                doc_iri, prefix_name, prop_name, target
+                            ));
+                        }
+                        None => {
+                            return Err(format!(
+                                "{}: declared range `{}` is not a resolvable class IRI",
+                                prop_name, range_iri
+                            ));
+                        }
+                    }
+                    continue;
+                }
                 match crate::resolve::resolve_frontmatter_value(val) {
                     crate::resolve::ResolveResult::Iri(uri) => {
                         // `uri` arrives in `<...>` form, valid Turtle as-is.
@@ -377,7 +408,7 @@ pub(crate) fn extract_markdown_links() {
         for inline_tree in tree.inline_trees() {
             let inline_root = inline_tree.root_node();
 
-            fn extract_links(node: tree_sitter::Node, source: &str, lines: &mut Vec<String>, file_index: &HashSet<String>, doc_dir: &str) {
+            fn extract_links(node: tree_sitter::Node, source: &str, lines: &mut Vec<String>, file_index: &HashSet<String>, doc_dir: &str, relpath: &str) {
                 if node.kind() == "inline_link" {
                     let dest = node.children(&mut node.walk())
                         .find(|c| c.kind() == "link_destination")
@@ -399,7 +430,12 @@ pub(crate) fn extract_markdown_links() {
                             };
 
                             if file_index.contains(&resolved) {
-                                lines.push(format!("md.internalLink | hasValue | {}", resolved));
+                                // Markdown links are THE document-reference
+                                // edge (Rob-ruled 2026-08-06): they emit
+                                // `linksTo`, the name the graph and viz
+                                // already consume. md.internalLink retired
+                                // with the wikilink reader.
+                                lines.push(format!("{} | linksTo | {}", relpath, resolved));
                             } else {
                                 lines.push(format!("md.unresolvedLink | hasValue | {}", dest));
                             }
@@ -419,7 +455,7 @@ pub(crate) fn extract_markdown_links() {
                 let mut cursor = node.walk();
                 if cursor.goto_first_child() {
                     loop {
-                        extract_links(cursor.node(), source, lines, file_index, doc_dir);
+                        extract_links(cursor.node(), source, lines, file_index, doc_dir, relpath);
                         if !cursor.goto_next_sibling() { break; }
                     }
                 }
@@ -429,7 +465,7 @@ pub(crate) fn extract_markdown_links() {
                 .map(|p| p.to_string_lossy().to_string())
                 .unwrap_or_default();
 
-            extract_links(inline_root, &content, &mut spo_lines, &file_index, &doc_dir);
+            extract_links(inline_root, &content, &mut spo_lines, &file_index, &doc_dir, &relpath_str);
         }
 
         // Write .md.spo sidecar; when a doc's last link goes away its

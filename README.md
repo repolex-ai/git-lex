@@ -169,8 +169,11 @@ git-lex keeps a clean split between **what you write**, **the index**, and
   (`.lex/repo.yml`, anchored on the genesis commit). It's
   checked in, so your graph travels with your repo.
 
-- **`.git/lex/`** — derived data (the oxigraph SPARQL store). Never tracked,
-  fully rebuildable from the sidecars with `git lex sync`.
+- **`.lex/_ignore/`** — the machine-local pocket inside the dotdir: derived
+  data (the oxigraph SPARQL store at `.lex/_ignore/oxigraph/`). Gitignored,
+  never tracked, fully rebuildable from the sidecars with `git lex sync`.
+  (The law, shared by every Subtexture tool's dotdir: `_ignore/` is
+  machine-local; everything else is committed.)
 
 - **Kits** — a kit defines the *shape* of your graph: its ontology (classes +
   properties), the document templates `create` scaffolds, the SHACL shapes

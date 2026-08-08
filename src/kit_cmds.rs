@@ -64,8 +64,23 @@ fn regenerate_kit_artifacts(kit_name: &str, root: &std::path::Path, create_folde
     let kit_types = get_kit_types(kit_name);
     let folder_base = kit_config_str(kit_name, "folder base");
     if let Some(ref base) = folder_base {
-        let expected: std::collections::HashSet<String> =
+        let declared_all: std::collections::HashSet<String> =
             kit_types.iter().map(|(name, _)| name.clone()).collect();
+        // The folder contract is `git-lex:foldered AND NOT owl:deprecated`
+        // (#74) — the same gate emit_class_templates applies. Unfoldered
+        // classes are graph-only by design, and a deprecated class keeps
+        // resolving (history replays) but must not demand its folder back:
+        // creating one would invite new writing into retired vocabulary.
+        // Auditing "every known class" instead printed phantom missing-
+        // folder lines fleet-wide after the soul 0.9.x deprecation appendix.
+        let deprecated = ontology::get_deprecated_classes(kit_name);
+        let expected: std::collections::HashSet<String> = declared_all
+            .iter()
+            .filter(|n| {
+                !deprecated.contains_key(*n) && ontology::get_class_foldered(kit_name, n)
+            })
+            .cloned()
+            .collect();
         let base_dir = root.join(base);
 
         let mut missing = Vec::new();
@@ -78,7 +93,11 @@ fn regenerate_kit_artifacts(kit_name: &str, root: &std::path::Path, create_folde
         if let Ok(entries) = fs::read_dir(&base_dir) {
             for entry in entries.filter_map(|e| e.ok()) {
                 let name = entry.file_name().to_string_lossy().to_string();
-                if entry.path().is_dir() && !expected.contains(&name) {
+                // Extra = a folder no declared class explains. A folder for
+                // a deprecated or unfoldered class is NOT extra — it's legal
+                // residue awaiting owner-paced evacuation, or the owner's
+                // choice to keep foldering a graph-only class.
+                if entry.path().is_dir() && !declared_all.contains(&name) {
                     extra.push(name);
                 }
             }
@@ -305,13 +324,37 @@ pub(crate) fn cmd_kit_update(kit_arg: Option<String>) {
     let mut total_installed = 0usize;
     let mut total_skipped = 0usize;
     let mut all_updated: Vec<String> = Vec::new();
+    // #72: which kit(s) converged each path this run. Two kits shipping the
+    // SAME path with different content flip the file back and forth every
+    // update — the last kit silently wins by install order, not intent, and
+    // the loser's copy churns as <file>.bak forever. Receipt: base shipped
+    // an empty .claude/CLAUDE.md while soul ships the real one — every
+    // fleet kit-update printed the path twice and re-.bak'd it.
+    let mut converged_by: std::collections::BTreeMap<String, Vec<String>> =
+        std::collections::BTreeMap::new();
     for spec in &kits_to_update {
         let (org, repo, _) = resolve_kit_spec(spec);
         let kit_dir = lex_dir.join("kit").join(&org).join(&repo);
         let report = install_scaffold_files_from_skip_existing(&kit_dir);
         total_installed += report.installed;
         total_skipped += report.skipped;
+        for path in &report.updated {
+            converged_by.entry(path.clone()).or_default().push(repo.clone());
+        }
         all_updated.extend(report.updated);
+    }
+    for (path, kits) in &converged_by {
+        if kits.len() > 1 {
+            eprintln!(
+                "⚠ kit CONFLICT: {} is shipped by {} — each kit-update rewrites it {} times \
+                 and `{}` wins only by install order. This is a kit-lane bug: exactly one \
+                 kit should ship this file. Report it to the kit owner.",
+                path,
+                kits.join(" AND "),
+                kits.len(),
+                kits.last().map(String::as_str).unwrap_or("?")
+            );
+        }
     }
 
     // File-level hook reap (twin of the registration reap). The keep-set MUST
@@ -444,6 +487,75 @@ pub(crate) fn cmd_kit_update(kit_arg: Option<String>) {
         }
     }
 
+    // #71: converge .lex/ontology/ to exactly what the installed kits own.
+    // Kit installs copy additively and never delete, so every layout era
+    // left fossils behind (top-level fm/ git/ lex/ lex-o/, retired optional
+    // kits, nested git-lex/git2/) — and the ontology loader walks the WHOLE
+    // tree, so stale vocabulary from retired eras kept loading into the
+    // ontology graph fleet-wide (lupov's find). Ownership derives from the
+    // installed kit payloads (.lex/kit/<org>/<repo>/ontology/<short>/):
+    // unowned top-level dirs are reaped, owned dirs converge to an exact
+    // MIRROR of their payload so nested fossils die too. The -shapes.ttl
+    // derived artifacts are regenerated just below, so the mirror losing
+    // them is part of the design, not a casualty.
+    {
+        fn copy_dir_recursive(src: &std::path::Path, dest: &std::path::Path) {
+            fs::create_dir_all(dest).ok();
+            if let Ok(entries) = fs::read_dir(src) {
+                for e in entries.filter_map(|e| e.ok()) {
+                    let d = dest.join(e.file_name());
+                    if e.path().is_dir() {
+                        copy_dir_recursive(&e.path(), &d);
+                    } else {
+                        fs::copy(e.path(), &d).ok();
+                    }
+                }
+            }
+        }
+        let kit_root = root.join(".lex").join("kit");
+        let mut payload_dirs: Vec<(String, std::path::PathBuf)> = Vec::new();
+        if let Ok(orgs) = fs::read_dir(&kit_root) {
+            for org in orgs.filter_map(|e| e.ok()).filter(|e| e.path().is_dir()) {
+                if let Ok(repos) = fs::read_dir(org.path()) {
+                    for repo in repos.filter_map(|e| e.ok()).filter(|e| e.path().is_dir()) {
+                        let ont = repo.path().join("ontology");
+                        if let Ok(shorts) = fs::read_dir(&ont) {
+                            for s in shorts.filter_map(|e| e.ok()).filter(|e| e.path().is_dir()) {
+                                payload_dirs.push((
+                                    s.file_name().to_string_lossy().to_string(),
+                                    s.path(),
+                                ));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        // Fail-safe: an empty payload set means the kit tree is in a state
+        // this sweep can't reason about — touch nothing.
+        if !payload_dirs.is_empty() {
+            let owned: std::collections::HashSet<&String> =
+                payload_dirs.iter().map(|(n, _)| n).collect();
+            let ont_root = root.join(".lex").join("ontology");
+            if let Ok(entries) = fs::read_dir(&ont_root) {
+                for e in entries.filter_map(|e| e.ok()).filter(|e| e.path().is_dir()) {
+                    let name = e.file_name().to_string_lossy().to_string();
+                    if !owned.contains(&name) && fs::remove_dir_all(e.path()).is_ok() {
+                        println!(
+                            "Reaped orphaned ontology dir (no installed kit owns it): .lex/ontology/{}",
+                            name
+                        );
+                    }
+                }
+            }
+            for (name, src) in &payload_dirs {
+                let dest = ont_root.join(name);
+                let _ = fs::remove_dir_all(&dest);
+                copy_dir_recursive(src, &dest);
+            }
+        }
+    }
+
     // Converge the engine runtime-dir gitignore on every existing soul. Souls
     // that predate the `.pool/`/`.copia/`/`.weave/` standard hand-wrote their
     // .gitignore and never got these lines — so their engine index stores leaked
@@ -498,34 +610,90 @@ pub(crate) fn cmd_kit_update(kit_arg: Option<String>) {
 /// The engine runtime dirs every soul must gitignore: the per-soul LOCAL state
 /// of the Subtexture engines. These hold index stores, embeddings, HNSW
 /// indexes, and media roots — heavy, high-churn, machine-local, never
-/// committed. Current engines per the ravel git-lex mode spec (2026_08_01):
-/// `.copia/`, `.pan/`, `.ravel/`. Pre-rename `.pool/` stays until the full
-/// Pool→Pan conversion (Rob, 2026-08-04); `.weave/` retired same day after a
-/// fleet sweep found zero on-disk and zero tracked dirs. Removing a live
-/// entry commits someone's store at their next save (th34's day-one repo
-/// vacuumed 1.4MB of .ravel/ RocksDB before ".ravel/" was here) — sweep
-/// before you drop.
-const ENGINE_GITIGNORE_DIRS: &[&str] = &[".pool/", ".copia/", ".ravel/", ".pan/"];
+/// committed. `.weave/` retired 2026-08-04 after a fleet sweep found zero
+/// on-disk and zero tracked dirs. Removing a live entry commits someone's
+/// store at their next save (th34's day-one repo vacuumed 1.4MB of .ravel/
+/// RocksDB before ".ravel/" was here) — sweep before you drop.
+///
+/// Pocket law (Rob, 2026-08-05; doc:
+/// subtexture/docs/stack/2026_08_05_DOTDIR_IGNORE_POCKET.md): in any tool's
+/// dotdir, `_ignore/` is machine-local and everything else is committed. An
+/// engine's entry converges whole-dir → `<dir>_ignore/` per repo, gated on
+/// that engine's KNOWN legacy machine-local paths being gone from outside
+/// the pocket — the engine's own data migration is the trigger, so the flip
+/// can never make a pre-move store committable (spaceGOAT's inverted-82fe1d7
+/// hazard: an 81M transcript tree, one file over GitHub's 100MB cap, one
+/// save away from a rejected push). The gate + legacy lists are
+/// TRANSITIONAL — they die in ship-prep once every engine has moved.
+struct EngineIgnore {
+    dir: &'static str,
+    /// Known legacy machine-local paths (relative to `dir`) from before the
+    /// pocket law. `Some(paths)`: flip to the narrow pocket entry once ALL
+    /// are absent. `None`: never flips (whole-dir entry retained).
+    legacy: Option<&'static [&'static str]>,
+}
+
+const ENGINE_IGNORE: &[EngineIgnore] = &[
+    // Rob 2026-08-05: .pool/ absolutely untouched until the Pool conversion
+    // ("it's hanging on by a thread").
+    EngineIgnore { dir: ".pool/", legacy: None },
+    // Legacy path list not yet confirmed by the copia owner — whole-dir
+    // until it is.
+    EngineIgnore { dir: ".copia/", legacy: None },
+    // spaceGOAT-confirmed complete (disk survey ×3 installs + sync.rs writes
+    // only these two): store + transcript mirror.
+    EngineIgnore { dir: ".ravel/", legacy: Some(&["oxigraph", "transcripts"]) },
+    // Pan adopts the pocket young; defensive single entry.
+    EngineIgnore { dir: ".pan/", legacy: Some(&["oxigraph"]) },
+];
+
+/// git-lex's own pocket entry. UNCONDITIONAL: the legacy store lived under
+/// `.git/lex/`, never loose in `.lex/`, so there is nothing to gate on.
+const LEX_POCKET_IGNORE: &str = ".lex/_ignore/";
+
+/// The ignore entries to emit for this repo's ACTUAL layout: git-lex's own
+/// pocket first, then each engine at whole-dir or narrow pocket form per the
+/// gate above. Stray files outside a pocket after a flip are committable by
+/// law and surface LOUD in git status — gating on dir-emptiness instead of
+/// the known list would hide them forever (dedup-hides-errors disease).
+fn engine_ignore_entries(root: &Path) -> Vec<String> {
+    let mut entries = vec![LEX_POCKET_IGNORE.to_string()];
+    for e in ENGINE_IGNORE {
+        let flipped = match e.legacy {
+            None => false,
+            Some(paths) => paths.iter().all(|p| !root.join(e.dir).join(p).exists()),
+        };
+        if flipped {
+            entries.push(format!("{}_ignore/", e.dir));
+        } else {
+            entries.push(e.dir.to_string());
+        }
+    }
+    entries
+}
 
 const ENGINE_GITIGNORE_BEGIN: &str = "# >>> git-lex engine runtime (managed) >>>";
 const ENGINE_GITIGNORE_END: &str = "# <<< git-lex engine runtime (managed) <<<";
 
-/// Idempotently ensure the soul repo's root `.gitignore` ignores the engine
-/// runtime dirs (`ENGINE_GITIGNORE_DIRS`). Wrapped in a sentinel block so
-/// re-runs replace-in-place (never duplicate) and a future dir can be added by
-/// editing `ENGINE_GITIGNORE_DIRS` — the next `git lex kit-update` re-emits the
-/// block. Reports (does NOT auto-remove) files already tracked that now match, so
-/// the soul can `git rm --cached` them deliberately — git-lex never mutates the
-/// index on the soul's behalf (Rob's call, Day 51).
+/// Idempotently ensure the soul repo's root `.gitignore` carries the managed
+/// engine-runtime entries for this repo's layout (`engine_ignore_entries`).
+/// Wrapped in a sentinel block so re-runs replace-in-place (never duplicate);
+/// the next `git lex kit-update` re-emits the block, which is also how an
+/// engine's whole-dir entry converges to its `_ignore/` pocket form after
+/// that engine migrates its data. Reports (does NOT auto-remove) files
+/// already tracked that now match, so the soul can `git rm --cached` them
+/// deliberately — git-lex never mutates the index on the soul's behalf
+/// (Rob's call, Day 51).
 pub(crate) fn ensure_engine_gitignore(root: &Path) {
     let gitignore = root.join(".gitignore");
     let existing = fs::read_to_string(&gitignore).unwrap_or_default();
 
-    // Build the managed block.
+    // Build the managed block from the repo's actual layout.
+    let entries = engine_ignore_entries(root);
     let mut block = String::from(ENGINE_GITIGNORE_BEGIN);
     block.push('\n');
-    for dir in ENGINE_GITIGNORE_DIRS {
-        block.push_str(dir);
+    for entry in &entries {
+        block.push_str(entry);
         block.push('\n');
     }
     block.push_str(ENGINE_GITIGNORE_END);
@@ -551,7 +719,7 @@ pub(crate) fn ensure_engine_gitignore(root: &Path) {
         if fs::write(&gitignore, &new_contents).is_ok() {
             println!(
                 "Ensured engine runtime dirs are gitignored ({}).",
-                ENGINE_GITIGNORE_DIRS.join(" ")
+                entries.join(" ")
             );
         }
     }
@@ -575,22 +743,24 @@ fn report_tracked_engine_paths(root: &Path) {
         Ok(o) if o.status.success() => o.stdout,
         _ => return,
     };
-    // Engine dir prefixes to match against tracked paths: the live ignore set
-    // plus legacy trees the report should still catch — retired `.weave/`
-    // (anyone resurrecting a pre-rename store deserves the warning) and the
-    // capitalized `Pool/` tree from the pre-`.pool` layout.
-    let prefixes: Vec<&str> =
-        ENGINE_GITIGNORE_DIRS.iter().copied().chain([".weave/", "Pool/"]).collect();
-    let prefixes: &[&str] = &prefixes;
+    // Prefixes to match against tracked paths: the entries actually emitted
+    // for this repo's layout (post-flip, e.g. `.ravel/config/` is committable
+    // by law — only the pocket must stay untracked) plus legacy trees the
+    // report should still catch — retired `.weave/` (anyone resurrecting a
+    // pre-rename store deserves the warning) and the capitalized `Pool/` tree
+    // from the pre-`.pool` layout.
+    let mut prefixes: Vec<String> = engine_ignore_entries(root);
+    prefixes.push(".weave/".to_string());
+    prefixes.push("Pool/".to_string());
     let mut hits: std::collections::BTreeMap<&str, usize> = std::collections::BTreeMap::new();
     for path in stdout.split(|b| *b == 0) {
         if path.is_empty() {
             continue;
         }
         let p = String::from_utf8_lossy(path);
-        for pre in prefixes {
-            if p.starts_with(pre) {
-                *hits.entry(pre).or_insert(0) += 1;
+        for pre in &prefixes {
+            if p.starts_with(pre.as_str()) {
+                *hits.entry(pre.as_str()).or_insert(0) += 1;
                 break;
             }
         }
@@ -717,12 +887,28 @@ pub(crate) fn cmd_kit_add(kit_spec: String) {
     // Code never fires them (the pool-kit gap, Day 50). Identity is per-repo,
     // not per-kit, so this re-derives the whole hook set from all installed
     // kits — exactly the convergent behavior we want.
-    if let Some(agent_name) = git_lex::RepoYml::load(&root).agent_name.filter(|s| !s.is_empty()) {
-        for substrate in harness::active_substrates(&root) {
-            match substrate {
-                harness::Substrate::Claude => harness::claude::setup_substrate_claude(&root, &agent_name),
-                harness::Substrate::Hermes | harness::Substrate::Gemini => {}
+    match git_lex::RepoYml::load(&root).agent_name.filter(|s| !s.is_empty()) {
+        Some(agent_name) => {
+            for substrate in harness::active_substrates(&root) {
+                match substrate {
+                    harness::Substrate::Claude => harness::claude::setup_substrate_claude(&root, &agent_name),
+                    harness::Substrate::Hermes | harness::Substrate::Gemini => {}
+                }
             }
+        }
+        // #67: same well-dressed-dead kit-update had (Day 50) — kit-add
+        // lands the hook FILES above, but without this pass they are never
+        // registered in settings.json, so the kit looks installed and its
+        // hooks never fire. The skip must be as loud here as there.
+        None => {
+            eprintln!(
+                "warning: no `agent_name:` in .lex/repo.yml — SKIPPED substrate setup \
+                 (settings.json hooks + identity env were NOT written/reconciled).\n\
+                 This kit's hooks will not fire until this is fixed. Add a line to \
+                 .lex/repo.yml:\n\
+                 \x20   agent_name: <your-name>\n\
+                 then re-run `git lex kit-update`."
+            );
         }
     }
 
@@ -853,6 +1039,14 @@ mod engine_gitignore_tests {
         dir
     }
 
+    /// The exact entry lines of the managed block (contains() can't tell
+    /// `.ravel/` from `.ravel/_ignore/` — line identity can).
+    fn block_lines(got: &str) -> Vec<&str> {
+        let start = got.find(ENGINE_GITIGNORE_BEGIN).expect("block begin");
+        let end = got.find(ENGINE_GITIGNORE_END).expect("block end");
+        got[start..end].lines().skip(1).collect()
+    }
+
     #[test]
     fn engine_gitignore_appends_to_existing_blocklist() {
         let dir = tmp_repo("append");
@@ -862,16 +1056,92 @@ mod engine_gitignore_tests {
         // Original lines preserved.
         assert!(got.contains(".lex/oxigraph/"), "must keep existing entries");
         assert!(got.contains("custom/"));
-        // Engine dirs added under the sentinel.
-        assert!(got.contains(ENGINE_GITIGNORE_BEGIN));
-        assert!(got.contains(".pool/"));
-        assert!(got.contains(".copia/"));
-        assert!(got.contains(".ravel/"));
-        assert!(got.contains(".pan/"));
+        // Entries added under the sentinel. A layout with no engine dirs on
+        // disk has no legacy paths anywhere, so flip-gated engines emit in
+        // pocket form; .pool/ and .copia/ stay whole-dir (never flip / owner
+        // unconfirmed); .lex/_ignore/ is unconditional.
+        let lines = block_lines(&got);
+        assert_eq!(
+            lines,
+            vec![".lex/_ignore/", ".pool/", ".copia/", ".ravel/_ignore/", ".pan/_ignore/"]
+        );
         // .weave/ retired 2026-08-04 (Rob; fleet swept clean first) — a
         // re-emitted block must NOT reintroduce it.
         assert!(!got.contains(".weave/"));
         assert!(got.contains(ENGINE_GITIGNORE_END));
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    // ---- pocket-law layout gate (Rob 2026-08-05): both shapes pinned ----
+
+    #[test]
+    fn legacy_engine_layout_keeps_whole_dir_entry() {
+        let dir = tmp_repo("legacy-holds");
+        // One known legacy path still outside the pocket → the flip must NOT
+        // happen, or spaceGOAT's transcripts (69M jsonl > GitHub's cap)
+        // become committable one save before the migration runs.
+        fs::create_dir_all(dir.join(".ravel").join("transcripts")).unwrap();
+        ensure_engine_gitignore(&dir);
+        let got = fs::read_to_string(dir.join(".gitignore")).unwrap();
+        let lines = block_lines(&got);
+        assert!(lines.contains(&".ravel/"), "whole-dir entry retained: {lines:?}");
+        assert!(!lines.contains(&".ravel/_ignore/"), "must not flip early: {lines:?}");
+        // The other flip-gated engine is unaffected by ravel's layout.
+        assert!(lines.contains(&".pan/_ignore/"));
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn migrated_engine_layout_flips_to_pocket_entry() {
+        let dir = tmp_repo("pocket-flips");
+        // Data moved into the pocket, nothing legacy outside it → narrow
+        // entry, so .ravel/config/ etc. become committable per the law.
+        fs::create_dir_all(dir.join(".ravel").join("_ignore").join("oxigraph")).unwrap();
+        fs::create_dir_all(dir.join(".ravel").join("config")).unwrap();
+        ensure_engine_gitignore(&dir);
+        let got = fs::read_to_string(dir.join(".gitignore")).unwrap();
+        let lines = block_lines(&got);
+        assert!(lines.contains(&".ravel/_ignore/"), "narrow entry expected: {lines:?}");
+        assert!(!lines.contains(&".ravel/"), "whole-dir entry must be gone: {lines:?}");
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn pool_never_flips_even_with_pocket_layout() {
+        let dir = tmp_repo("pool-never");
+        // Even a pocket-shaped .pool/ stays whole-dir ignored — Rob 2026-08-05:
+        // untouched until the Pool conversion.
+        fs::create_dir_all(dir.join(".pool").join("_ignore")).unwrap();
+        ensure_engine_gitignore(&dir);
+        let got = fs::read_to_string(dir.join(".gitignore")).unwrap();
+        let lines = block_lines(&got);
+        assert!(lines.contains(&".pool/"), "{lines:?}");
+        assert!(!lines.contains(&".pool/_ignore/"), "{lines:?}");
+        // Same for .copia/ until its owner confirms a legacy list.
+        assert!(lines.contains(&".copia/"), "{lines:?}");
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn engine_migration_converges_block_on_rerun() {
+        let dir = tmp_repo("converge");
+        // Before: legacy layout → whole-dir. After the engine moves its data
+        // into the pocket, the SAME call converges the entry — the engine's
+        // migration is the trigger, no flag day.
+        let legacy = dir.join(".ravel").join("oxigraph");
+        fs::create_dir_all(&legacy).unwrap();
+        ensure_engine_gitignore(&dir);
+        let before = block_lines(&fs::read_to_string(dir.join(".gitignore")).unwrap())
+            .contains(&".ravel/");
+        assert!(before);
+        fs::remove_dir_all(&legacy).unwrap();
+        fs::create_dir_all(dir.join(".ravel").join("_ignore").join("oxigraph")).unwrap();
+        ensure_engine_gitignore(&dir);
+        let got = fs::read_to_string(dir.join(".gitignore")).unwrap();
+        let lines = block_lines(&got);
+        assert!(lines.contains(&".ravel/_ignore/"), "{lines:?}");
+        assert!(!lines.contains(&".ravel/"), "{lines:?}");
+        assert_eq!(got.matches(ENGINE_GITIGNORE_BEGIN).count(), 1);
         fs::remove_dir_all(&dir).ok();
     }
 
@@ -902,10 +1172,14 @@ mod engine_gitignore_tests {
         fs::write(dir.join(".gitignore"), &old).unwrap();
         ensure_engine_gitignore(&dir);
         let got = fs::read_to_string(dir.join(".gitignore")).unwrap();
-        // The block is rewritten in place (still one pair), now with all dirs,
-        // and the surrounding non-managed lines are untouched.
+        // The block is rewritten in place (still one pair), now with all
+        // entries, and the surrounding non-managed lines are untouched.
         assert_eq!(got.matches(ENGINE_GITIGNORE_BEGIN).count(), 1);
-        assert!(got.contains(".copia/") && got.contains(".ravel/") && got.contains(".pan/"));
+        let lines = block_lines(&got);
+        assert_eq!(
+            lines,
+            vec![".lex/_ignore/", ".pool/", ".copia/", ".ravel/_ignore/", ".pan/_ignore/"]
+        );
         assert!(!got.contains(".weave/"), "retired entry must be dropped on rewrite");
         assert!(got.contains("keepme/"), "content before the block is preserved");
         assert!(got.contains("tail/"), "content after the block is preserved");
@@ -918,7 +1192,11 @@ mod engine_gitignore_tests {
         // No .gitignore at all.
         ensure_engine_gitignore(&dir);
         let got = fs::read_to_string(dir.join(".gitignore")).unwrap();
-        assert!(got.contains(".pool/") && got.contains(".copia/") && got.contains(".ravel/") && got.contains(".pan/"));
+        let lines = block_lines(&got);
+        assert_eq!(
+            lines,
+            vec![".lex/_ignore/", ".pool/", ".copia/", ".ravel/_ignore/", ".pan/_ignore/"]
+        );
         assert!(!got.contains(".weave/"));
         assert_eq!(got.matches(ENGINE_GITIGNORE_BEGIN).count(), 1);
         fs::remove_dir_all(&dir).ok();

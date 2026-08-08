@@ -23,11 +23,14 @@ pub fn find_git_root() -> Option<PathBuf> {
     }
 }
 
-/// Path to the oxigraph store directory: `{repo_root}/.git/lex/oxigraph/`.
-/// Lives under .git/ because the store is derived data (rebuildable from
-/// .spo sidecars) and should never be version-controlled.
+/// Path to the oxigraph store directory: `{repo_root}/.lex/_ignore/oxigraph/`.
+/// The store is derived data (rebuildable from .spo sidecars) and never
+/// version-controlled; under the pocket law (Rob, 2026-08-05 — in any tool's
+/// dotdir, `_ignore/` is machine-local, everything else is committed) it
+/// lives in the worktree pocket, same shape as `.ravel/_ignore/` and
+/// `.pan/_ignore/`.
 pub fn store_path() -> Option<PathBuf> {
-    find_git_root().map(|r| r.join(".git").join("lex").join("oxigraph"))
+    find_git_root().map(|r| store_path_at(&r))
 }
 
 /// Open the persistent store in read-only mode. Does not acquire the
@@ -39,8 +42,16 @@ pub fn open_store_read_only() -> Option<Store> {
 }
 
 /// Store dir for an EXPLICIT repo root (multi-repo servers) — the single
-/// authority for the `.git/lex/oxigraph` layout.
+/// authority for the `.lex/_ignore/oxigraph` layout.
 pub fn store_path_at(root: &std::path::Path) -> PathBuf {
+    root.join(".lex").join("_ignore").join("oxigraph")
+}
+
+/// Pre-pocket store dir (`.git/lex/oxigraph`). TRANSITIONAL: exists only as
+/// the migration source and the read-side fallback for repos that haven't
+/// run a write command since the pocket law landed — dies in ship-prep once
+/// the fleet is on the pocket layout.
+pub fn legacy_store_path_at(root: &std::path::Path) -> PathBuf {
     root.join(".git").join("lex").join("oxigraph")
 }
 
@@ -48,10 +59,17 @@ pub fn store_path_at(root: &std::path::Path) -> PathBuf {
 pub fn open_store_read_only_at(root: &std::path::Path) -> Option<Store> {
     let path = store_path_at(root);
     if path.exists() {
-        Store::open_read_only(&path).ok()
-    } else {
-        None
+        return Store::open_read_only(&path).ok();
     }
+    // Both-shapes read window: a repo whose store predates the pocket law
+    // still has it at the legacy path until its next sync/kit-update
+    // migrates it. Read it where it is. TRANSITIONAL — dies with
+    // `legacy_store_path_at`.
+    let legacy = legacy_store_path_at(root);
+    if legacy.exists() {
+        return Store::open_read_only(&legacy).ok();
+    }
+    None
 }
 
 /// The domain kit spec from `.lex/repo.yml` (None if unset or "none").
@@ -110,14 +128,16 @@ pub struct RepoYml {
     /// this.
     #[serde(default)]
     pub dev_history_horizon: Option<String>,
-    /// Wikilink resolution semantics — a MIGRATION FENCE, not user config
-    /// (same lifecycle as dev_history_horizon: deletable once every repo
-    /// has crossed). `git lex init` stamps "obsidian" on NEW repos: bare
-    /// targets are repo-root-relative, leading `/` is rejected at save
-    /// (Rob-ruled 2026-08-01). Absent = the legacy 2026-07-28 markdown
-    /// semantics (bare = source-folder-relative, `/` = repo-rooted) —
-    /// pre-existing repos keep it until their Phase-4 migration flips
-    /// them. KEY NAME PENDING ROB — nothing writes it until he picks.
+    /// HISTORY-REPLAY FENCE, not user config. The wikilink reader is
+    /// retired (Rob-ruled 2026-08-06) — nothing writes this key anymore —
+    /// but wikilink-era sidecars still exist in repo HISTORY, and the walk
+    /// must resolve their linksTo operands the way the era they were
+    /// written under resolved them: "obsidian" = bare targets repo-root-
+    /// relative (2026-08-01 ruling), absent = legacy 2026-07-28 semantics
+    /// (bare = source-folder-relative, `/` = repo-rooted). Same lifecycle
+    /// as dev_history_horizon: deletable from a repo.yml only when that
+    /// repo's history holds no wikilink-era sidecars the two semantics
+    /// would resolve differently.
     #[serde(default)]
     pub link_semantics: Option<String>,
     #[serde(default)]
@@ -772,5 +792,50 @@ mod kit_prefix_syntax_tests {
     #[test]
     fn keyword_needs_a_separator() {
         assert_eq!(extract_kit_prefix("prefixsoul: <https://x.example/> .\n", "soul"), None);
+    }
+}
+
+#[cfg(test)]
+mod store_layout_tests {
+    use super::*;
+
+    // ---- open_store_read_only_at: the both-shapes read window ----
+
+    fn tmp_root(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "gitlex-store-layout-{}-{}",
+            tag,
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn read_only_open_falls_back_to_legacy_layout() {
+        let root = tmp_root("fallback");
+        // A repo that hasn't run a write command since the pocket law: store
+        // still at .git/lex/oxigraph. Read-only paths (serve) must find it.
+        let legacy = legacy_store_path_at(&root);
+        fs::create_dir_all(&legacy).unwrap();
+        drop(Store::open(&legacy).unwrap()); // real store, then release the lock
+        assert!(
+            open_store_read_only_at(&root).is_some(),
+            "read-only open must fall back to the legacy layout"
+        );
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn read_only_open_prefers_the_pocket() {
+        let root = tmp_root("prefers-pocket");
+        // Pocket present → it wins, legacy never consulted.
+        let pocket = store_path_at(&root);
+        fs::create_dir_all(&pocket).unwrap();
+        drop(Store::open(&pocket).unwrap());
+        assert!(open_store_read_only_at(&root).is_some());
+        assert!(!legacy_store_path_at(&root).exists());
+        fs::remove_dir_all(&root).ok();
     }
 }

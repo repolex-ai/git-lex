@@ -149,9 +149,10 @@ pub(crate) fn cmd_init(directory: Option<String>, kit: Option<String>) {
         }
     }
 
-    // Create .git/lex/ for derived data (oxigraph store, etc.)
-    let git_lex_dir = root.join(".git").join("lex");
-    fs::create_dir_all(&git_lex_dir).ok();
+    // Create the machine-local pocket for derived data (oxigraph store, etc.)
+    // — gitignored via the managed engine block below, never committed.
+    let pocket_dir = lex_dir.join("_ignore");
+    fs::create_dir_all(&pocket_dir).ok();
 
     // Claude Code kit needs a whitelist-style root .gitignore because it
     // runs against an existing project directory and only wants to track
@@ -204,13 +205,13 @@ pub(crate) fn cmd_init(directory: Option<String>, kit: Option<String>) {
         let today = Command::new("date").args(["+%Y-%m-%d"]).output().ok()
             .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
             .unwrap_or_else(|| "unknown".to_string());
-        // link_semantics stamp: NEW repos are born under Obsidian wikilink
-        // semantics (Rob-ruled 2026-08-01) — bare [[targets]] are repo-root-
-        // relative, leading `/` rejected at save. Pre-existing repos have no
-        // stamp and keep the legacy 2026-07-28 semantics until their Phase-4
-        // migration flips them. Migration fence, not user config.
+        // No link_semantics stamp: the wikilink reader is retired
+        // (Rob-ruled 2026-08-06) — markdown links are the linking story.
+        // The key survives in OLD repo.ymls only as a history-replay fence
+        // (see RepoYml::link_semantics); a newborn has no wikilink-era
+        // history, so writing it here would be minting dead config.
         fs::write(&repo_yml_path, format!(
-            "name: {}\nkit: {}\ncreated: {}\nlink_semantics: obsidian\n",
+            "name: {}\nkit: {}\ncreated: {}\n",
             repo_name, kit_spec, today
         )).unwrap_or_else(|e| {
             eprintln!("fatal: could not write .lex/repo.yml: {}", e);
@@ -250,7 +251,7 @@ pub(crate) fn cmd_init(directory: Option<String>, kit: Option<String>) {
             "# .lex/\n\nKnowledge graph managed by git-lex.\nKit: {}\n\n\
              - `extract/` — extraction sidecars (.spo)\n\
              - `ontology/` — ontology definitions\n\
-             - `.git/lex/oxigraph/` — local SPARQL store\n",
+             - `_ignore/oxigraph/` — local SPARQL store (machine-local, gitignored)\n",
             kit_name
         )).ok();
     }
@@ -361,15 +362,17 @@ pub(crate) fn cmd_init(directory: Option<String>, kit: Option<String>) {
                 doc.push_str(&format!("{}.{}.<property>: \"value\"\n", kit_short, example_type));
                 doc.push_str(&format!("# class names are case-sensitive: {}.{}. — see the __{}.md template\n", kit_short, example_type, example_type));
                 doc.push_str("---\n\n");
-                doc.push_str("Your content here. Use [[wikilinks]] for relationships between documents.\n");
+                doc.push_str("Your content here. Link other documents with standard markdown links.\n");
                 doc.push_str("```\n\n");
                 doc.push_str("See `__ClassName.md` files in each folder for available properties and SHACL-derived constraints.\n\n");
 
-                doc.push_str("## [[wikilinks]]\n\n");
-                doc.push_str("Reference other documents naturally in your text:\n\n");
-                doc.push_str("- `[[Class/id]]` — creates a `md:linksTo` relationship to that document\n");
-                doc.push_str("- bare `[[some-doc]]` is also accepted (resolved via slug)\n\n");
-                doc.push_str("Wikilinks are extracted automatically from document bodies and commit messages.\n\n");
+                doc.push_str("## Linking documents\n\n");
+                doc.push_str("Use standard markdown links with root-relative paths:\n\n");
+                doc.push_str("- `[display text](/Soul/Note/some-doc.md)` — creates a `linksTo` relationship to that document\n");
+                doc.push_str("- links resolve from the repository root; they survive the linking file moving\n\n");
+                doc.push_str("git-lex does not read `[[wikilinks]]` — the only place that notation appears is\n");
+                doc.push_str("Claude Code's own memory files under `Harness/Memory/`, where it is the\n");
+                doc.push_str("harness's private note-taking shorthand and is never resolved by any tool.\n\n");
 
                 // Kit-specific section
                 doc.push_str(&format!("## {} Kit — Document Types\n\n", kit_short));
