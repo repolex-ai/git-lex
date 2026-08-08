@@ -376,51 +376,9 @@ pub(crate) fn cmd_kit_update(kit_arg: Option<String>) {
         }
     }
 
-    // File-level hook reap (twin of the registration reap). The keep-set MUST
-    // come from ALL installed kits — not just the kits being updated — or a
-    // single-kit `kit-update soul` would reap every other kit's hooks (the
-    // live incident of 2026-07-30: pool's hooks .bak'd and deregistered).
-    // Non-updated kits weren't re-fetched, but their install dirs are already
-    // on disk from their own install. If any installed kit's dir is missing
-    // we can't know its hook set, so skip the reap rather than guess.
-    let mut kit_hook_names: std::collections::HashSet<String> = std::collections::HashSet::new();
-    let mut reap_safe = true;
-    for spec in collect_kits_for_update(&root, None) {
-        let (org, repo, _) = resolve_kit_spec(&spec);
-        let kit_dir = lex_dir.join("kit").join(&org).join(&repo);
-        if !kit_dir.exists() {
-            eprintln!(
-                "  ⚠ Kit '{}' has no install dir ({}); skipping the hook reap this run \
-                 (can't know which hooks it ships). Run a full `git lex kit-update` to repair.",
-                spec,
-                kit_dir.display()
-            );
-            reap_safe = false;
-            continue;
-        }
-        for name in crate::kit::kit_shipped_hook_names(&kit_dir) {
-            kit_hook_names.insert(name);
-        }
-    }
-    // Remove any .claude/hooks/*.sh that is neither kit-shipped nor a
-    // `<Event>-local-*.sh` personal hook — this kills old-named hooks left
-    // behind by a rename (the exact tangle a migrating soul hits: old + new
-    // both present + firing). Removed files stay beside as `<file>.bak`;
-    // their now-dangling settings.json registrations get pruned by
-    // reap_orphan_hook_registrations inside the setup_substrate_claude pass
-    // below (the file is gone → its registration reaps).
-    if reap_safe {
-        let reaped_hooks = crate::kit::reap_non_kit_non_local_hooks(&root, &kit_hook_names);
-        if !reaped_hooks.is_empty() {
-            println!(
-                "Removed {} hook file(s) no installed kit ships (old copy kept as <file>.bak):",
-                reaped_hooks.len()
-            );
-            for path in &reaped_hooks {
-                println!("  {}", path);
-            }
-        }
-    }
+    // File-level hook reap (twin of the registration reap) — extracted
+    // step, see fn doc.
+    reap_stale_hooks(&root);
 
     // The .kit-latest drift-sidecar mechanism is retired; sweep any leftovers.
     let swept = crate::kit::sweep_kit_latest_files(&root);
@@ -452,163 +410,13 @@ pub(crate) fn cmd_kit_update(kit_arg: Option<String>) {
     // on the convergence rollout, Day 50 — #67).
     harness::run_substrate_setup(&root, None);
 
-    // Remove legacy .env if present. Older souls used .env + SessionStart
-    // hook to inject identity; identity now lives in .claude/settings.json
-    // and the .env path silently wins over settings.json when both exist
-    // (the hook appended .env after settings.json's env block). Sweeping
-    // it on every kit-update guarantees one source of truth.
-    let legacy_env = root.join(".env");
-    if legacy_env.exists() {
-        if fs::remove_file(&legacy_env).is_ok() {
-            println!("Removed legacy .env — identity now lives in .claude/settings.json");
-        }
-    }
+    // Retired-mechanism sweeps (legacy .env, ontology/kit/ tier,
+    // link_semantics key) — extracted step, see fn doc.
+    sweep_legacy_layouts(&root);
 
-    // Remove legacy `.lex/ontology/kit/` directory. Pre-multi-kit repos
-    // installed shapes at `.lex/ontology/kit/{short}/`; the current layout
-    // is `.lex/ontology/{short}/`. Stale shapes files in the old location
-    // sort alphabetically BEFORE the new location (`k` < `s`) and used to
-    // shadow current shapes via `read_kit_shapes`'s glob-walk. The resolver
-    // is now canonical-path-based and ignores them — but stale fossils on
-    // disk are still confusing, so sweep them. See task #29.
-    let legacy_ontology = root.join(".lex").join("ontology").join("kit");
-    if legacy_ontology.exists() {
-        if fs::remove_dir_all(&legacy_ontology).is_ok() {
-            println!("Removed legacy .lex/ontology/kit/ — shapes now resolve via canonical .lex/ontology/<short>/ path");
-        }
-    }
-
-    // Sweep the retired `link_semantics:` key from repo.yml. The wikilink-era
-    // migration fence is gone from the code (ONE link law, Rob-ruled
-    // 2026-08-08: linksTo targets are repo-root-relative everywhere, every
-    // era) — the key is inert, and inert config left lying around reads as
-    // meaning something.
-    {
-        let ryml = root.join(".lex").join("repo.yml");
-        if let Ok(content) = fs::read_to_string(&ryml) {
-            if content.lines().any(|l| l.trim_start().starts_with("link_semantics:")) {
-                let cleaned: String = content
-                    .lines()
-                    .filter(|l| !l.trim_start().starts_with("link_semantics:"))
-                    .collect::<Vec<_>>()
-                    .join("\n")
-                    + "\n";
-                if fs::write(&ryml, cleaned).is_ok() {
-                    println!("Removed retired `link_semantics:` key from .lex/repo.yml (one link law)");
-                }
-            }
-        }
-    }
-
-    // #71: converge .lex/ontology/ to exactly what the installed kits own.
-    // Kit installs copy additively and never delete, so every layout era
-    // left fossils behind (top-level fm/ git/ lex/ lex-o/, retired optional
-    // kits, nested git-lex/git2/) — and the ontology loader walks the WHOLE
-    // tree, so stale vocabulary from retired eras kept loading into the
-    // ontology graph fleet-wide (lupov's find). Ownership derives from the
-    // installed kit payloads (.lex/kit/<org>/<repo>/ontology/<short>/):
-    // unowned top-level dirs are reaped, owned dirs converge to an exact
-    // MIRROR of their payload so nested fossils die too. The -shapes.ttl
-    // derived artifacts are regenerated just below, so the mirror losing
-    // them is part of the design, not a casualty.
-    {
-        // Every error propagates (review #22): this copier rebuilds a dir
-        // the sweep deletes, so a swallowed failure guts the live ontology
-        // and the loader then reads "kit ships no ontology" — validation
-        // silently skipped, object properties emitted as string literals.
-        fn copy_dir_recursive(
-            src: &std::path::Path,
-            dest: &std::path::Path,
-        ) -> std::io::Result<()> {
-            fs::create_dir_all(dest)?;
-            for e in fs::read_dir(src)? {
-                let e = e?;
-                let d = dest.join(e.file_name());
-                if e.path().is_dir() {
-                    copy_dir_recursive(&e.path(), &d)?;
-                } else {
-                    fs::copy(e.path(), &d)?;
-                }
-            }
-            Ok(())
-        }
-        let kit_root = root.join(".lex").join("kit");
-        let mut payload_dirs: Vec<(String, std::path::PathBuf)> = Vec::new();
-        if let Ok(orgs) = fs::read_dir(&kit_root) {
-            for org in orgs.filter_map(|e| e.ok()).filter(|e| e.path().is_dir()) {
-                if let Ok(repos) = fs::read_dir(org.path()) {
-                    for repo in repos.filter_map(|e| e.ok()).filter(|e| e.path().is_dir()) {
-                        let ont = repo.path().join("ontology");
-                        if let Ok(shorts) = fs::read_dir(&ont) {
-                            for s in shorts.filter_map(|e| e.ok()).filter(|e| e.path().is_dir()) {
-                                payload_dirs.push((
-                                    s.file_name().to_string_lossy().to_string(),
-                                    s.path(),
-                                ));
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        // Fail-safe: an empty payload set means the kit tree is in a state
-        // this sweep can't reason about — touch nothing.
-        if !payload_dirs.is_empty() {
-            let owned: std::collections::HashSet<&String> =
-                payload_dirs.iter().map(|(n, _)| n).collect();
-            let ont_root = root.join(".lex").join("ontology");
-            if let Ok(entries) = fs::read_dir(&ont_root) {
-                for e in entries.filter_map(|e| e.ok()).filter(|e| e.path().is_dir()) {
-                    let name = e.file_name().to_string_lossy().to_string();
-                    if !owned.contains(&name) && fs::remove_dir_all(e.path()).is_ok() {
-                        println!(
-                            "Reaped orphaned ontology dir (no installed kit owns it): .lex/ontology/{}",
-                            name
-                        );
-                    }
-                }
-            }
-            for (name, src) in &payload_dirs {
-                let dest = ont_root.join(name);
-                // Build the mirror BESIDE the live dir, then swap (review
-                // #22). The old order — delete live, then copy with
-                // swallowed errors — meant one failed copy left
-                // .lex/ontology/<short>/ empty while kit-update reported
-                // success, and that path is the documented contract external
-                // consumers (Pool) read alone. Now a failure leaves the live
-                // dir untouched and says so.
-                let tmp = ont_root.join(format!(".{}.kit-tmp", name));
-                let _ = fs::remove_dir_all(&tmp);
-                if let Err(e) = copy_dir_recursive(src, &tmp) {
-                    eprintln!(
-                        "ERROR: building the ontology mirror for `{name}` failed ({e}) — \
-                         the live .lex/ontology/{name}/ is UNTOUCHED. Fix the error \
-                         (disk/permissions) and re-run `git lex kit-update`."
-                    );
-                    let _ = fs::remove_dir_all(&tmp);
-                    continue;
-                }
-                if dest.exists() {
-                    if let Err(e) = fs::remove_dir_all(&dest) {
-                        eprintln!(
-                            "ERROR: could not clear .lex/ontology/{name}/ for convergence \
-                             ({e}) — left as-is; re-run `git lex kit-update` after fixing."
-                        );
-                        let _ = fs::remove_dir_all(&tmp);
-                        continue;
-                    }
-                }
-                if let Err(e) = fs::rename(&tmp, &dest) {
-                    eprintln!(
-                        "ERROR: ontology mirror swap for `{name}` failed ({e}) — \
-                         .lex/ontology/{name}/ is MISSING until a re-run of \
-                         `git lex kit-update` succeeds. The kit payload copy is intact."
-                    );
-                    let _ = fs::remove_dir_all(&tmp);
-                }
-            }
-        }
-    }
+    // #71: converge .lex/ontology/ to exactly what the installed kits
+    // own — extracted step, see fn doc.
+    converge_ontology_mirror(&root);
 
     // Converge the engine runtime-dir gitignore on every existing soul. Souls
     // that predate the `.pool/`/`.copia/`/`.weave/` standard hand-wrote their
@@ -654,6 +462,208 @@ pub(crate) fn cmd_kit_update(kit_arg: Option<String>) {
 
     // t-box refresh: kit vocab may have changed.
     reload_ontology_graph();
+}
+
+/// kit-update step: file-level hook reap (twin of the registration reap).
+/// The keep-set MUST come from ALL installed kits — not just the kits
+/// being updated — or a single-kit `kit-update soul` would reap every
+/// other kit's hooks (the live incident of 2026-07-30: pool's hooks
+/// .bak'd and deregistered). Non-updated kits weren't re-fetched, but
+/// their install dirs are already on disk from their own install. If any
+/// installed kit's dir is missing we can't know its hook set, so the reap
+/// is SKIPPED (loudly) rather than guessed. Removed files stay beside as
+/// `<file>.bak` — a reaped personal hook may be uncommitted user work,
+/// the one case git history cannot cover — and their now-dangling
+/// settings.json registrations get pruned by the substrate-setup pass
+/// (the file is gone → its registration reaps).
+fn reap_stale_hooks(root: &Path) {
+    let lex_dir = root.join(".lex");
+    let mut kit_hook_names: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut reap_safe = true;
+    for spec in collect_kits_for_update(root, None) {
+        let (org, repo, _) = resolve_kit_spec(&spec);
+        let kit_dir = lex_dir.join("kit").join(&org).join(&repo);
+        if !kit_dir.exists() {
+            eprintln!(
+                "  ⚠ Kit '{}' has no install dir ({}); skipping the hook reap this run \
+                 (can't know which hooks it ships). Run a full `git lex kit-update` to repair.",
+                spec,
+                kit_dir.display()
+            );
+            reap_safe = false;
+            continue;
+        }
+        for name in crate::kit::kit_shipped_hook_names(&kit_dir) {
+            kit_hook_names.insert(name);
+        }
+    }
+    // Remove any .claude/hooks/*.sh that is neither kit-shipped nor a
+    // `<Event>-local-*.sh` personal hook — this kills old-named hooks left
+    // behind by a rename (the exact tangle a migrating soul hits: old + new
+    // both present + firing).
+    if reap_safe {
+        let reaped_hooks = crate::kit::reap_non_kit_non_local_hooks(root, &kit_hook_names);
+        if !reaped_hooks.is_empty() {
+            println!(
+                "Removed {} hook file(s) no installed kit ships (old copy kept as <file>.bak):",
+                reaped_hooks.len()
+            );
+            for path in &reaped_hooks {
+                println!("  {}", path);
+            }
+        }
+    }
+}
+
+/// kit-update step: sweep retired-mechanism residue. Three lanes, all
+/// self-healing no-ops once clean:
+/// - legacy `.env` (identity now lives in .claude/settings.json; the .env
+///   path silently WON over settings.json when both existed);
+/// - legacy `.lex/ontology/kit/` tier (pre-multi-kit layout whose stale
+///   shapes used to shadow canonical ones via the old glob-walk — task
+///   #29; the resolver is canonical-path-based now, fossils just confuse);
+/// - the retired `link_semantics:` repo.yml key (ONE link law, Rob-ruled
+///   2026-08-08 — inert config left lying around reads as meaning
+///   something).
+fn sweep_legacy_layouts(root: &Path) {
+    let legacy_env = root.join(".env");
+    if legacy_env.exists() {
+        if fs::remove_file(&legacy_env).is_ok() {
+            println!("Removed legacy .env — identity now lives in .claude/settings.json");
+        }
+    }
+
+    let legacy_ontology = root.join(".lex").join("ontology").join("kit");
+    if legacy_ontology.exists() {
+        if fs::remove_dir_all(&legacy_ontology).is_ok() {
+            println!("Removed legacy .lex/ontology/kit/ — shapes now resolve via canonical .lex/ontology/<short>/ path");
+        }
+    }
+
+    let ryml = root.join(".lex").join("repo.yml");
+    if let Ok(content) = fs::read_to_string(&ryml) {
+        if content.lines().any(|l| l.trim_start().starts_with("link_semantics:")) {
+            let cleaned: String = content
+                .lines()
+                .filter(|l| !l.trim_start().starts_with("link_semantics:"))
+                .collect::<Vec<_>>()
+                .join("\n")
+                + "\n";
+            if fs::write(&ryml, cleaned).is_ok() {
+                println!("Removed retired `link_semantics:` key from .lex/repo.yml (one link law)");
+            }
+        }
+    }
+}
+
+/// #71 (kit-update step): converge .lex/ontology/ to exactly what the
+/// Kit installs copy additively and never delete, so every layout era
+/// left fossils behind (top-level fm/ git/ lex/ lex-o/, retired optional
+/// kits, nested git-lex/git2/) — and the ontology loader walks the WHOLE
+/// tree, so stale vocabulary from retired eras kept loading into the
+/// ontology graph fleet-wide (lupov's find). Ownership derives from the
+/// installed kit payloads (.lex/kit/<org>/<repo>/ontology/<short>/):
+/// unowned top-level dirs are reaped, owned dirs converge to an exact
+/// MIRROR of their payload so nested fossils die too. The -shapes.ttl
+/// derived artifacts are regenerated just below, so the mirror losing
+/// them is part of the design, not a casualty.
+fn converge_ontology_mirror(root: &Path) {
+    // Every error propagates (review #22): this copier rebuilds a dir
+    // the sweep deletes, so a swallowed failure guts the live ontology
+    // and the loader then reads "kit ships no ontology" — validation
+    // silently skipped, object properties emitted as string literals.
+    fn copy_dir_recursive(
+        src: &std::path::Path,
+        dest: &std::path::Path,
+    ) -> std::io::Result<()> {
+        fs::create_dir_all(dest)?;
+        for e in fs::read_dir(src)? {
+            let e = e?;
+            let d = dest.join(e.file_name());
+            if e.path().is_dir() {
+                copy_dir_recursive(&e.path(), &d)?;
+            } else {
+                fs::copy(e.path(), &d)?;
+            }
+        }
+        Ok(())
+    }
+    let kit_root = root.join(".lex").join("kit");
+    let mut payload_dirs: Vec<(String, std::path::PathBuf)> = Vec::new();
+    if let Ok(orgs) = fs::read_dir(&kit_root) {
+        for org in orgs.filter_map(|e| e.ok()).filter(|e| e.path().is_dir()) {
+            if let Ok(repos) = fs::read_dir(org.path()) {
+                for repo in repos.filter_map(|e| e.ok()).filter(|e| e.path().is_dir()) {
+                    let ont = repo.path().join("ontology");
+                    if let Ok(shorts) = fs::read_dir(&ont) {
+                        for s in shorts.filter_map(|e| e.ok()).filter(|e| e.path().is_dir()) {
+                            payload_dirs.push((
+                                s.file_name().to_string_lossy().to_string(),
+                                s.path(),
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    // Fail-safe: an empty payload set means the kit tree is in a state
+    // this sweep can't reason about — touch nothing.
+    if !payload_dirs.is_empty() {
+        let owned: std::collections::HashSet<&String> =
+            payload_dirs.iter().map(|(n, _)| n).collect();
+        let ont_root = root.join(".lex").join("ontology");
+        if let Ok(entries) = fs::read_dir(&ont_root) {
+            for e in entries.filter_map(|e| e.ok()).filter(|e| e.path().is_dir()) {
+                let name = e.file_name().to_string_lossy().to_string();
+                if !owned.contains(&name) && fs::remove_dir_all(e.path()).is_ok() {
+                    println!(
+                        "Reaped orphaned ontology dir (no installed kit owns it): .lex/ontology/{}",
+                        name
+                    );
+                }
+            }
+        }
+        for (name, src) in &payload_dirs {
+            let dest = ont_root.join(name);
+            // Build the mirror BESIDE the live dir, then swap (review
+            // #22). The old order — delete live, then copy with
+            // swallowed errors — meant one failed copy left
+            // .lex/ontology/<short>/ empty while kit-update reported
+            // success, and that path is the documented contract external
+            // consumers (Pool) read alone. Now a failure leaves the live
+            // dir untouched and says so.
+            let tmp = ont_root.join(format!(".{}.kit-tmp", name));
+            let _ = fs::remove_dir_all(&tmp);
+            if let Err(e) = copy_dir_recursive(src, &tmp) {
+                eprintln!(
+                    "ERROR: building the ontology mirror for `{name}` failed ({e}) — \
+                     the live .lex/ontology/{name}/ is UNTOUCHED. Fix the error \
+                     (disk/permissions) and re-run `git lex kit-update`."
+                );
+                let _ = fs::remove_dir_all(&tmp);
+                continue;
+            }
+            if dest.exists() {
+                if let Err(e) = fs::remove_dir_all(&dest) {
+                    eprintln!(
+                        "ERROR: could not clear .lex/ontology/{name}/ for convergence \
+                         ({e}) — left as-is; re-run `git lex kit-update` after fixing."
+                    );
+                    let _ = fs::remove_dir_all(&tmp);
+                    continue;
+                }
+            }
+            if let Err(e) = fs::rename(&tmp, &dest) {
+                eprintln!(
+                    "ERROR: ontology mirror swap for `{name}` failed ({e}) — \
+                     .lex/ontology/{name}/ is MISSING until a re-run of \
+                     `git lex kit-update` succeeds. The kit payload copy is intact."
+                );
+                let _ = fs::remove_dir_all(&tmp);
+            }
+        }
+    }
 }
 
 /// t-box reload: installed kit ontologies → the persistent ontology graph
