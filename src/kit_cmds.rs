@@ -437,39 +437,11 @@ pub(crate) fn cmd_kit_update(kit_arg: Option<String>) {
     // in place. Each substrate gets its own injection pass.
     //
     // This pass is what registers hooks + writes the identity env block into
-    // settings.json. It is GATED on read_agent_name — and a soul whose
-    // .lex/repo.yml has no parseable `agent_name:` line (e.g. a repo
-    // hand-maintained since before that field existed) silently gets NONE of
-    // it: kit files converge (separate code path above), but settings.json is
-    // never touched, so deleted hooks stay registered and new hooks never do.
-    // That's a well-dressed-dead: "kit update complete" with a dead hook layer.
-    // The None branch below makes the skip LOUD (prefer-the-crash: a silent
-    // skip of the thing that makes hooks FIRE is exactly the R11 ghost). Found
-    // by w3bl0rd's flinch-audit on the convergence rollout, Day 50.
-    match git_lex::RepoYml::load(&root).agent_name.filter(|s| !s.is_empty()) {
-        Some(agent_name) => {
-            for substrate in harness::active_substrates(&root) {
-                match substrate {
-                    harness::Substrate::Claude => harness::claude::setup_substrate_claude(&root, &agent_name),
-                    harness::Substrate::Hermes | harness::Substrate::Gemini => {
-                        // Per-substrate identity injection not yet implemented.
-                        // The substrate's sync adapter will surface what shape
-                        // it needs (see harness/<substrate>.rs).
-                    }
-                }
-            }
-        }
-        None => {
-            eprintln!(
-                "warning: no `agent_name:` in .lex/repo.yml — SKIPPED substrate setup \
-                 (settings.json hooks + identity env were NOT written/reconciled).\n\
-                 Your hooks will not fire and kit hook changes will not converge until \
-                 this is fixed. Add a line to .lex/repo.yml:\n\
-                 \x20   agent_name: <your-name>\n\
-                 then re-run `git lex kit-update`."
-            );
-        }
-    }
+    // settings.json — through the ONE shared gate (review #11), whose
+    // no-agent_name branch is LOUD (a silent skip of the thing that makes
+    // hooks FIRE is exactly the R11 ghost; found by w3bl0rd's flinch-audit
+    // on the convergence rollout, Day 50 — #67).
+    harness::run_substrate_setup(&root, None);
 
     // Remove legacy .env if present. Older souls used .env + SessionStart
     // hook to inject identity; identity now lives in .claude/settings.json
@@ -671,13 +643,18 @@ pub(crate) fn cmd_kit_update(kit_arg: Option<String>) {
 
     println!("Kit update complete: {} kit(s) refreshed.", kits_to_update.len());
 
-    // t-box refresh: reload kit ontologies into the persistent ontology graph
-    // (kit vocab may have changed; the graph stays put until the next update).
-    {
-        let store = open_or_create_store();
-        let n = crate::nquad::load_ontology_graph(&store);
-        println!("Ontology graph: {} kit ttl file(s) loaded", n);
-    }
+    // t-box refresh: kit vocab may have changed.
+    reload_ontology_graph();
+}
+
+/// t-box reload: installed kit ontologies → the persistent ontology graph
+/// (it stays put across syncs). ONE helper for the three lifecycle moments
+/// that change kit vocab — init, kit-add, kit-update; the block used to be
+/// tripled verbatim (review #11).
+pub(crate) fn reload_ontology_graph() {
+    let store = open_or_create_store();
+    let n = crate::nquad::load_ontology_graph(&store);
+    println!("Ontology graph: {} kit ttl file(s) loaded", n);
 }
 
 /// The engine runtime dirs every soul must gitignore: the per-soul LOCAL state
@@ -952,47 +929,20 @@ pub(crate) fn cmd_kit_add(kit_spec: String) {
         println!("Recorded '{}' under optional_kits in .lex/repo.yml.", canonical_spec);
     }
 
-    // Register the kit's hooks (and reap any orphans) in the substrate config.
-    // install_scaffold_files_from_skip_existing above copies the hook *files*
-    // to .claude/hooks/, but a hook does nothing until it's registered under
-    // its event in settings.json. setup_substrate_claude is that pass — same
-    // one kit-update runs. Without this, kit-add lands the files but Claude
-    // Code never fires them (the pool-kit gap, Day 50). Identity is per-repo,
-    // not per-kit, so this re-derives the whole hook set from all installed
+    // Register the kit's hooks (and reap any orphans) in the substrate
+    // config. install_scaffold_files_from_skip_existing above copies the
+    // hook *files* to .claude/hooks/, but a hook does nothing until it's
+    // registered under its event in settings.json — run_substrate_setup is
+    // that pass, the ONE shared gate with the loud no-agent_name branch
+    // (the pool-kit gap, Day 50; #67; review #11). Identity is per-repo,
+    // not per-kit, so it re-derives the whole hook set from all installed
     // kits — exactly the convergent behavior we want.
-    match git_lex::RepoYml::load(&root).agent_name.filter(|s| !s.is_empty()) {
-        Some(agent_name) => {
-            for substrate in harness::active_substrates(&root) {
-                match substrate {
-                    harness::Substrate::Claude => harness::claude::setup_substrate_claude(&root, &agent_name),
-                    harness::Substrate::Hermes | harness::Substrate::Gemini => {}
-                }
-            }
-        }
-        // #67: same well-dressed-dead kit-update had (Day 50) — kit-add
-        // lands the hook FILES above, but without this pass they are never
-        // registered in settings.json, so the kit looks installed and its
-        // hooks never fire. The skip must be as loud here as there.
-        None => {
-            eprintln!(
-                "warning: no `agent_name:` in .lex/repo.yml — SKIPPED substrate setup \
-                 (settings.json hooks + identity env were NOT written/reconciled).\n\
-                 This kit's hooks will not fire until this is fixed. Add a line to \
-                 .lex/repo.yml:\n\
-                 \x20   agent_name: <your-name>\n\
-                 then re-run `git lex kit-update`."
-            );
-        }
-    }
+    harness::run_substrate_setup(&root, None);
 
     println!("Kit '{}' added.", canonical_spec);
 
     // t-box: the new kit's ontology joins the persistent ontology graph.
-    {
-        let store = open_or_create_store();
-        let n = crate::nquad::load_ontology_graph(&store);
-        println!("Ontology graph: {} kit ttl file(s) loaded", n);
-    }
+    reload_ontology_graph();
 }
 
 // ─── kit-remove ──────────────────────────────────────────────────

@@ -19,7 +19,7 @@ use crate::kit::{collect_init_variables, fetch_kit_from_github, install_scaffold
 use crate::kit_cmds;
 use crate::ontology::{self, get_kit_types};
 use crate::shacl::build_shacl_shapes;
-use crate::{open_or_create_store, BASE_KIT};
+use crate::BASE_KIT;
 
 // Base ontologies (git.ttl, fm.ttl, lex.ttl) are no longer embedded in the
 // binary. They ship in the base kit scaffold at scaffold/.lex/ontology/ and
@@ -475,28 +475,20 @@ pub(crate) fn cmd_init(directory: Option<String>, kit: Option<String>) {
         // Future: Gemini, OpenAI Codex, etc. — stub those as needed after
         // researching how each model's CLI handles per-project identity.
 
+        // Per-substrate identity injection through the ONE shared gate
+        // (review #11). Souls are portable across machines via git, so
+        // identity travels with the repo — committed to a substrate-
+        // specific config file. This copy of the gate used to skip in
+        // TOTAL silence when no agent_name was collected (empty enter,
+        // scripted init, kit.yml without the prompt) — the exact
+        // well-dressed-dead class #67 fixed in kit-add/kit-update while
+        // this third copy kept it. An empty collection now falls back to
+        // repo.yml, and the no-name-anywhere case warns loudly inside.
         let agent_name = vars.get("agent_name").cloned().unwrap_or_default();
-        if !agent_name.is_empty() {
-            // Per-substrate identity injection. Souls are portable across
-            // machines via git, so identity travels with the repo —
-            // committed to a substrate-specific config file. Each active
-            // substrate gets its own setup pass.
-            for substrate in harness::active_substrates(&root) {
-                match substrate {
-                    harness::Substrate::Claude => harness::claude::setup_substrate_claude(&root, &agent_name),
-                    harness::Substrate::Hermes => {
-                        // TODO: Hermes per-project identity. Hermes uses
-                        // hermes-config.yaml + in-process Python lifecycle;
-                        // needs research on how it surfaces per-project git
-                        // identity vs global config.
-                    }
-                    harness::Substrate::Gemini => {
-                        // TODO: Gemini / Antigravity CLI per-project config.
-                    }
-                }
-            }
-        }
-
+        harness::run_substrate_setup(
+            &root,
+            if agent_name.is_empty() { None } else { Some(&agent_name) },
+        );
     }
 
     // Print summary
@@ -609,13 +601,9 @@ pub(crate) fn cmd_init(directory: Option<String>, kit: Option<String>) {
         }
     }
 
-    // t-box: load installed kit ontologies into the persistent ontology graph
-    // (init, kit-add, kit-update; it stays put across syncs).
-    {
-        let store = open_or_create_store();
-        let n = crate::nquad::load_ontology_graph(&store);
-        println!("Ontology graph: {} kit ttl file(s) loaded", n);
-    }
+    // t-box: load installed kit ontologies into the persistent ontology
+    // graph (the shared lifecycle helper — review #11).
+    crate::kit_cmds::reload_ontology_graph();
 
     // Register this repo in the machine-level registry (~/.lex/repos)
     registry_add(&root);

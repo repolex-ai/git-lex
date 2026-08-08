@@ -145,6 +145,47 @@ pub fn sync_all(root: &Path) {
     }
 }
 
+/// The ONE substrate-setup pass (review #11): resolve the agent name and
+/// run every active substrate's identity/hook injection — the pass that
+/// registers hooks and writes the identity env block into settings.json,
+/// i.e. the thing that makes hooks FIRE. The gate used to be triplicated
+/// across init, kit-add, and kit-update; the #67 loud-skip fix landed in
+/// two of the three copies while init's kept skipping in total silence —
+/// exactly how triplication bites. `agent_name`: Some(name) when the
+/// caller just collected it (init — repo.yml may not carry the line yet);
+/// None reads .lex/repo.yml.
+pub fn run_substrate_setup(root: &Path, agent_name: Option<&str>) {
+    let name = match agent_name {
+        Some(n) => n.trim().to_string(),
+        None => git_lex::RepoYml::load(root)
+            .agent_name
+            .unwrap_or_default()
+            .trim()
+            .to_string(),
+    };
+    if name.is_empty() {
+        eprintln!(
+            "warning: no `agent_name:` in .lex/repo.yml — SKIPPED substrate setup \
+             (settings.json hooks + identity env were NOT written/reconciled).\n\
+             Your hooks will not fire and kit hook changes will not converge until \
+             this is fixed. Add a line to .lex/repo.yml:\n\
+             \x20   agent_name: <your-name>\n\
+             then re-run `git lex kit-update`."
+        );
+        return;
+    }
+    for substrate in active_substrates(root) {
+        match substrate {
+            Substrate::Claude => claude::setup_substrate_claude(root, &name),
+            Substrate::Hermes | Substrate::Gemini => {
+                // Per-substrate identity injection not yet implemented.
+                // The substrate's sync adapter will surface what shape it
+                // needs (see harness/<substrate>.rs).
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
