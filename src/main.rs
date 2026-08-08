@@ -773,12 +773,33 @@ fn cmd_validate() -> bool {
     let shapes_ttl = ontology::read_kit_shapes(&kit);
 
     if shapes_ttl.is_empty() {
-        // A kit IS configured but its shapes are gone (broken/partial
-        // install). A gate that can't run must not pretend it passed
-        // (Rob-ruled 2026-07-29) — fail the save and name the fix.
-        eprintln!("fatal: kit '{}' is configured but its SHACL shapes are not installed — validation cannot run.", kit);
-        eprintln!("Fix: `git lex kit-update` (reinstalls the kit's ontology and shapes), then retry.");
-        return false;
+        // Two very different "no shapes" cases (found live by the fresh
+        // base-kit-only init receipt, review #12 sweep):
+        // - the kit's ontology yields NO shapes (base ships engine vocab
+        //   only, no document classes) → there is genuinely nothing to
+        //   validate; the gate passes (blocking every commit of a
+        //   base-kit repo forever is not a gate, it's a wall);
+        // - the kit's ontology WOULD yield shapes but they're not
+        //   installed → broken/partial install; a gate that can't run
+        //   must not pretend it passed (Rob-ruled 2026-07-29).
+        // Deciding which by re-deriving from the source TTL — the same
+        // generator init/kit-update run.
+        match crate::shacl::generate_shacl_shapes(&kit) {
+            Ok(None) => {
+                println!("Kit '{}' declares no document classes — nothing to validate.", kit);
+                return true;
+            }
+            Ok(Some(_)) => {
+                eprintln!("fatal: kit '{}' is configured but its SHACL shapes are not installed — validation cannot run.", kit);
+                eprintln!("Fix: `git lex kit-update` (reinstalls the kit's ontology and shapes), then retry.");
+                return false;
+            }
+            Err(e) => {
+                eprintln!("fatal: kit '{}' ontology is broken ({e}) — validation cannot run.", kit);
+                eprintln!("Fix the kit TTL (or `git lex kit-update` for a fresh copy), then retry.");
+                return false;
+            }
+        }
     }
 
     // One walker for the whole codebase; `.txt` files ride along for the

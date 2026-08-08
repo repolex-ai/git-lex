@@ -114,40 +114,8 @@ pub(crate) fn cmd_init(directory: Option<String>, kit: Option<String>) {
     // Ontologies are installed from the base kit scaffold (scaffold/.lex/ontology/)
     // by the scaffold installer below — no hardcoded ontology block needed.
 
-    // Install kit(s). Every repo gets the base kit. If --kit specifies a
-    // domain kit (squad, soul, etc.), that's installed alongside base in
-    // the same .lex/kit/ directory.
-    {
-        let lex_kit_root = lex_dir.join("kit");
-        let _ = fs::remove_dir_all(&lex_kit_root);
-
-        // Always install base kit.
-        let (base_org, base_repo, _) = resolve_kit_spec(BASE_KIT);
-        let base_dir = lex_kit_root.join(&base_org).join(&base_repo);
-        fs::create_dir_all(&base_dir).ok();
-        println!("Downloading base kit {}/{}...", base_org, base_repo);
-        if fetch_kit_from_github(BASE_KIT, &base_dir) {
-            println!("Base kit installed.");
-        } else {
-            eprintln!("Failed to fetch base kit from GitHub.");
-            eprintln!("Check network access to https://github.com/{}/{}", base_org, base_repo);
-            exit(1);
-        }
-
-        // Install the domain kit (if different from base).
-        let kit_dir = lex_kit_root.join(&org).join(&repo);
-        if kit_spec != format!("{}/{}", base_org, base_repo) {
-            fs::create_dir_all(&kit_dir).ok();
-            println!("Downloading additional kit {}/{}...", org, repo);
-            if fetch_kit_from_github(kit_name, &kit_dir) {
-                println!("Additional kit installed.");
-            } else {
-                eprintln!("Failed to fetch kit '{}' from GitHub.", kit_name);
-                eprintln!("Check that https://github.com/{}/{} exists and you have network access.", org, repo);
-                exit(1);
-            }
-        }
-    }
+    // Install kit(s) — extracted step, see fn doc.
+    fetch_kits(&lex_dir, kit_name, &kit_spec, &org, &repo);
 
     // Create the machine-local pocket for derived data (oxigraph store, etc.)
     // — gitignored via the managed engine block below, never committed.
@@ -198,49 +166,7 @@ pub(crate) fn cmd_init(directory: Option<String>, kit: Option<String>) {
     // if the user ran init once without --kit and then runs again with
     // --kit X, the kit: field needs to change from "none" to the new spec.
     let repo_yml_path = lex_dir.join("repo.yml");
-    if !repo_yml_path.exists() {
-        let repo_name = root.file_name()
-            .map(|n| n.to_string_lossy().to_string())
-            .unwrap_or_else(|| "unknown".to_string());
-        let today = Command::new("date").args(["+%Y-%m-%d"]).output().ok()
-            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-            .unwrap_or_else(|| "unknown".to_string());
-        // Three keys only. The wikilink-era `link_semantics` fence is fully
-        // retired (one link law, Rob-ruled 2026-08-08); kit-update sweeps
-        // the key from old repo.ymls.
-        fs::write(&repo_yml_path, format!(
-            "name: {}\nkit: {}\ncreated: {}\n",
-            repo_name, kit_spec, today
-        )).unwrap_or_else(|e| {
-            eprintln!("fatal: could not write .lex/repo.yml: {}", e);
-            exit(1);
-        });
-    } else {
-        // Rewrite the kit: line in the existing repo.yml to match the
-        // current spec. Preserves all other fields (name, created,
-        // agent_name, first_commit, etc.) untouched.
-        if let Ok(existing) = fs::read_to_string(&repo_yml_path) {
-            let mut updated_lines: Vec<String> = Vec::new();
-            let mut saw_kit_line = false;
-            for line in existing.lines() {
-                if line.starts_with("kit: ") || line.starts_with("kit:") {
-                    updated_lines.push(format!("kit: {}", kit_spec));
-                    saw_kit_line = true;
-                } else {
-                    updated_lines.push(line.to_string());
-                }
-            }
-            if !saw_kit_line {
-                updated_lines.push(format!("kit: {}", kit_spec));
-            }
-            let mut content = updated_lines.join("\n");
-            if !content.ends_with('\n') { content.push('\n'); }
-            fs::write(&repo_yml_path, content).unwrap_or_else(|e| {
-                eprintln!("fatal: could not update .lex/repo.yml kit binding: {}", e);
-                exit(1);
-            });
-        }
-    }
+    write_repo_yml(&repo_yml_path, &root, &kit_spec);
 
     // README
     let readme_path = lex_dir.join("README.md");
@@ -284,130 +210,17 @@ pub(crate) fn cmd_init(directory: Option<String>, kit: Option<String>) {
         }
     }
 
-    // Create type folders from kit ontology.
-    // Reads from kit.yml: "install folders", "folder base", "folder ontology".
-    // Falls back to legacy "createTypeFolders" for pre-migration kits.
-    {
-        let create_folders = kit_config_bool(kit_name, "install folders", false)
-            || kit_config_bool(kit_name, "createTypeFolders", false);
-        let folder_base = kit_config_str(kit_name, "folder base");
-        let kit_types = get_kit_types(kit_name);
-        if create_folders {
-            let mut created: Vec<String> = Vec::new();
-            for (type_name, _) in &kit_types {
-                // Foldered gate — the shared predicate (foldered AND NOT
-                // deprecated, #74): a class earns a scaffolded folder ONLY
-                // when tagged `git-lex:foldered true` and not retired.
-                // Untagged = graph-only, no folder.
-                if !ontology::class_gets_folder(kit_name, type_name) {
-                    continue;
-                }
-                let type_dir = if let Some(ref base) = folder_base {
-                    root.join(base).join(type_name)
-                } else {
-                    root.join(type_name)
-                };
-                fs::create_dir_all(&type_dir).ok();
-                // Add a .gitkeep so empty dirs are tracked
-                let gitkeep = type_dir.join(".gitkeep");
-                if !gitkeep.exists() {
-                    fs::write(&gitkeep, "").ok();
-                }
-                created.push(type_name.clone());
-            }
-            if !created.is_empty() {
-                let prefix = folder_base.as_deref().unwrap_or("");
-                if prefix.is_empty() {
-                    println!("Created type folders: {}", created.join(", "));
-                } else {
-                    println!("Created type folders: {}/{{{}}}", prefix, created.join(", "));
-                }
-            }
-        }
-        let type_names: Vec<String> = kit_types.iter().map(|(n, _)| n.clone()).collect();
-        if !kit_types.is_empty() {
+    // Create type folders from kit ontology — extracted step, see fn doc.
+    create_class_folders(kit_name, &root);
 
-            // Generate README.lex.md
+    // README.lex.md — install-once (convergence is board #75); the body is
+    // a pure generator so it is testable and reusable.
+    {
+        let kit_types = get_kit_types(kit_name);
+        if !kit_types.is_empty() {
             let readme_lex = root.join("README.lex.md");
             if !readme_lex.exists() {
-                let mut doc = String::new();
-                doc.push_str(&format!("# git-lex — {} kit\n\n", kit_short));
-                doc.push_str("This repo is managed by [git-lex](https://github.com/repolex-ai/git-lex) — git extensions for knowledge graphs.\n\n");
-
-                doc.push_str("## Quick Start\n\n");
-                doc.push_str("```bash\n");
-                doc.push_str(&format!("git lex create <type>    # Create a new document (types: {})\n", type_names.join(", ")));
-                doc.push_str("git lex save \"message\"   # Add + commit (extracts automatically)\n");
-                doc.push_str("git lex sync              # Build/update the knowledge graph\n");
-                doc.push_str("git lex query \"SPARQL...\" # Query the knowledge graph\n");
-                doc.push_str("```\n\n");
-
-                doc.push_str("## Commands\n\n");
-                doc.push_str("| Command | What it does |\n");
-                doc.push_str("|---|---|\n");
-                doc.push_str(&format!("| `git lex create <type>` | Scaffold a new document. Valid types: {} |\n", type_names.join(", ")));
-                doc.push_str("| `git lex save \"msg\"` | Stage all changes, commit, extract frontmatter |\n");
-                doc.push_str("| `git lex sync` | Build/update the knowledge graph from the commit history |\n");
-                doc.push_str("| `git lex query \"...\"` | SPARQL over the working tree (current files + git layer) |\n");
-                doc.push_str("| `git lex serve viz` | Local web view: activity, graph, history replay |\n");
-                doc.push_str("| `git lex serve sparql` | SPARQL endpoint over the synced store (history queries) |\n\n");
-
-                doc.push_str("## Writing Documents\n\n");
-                doc.push_str("Documents use YAML frontmatter with flat dot notation: `kit.class.property`\n\n");
-                doc.push_str("```yaml\n");
-                doc.push_str("---\n");
-                let example_type = type_names.first().map(|s| s.as_str()).unwrap_or("Class");
-                doc.push_str(&format!("{}.{}.<property>: \"value\"\n", kit_short, example_type));
-                doc.push_str(&format!("# class names are case-sensitive: {}.{}. — see the __{}.md template\n", kit_short, example_type, example_type));
-                doc.push_str("---\n\n");
-                doc.push_str("Your content here. Link other documents with standard markdown links.\n");
-                doc.push_str("```\n\n");
-                doc.push_str("See `__ClassName.md` files in each folder for available properties and SHACL-derived constraints.\n\n");
-
-                doc.push_str("## Linking documents\n\n");
-                doc.push_str("Use standard markdown links with root-relative paths:\n\n");
-                doc.push_str("- `[display text](/Soul/Note/some-doc.md)` — creates a `linksTo` relationship to that document\n");
-                doc.push_str("- links resolve from the repository root; they survive the linking file moving\n\n");
-                doc.push_str("git-lex does not read `[[wikilinks]]` — the only place that notation appears is\n");
-                doc.push_str("Claude Code's own memory files under `Harness/Memory/`, where it is the\n");
-                doc.push_str("harness's private note-taking shorthand and is never resolved by any tool.\n\n");
-
-                // Kit-specific section
-                doc.push_str(&format!("## {} Kit — Document Types\n\n", kit_short));
-                for (type_name, properties) in &kit_types {
-                    doc.push_str(&format!("### {}\n\n", type_name));
-                    doc.push_str(&format!("Create: `git lex create {}`\n\n", type_name));
-                    if !properties.is_empty() {
-                        let has_comments = properties.iter().any(|(_, _, _, c)| !c.is_empty());
-                        if has_comments {
-                            doc.push_str("| Property | Type | Description |\n");
-                            doc.push_str("|---|---|---|\n");
-                        } else {
-                            doc.push_str("| Property | Type |\n");
-                            doc.push_str("|---|---|\n");
-                        }
-                        for (prop_name, prop_type, _, comment) in properties {
-                            if comment.is_empty() {
-                                doc.push_str(&format!("| {} | {} |\n", prop_name, prop_type));
-                            } else {
-                                doc.push_str(&format!("| {} | {} | {} |\n", prop_name, prop_type, comment));
-                            }
-                        }
-                        doc.push_str("\n");
-                    }
-                }
-
-                doc.push_str("## Querying\n\n");
-                doc.push_str("Auto-injected prefixes: `git-lex:`, `git2:`, `md:`, `fm:`");
-                if kit_short != "none" {
-                    doc.push_str(&format!(", `{}:`", kit_short));
-                }
-                doc.push_str("\n\n");
-                doc.push_str("```sparql\n");
-                doc.push_str("# List all documents by type\n");
-                doc.push_str("SELECT ?doc ?type WHERE { ?doc a ?type } LIMIT 20\n");
-                doc.push_str("```\n");
-
+                let doc = generate_readme_lex(&kit_short, &kit_types);
                 fs::write(&readme_lex, &doc).ok();
                 println!("Created README.lex.md");
             }
@@ -515,7 +328,235 @@ pub(crate) fn cmd_init(directory: Option<String>, kit: Option<String>) {
 
     // NO post-commit hook — sync is manual/background
 
-    // Commit setup files
+    // Commit setup files + offer the initial-content commit for
+    // brand-new repos — extracted step, see fn doc.
+    commit_setup_and_content();
+
+    // Genesis identity: repo.yml genesis_sha + SOUL.md soulId fill,
+    // committed as "git lex identity" — extracted step, see fn doc.
+    record_identity(&root, &repo_yml_path);
+
+    // t-box: load installed kit ontologies into the persistent ontology
+    // graph (the shared lifecycle helper — review #11).
+    crate::kit_cmds::reload_ontology_graph();
+
+    // Register this repo in the machine-level registry (~/.lex/repos)
+    registry_add(&root);
+}
+
+// ─── init steps (extracted from cmd_init — review #12: the 582-line
+// single function was the longest in the crate, and these seams were
+// already delimited as anonymous blocks) ─────────────────────────────
+
+/// init step: fetch and install the base kit (always) plus the domain
+/// kit (when different). Any fetch failure aborts init — partial kit
+/// state is worse than none, and the only failure mode here is
+/// network/auth.
+fn fetch_kits(lex_dir: &std::path::Path, kit_name: &str, kit_spec: &str, org: &str, repo: &str) {
+    let lex_kit_root = lex_dir.join("kit");
+    let _ = fs::remove_dir_all(&lex_kit_root);
+
+    // Always install base kit.
+    let (base_org, base_repo, _) = resolve_kit_spec(BASE_KIT);
+    let base_dir = lex_kit_root.join(&base_org).join(&base_repo);
+    fs::create_dir_all(&base_dir).ok();
+    println!("Downloading base kit {}/{}...", base_org, base_repo);
+    if fetch_kit_from_github(BASE_KIT, &base_dir) {
+        println!("Base kit installed.");
+    } else {
+        eprintln!("Failed to fetch base kit from GitHub.");
+        eprintln!("Check network access to https://github.com/{}/{}", base_org, base_repo);
+        exit(1);
+    }
+
+    // Install the domain kit (if different from base).
+    let kit_dir = lex_kit_root.join(org).join(repo);
+    if kit_spec != format!("{}/{}", base_org, base_repo) {
+        fs::create_dir_all(&kit_dir).ok();
+        println!("Downloading additional kit {}/{}...", org, repo);
+        if fetch_kit_from_github(kit_name, &kit_dir) {
+            println!("Additional kit installed.");
+        } else {
+            eprintln!("Failed to fetch kit '{}' from GitHub.", kit_name);
+            eprintln!("Check that https://github.com/{}/{} exists and you have network access.", org, repo);
+            exit(1);
+        }
+    }
+}
+
+/// init step: create repo.yml if missing (three keys: name/kit/created —
+/// the wikilink-era `link_semantics` fence is fully retired, one link
+/// law, Rob-ruled 2026-08-08), or rewrite just the `kit:` line of an
+/// existing one so a re-init with --kit X rebinds without touching any
+/// other field.
+fn write_repo_yml(repo_yml_path: &std::path::Path, root: &std::path::Path, kit_spec: &str) {
+    if !repo_yml_path.exists() {
+        let repo_name = root.file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| "unknown".to_string());
+        let today = Command::new("date").args(["+%Y-%m-%d"]).output().ok()
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+            .unwrap_or_else(|| "unknown".to_string());
+        fs::write(repo_yml_path, format!(
+            "name: {}\nkit: {}\ncreated: {}\n",
+            repo_name, kit_spec, today
+        )).unwrap_or_else(|e| {
+            eprintln!("fatal: could not write .lex/repo.yml: {}", e);
+            exit(1);
+        });
+    } else if let Ok(existing) = fs::read_to_string(repo_yml_path) {
+        let mut updated_lines: Vec<String> = Vec::new();
+        let mut saw_kit_line = false;
+        for line in existing.lines() {
+            if line.starts_with("kit: ") || line.starts_with("kit:") {
+                updated_lines.push(format!("kit: {}", kit_spec));
+                saw_kit_line = true;
+            } else {
+                updated_lines.push(line.to_string());
+            }
+        }
+        if !saw_kit_line {
+            updated_lines.push(format!("kit: {}", kit_spec));
+        }
+        let mut content = updated_lines.join("\n");
+        if !content.ends_with('\n') { content.push('\n'); }
+        fs::write(repo_yml_path, content).unwrap_or_else(|e| {
+            eprintln!("fatal: could not update .lex/repo.yml kit binding: {}", e);
+            exit(1);
+        });
+    }
+}
+
+/// init step: create the kit's class folders (gated per class on the
+/// shared foldered-AND-not-deprecated predicate, #74). Reads kit.yml
+/// "install folders" / "folder base" ("createTypeFolders" is the legacy
+/// pre-migration key).
+fn create_class_folders(kit_name: &str, root: &std::path::Path) {
+    let create_folders = kit_config_bool(kit_name, "install folders", false)
+        || kit_config_bool(kit_name, "createTypeFolders", false);
+    if !create_folders {
+        return;
+    }
+    let folder_base = kit_config_str(kit_name, "folder base");
+    let kit_types = get_kit_types(kit_name);
+    let mut created: Vec<String> = Vec::new();
+    for (type_name, _) in &kit_types {
+        if !ontology::class_gets_folder(kit_name, type_name) {
+            continue;
+        }
+        let type_dir = if let Some(ref base) = folder_base {
+            root.join(base).join(type_name)
+        } else {
+            root.join(type_name)
+        };
+        fs::create_dir_all(&type_dir).ok();
+        // Add a .gitkeep so empty dirs are tracked
+        let gitkeep = type_dir.join(".gitkeep");
+        if !gitkeep.exists() {
+            fs::write(&gitkeep, "").ok();
+        }
+        created.push(type_name.clone());
+    }
+    if !created.is_empty() {
+        let prefix = folder_base.as_deref().unwrap_or("");
+        if prefix.is_empty() {
+            println!("Created type folders: {}", created.join(", "));
+        } else {
+            println!("Created type folders: {}/{{{}}}", prefix, created.join(", "));
+        }
+    }
+}
+
+/// init step: the README.lex.md body — a PURE generator (no I/O), so the
+/// onboarding page is testable and ready for the #75 convergence path.
+fn generate_readme_lex(
+    kit_short: &str,
+    kit_types: &[(String, Vec<(String, String, bool, String)>)],
+) -> String {
+    let type_names: Vec<String> = kit_types.iter().map(|(n, _)| n.clone()).collect();
+    let mut doc = String::new();
+    doc.push_str(&format!("# git-lex — {} kit\n\n", kit_short));
+    doc.push_str("This repo is managed by [git-lex](https://github.com/repolex-ai/git-lex) — git extensions for knowledge graphs.\n\n");
+
+    doc.push_str("## Quick Start\n\n");
+    doc.push_str("```bash\n");
+    doc.push_str(&format!("git lex create <type>    # Create a new document (types: {})\n", type_names.join(", ")));
+    doc.push_str("git lex save \"message\"   # Add + commit (extracts automatically)\n");
+    doc.push_str("git lex sync              # Build/update the knowledge graph\n");
+    doc.push_str("git lex query \"SPARQL...\" # Query the knowledge graph\n");
+    doc.push_str("```\n\n");
+
+    doc.push_str("## Commands\n\n");
+    doc.push_str("| Command | What it does |\n");
+    doc.push_str("|---|---|\n");
+    doc.push_str(&format!("| `git lex create <type>` | Scaffold a new document. Valid types: {} |\n", type_names.join(", ")));
+    doc.push_str("| `git lex save \"msg\"` | Stage all changes, commit, extract frontmatter |\n");
+    doc.push_str("| `git lex sync` | Build/update the knowledge graph from the commit history |\n");
+    doc.push_str("| `git lex query \"...\"` | SPARQL over the working tree (current files + git layer) |\n");
+    doc.push_str("| `git lex serve viz` | Local web view: activity, graph, history replay |\n");
+    doc.push_str("| `git lex serve sparql` | SPARQL endpoint over the synced store (history queries) |\n\n");
+
+    doc.push_str("## Writing Documents\n\n");
+    doc.push_str("Documents use YAML frontmatter with flat dot notation: `kit.class.property`\n\n");
+    doc.push_str("```yaml\n");
+    doc.push_str("---\n");
+    let example_type = type_names.first().map(|s| s.as_str()).unwrap_or("Class");
+    doc.push_str(&format!("{}.{}.<property>: \"value\"\n", kit_short, example_type));
+    doc.push_str(&format!("# class names are case-sensitive: {}.{}. — see the __{}.md template\n", kit_short, example_type, example_type));
+    doc.push_str("---\n\n");
+    doc.push_str("Your content here. Link other documents with standard markdown links.\n");
+    doc.push_str("```\n\n");
+    doc.push_str("See `__ClassName.md` files in each folder for available properties and SHACL-derived constraints.\n\n");
+
+    doc.push_str("## Linking documents\n\n");
+    doc.push_str("Use standard markdown links with root-relative paths:\n\n");
+    doc.push_str("- `[display text](/Soul/Note/some-doc.md)` — creates a `linksTo` relationship to that document\n");
+    doc.push_str("- links resolve from the repository root; they survive the linking file moving\n\n");
+    doc.push_str("git-lex does not read `[[wikilinks]]` — the only place that notation appears is\n");
+    doc.push_str("Claude Code's own memory files under `Harness/Memory/`, where it is the\n");
+    doc.push_str("harness's private note-taking shorthand and is never resolved by any tool.\n\n");
+
+    // Kit-specific section
+    doc.push_str(&format!("## {} Kit — Document Types\n\n", kit_short));
+    for (type_name, properties) in kit_types {
+        doc.push_str(&format!("### {}\n\n", type_name));
+        doc.push_str(&format!("Create: `git lex create {}`\n\n", type_name));
+        if !properties.is_empty() {
+            let has_comments = properties.iter().any(|(_, _, _, c)| !c.is_empty());
+            if has_comments {
+                doc.push_str("| Property | Type | Description |\n");
+                doc.push_str("|---|---|---|\n");
+            } else {
+                doc.push_str("| Property | Type |\n");
+                doc.push_str("|---|---|\n");
+            }
+            for (prop_name, prop_type, _, comment) in properties {
+                if comment.is_empty() {
+                    doc.push_str(&format!("| {} | {} |\n", prop_name, prop_type));
+                } else {
+                    doc.push_str(&format!("| {} | {} | {} |\n", prop_name, prop_type, comment));
+                }
+            }
+            doc.push_str("\n");
+        }
+    }
+
+    doc.push_str("## Querying\n\n");
+    doc.push_str("Auto-injected prefixes: `git-lex:`, `git2:`, `md:`, `fm:`");
+    if kit_short != "none" {
+        doc.push_str(&format!(", `{}:`", kit_short));
+    }
+    doc.push_str("\n\n");
+    doc.push_str("```sparql\n");
+    doc.push_str("# List all documents by type\n");
+    doc.push_str("SELECT ?doc ?type WHERE { ?doc a ?type } LIMIT 20\n");
+    doc.push_str("```\n");
+    doc
+}
+
+/// init step: commit the .lex/ setup files, then (brand-new repos only)
+/// offer to commit pre-existing content.
+fn commit_setup_and_content() {
     let has_commits = Command::new("git").args(["rev-parse", "HEAD"]).output()
         .map(|o| o.status.success()).unwrap_or(false);
 
@@ -546,21 +587,19 @@ pub(crate) fn cmd_init(directory: Option<String>, kit: Option<String>) {
             }
         }
     }
+}
 
-    // Capture the genesis (first-commit) SHA — the cryptographic anchor —
-    // and record it in repo.yml as `genesis_sha:` through git.rs, the ONE
-    // authority (review #10). The inline copy that lived here took
-    // `git rev-list`'s WHOLE stdout, so a multi-root repo appended
-    // "sha1\nsha2" — invalid YAML that made RepoYml::load warn-discard the
-    // entire repo.yml (kit, identity, everything), permanently: the repair
-    // check matches the first line and never fires. git.rs handles
-    // multi-root (last line = earliest commit), validates the sha, and
-    // owns the textual append including the legacy `first_commit:`
-    // self-migration.
+/// init step: genesis identity. Records genesis_sha in repo.yml through
+/// git.rs, the ONE authority (review #10 — the inline copy this replaces
+/// broke multi-root repos into invalid YAML that warn-discarded the whole
+/// repo.yml), fills soul.Soul.soulId in SOUL.md (#29), and commits both
+/// as "git lex identity" — loudly on failure (#50): identity is the
+/// anchor engines join on.
+fn record_identity(root: &std::path::Path, repo_yml_path: &std::path::Path) {
     let first_sha = crate::git::genesis_sha().unwrap_or_default();
 
     if !first_sha.is_empty() {
-        let existing = fs::read_to_string(&repo_yml_path).unwrap_or_default();
+        let existing = fs::read_to_string(repo_yml_path).unwrap_or_default();
         let mut identity_paths: Vec<&str> = Vec::new();
         if !existing.contains("genesis_sha:") && !existing.contains("first_commit:") {
             if let Err(e) = crate::git::ensure_repo_yml_genesis(&first_sha) {
@@ -573,7 +612,7 @@ pub(crate) fn cmd_init(directory: Option<String>, kit: Option<String>) {
         // Fill soul.Soul.soulId in the freshly installed root SOUL.md from
         // the same genesis sha (#29 — the kit template ships the key empty
         // and declares this fill as git-lex's job).
-        match crate::soul_md::heal_soul_id(&root) {
+        match crate::soul_md::heal_soul_id(root) {
             crate::soul_md::HealOutcome::Filled
             | crate::soul_md::HealOutcome::Healed { .. } => identity_paths.push("SOUL.md"),
             _ => {}
@@ -600,11 +639,4 @@ pub(crate) fn cmd_init(directory: Option<String>, kit: Option<String>) {
             }
         }
     }
-
-    // t-box: load installed kit ontologies into the persistent ontology
-    // graph (the shared lifecycle helper — review #11).
-    crate::kit_cmds::reload_ontology_graph();
-
-    // Register this repo in the machine-level registry (~/.lex/repos)
-    registry_add(&root);
 }
