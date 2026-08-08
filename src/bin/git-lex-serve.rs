@@ -1,8 +1,8 @@
-//! git lex-serve — HTTP + WebSocket server for git-lex knowledge graphs.
+//! git lex-serve — HTTP server for git-lex knowledge graphs.
 //!
-//! Bundles the viz server (D3 graph explorer) and the listen server (SSE
-//! squad notifications) into a single binary. Runs as `git lex-serve` via
-//! git's subcommand discovery (`git <foo>` finds `git-<foo>` on PATH).
+//! Two subcommands: the viz server (D3 graph explorer) and the W3C SPARQL
+//! endpoint. Runs as `git lex-serve` via git's subcommand discovery
+//! (`git <foo>` finds `git-<foo>` on PATH).
 
 use clap::{Parser, Subcommand};
 use git_lex::{add_prefixes, find_git_root, open_store_read_only};
@@ -22,7 +22,7 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Start the visualization server (HTTP + WebSocket on localhost)
+    /// Start the visualization server (HTTP on localhost)
     Viz {
         /// Port to listen on
         #[arg(long, default_value = "7878")]

@@ -193,18 +193,6 @@ pub(crate) fn remove_optional_kit(path: &std::path::Path, spec: &str) -> std::io
     remove_repo_yml_list_item(path, "optional_kits", spec)
 }
 
-/// Append a substrate name to `substrates:` in repo.yml. Idempotent.
-#[allow(dead_code)]
-pub(crate) fn append_substrate(path: &std::path::Path, name: &str) -> std::io::Result<()> {
-    append_repo_yml_list_item(path, "substrates", name)
-}
-
-/// Remove a substrate name from `substrates:` in repo.yml. Idempotent.
-#[allow(dead_code)]
-pub(crate) fn remove_substrate(path: &std::path::Path, name: &str) -> std::io::Result<()> {
-    remove_repo_yml_list_item(path, "substrates", name)
-}
-
 /// Kit scope as declared by `scope:` in the kit's kit.yml.
 ///
 /// - `Base`: ships system ontologies/UI for every repo. Implicit; always
@@ -1344,33 +1332,6 @@ mod tests {
     fn read_substrates_empty_when_missing() {
         let p = write_tmp_repo_yml("name: TEST\nkit: foo/bar\n");
         assert!(read_repo_yml_substrates(&p).is_empty());
-        std::fs::remove_dir_all(p.parent().unwrap()).ok();
-    }
-
-    #[test]
-    fn append_substrate_creates_section() {
-        let p = write_tmp_repo_yml("name: TEST\nkit: foo/bar\n");
-        append_substrate(&p, "claude").unwrap();
-        assert_eq!(read_repo_yml_substrates(&p), vec!["claude".to_string()]);
-        std::fs::remove_dir_all(p.parent().unwrap()).ok();
-    }
-
-    #[test]
-    fn append_substrate_is_idempotent() {
-        let p = write_tmp_repo_yml("name: TEST\nkit: foo/bar\nsubstrates:\n  - claude\n");
-        append_substrate(&p, "claude").unwrap();
-        append_substrate(&p, "claude").unwrap();
-        assert_eq!(read_repo_yml_substrates(&p), vec!["claude".to_string()]);
-        std::fs::remove_dir_all(p.parent().unwrap()).ok();
-    }
-
-    #[test]
-    fn remove_substrate_drops_entry() {
-        let p = write_tmp_repo_yml(
-            "name: TEST\nkit: foo/bar\nsubstrates:\n  - claude\n  - hermes\n"
-        );
-        remove_substrate(&p, "claude").unwrap();
-        assert_eq!(read_repo_yml_substrates(&p), vec!["hermes".to_string()]);
         std::fs::remove_dir_all(p.parent().unwrap()).ok();
     }
 

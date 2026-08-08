@@ -471,10 +471,6 @@ pub(crate) fn generate_frontmatter_nquads_with(
     let extract_dir = root.join(".lex").join("extract");
     fs::create_dir_all(&extract_dir).ok();
 
-    // Regex pattern for [[wikilinks]].
-    // @mentions removed — they were blog inheritance with no job in a system
-    // where everything is a document. Canonical direction: [[Class/id]].
-
     for filepath in files {
         let content = match fs::read_to_string(filepath) {
             Ok(c) => c,
@@ -498,8 +494,13 @@ pub(crate) fn generate_frontmatter_nquads_with(
         }).unwrap_or_default();
 
         // --- Frontmatter extraction ---
+        // Only the YAML block is read here. The BODY is deliberately not
+        // parsed: wikilink extraction retired (Rob-ruled 2026-08-06) —
+        // markdown links are the linking story and extraction.rs emits
+        // their `linksTo` lines; `[[...]]` in a body is plain prose.
+        // Historical `linksTo` sidecar lines still replay through the quad
+        // emitter below — history doesn't un-happen.
         let mut spo_lines = Vec::new();
-        let body_text;
 
         if content.starts_with("---\n") || content.starts_with("---\r\n") {
             let rest = &content[4..];
@@ -516,24 +517,8 @@ pub(crate) fn generate_frontmatter_nquads_with(
                         total_errors += 1;
                     }
                 }
-                // Body is everything after the closing ---
-                let after_fm = &rest[end + 4..]; // skip "\n---"
-                body_text = after_fm.to_string();
-            } else {
-                body_text = content.clone();
             }
-        } else {
-            body_text = content.clone();
         }
-
-        // --- [[wikilink]] extraction: RETIRED (Rob-ruled 2026-08-06) ---
-        // git-lex no longer reads wikilinks. Markdown links are the linking
-        // story (extraction.rs emits their `linksTo` lines); `[[...]]` in a
-        // body is plain prose. The ONLY sanctioned wikilink use is Claude
-        // Code's Harness/Memory notation, which no resolver ever reads.
-        // Historical sidecar lines with `linksTo` targets still replay
-        // through the quad emitter below — history doesn't un-happen.
-        let _ = &body_text;
 
         // Sort and dedup
         spo_lines.sort();
