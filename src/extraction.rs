@@ -2,16 +2,13 @@
 //! and the frontmatter-to-Turtle converter (`frontmatter_to_turtle`, called by
 //! `cmd_validate` to build the per-file graph SHACL validates).
 //!
-//! The big N-Quad *generators* (`generate_git_nquads`, `generate_frontmatter_nquads`,
-//! `load_lex_nquads`) live in `nquad.rs`.
+//! The big N-Quad *generators* (`generate_frontmatter_nquads`,
+//! `load_lex_nquads`) live in `nquad.rs`; the git layer is
+//! `generate_git2_nquads` in `git2_nquads.rs`.
 //!
 //! Peeled out of `main.rs` during modularization. No behavior changes.
-//!
-//! NOTE(w4r3z, Day 48): two type-emitters in two files have DRIFTED apart and are
-//! the STRUCTURAL ROOT of the B1 class-casing bug: `frontmatter_to_turtle` (here,
-//! capitalizes first letter) and the nquad-path emitter (`nquad.rs:~749`, no
-//! transform). Unifying them — one emitter, one casing rule — would dissolve the
-//! bug. Update or remove this comment when that lands.
+//! (The Day-48 two-type-emitters drift NOTE that lived here is resolved:
+//! both paths now call `ontology::resolve_class_segment`, one casing rule.)
 
 use std::collections::HashMap;
 use std::fs;

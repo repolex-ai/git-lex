@@ -8,15 +8,14 @@
 //!
 //! ## The rules (as codified by the test suite below)
 //!
-//! 1. **No `[[wikilinks]]` in frontmatter.** Wikilinks are body-text syntax
-//!    for cross-referencing pages. If an agent writes `assignedTo: [[w4r3z]]`
-//!    the resolver rejects it with a clear error. The correct form is
-//!    `assignedTo: w4r3z` the resolver rejects it. The correct form is
-//!    `assignedTo: <repo-relative path>`.
+//! 1. **No `[[wikilinks]]` in frontmatter.** If an agent writes
+//!    `assignedTo: [[w4r3z]]` the resolver rejects it with a clear error.
+//!    The correct form is the repo-relative path
+//!    (`assignedTo: friend/w4r3z.md`).
 //!
-//! 2. **No `@mentions` in frontmatter.** The `@` prefix is body-text syntax
-//!    for mentioning agents in prose. `assignedTo: @w4r3z` is rejected.
-//!    Write `assignedTo: w4r3z` instead.
+//! 2. **No `@mentions` in frontmatter.** The `@` prefix is prose syntax.
+//!    `assignedTo: @w4r3z` is rejected — write the repo-relative path
+//!    (`assignedTo: friend/w4r3z.md`) instead, per rule 3.
 //!
 //! 3. **Bare names are REJECTED** (Rob-ruled 2026-07-28). A reference is
 //!    the document's repo-relative path (`friend/selkie.md`) or a full
@@ -64,10 +63,11 @@ pub enum ResolveResult {
 
 /// Resolve a raw frontmatter ObjectProperty value into an IRI or reject it.
 ///
-/// This is the ONLY code path for frontmatter ObjectProperty resolution.
-/// Body-text `[[wikilinks]]` and `@mentions` have their own resolvers
-/// because they serve a different purpose (ambient cross-references in
-/// prose, emitting `md:linksTo` and `md:mentions` respectively).
+/// This is the ONLY resolution path for frontmatter ObjectProperty values.
+/// Body links are standard markdown links, handled in extraction.rs
+/// (emitting `linksTo`); the body wikilink/@mention resolvers this doc
+/// once described are retired — `[[...]]` and `@name` in a body are
+/// plain prose.
 ///
 /// See the module-level doc comment for the full rule set, and the test
 /// suite below for executable examples of each rule.

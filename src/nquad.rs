@@ -485,9 +485,11 @@ pub(crate) fn emit_file_anchor_nquads(
     ));
 }
 
-/// Extract frontmatter and body wikilinks from all .md/.txt files in the
-/// repo into the "now" graph. Also writes `.fm.spo` sidecars and scans
-/// commit messages for wikilinks.
+/// Extract frontmatter from all .md/.txt files in the repo into the "now"
+/// graph, writing `.fm.spo` sidecars as a side effect. Body linking is
+/// markdown links, extracted in extraction.rs (`linksTo`); the wikilink
+/// reader and commit-message scanning this doc once promised are retired
+/// (Rob-ruled 2026-08-06 — `[[...]]` in a body is plain prose).
 pub(crate) fn generate_frontmatter_nquads() -> (String, u32) {
     let root = match find_git_root() {
         Some(r) => r,
@@ -505,12 +507,13 @@ pub(crate) fn generate_frontmatter_nquads_with(
 ) -> (String, u32) {
     let root = root.to_path_buf();
 
-    // The "now" graph is the canonical view of current state — extracted
-    // frontmatter, body wikilinks/mentions, and any triples derived from the
-    // working tree as it exists right now. Contrasts with sync/<sha>/ graphs,
-    // which hold historical snapshots at past commits. Previously named
-    // "frontmatter" but that was misleading: this graph holds more than the
-    // fm: namespace (wikilinks, mentions, etc are also here).
+    // The "now" graph is the canonical view of current state: extracted
+    // frontmatter plus the git-layer facts derived from the working tree
+    // as it exists right now. Contrasts with the ONE graph
+    // (LexHistoryGraph), which holds the full event history and its
+    // materialized base layer. (The old sync/<sha> snapshot family this
+    // comment once contrasted against is retired and swept at every sync;
+    // wikilinks/mentions likewise no longer exist anywhere.)
     let graph = format!("<{}>", graph_uri("now"));
     let mut nq = String::new();
     let mut total_errors: u32 = 0;

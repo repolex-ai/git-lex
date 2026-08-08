@@ -325,8 +325,13 @@ impl CleanupReport {
 ///
 /// Current extractors:
 ///   - `fm`   : frontmatter (YAML header → triples, mainline)
-///   - `md`   : markdown links (tree-sitter walker, mentions + wikilinks)
-///   - `cc`   : claude-code JSONL sessions (claude-export kit)
+///   - `md`   : markdown links (tree-sitter walker → `linksTo`; the
+///              wikilink/mention lanes are retired)
+///
+/// Historical suffixes (kept so cleanup still globs their legacy sidecars):
+///   - `cc`   : claude-code JSONL sessions — extractor deleted
+///              (Rob-ruled 2026-08-01; transcript analytics is ravel's
+///              domain), old sidecars may survive in repos and history
 ///
 /// Future extractors (not yet implemented but named in the spec):
 ///   - `gliner` : entity mentions via the gliner2 Rust crate

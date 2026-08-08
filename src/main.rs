@@ -40,8 +40,8 @@ use crate::kit::{kit_config_str, read_repo_yml_fields};
 
 // .spo event stream — git-aware change detector for .spo sidecars. Used by
 // orphan cleanup (pre-commit hook) and history graph ingest (rebuild +
-// incremental). See Situation/2026-04-09-history-graph-temporal-ledger.md §11
-// for the phase plan this module is the foundation for.
+// incremental). The full model is documented in docs/history.md and in the
+// module header of src/spo_events.rs itself.
 mod spo_events;
 
 #[derive(Parser)]
@@ -550,10 +550,11 @@ fn cmd_create(doctype: &str, instance_id: Option<&str>, json: bool) {
 
     fs::write(&filepath, &fm).expect("failed to create document");
 
-    // Document URI = https://repolex.ai/soul/{path} — matches the
-    // scheme used by the nquad generator so the JSON payload matches what the
-    // extraction pipeline will produce on the next sync (Day-50: no soul
-    // identity in subjects).
+    // Document URI = <derived a-box base>/{path} — resource_uri derives the
+    // base per repo (kit short name, else repo name; NEVER hardcoded —
+    // Rob-ruled 2026-07-28), so the JSON payload matches what the
+    // extraction pipeline will produce on the next sync. A soul-kit repo
+    // gets https://repolex.ai/soul/{path}; other kits get their own base.
     let rel = filepath.strip_prefix(&root).unwrap_or(&filepath);
     let uri = resource_uri(&rel.to_string_lossy().replace('\\', "/"));
 
@@ -648,10 +649,13 @@ fn cmd_save(message: &str, dry_run: bool) {
     // (fail-loud, #29 — the file is restorable via kit-update).
     soul_md::require_soul_md(&root);
 
-    // Resolve the agent's identity. Tries env first (squad-repo case where
-    // the agent's soul session injects GIT_AUTHOR_*) then settings.json
-    // (soul-repo case). Hard-fail otherwise — saving with the wrong identity
-    // (e.g. user's global gitconfig leaking in) is worse than not saving.
+    // Resolve the agent's identity — THREE sources in precedence order
+    // (see resolve_agent_identity): env (squad-repo case where the soul
+    // session injects GIT_AUTHOR_*), then .lex/repo.yml (authoritative,
+    // travels with the soul — the C23 Day-40 fix), then settings.json
+    // (legacy soul-repo case). Hard-fail otherwise — saving with the wrong
+    // identity (e.g. user's global gitconfig leaking in) is worse than not
+    // saving.
     let (author_name, author_email) = match resolve_agent_identity(&root) {
         Some(id) => id,
         None => {
@@ -966,8 +970,8 @@ fn cmd_extract() {
     // regeneration. Replaces the old cleanup_orphaned_sidecars walker that
     // was buggy on macOS APFS (case-insensitive `Path::exists()`).
     //
-    // See src/spo_events.rs and Situation/2026-04-09-history-graph-
-    // temporal-ledger.md §11 for the design.
+    // See src/spo_events.rs (module header) and docs/history.md for the
+    // design.
     let cleanup = spo_events::cleanup_sidecars_for_staged_changes();
     if !cleanup.is_empty() {
         eprintln!("Cleanup: {}", cleanup.summary());
@@ -1275,10 +1279,10 @@ fn run_query(store: &Store, query: &str, store_type: &str, json: bool) {
                         println!("|{}", row_str);
                     }
                 } else {
+                    // (review #43: the old "run `git lex sync`" hint here
+                    // was unreachable — this command always queries the
+                    // live working-tree view — and wrong advice besides.)
                     println!("(No results found)");
-                    if store_type.starts_with("one graph") {
-                        println!("(nothing synced yet? run `git lex sync` to build the store)");
-                    }
                 }
             }
         }

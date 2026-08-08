@@ -460,8 +460,10 @@ mod query_server {
 
     #[derive(serde::Deserialize, ToSchema)]
     pub struct QueryBody {
-        /// SPARQL text. Standard prefixes (rdf/rdfs/owl/xsd, git:/lex:/fm: +
-        /// the installed kit's prefix) are pre-declared.
+        /// SPARQL text. Standard prefixes (rdf/rdfs/owl/xsd plus git:,
+        /// git-lex:, git2:, md:, fm: and the installed kit's prefix) are
+        /// pre-declared — the set add_prefixes_at injects (lib.rs), same
+        /// as docs/queries.md.
         pub query: String,
     }
 
