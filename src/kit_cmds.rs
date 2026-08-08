@@ -887,12 +887,28 @@ pub(crate) fn cmd_kit_add(kit_spec: String) {
     // Code never fires them (the pool-kit gap, Day 50). Identity is per-repo,
     // not per-kit, so this re-derives the whole hook set from all installed
     // kits — exactly the convergent behavior we want.
-    if let Some(agent_name) = git_lex::RepoYml::load(&root).agent_name.filter(|s| !s.is_empty()) {
-        for substrate in harness::active_substrates(&root) {
-            match substrate {
-                harness::Substrate::Claude => harness::claude::setup_substrate_claude(&root, &agent_name),
-                harness::Substrate::Hermes | harness::Substrate::Gemini => {}
+    match git_lex::RepoYml::load(&root).agent_name.filter(|s| !s.is_empty()) {
+        Some(agent_name) => {
+            for substrate in harness::active_substrates(&root) {
+                match substrate {
+                    harness::Substrate::Claude => harness::claude::setup_substrate_claude(&root, &agent_name),
+                    harness::Substrate::Hermes | harness::Substrate::Gemini => {}
+                }
             }
+        }
+        // #67: same well-dressed-dead kit-update had (Day 50) — kit-add
+        // lands the hook FILES above, but without this pass they are never
+        // registered in settings.json, so the kit looks installed and its
+        // hooks never fire. The skip must be as loud here as there.
+        None => {
+            eprintln!(
+                "warning: no `agent_name:` in .lex/repo.yml — SKIPPED substrate setup \
+                 (settings.json hooks + identity env were NOT written/reconciled).\n\
+                 This kit's hooks will not fire until this is fixed. Add a line to \
+                 .lex/repo.yml:\n\
+                 \x20   agent_name: <your-name>\n\
+                 then re-run `git lex kit-update`."
+            );
         }
     }
 
