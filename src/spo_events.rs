@@ -736,6 +736,63 @@ fn read_sidecar_at_commit(sha: &str, sidecar_path: &str) -> Result<Vec<String>, 
     ))
 }
 
+/// Read a sidecar's lines by blob oid (same comment/blank filtering as
+/// `read_sidecar_at_commit`). The duplicate-id retract guard resolves
+/// untouched sidecars content-addressed, so identical bytes across commits
+/// resolve once per walk.
+fn read_sidecar_blob(oid: &str) -> Result<Vec<String>, String> {
+    let out = Command::new("git")
+        .args(["cat-file", "blob", oid])
+        .output()
+        .map_err(|e| format!("git cat-file blob {oid}: spawn failed: {e}"))?;
+    if !out.status.success() {
+        return Err(format!(
+            "git cat-file blob {oid} failed ({}): {}",
+            out.status,
+            String::from_utf8_lossy(&out.stderr).trim()
+        ));
+    }
+    Ok(String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .filter(|l| !l.is_empty() && !l.starts_with('#'))
+        .map(|l| l.to_string())
+        .collect())
+}
+
+/// List every `(blob oid, path)` under `.lex/extract/` at a commit. A
+/// malformed ls-tree record is a hard error — the guard that consumes this
+/// list decides whether facts LEAVE the graph, so a silently skipped entry
+/// would reintroduce the exact wrong-retract it exists to prevent.
+fn list_sidecar_blobs_at(sha: &str) -> Result<Vec<(String, String)>, String> {
+    let out = Command::new("git")
+        .args(["ls-tree", "-r", "-z", "--full-tree", sha, "--", ".lex/extract"])
+        .output()
+        .map_err(|e| format!("git ls-tree -r {sha}: spawn failed: {e}"))?;
+    if !out.status.success() {
+        return Err(format!(
+            "git ls-tree -r {sha} -- .lex/extract failed ({}): {}",
+            out.status,
+            String::from_utf8_lossy(&out.stderr).trim()
+        ));
+    }
+    let text = String::from_utf8_lossy(&out.stdout);
+    let mut entries = Vec::new();
+    for rec in text.split('\0').filter(|r| !r.is_empty()) {
+        // "<mode> <type> <oid>\t<path>"
+        let (meta, path) = rec
+            .split_once('\t')
+            .ok_or_else(|| format!("git ls-tree {sha}: malformed record: {rec:?}"))?;
+        let mut parts = meta.split_whitespace();
+        let (_mode, typ, oid) = (parts.next(), parts.next(), parts.next());
+        if typ != Some("blob") {
+            continue; // submodules etc. — not sidecar content
+        }
+        let oid = oid.ok_or_else(|| format!("git ls-tree {sha}: record missing oid: {rec:?}"))?;
+        entries.push((oid.to_string(), path.to_string()));
+    }
+    Ok(entries)
+}
+
 // ════════════════════════════════════════════════════════════════════════════
 // The one graph — the PRODUCTION history model
 // ════════════════════════════════════════════════════════════════════════════
@@ -927,6 +984,11 @@ pub(crate) fn onegraph_walk_engine(
         resolver_other: usize,       // dropped inside the shared emitter
         unknown_suffix: usize,       // sidecar with an undeclared extractor suffix
         resolver_errors: u32,        // errors reported by the shared emitter
+        // #28: retracts suppressed because an UNTOUCHED sidecar still
+        // asserts the same triple (duplicate ids from merge commits or
+        // pre-gate history). Suppression is correct — the fact never left
+        // the world — but it must be visible, not silent.
+        dup_retracts_suppressed: usize,
         // #79: kit lines whose CLASS segment doesn't resolve under the
         // CURRENT ontology, keyed `kit.Class` → (line count, source files).
         // A class DELETED from its kit TTL doesn't drop its lines — worse:
@@ -949,35 +1011,16 @@ pub(crate) fn onegraph_walk_engine(
     // Net base-layer effect per triple across this walk (last op wins).
     let mut base_final: HashMap<String, char> = HashMap::new();
 
-    let resolve_sidecar_at = |commit: &str,
-                                  sidecar_path: &str,
-                                  acct: &mut DropAccounting,
-                                  warned_unknown: &mut HashSet<String>|
+    // Resolve one sidecar's LINES (already read from git) into the set of
+    // resolved triple-quad lines. Split from the by-commit reader so the
+    // duplicate-id retract guard below resolves blobs by oid through the
+    // SAME path — one resolver, no drift between the diff sides and the
+    // guard's view of the untouched world.
+    let resolve_lines = |lines: &[String],
+                         sidecar_path: &str,
+                         relpath_str: &str,
+                         acct: &mut DropAccounting|
      -> Result<HashSet<String>, String> {
-        // Unknown extractor suffix: counted and warned, never silent (the
-        // BUG-4 contract). The diff-tree pathspec matches ALL
-        // `.lex/extract/**.spo`, so a sidecar from an extractor this binary
-        // doesn't know contributes nothing — that must be visible.
-        let Some(relpath_str) = derive_source_document(sidecar_path) else {
-            acct.unknown_suffix += 1;
-            if warned_unknown.insert(sidecar_path.to_string()) {
-                eprintln!(
-                    "  one-graph: sidecar with unknown extractor suffix NOT walked: {sidecar_path} (known: {})",
-                    SPO_EXTRACTOR_SUFFIXES.join(", ")
-                );
-            }
-            return Ok(HashSet::new());
-        };
-        let lines = read_sidecar_at_commit(commit, sidecar_path)?;
-        // ABSENT (or empty) sidecar = NO anchors (review-critical fix): the
-        // File rdf:type used to emit unconditionally even for the verified-
-        // empty set of a path absent at this commit — identical on both
-        // diff sides, so a file's anchor facts never diffed: a new file
-        // under-reported its events and a deletion never retracted its
-        // anchors. No sidecar lines, no facts of any kind.
-        if lines.is_empty() {
-            return Ok(HashSet::new());
-        }
         acct.lines_in += lines.len();
         let mut triples: HashSet<String> = HashSet::new();
         let mut emitted_types: HashSet<String> = HashSet::new();
@@ -988,8 +1031,8 @@ pub(crate) fn onegraph_walk_engine(
         // retract+assert pair, nothing else. Warnings stay quiet here: the
         // walk revisits every commit and the save path already warned.
         let subjects = crate::nquad::derive_file_subjects(
-            &lines,
-            &relpath_str,
+            lines,
+            relpath_str,
             &ctx.declared_props,
             &ctx.obj_props,
             &ctx.kit_namespaces,
@@ -1004,7 +1047,7 @@ pub(crate) fn onegraph_walk_engine(
                 triples.insert(t.to_string());
             }
         }
-        for line in &lines {
+        for line in lines {
             // Shape check — HARD error. The walker knows one format:
             // `subject | predicate | object`.
             // splitn(3): MUST match the emitter's split (nquad.rs) — a
@@ -1046,13 +1089,13 @@ pub(crate) fn onegraph_walk_engine(
             if subj.len() == 3 && fields[1] == "hasValue" {
                 let class_key = format!("{}.{}", subj[0], subj[1]);
                 let ok = *acct.class_ok.entry(class_key.clone()).or_insert_with(|| {
-                    crate::ontology::resolve_class_segment(subj[0], subj[1], &relpath_str, false)
+                    crate::ontology::resolve_class_segment(subj[0], subj[1], relpath_str, false)
                         .is_ok()
                 });
                 if !ok {
                     let entry = acct.unresolved_classes.entry(class_key).or_default();
                     entry.0 += 1;
-                    entry.1.insert(relpath_str.clone());
+                    entry.1.insert(relpath_str.to_string());
                 }
             }
             let mut emit_buf = String::new();
@@ -1062,7 +1105,7 @@ pub(crate) fn onegraph_walk_engine(
             // walk revisits every commit — replaying the save path's live
             // to-dos per visit is the #73 spam (the counts still land).
             acct.resolver_errors += crate::nquad::emit_spo_line_nquads(
-                line, &subjects, one_graph, &relpath_str,
+                line, &subjects, one_graph, relpath_str,
                 &ctx.path_index, &ctx.obj_props,
                 &ctx.prop_datatypes, &ctx.declared_props,
                 &ctx.kit_namespaces, &ctx.ref_ranges, &ctx.deprecated_props,
@@ -1080,6 +1123,48 @@ pub(crate) fn onegraph_walk_engine(
         }
         Ok(triples)
     };
+
+    let resolve_sidecar_at = |commit: &str,
+                              sidecar_path: &str,
+                              acct: &mut DropAccounting,
+                              warned_unknown: &mut HashSet<String>|
+     -> Result<HashSet<String>, String> {
+        // Unknown extractor suffix: counted and warned, never silent (the
+        // BUG-4 contract). The diff-tree pathspec matches ALL
+        // `.lex/extract/**.spo`, so a sidecar from an extractor this binary
+        // doesn't know contributes nothing — that must be visible.
+        let Some(relpath_str) = derive_source_document(sidecar_path) else {
+            acct.unknown_suffix += 1;
+            if warned_unknown.insert(sidecar_path.to_string()) {
+                eprintln!(
+                    "  one-graph: sidecar with unknown extractor suffix NOT walked: {sidecar_path} (known: {})",
+                    SPO_EXTRACTOR_SUFFIXES.join(", ")
+                );
+            }
+            return Ok(HashSet::new());
+        };
+        let lines = read_sidecar_at_commit(commit, sidecar_path)?;
+        // ABSENT (or empty) sidecar = NO anchors (review-critical fix): the
+        // File rdf:type used to emit unconditionally even for the verified-
+        // empty set of a path absent at this commit — identical on both
+        // diff sides, so a file's anchor facts never diffed: a new file
+        // under-reported its events and a deletion never retracted its
+        // anchors. No sidecar lines, no facts of any kind.
+        if lines.is_empty() {
+            return Ok(HashSet::new());
+        }
+        resolve_lines(&lines, sidecar_path, &relpath_str, acct)
+    };
+
+    // ── Duplicate-id retract guard state (#28) ──
+    // (blob oid, sidecar path) → resolved triples, content-addressed:
+    // identical sidecar bytes resolve identically within one walk (the
+    // resolution context is constant), so repo-wide guard scans amortize to
+    // one resolve per unique sidecar version. Guard scans count into a
+    // SCRATCH accounting — those sidecars' lines are counted when their own
+    // commits walk; the guard must not inflate the receipt.
+    let mut blob_memo: HashMap<(String, String), HashSet<String>> = HashMap::new();
+    let mut guard_acct = DropAccounting::default();
 
     for (ci, c) in commits.iter().enumerate() {
         if show_progress && total > 0 {
@@ -1125,7 +1210,56 @@ pub(crate) fn onegraph_walk_engine(
         // base_final tracks each touched triple's NET state across this walk
         // (commits are processed oldest→newest, so the last op wins) — it
         // becomes the base-layer mutation set after the walk.
-        for line in old_triples.difference(&new_triples) {
+        //
+        // Retract guard (#28): a retract candidate may still be asserted by
+        // an UNTOUCHED sidecar — duplicate ids enter history through merge
+        // commits (which bypass the pre-commit identity gate), pre-gate
+        // history, and stale .lex/extract/ subtrees. The per-commit diff
+        // sees only touched paths, so deleting one duplicate would emit a
+        // false death event AND drop the survivor's facts from the base
+        // layer (state parity can't catch it: base and derived go wrong
+        // together). Scanning the untouched world costs one ls-tree plus
+        // memoized blob resolves, paid only on commits with candidates.
+        let retracts: Vec<&String> = old_triples.difference(&new_triples).collect();
+        let mut still_live: HashSet<&String> = HashSet::new();
+        if !retracts.is_empty() {
+            let touched_any: HashSet<&str> = old_side.union(&new_side).copied().collect();
+            'scan: for (oid, path) in list_sidecar_blobs_at(&c.sha)? {
+                if !path.ends_with(".spo") || touched_any.contains(path.as_str()) {
+                    continue;
+                }
+                let Some(relpath_str) = derive_source_document(&path) else {
+                    continue; // unknown suffix — counted when its own commit walks
+                };
+                let key = (oid, path.clone());
+                if !blob_memo.contains_key(&key) {
+                    let lines = read_sidecar_blob(&key.0)?;
+                    let triples = if lines.is_empty() {
+                        HashSet::new()
+                    } else {
+                        resolve_lines(&lines, &path, &relpath_str, &mut guard_acct)?
+                    };
+                    blob_memo.insert(key.clone(), triples);
+                }
+                let set = &blob_memo[&key];
+                for cand in &retracts {
+                    if set.contains(*cand) {
+                        still_live.insert(*cand);
+                        if still_live.len() == retracts.len() {
+                            break 'scan; // every candidate accounted for
+                        }
+                    }
+                }
+            }
+        }
+        for line in retracts {
+            if still_live.contains(line) {
+                // Still asserted by an untouched file: the fact never left
+                // the world, so there is no event and no base change. It
+                // retracts when its LAST asserting file drops it.
+                acct.dup_retracts_suppressed += 1;
+                continue;
+            }
             events_seen += 1;
             if let Some(quads) = onegraph_event(line, '-', &c.sha, one_graph) {
                 for q in quads { nq_buffer.push_str(&q); nq_buffer.push('\n'); }
@@ -1182,6 +1316,17 @@ pub(crate) fn onegraph_walk_engine(
             "  one-graph accounting: {} line(s) read — empty-value (no fact): {}, resolver-other: {}, unknown-suffix sidecar(s): {}, resolver error(s): {}",
             acct.lines_in, acct.empty_object, acct.resolver_other,
             acct.unknown_suffix, acct.resolver_errors
+        );
+    }
+    // #28 receipt: suppressed duplicate retracts are correct behavior but
+    // never silent — they mean duplicate Thing ids exist(ed) in history.
+    if acct.dup_retracts_suppressed > 0 {
+        eprintln!(
+            "  one-graph: {} retract(s) suppressed — the same fact is still asserted \
+             by an untouched file (duplicate ids: merge commits bypass the identity \
+             gate, and pre-gate history carries them). A fact retracts when its \
+             LAST asserting file drops it. This is history accounting, not a to-do.",
+            acct.dup_retracts_suppressed
         );
     }
     // #79: the retired-class receipt. Without this, a class deleted from its
