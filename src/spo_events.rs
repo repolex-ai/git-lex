@@ -938,6 +938,19 @@ pub(crate) fn onegraph_walk_engine(
         resolver_other: usize,       // dropped inside the shared emitter
         unknown_suffix: usize,       // sidecar with an undeclared extractor suffix
         resolver_errors: u32,        // errors reported by the shared emitter
+        // #79: kit lines whose CLASS segment doesn't resolve under the
+        // CURRENT ontology, keyed `kit.Class` → (line count, source files).
+        // A class DELETED from its kit TTL doesn't drop its lines — worse:
+        // type + Thing-plane facts silently vanish while property facts
+        // re-anchor to the File plane, so nothing shows in the drop counts
+        // (measured on the 0.9.0 Friend incident: 142 events gone, zero
+        // resolver-other). Named here so the accounting can teach the cure
+        // instead of hiding the erasure.
+        unresolved_classes: std::collections::BTreeMap<String, (usize, std::collections::BTreeSet<String>)>,
+        // Per-walk memo for the #79 pre-check (`kit.Class` → resolves?) —
+        // resolution is constant within one walk, and the check would
+        // otherwise re-read kit shapes per line per commit visit.
+        class_ok: HashMap<String, bool>,
     }
     let mut acct = DropAccounting::default();
     // Unknown-suffix sidecars warn once per path (the walk visits the same
@@ -1023,16 +1036,40 @@ pub(crate) fn onegraph_walk_engine(
                 acct.empty_object += 1;
                 continue;
             }
+            // #79 pre-check: a kit line whose class segment doesn't resolve
+            // under the CURRENT ontology still EMITS (File-plane fallback),
+            // so it never lands in the drop counts — this is the only place
+            // the erasure of its type/Thing-plane facts becomes visible.
+            // Memoized per `kit.Class`; PassThrough (kit with no declared
+            // classes) records nothing — there is nothing to teach about a
+            // kit we can't validate. hasValue guard matches the anchor
+            // scan's definition of a kit line (derive_file_subjects).
+            let subj: Vec<&str> = fields[0].splitn(3, '.').collect();
+            if subj.len() == 3 && fields[1] == "hasValue" {
+                let class_key = format!("{}.{}", subj[0], subj[1]);
+                let ok = *acct.class_ok.entry(class_key.clone()).or_insert_with(|| {
+                    crate::ontology::resolve_class_segment(subj[0], subj[1], &relpath_str, false)
+                        .is_ok()
+                });
+                if !ok {
+                    let entry = acct.unresolved_classes.entry(class_key).or_default();
+                    entry.0 += 1;
+                    entry.1.insert(relpath_str.clone());
+                }
+            }
             let mut emit_buf = String::new();
             // Emitter errors are COUNTED (a line can yield some triples AND
             // errors — e.g. one rejected value among several); the now path
-            // counts the same errors, so the walk must too.
+            // counts the same errors, so the walk must too. warn=false: the
+            // walk revisits every commit — replaying the save path's live
+            // to-dos per visit is the #73 spam (the counts still land).
             acct.resolver_errors += crate::nquad::emit_spo_line_nquads(
                 line, &subjects, one_graph, &relpath_str,
                 &ctx.path_index, &ctx.obj_props,
                 &ctx.prop_datatypes, &ctx.declared_props,
                 &ctx.kit_namespaces, &ctx.ref_ranges, &ctx.deprecated_props,
                 ctx.obsidian_links,
+                false,
                 &mut emitted_types, &mut emit_buf,
             );
             let mut any = false;
@@ -1148,6 +1185,25 @@ pub(crate) fn onegraph_walk_engine(
             "  one-graph accounting: {} line(s) read — empty-value (no fact): {}, resolver-other: {}, unknown-suffix sidecar(s): {}, resolver error(s): {}",
             acct.lines_in, acct.empty_object, acct.resolver_other,
             acct.unknown_suffix, acct.resolver_errors
+        );
+    }
+    // #79: the retired-class receipt. Without this, a class deleted from its
+    // kit TTL erases its own history invisibly (the 0.9.0 Friend incident:
+    // type + Thing-plane events vanish, property facts re-anchor File-ward
+    // — none of it reaches the drop counts above). Printed once per class,
+    // labeled as HISTORY REPLAY accounting, never a live to-do.
+    for (class_key, (n, files)) in &acct.unresolved_classes {
+        eprintln!(
+            "  one-graph: `{class_key}` — {n} historical line(s) across {} file(s) \
+             carry a class that is not declared in the installed ontology; their \
+             rdf:type and Thing-plane facts did NOT replay (property facts fell \
+             back to the File plane). This is history replay, not a to-do. If the \
+             kit RETIRED the class, the cure is kit-lane: re-declare it with \
+             `owl:deprecated true` instead of deleting it — deprecated IS \
+             declared, so its history replays and stale Things retract. If it is \
+             pre-standard dev churn, fence it with `dev_history_horizon:` in \
+             .lex/repo.yml.",
+            files.len()
         );
     }
 

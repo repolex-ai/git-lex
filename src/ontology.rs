@@ -490,6 +490,7 @@ pub(crate) fn resolve_class_segment(
     kit: &str,
     class_seg: &str,
     context: &str,
+    warn: bool,
 ) -> Result<String, String> {
     let classes: Vec<String> = get_kit_types(kit).into_iter().map(|(name, _)| name).collect();
     match resolve_class_against(&classes, class_seg) {
@@ -498,11 +499,17 @@ pub(crate) fn resolve_class_segment(
             // Recover to the canonical name, but warn loudly so the author
             // corrects the frontmatter (and so this never silently masks a
             // future real typo that happens to differ only in case).
-            eprintln!(
-                "warning: {context}: the key prefix `{kit}.{given}.` has the wrong \
-                 capitalization. Fix: edit it to `{kit}.{canonical}.` exactly \
-                 (capitalization matters). Auto-corrected for this run only."
-            );
+            // `warn: false` = the history walk, which revisits every commit:
+            // the save path already taught this once, at the moment the
+            // author could act on it (#73 — replay must not repeat live
+            // to-dos). Recovery behavior is identical either way.
+            if warn {
+                eprintln!(
+                    "warning: {context}: the key prefix `{kit}.{given}.` has the wrong \
+                     capitalization. Fix: edit it to `{kit}.{canonical}.` exactly \
+                     (capitalization matters). Auto-corrected for this run only."
+                );
+            }
             Ok(canonical)
         }
         ClassMatch::NoMatch => Err(format!(

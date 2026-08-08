@@ -178,6 +178,7 @@ pub(crate) fn frontmatter_to_turtle(
                         kit,
                         class_seg,
                         &filepath.display().to_string(),
+                        true, // extraction runs at save — the author can act
                     ) {
                         Ok(canonical) => doc_type = Some(canonical),
                         Err(msg) => {

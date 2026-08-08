@@ -306,7 +306,7 @@ pub(crate) fn derive_file_subjects(
             continue;
         }
         if let Ok(canonical) =
-            crate::ontology::resolve_class_segment(segments[0], segments[1], relpath_str)
+            crate::ontology::resolve_class_segment(segments[0], segments[1], relpath_str, warn)
         {
             anchor = Some((segments[0].to_string(), canonical));
             break;
@@ -609,6 +609,7 @@ pub(crate) fn generate_frontmatter_nquads_with(
                 &ctx.ref_ranges,
                 &ctx.deprecated_props,
                 ctx.obsidian_links,
+                true, // the now path is the save/sync moment — warn here
                 &mut emitted_types,
                 &mut nq,
             );
@@ -643,6 +644,10 @@ pub(crate) fn generate_frontmatter_nquads_with(
 /// - `obj_props` / `prop_datatypes`: ontology-derived property metadata
 /// - `emitted_types`: in/out dedup set — the caller must zero this per doc
 ///   so each document emits its `rdf:type` assertions at most once
+/// - `warn`: true on the live save/sync path (the moment the author can
+///   act); false on the history walk, which revisits every commit — replay
+///   must not repeat live to-dos (#73). Emission and the returned error
+///   COUNT are identical either way; only the printing differs.
 /// - `out`: the N-Quad buffer being appended to
 pub(crate) fn emit_spo_line_nquads(
     line: &str,
@@ -657,6 +662,7 @@ pub(crate) fn emit_spo_line_nquads(
     ref_ranges: &HashMap<String, String>,
     deprecated_props: &HashMap<String, Option<String>>,
     obsidian_links: bool,
+    warn: bool,
     emitted_types: &mut HashSet<String>,
     out: &mut String,
 ) -> u32 {
@@ -676,10 +682,12 @@ pub(crate) fn emit_spo_line_nquads(
 
     // Hard-fail: [[wikilinks]] in frontmatter values corrupt the graph
     if predicate != "linksTo" && (object.contains("[[") || object.contains("]]")) {
-        eprintln!(
-            "error: {}: {} — wikilink syntax [[...]] is not allowed in frontmatter values. Write the repo-relative path (e.g. friend/selkie.md).",
-            relpath_str, subject
-        );
+        if warn {
+            eprintln!(
+                "error: {}: {} — wikilink syntax [[...]] is not allowed in frontmatter values. Write the repo-relative path (e.g. friend/selkie.md).",
+                relpath_str, subject
+            );
+        }
         return 1;
     }
 
@@ -705,12 +713,14 @@ pub(crate) fn emit_spo_line_nquads(
         // repo) — deleted because search-based resolution rebinds silently
         // as files come and go and makes history non-deterministic.
         if obsidian_links && object.starts_with('/') {
-            eprintln!(
-                "error: {relpath_str}: [[{object}]] — leading `/` is retired under \
-                 Obsidian link semantics; write the repo-root-relative path \
-                 (e.g. [[{}]])",
-                object.trim_start_matches('/')
-            );
+            if warn {
+                eprintln!(
+                    "error: {relpath_str}: [[{object}]] — leading `/` is retired under \
+                     Obsidian link semantics; write the repo-root-relative path \
+                     (e.g. [[{}]])",
+                    object.trim_start_matches('/')
+                );
+            }
             return errors + 1;
         }
         let source_dir = if obsidian_links {
@@ -740,9 +750,11 @@ pub(crate) fn emit_spo_line_nquads(
                 ));
             }
             None => {
-                eprintln!(
-                    "error: {relpath_str}: [[{object}]] escapes the repo root — links stay inside the repo"
-                );
+                if warn {
+                    eprintln!(
+                        "error: {relpath_str}: [[{object}]] escapes the repo root — links stay inside the repo"
+                    );
+                }
                 errors += 1;
             }
         }
@@ -768,10 +780,12 @@ pub(crate) fn emit_spo_line_nquads(
             // phantom `a soul:memory`. The doc's properties still emit; only
             // the bad type is withheld until the frontmatter is fixed.
             let canonical_class: Option<String> =
-                match crate::ontology::resolve_class_segment(kit_name, class_seg, relpath_str) {
+                match crate::ontology::resolve_class_segment(kit_name, class_seg, relpath_str, warn) {
                     Ok(canonical) => Some(canonical),
                     Err(msg) => {
-                        eprintln!("warning: {relpath_str}: {msg}");
+                        if warn {
+                            eprintln!("warning: {relpath_str}: {msg}");
+                        }
                         None
                     }
                 };
@@ -839,10 +853,12 @@ pub(crate) fn emit_spo_line_nquads(
                                 ));
                             }
                             None => {
-                                eprintln!(
-                                    "error: {}: {} — declared range `{}` is not a resolvable class IRI",
-                                    relpath_str, prop_seg, range_iri
-                                );
+                                if warn {
+                                    eprintln!(
+                                        "error: {}: {} — declared range `{}` is not a resolvable class IRI",
+                                        relpath_str, prop_seg, range_iri
+                                    );
+                                }
                                 errors += 1;
                             }
                         }
@@ -863,10 +879,12 @@ pub(crate) fn emit_spo_line_nquads(
                             ));
                         }
                         resolve::ResolveResult::Rejected(msg) => {
-                            eprintln!(
-                                "error: {}: {} — {}",
-                                relpath_str, prop_seg, msg
-                            );
+                            if warn {
+                                eprintln!(
+                                    "error: {}: {} — {}",
+                                    relpath_str, prop_seg, msg
+                                );
+                            }
                             errors += 1;
                         }
                     }
@@ -883,7 +901,10 @@ pub(crate) fn emit_spo_line_nquads(
                     // generator omits sh:datatype for strings): 412 bogus
                     // "not declared" warnings per save in W4R3Z alone
                     // (found 2026-08-01).
-                    if !declared_props.contains(key) && !obj_props.contains(key) {
+                    // The whole block below is teaching, no emission — one
+                    // `warn` gate covers the wrong-class, deprecated-note,
+                    // and does-not-exist branches together.
+                    if warn && !declared_props.contains(key) && !obj_props.contains(key) {
                         let kit_scope = format!("{}/", kit_name);
                         let prop_tail = format!("/{}", prop_seg);
                         let class_for_msg = canonical_class.as_deref().unwrap_or(class_seg);
@@ -1163,7 +1184,7 @@ mod tests {
             "<https://repolex.ai/git-lex/NamedGraph/now>",
             "Journal/day-1.md",
             &empty_paths, &obj_props, &datatypes, &declared, &namespaces, &ranges,
-            &std::collections::HashMap::new(), false,
+            &std::collections::HashMap::new(), false, true,
             &mut types, &mut out,
         );
         assert!(
@@ -1185,7 +1206,7 @@ mod tests {
             "<https://repolex.ai/git-lex/NamedGraph/now>",
             "friend/selkie.md",
             &empty_paths, &obj_props, &datatypes, &declared, &namespaces, &ranges,
-            &std::collections::HashMap::new(), false,
+            &std::collections::HashMap::new(), false, true,
             &mut types, &mut out2,
         );
         assert!(
