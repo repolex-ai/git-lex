@@ -27,37 +27,8 @@ pub(crate) fn cmd_sync() {
     // root SOUL.md (#29 — restorable via kit-update).
     crate::soul_md::require_soul_md(&root);
 
-    // ══ DESIGN DECISION (Rob-ruled 2026-07-28): git-lex tracks the DEFAULT
-    // BRANCH, full stop. The semantic history is the history of the project
-    // as a whole — branches earn their place in it by merging, which is
-    // what git branches are for. This deliberately breaks from "track
-    // whatever git state you're in":
-    //   - "what is true now" is never ambiguous (no branch-dependent state);
-    //   - the resume point can never be poisoned by commits from refs the
-    //     walk never visits (the silent-skip failure the adversarial review
-    //     demonstrated);
-    //   - the model fits in one sentence for the docs.
-    // NOT-CHOSEN alternative, recorded for future revisiting: per-branch
-    // walking with an ancestor-filtered resume (one extra git call). It
-    // prevents the skip bug but NOT the deeper ambiguity — after syncing
-    // two diverged branches, the base layer reflects whichever synced
-    // last. If real branch-tracking demand appears, that ambiguity is the
-    // problem to solve first.
-    let current = git_current_branch(&root);
-    let default = git_default_branch(&root);
-    match &current {
-        Some(b) if *b == default => {}
-        Some(b) => {
-            eprintln!("sync tracks the default branch ('{default}') only — you are on '{b}'.");
-            eprintln!("git-lex records the project's merged history; merge your branch, then sync.");
-            std::process::exit(1);
-        }
-        None => {
-            eprintln!("sync tracks the default branch ('{default}') only — HEAD is detached.");
-            eprintln!("check out '{default}' and re-run.");
-            std::process::exit(1);
-        }
-    }
+    gate_default_branch(&root);
+
 
     // Identity: resolve + record the genesis SHA ONCE per sync. Authority
     // is repo.yml `genesis_sha:` (legacy `first_commit:` self-migrates);
@@ -80,6 +51,109 @@ pub(crate) fn cmd_sync() {
         return;
     }
 
+    if fast_path_hit(&store, &root, &head_sha) {
+        let elapsed = start.elapsed();
+        println!(
+            "Already synced at {} ({:.1}ms).",
+            &head_sha[..8.min(head_sha.len())],
+            elapsed.as_secs_f64() * 1000.0
+        );
+        return;
+    }
+
+    let onegraph_resume = resume_point(&store, &root);
+
+    clear_derived_graphs(&store);
+
+    heal_ontology_graph(&store);
+
+
+    // Regenerate the git2 machinery layer (commits/signatures/refs/filetree)
+    let git_nq = crate::git2_nquads::generate_git2_nquads();
+    let git_count = git_nq.lines().count();
+    store
+        .load_from_reader(RdfFormat::NQuads, Cursor::new(git_nq.as_bytes()))
+        .expect("failed to load git triples");
+
+    // Extraction: generate_frontmatter_nquads WRITES the .spo sidecars (the
+    // one graph's source) and derives the working-tree now view. The now
+    // view is NO LONGER loaded into the store (Rob-ruled: the now graph
+    // died as a store product — the one graph's base layer is current
+    // state). The derived text is discarded; the extraction side effect is
+    // what sync needs. (Splitting extraction from emission is a refactor
+    // deferred until the direct query path's disposition is ruled — the
+    // same function serves `git lex query`.)
+    let resolver_ctx = crate::nquad::ResolverContext::build(&root);
+    let (fm_nq, fm_errors) = crate::nquad::generate_frontmatter_nquads_with(&root, &resolver_ctx);
+    if fm_errors > 0 {
+        eprintln!(
+            "warning: {fm_errors} live document(s) carry values the data rules reject (each is listed above with its file). \
+These are in your WORKING FILES, not history — fix the listed files and the warning goes away for good."
+        );
+    }
+    let fm_count = fm_nq.lines().filter(|l| !l.is_empty()).count();
+
+    // ─── One-graph phase: append new commits' statement events.
+    // Shares the SAME resolver context, so one-graph facts resolve
+    // identically to now-view facts (and the indexes build once per sync,
+    // not twice). ───
+    sync_onegraph_phase(&store, &root, onegraph_resume, &resolver_ctx);
+
+    // ─── Stale graph cleanup ───
+    // Subsumed by the Phase-1 clear filter: every graph not on the keep-list
+    // (the one graph + repo-ontology) is removed each sync — including the
+    // RETIRED families (sync/<sha>, history, meta, changeset/, blame/) and
+    // all legacy urn:soul:* names. Migration off every old layout is
+    // automatic on the first new-binary sync.
+
+    materialize_now_view(&store);
+
+    store.flush().expect("failed to flush store");
+
+    let elapsed = start.elapsed();
+
+    println!(
+        "Synced in {:.1}ms:",
+        elapsed.as_secs_f64() * 1000.0
+    );
+    println!("  git2 layer: {} quads; extracted: {} now-view facts", git_count, fm_count);
+    println!("Store: {}", store_path().unwrap().display());
+}
+
+fn gate_default_branch(root: &std::path::Path) {
+    // ══ DESIGN DECISION (Rob-ruled 2026-07-28): git-lex tracks the DEFAULT
+    // BRANCH, full stop. The semantic history is the history of the project
+    // as a whole — branches earn their place in it by merging, which is
+    // what git branches are for. This deliberately breaks from "track
+    // whatever git state you're in":
+    //   - "what is true now" is never ambiguous (no branch-dependent state);
+    //   - the resume point can never be poisoned by commits from refs the
+    //     walk never visits (the silent-skip failure the adversarial review
+    //     demonstrated);
+    //   - the model fits in one sentence for the docs.
+    // NOT-CHOSEN alternative, recorded for future revisiting: per-branch
+    // walking with an ancestor-filtered resume (one extra git call). It
+    // prevents the skip bug but NOT the deeper ambiguity — after syncing
+    // two diverged branches, the base layer reflects whichever synced
+    // last. If real branch-tracking demand appears, that ambiguity is the
+    // problem to solve first.
+    let current = git_current_branch(root);
+    let default = git_default_branch(root);
+    match &current {
+        Some(b) if *b == default => {}
+        Some(b) => {
+            eprintln!("sync tracks the default branch ('{default}') only — you are on '{b}'.");
+            eprintln!("git-lex records the project's merged history; merge your branch, then sync.");
+            std::process::exit(1);
+        }
+        None => {
+            eprintln!("sync tracks the default branch ('{default}') only — HEAD is detached.");
+            eprintln!("check out '{default}' and re-run.");
+            std::process::exit(1);
+        }
+    }
+}
+
     // ─── Fast path: already-synced no-op ───
     // If the commits graph already contains HEAD (the previous sync reached
     // this commit) AND the extract dir is clean (no uncommitted .spo
@@ -87,76 +161,70 @@ pub(crate) fn cmd_sync() {
     //
     // Contract this depends on: the oxigraph store is derived. If you've
     // manually mutated it, rebuild via `rm -rf .lex/_ignore/oxigraph`.
-    {
+fn fast_path_hit(store: &Store, root: &std::path::Path, head_sha: &str) -> bool {
+    let probe = format!(
+        "ASK {{ GRAPH <{}> {{ <https://repolex.ai/git-lex/git2/Commit/{}> ?p ?o }} }}",
+        graph_uri("commits"), head_sha
+    );
+    let already_synced = oxigraph::sparql::SparqlEvaluator::new()
+        .parse_query(&probe)
+        .ok()
+        .and_then(|q| q.on_store(&store).execute().ok())
+        .map(|r| matches!(r, oxigraph::sparql::QueryResults::Boolean(true)))
+        .unwrap_or(false);
+
+    // The fast path also requires the one graph to EXIST — an
+    // already-synced store from before the one-graph era (or one whose
+    // graph was cleared) must fall through so the phase builds it.
+    let onegraph_present = {
         let probe = format!(
-            "ASK {{ GRAPH <{}> {{ <https://repolex.ai/git-lex/git2/Commit/{}> ?p ?o }} }}",
-            graph_uri("commits"), head_sha
+            "ASK {{ GRAPH <{}> {{ ?s ?p ?o }} }}",
+            spo_events::LEXHISTORY_GRAPH_IRI
         );
-        let already_synced = oxigraph::sparql::SparqlEvaluator::new()
+        oxigraph::sparql::SparqlEvaluator::new()
             .parse_query(&probe)
             .ok()
             .and_then(|q| q.on_store(&store).execute().ok())
             .map(|r| matches!(r, oxigraph::sparql::QueryResults::Boolean(true)))
-            .unwrap_or(false);
+            .unwrap_or(false)
+    };
 
-        // The fast path also requires the one graph to EXIST — an
-        // already-synced store from before the one-graph era (or one whose
-        // graph was cleared) must fall through so the phase builds it.
-        let onegraph_present = {
-            let probe = format!(
-                "ASK {{ GRAPH <{}> {{ ?s ?p ?o }} }}",
-                spo_events::LEXHISTORY_GRAPH_IRI
-            );
-            oxigraph::sparql::SparqlEvaluator::new()
-                .parse_query(&probe)
-                .ok()
-                .and_then(|q| q.on_store(&store).execute().ok())
-                .map(|r| matches!(r, oxigraph::sparql::QueryResults::Boolean(true)))
-                .unwrap_or(false)
-        };
+    // The fast path must also be format-current: an old-subject-model
+    // store (pre-re-anchor) with no new commits would otherwise report
+    // "already synced" forever and never take the one-time cutover
+    // rebuild. Same probe as the resume check below. A repo with no
+    // sidecar-bearing files never has File facts and so never fast-
+    // paths — a full sync of an empty extract tree is cheap.
+    let reanchored = {
+        let probe = format!(
+            "ASK {{ GRAPH <{}> {{ ?s <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> \
+             <https://repolex.ai/ontology/git-lex/File> }} }}",
+            spo_events::LEXHISTORY_GRAPH_IRI
+        );
+        oxigraph::sparql::SparqlEvaluator::new()
+            .parse_query(&probe)
+            .ok()
+            .and_then(|q| q.on_store(&store).execute().ok())
+            .map(|r| matches!(r, oxigraph::sparql::QueryResults::Boolean(true)))
+            .unwrap_or(false)
+    };
 
-        // The fast path must also be format-current: an old-subject-model
-        // store (pre-re-anchor) with no new commits would otherwise report
-        // "already synced" forever and never take the one-time cutover
-        // rebuild. Same probe as the resume check below. A repo with no
-        // sidecar-bearing files never has File facts and so never fast-
-        // paths — a full sync of an empty extract tree is cheap.
-        let reanchored = {
-            let probe = format!(
-                "ASK {{ GRAPH <{}> {{ ?s <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> \
-                 <https://repolex.ai/ontology/git-lex/File> }} }}",
-                spo_events::LEXHISTORY_GRAPH_IRI
-            );
-            oxigraph::sparql::SparqlEvaluator::new()
-                .parse_query(&probe)
-                .ok()
-                .and_then(|q| q.on_store(&store).execute().ok())
-                .map(|r| matches!(r, oxigraph::sparql::QueryResults::Boolean(true)))
-                .unwrap_or(false)
-        };
+    if already_synced && onegraph_present && reanchored {
+        // Check .lex/extract/ for uncommitted .spo changes
+        let dirty = Command::new("git")
+            .args(["status", "--porcelain", "--", ".lex/extract/"])
+            .current_dir(root)
+            .output()
+            .ok()
+            .map(|o| !o.stdout.is_empty())
+            .unwrap_or(true); // on error, fall through to full sync
 
-        if already_synced && onegraph_present && reanchored {
-            // Check .lex/extract/ for uncommitted .spo changes
-            let dirty = Command::new("git")
-                .args(["status", "--porcelain", "--", ".lex/extract/"])
-                .current_dir(&root)
-                .output()
-                .ok()
-                .map(|o| !o.stdout.is_empty())
-                .unwrap_or(true); // on error, fall through to full sync
-
-            if !dirty {
-                let elapsed = start.elapsed();
-                println!(
-                    "Already synced at {} ({:.1}ms).",
-                    &head_sha[..8.min(head_sha.len())],
-                    elapsed.as_secs_f64() * 1000.0
-                );
-                return;
-            }
-        }
+        return !dirty;
     }
+    false
+}
 
+fn resume_point(store: &Store, root: &std::path::Path) -> Option<String> {
     // ─── One-graph resume point: read BEFORE Phase 1 clears the commits
     // graph. The resume commit = the NEWEST commit in the PREVIOUS sync's
     // commits graph that is an ANCESTOR OF HEAD. No stored marker
@@ -179,7 +247,7 @@ pub(crate) fn cmd_sync() {
         let is_head_ancestor = |sha: &str| -> bool {
             std::process::Command::new("git")
                 .args(["merge-base", "--is-ancestor", sha, "HEAD"])
-                .current_dir(&root)
+                .current_dir(root)
                 .status()
                 .map(|s| s.success())
                 .unwrap_or(false)
@@ -234,7 +302,10 @@ pub(crate) fn cmd_sync() {
         }
         None => None,
     };
+    onegraph_resume
+}
 
+fn clear_derived_graphs(store: &Store) {
     // ─── Phase 1: Clear and regenerate virtual graphs ───
     // Virtual graphs are ephemeral — rebuilt from git every sync.
     // We clear ALL graphs that aren't /sync/ graphs, then reload.
@@ -275,7 +346,9 @@ pub(crate) fn cmd_sync() {
             }
         }
     }
+}
 
+fn heal_ontology_graph(store: &Store) {
     // t-box self-heal (#81): the repo-ontology graph persists and is loaded
     // at init/kit-update ("stays put", Rob Day-50) — but a fresh store
     // (deleted for a rebuild) starts EMPTY, which forced the cure sequence
@@ -301,44 +374,7 @@ pub(crate) fn cmd_sync() {
             );
         }
     }
-
-    // Regenerate the git2 machinery layer (commits/signatures/refs/filetree)
-    let git_nq = crate::git2_nquads::generate_git2_nquads();
-    let git_count = git_nq.lines().count();
-    store
-        .load_from_reader(RdfFormat::NQuads, Cursor::new(git_nq.as_bytes()))
-        .expect("failed to load git triples");
-
-    // Extraction: generate_frontmatter_nquads WRITES the .spo sidecars (the
-    // one graph's source) and derives the working-tree now view. The now
-    // view is NO LONGER loaded into the store (Rob-ruled: the now graph
-    // died as a store product — the one graph's base layer is current
-    // state). The derived text is discarded; the extraction side effect is
-    // what sync needs. (Splitting extraction from emission is a refactor
-    // deferred until the direct query path's disposition is ruled — the
-    // same function serves `git lex query`.)
-    let resolver_ctx = crate::nquad::ResolverContext::build(&root);
-    let (fm_nq, fm_errors) = crate::nquad::generate_frontmatter_nquads_with(&root, &resolver_ctx);
-    if fm_errors > 0 {
-        eprintln!(
-            "warning: {fm_errors} live document(s) carry values the data rules reject (each is listed above with its file). \
-These are in your WORKING FILES, not history — fix the listed files and the warning goes away for good."
-        );
-    }
-    let fm_count = fm_nq.lines().filter(|l| !l.is_empty()).count();
-
-    // ─── One-graph phase: append new commits' statement events.
-    // Shares the SAME resolver context, so one-graph facts resolve
-    // identically to now-view facts (and the indexes build once per sync,
-    // not twice). ───
-    sync_onegraph_phase(&store, &root, onegraph_resume, &resolver_ctx);
-
-    // ─── Stale graph cleanup ───
-    // Subsumed by the Phase-1 clear filter: every graph not on the keep-list
-    // (the one graph + repo-ontology) is removed each sync — including the
-    // RETIRED families (sync/<sha>, history, meta, changeset/, blame/) and
-    // all legacy urn:soul:* names. Migration off every old layout is
-    // automatic on the first new-binary sync.
+}
 
     // ─── Materialize the now VIEW ───
     // NamedGraph/now = the one graph's base layer (current facts), copied
@@ -347,35 +383,24 @@ These are in your WORKING FILES, not history — fix the listed files and the wa
     // one graph"): derived, disposable, rebuilt every sync, never edited.
     // It exists so downstream consumers (Syrinx, viz, agents) can query
     // current state as plain triples without filtering event machinery.
-    {
-        let update = "PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>              PREFIX gl: <https://repolex.ai/ontology/git-lex/>              DROP SILENT GRAPH <https://repolex.ai/git-lex/NamedGraph/now> ;              INSERT { GRAPH <https://repolex.ai/git-lex/NamedGraph/now> { ?s ?p ?o } }              WHERE { GRAPH <https://repolex.ai/git-lex/LexHistoryGraph> { ?s ?p ?o .                        FILTER NOT EXISTS { ?s a gl:SpoEvent }                        FILTER(?p != rdf:reifies) } }";
-        match oxigraph::sparql::SparqlEvaluator::new().parse_update(update) {
-            Ok(u) => {
-                if let Err(e) = u.on_store(&store).execute() {
-                    // A stale now view silently lies to every downstream
-                    // consumer (Syrinx, viz, agents) — fail the sync.
-                    eprintln!("ERROR: now-view materialization failed: {e}");
-                    std::process::exit(1);
-                }
-            }
-            Err(e) => {
-                eprintln!("ERROR: now-view update did not parse (binary bug): {e}");
+fn materialize_now_view(store: &Store) {
+    let update = "PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>              PREFIX gl: <https://repolex.ai/ontology/git-lex/>              DROP SILENT GRAPH <https://repolex.ai/git-lex/NamedGraph/now> ;              INSERT { GRAPH <https://repolex.ai/git-lex/NamedGraph/now> { ?s ?p ?o } }              WHERE { GRAPH <https://repolex.ai/git-lex/LexHistoryGraph> { ?s ?p ?o .                        FILTER NOT EXISTS { ?s a gl:SpoEvent }                        FILTER(?p != rdf:reifies) } }";
+    match oxigraph::sparql::SparqlEvaluator::new().parse_update(update) {
+        Ok(u) => {
+            if let Err(e) = u.on_store(&store).execute() {
+                // A stale now view silently lies to every downstream
+                // consumer (Syrinx, viz, agents) — fail the sync.
+                eprintln!("ERROR: now-view materialization failed: {e}");
                 std::process::exit(1);
             }
         }
+        Err(e) => {
+            eprintln!("ERROR: now-view update did not parse (binary bug): {e}");
+            std::process::exit(1);
+        }
     }
-
-    store.flush().expect("failed to flush store");
-
-    let elapsed = start.elapsed();
-
-    println!(
-        "Synced in {:.1}ms:",
-        elapsed.as_secs_f64() * 1000.0
-    );
-    println!("  git2 layer: {} quads; extracted: {} now-view facts", git_count, fm_count);
-    println!("Store: {}", store_path().unwrap().display());
 }
+
 
 fn sync_onegraph_phase(store: &Store, root: &std::path::Path, resume_sha: Option<String>, ctx: &crate::nquad::ResolverContext) {
     let one_graph_uri = format!("<{}>", spo_events::LEXHISTORY_GRAPH_IRI);
