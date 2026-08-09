@@ -65,6 +65,14 @@ struct VizState {
     repo_root: Arc<PathBuf>,
 }
 
+/// Shared state for the viz router: the read-only store + repo root
+/// (VizState) plus the on-disk asset dir the HTML/CSS/JS are served from.
+#[derive(Clone)]
+struct VizApp {
+    state: VizState,
+    www_dir: Arc<PathBuf>,
+}
+
 fn run_sparql_to_json(store: &Store, query: &str) -> serde_json::Value {
     let prefixed = add_prefixes(query);
     // Shared parse/execute with union-default-graph semantics (review #8).
@@ -232,7 +240,6 @@ async fn run_viz_server(port: u16, www_dir: PathBuf) {
     use axum::{
         Router,
         routing::{get, post},
-        response::{Html, Json},
     };
 
     let store = Arc::new(
@@ -244,137 +251,15 @@ async fn run_viz_server(port: u16, www_dir: PathBuf) {
     let www_dir = Arc::new(www_dir);
 
     let app = Router::new()
-        .route("/", get({
-            let www_dir = www_dir.clone();
-            move || {
-                let www_dir = www_dir.clone();
-                async move {
-                    match read_viz_asset(&www_dir, "index.html") {
-                        Some(body) => Html(body),
-                        None => Html("<h1>index.html not found in .lex/www/</h1>".to_string()),
-                    }
-                }
-            }
-        }))
-        .route("/css/main.css", get({
-            let www_dir = www_dir.clone();
-            move || {
-                let www_dir = www_dir.clone();
-                async move {
-                    let body = read_viz_asset(&www_dir, "css/main.css").unwrap_or_default();
-                    ([("content-type", "text/css"), ("cache-control", "no-store")], body)
-                }
-            }
-        }))
-        .route("/js/main.js", get({
-            let www_dir = www_dir.clone();
-            move || {
-                let www_dir = www_dir.clone();
-                async move {
-                    let body = read_viz_asset(&www_dir, "js/main.js").unwrap_or_default();
-                    ([("content-type", "application/javascript"), ("cache-control", "no-store")], body)
-                }
-            }
-        }))
-        .route("/api/query", post({
-            let state = state.clone();
-            move |Json(payload): Json<serde_json::Value>| {
-                let state = state.clone();
-                async move {
-                    let query = payload.get("query")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("SELECT ?s ?p ?o WHERE { ?s ?p ?o } LIMIT 10");
-                    Json(run_sparql_to_json(&state.store, query))
-                }
-            }
-        }))
-        .route("/api/viz/nodes", get({
-            let state = state.clone();
-            move || {
-                let state = state.clone();
-                async move {
-                    // Render-ready node rows: every typed document in the now
-                    // view (INCLUDING orphans nothing links to), with a
-                    // computed display label — gl:name when present, else the
-                    // IRI tail. No client-side joining or label munging.
-                    let q = "PREFIX gl: <https://repolex.ai/ontology/git-lex/> \
-                        SELECT ?id ?type ?label WHERE { \
-                          GRAPH <https://repolex.ai/git-lex/NamedGraph/now> { \
-                            ?id a ?type . \
-                            OPTIONAL { ?id gl:name ?n } \
-                            BIND(COALESCE(?n, REPLACE(STR(?id), \"^.*/\", \"\")) AS ?label) \
-                          } }";
-                    Json(run_sparql_to_json(&state.store, q))
-                }
-            }
-        }))
-        .route("/api/viz/edges", get({
-            let state = state.clone();
-            move || {
-                let state = state.clone();
-                async move {
-                    // Render-ready edge rows: one row per link, uniform
-                    // columns + a `predicate` column for per-predicate
-                    // coloring (w3bl0rd's contract, 2026-07-21). Covers
-                    // md:linksTo AND every kit object-property whose object
-                    // is doc-shaped or a slug — anything connecting
-                    // documents. `target` is always a STRING; `resolved` is
-                    // a boolean — the JS branches on columns, never on RDF
-                    // term kinds.
-                    // Kit predicates live under ontology/<kit>/ (the
-                    // kit/ tier is retired but old stores may carry it —
-                    // match both); machinery vocab (ontology/git-lex/) is
-                    // excluded except md:linksTo above. The a-box base is
-                    // DERIVED per repo, never hardcoded.
-                    let q = format!("PREFIX md: <https://repolex.ai/ontology/git-lex/md/> \
-                        SELECT ?from ?predicate ?target ?resolved WHERE {{ \
-                          GRAPH <https://repolex.ai/git-lex/NamedGraph/now> {{ \
-                            {{ ?from md:linksTo ?to . BIND(STR(md:linksTo) AS ?predicate) }} \
-                            UNION \
-                            {{ ?from ?p ?to . \
-                              FILTER(STRSTARTS(STR(?p), \"https://repolex.ai/ontology/\")) \
-                              FILTER(!STRSTARTS(STR(?p), \"https://repolex.ai/ontology/git-lex/\")) \
-                              FILTER(isIRI(?to) && STRSTARTS(STR(?to), \"{abox}/\")) \
-                              BIND(STR(?p) AS ?predicate) }} \
-                            BIND(STR(?to) AS ?target) \
-                            BIND(ISIRI(?to) AS ?resolved) \
-                          }} }}",
-                        abox = git_lex::resource_base_at(&state.repo_root));
-                    Json(run_sparql_to_json(&state.store, &q))
-                }
-            }
-        }))
-        .route("/api/store-info", get({
-            let state = state.clone();
-            move || {
-                let state = state.clone();
-                async move {
-                    // Snapshot of the store's graph inventory. The post-Part-5
-                    // store shape: the one graph (statement history + current
-                    // base facts), the git2 machinery graphs, the ontology
-                    // graph, and the derived now view.
-                    let q = "SELECT ?g (COUNT(*) AS ?n) WHERE { GRAPH ?g { ?s ?p ?o } } \
-                             GROUP BY ?g ORDER BY DESC(?n)";
-                    let graphs = run_sparql_to_json(&state.store, q);
-                    Json(serde_json::json!({
-                        "graphs": graphs,
-                        "one_graph": "https://repolex.ai/git-lex/LexHistoryGraph",
-                        "now_view": "https://repolex.ai/git-lex/NamedGraph/now",
-                        "model": "one-graph (RDF 1.2 SpoEvents; now = materialized view of the base layer)",
-                    }))
-                }
-            }
-        }))
-        .route("/api/file", get({
-            let state = state.clone();
-            move |axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>| {
-                let state = state.clone();
-                async move {
-                    Json(api_file_for_uri(&state, params.get("uri").map(|s| s.as_str())))
-                }
-            }
-        }))
-        ;
+        .route("/", get(viz_index))
+        .route("/css/main.css", get(viz_css))
+        .route("/js/main.js", get(viz_js))
+        .route("/api/query", post(api_query))
+        .route("/api/viz/nodes", get(api_viz_nodes))
+        .route("/api/viz/edges", get(api_viz_edges))
+        .route("/api/store-info", get(api_store_info))
+        .route("/api/file", get(api_file))
+        .with_state(VizApp { state, www_dir: www_dir.clone() });
 
     let mut chosen_port = port;
     let mut listener = None;
@@ -411,6 +296,116 @@ async fn run_viz_server(port: u16, www_dir: PathBuf) {
     if let Err(e) = axum::serve(listener, app).await {
         eprintln!("Server error: {}", e);
     }
+}
+
+// ─── Viz route handlers ──────────────────────────────────────────────────────
+
+async fn viz_index(
+    axum::extract::State(app): axum::extract::State<VizApp>,
+) -> axum::response::Html<String> {
+    match read_viz_asset(&app.www_dir, "index.html") {
+        Some(body) => axum::response::Html(body),
+        None => axum::response::Html("<h1>index.html not found in .lex/www/</h1>".to_string()),
+    }
+}
+
+async fn viz_css(
+    axum::extract::State(app): axum::extract::State<VizApp>,
+) -> ([(&'static str, &'static str); 2], String) {
+    let body = read_viz_asset(&app.www_dir, "css/main.css").unwrap_or_default();
+    ([("content-type", "text/css"), ("cache-control", "no-store")], body)
+}
+
+async fn viz_js(
+    axum::extract::State(app): axum::extract::State<VizApp>,
+) -> ([(&'static str, &'static str); 2], String) {
+    let body = read_viz_asset(&app.www_dir, "js/main.js").unwrap_or_default();
+    ([("content-type", "application/javascript"), ("cache-control", "no-store")], body)
+}
+
+async fn api_query(
+    axum::extract::State(app): axum::extract::State<VizApp>,
+    axum::response::Json(payload): axum::response::Json<serde_json::Value>,
+) -> axum::response::Json<serde_json::Value> {
+    let query = payload.get("query")
+        .and_then(|v| v.as_str())
+        .unwrap_or("SELECT ?s ?p ?o WHERE { ?s ?p ?o } LIMIT 10");
+    axum::response::Json(run_sparql_to_json(&app.state.store, query))
+}
+
+async fn api_viz_nodes(
+    axum::extract::State(app): axum::extract::State<VizApp>,
+) -> axum::response::Json<serde_json::Value> {
+    // Render-ready node rows: every typed document in the now
+    // view (INCLUDING orphans nothing links to), with a
+    // computed display label — gl:name when present, else the
+    // IRI tail. No client-side joining or label munging.
+    let q = "PREFIX gl: <https://repolex.ai/ontology/git-lex/> \
+        SELECT ?id ?type ?label WHERE { \
+          GRAPH <https://repolex.ai/git-lex/NamedGraph/now> { \
+            ?id a ?type . \
+            OPTIONAL { ?id gl:name ?n } \
+            BIND(COALESCE(?n, REPLACE(STR(?id), \"^.*/\", \"\")) AS ?label) \
+          } }";
+    axum::response::Json(run_sparql_to_json(&app.state.store, q))
+}
+
+async fn api_viz_edges(
+    axum::extract::State(app): axum::extract::State<VizApp>,
+) -> axum::response::Json<serde_json::Value> {
+    // Render-ready edge rows: one row per link, uniform
+    // columns + a `predicate` column for per-predicate
+    // coloring (w3bl0rd's contract, 2026-07-21). Covers
+    // md:linksTo AND every kit object-property whose object
+    // is doc-shaped or a slug — anything connecting
+    // documents. `target` is always a STRING; `resolved` is
+    // a boolean — the JS branches on columns, never on RDF
+    // term kinds.
+    // Kit predicates live under ontology/<kit>/ (the
+    // kit/ tier is retired but old stores may carry it —
+    // match both); machinery vocab (ontology/git-lex/) is
+    // excluded except md:linksTo above. The a-box base is
+    // DERIVED per repo, never hardcoded.
+    let q = format!("PREFIX md: <https://repolex.ai/ontology/git-lex/md/> \
+        SELECT ?from ?predicate ?target ?resolved WHERE {{ \
+          GRAPH <https://repolex.ai/git-lex/NamedGraph/now> {{ \
+            {{ ?from md:linksTo ?to . BIND(STR(md:linksTo) AS ?predicate) }} \
+            UNION \
+            {{ ?from ?p ?to . \
+              FILTER(STRSTARTS(STR(?p), \"https://repolex.ai/ontology/\")) \
+              FILTER(!STRSTARTS(STR(?p), \"https://repolex.ai/ontology/git-lex/\")) \
+              FILTER(isIRI(?to) && STRSTARTS(STR(?to), \"{abox}/\")) \
+              BIND(STR(?p) AS ?predicate) }} \
+            BIND(STR(?to) AS ?target) \
+            BIND(ISIRI(?to) AS ?resolved) \
+          }} }}",
+        abox = git_lex::resource_base_at(&app.state.repo_root));
+    axum::response::Json(run_sparql_to_json(&app.state.store, &q))
+}
+
+async fn api_store_info(
+    axum::extract::State(app): axum::extract::State<VizApp>,
+) -> axum::response::Json<serde_json::Value> {
+    // Snapshot of the store's graph inventory. The post-Part-5
+    // store shape: the one graph (statement history + current
+    // base facts), the git2 machinery graphs, the ontology
+    // graph, and the derived now view.
+    let q = "SELECT ?g (COUNT(*) AS ?n) WHERE { GRAPH ?g { ?s ?p ?o } } \
+             GROUP BY ?g ORDER BY DESC(?n)";
+    let graphs = run_sparql_to_json(&app.state.store, q);
+    axum::response::Json(serde_json::json!({
+        "graphs": graphs,
+        "one_graph": "https://repolex.ai/git-lex/LexHistoryGraph",
+        "now_view": "https://repolex.ai/git-lex/NamedGraph/now",
+        "model": "one-graph (RDF 1.2 SpoEvents; now = materialized view of the base layer)",
+    }))
+}
+
+async fn api_file(
+    axum::extract::State(app): axum::extract::State<VizApp>,
+    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> axum::response::Json<serde_json::Value> {
+    axum::response::Json(api_file_for_uri(&app.state, params.get("uri").map(|s| s.as_str())))
 }
 
 // ─── W3C SPARQL protocol endpoint (Task 2 Part B) ───────────────────────────
