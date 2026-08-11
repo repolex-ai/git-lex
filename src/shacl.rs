@@ -43,11 +43,14 @@ pub(crate) fn parse_shacl_hints(shapes_ttl: &str, short: &str) -> HashMap<String
     };
 
     let q = "PREFIX sh: <http://www.w3.org/ns/shacl#>
-             SELECT ?prop ?path ?nodeKind ?minCount ?inList WHERE {
+             SELECT ?prop ?path ?nodeKind ?minCount ?inList ?datatype ?minIncl ?maxIncl WHERE {
                  ?prop sh:path ?path .
                  OPTIONAL { ?prop sh:nodeKind ?nodeKind }
                  OPTIONAL { ?prop sh:minCount ?minCount }
                  OPTIONAL { ?prop sh:in ?inList }
+                 OPTIONAL { ?prop sh:datatype ?datatype }
+                 OPTIONAL { ?prop sh:minInclusive ?minIncl }
+                 OPTIONAL { ?prop sh:maxInclusive ?maxIncl }
              } ORDER BY ?path";
     let Ok(oxigraph::sparql::QueryResults::Solutions(sols)) = git_lex::eval_query(&store, q)
     else { return hints };
@@ -77,7 +80,27 @@ pub(crate) fn parse_shacl_hints(shapes_ttl: &str, short: &str) -> HashMap<String
             _ => None,
         };
 
-        let hint = build_shacl_hint(&in_values, &node_kind, min_count);
+        // The declared datatype and its bounds, so the template teaches the
+        // real type instead of calling every literal a string (#100).
+        let datatype = match s.get("datatype") {
+            Some(Term::NamedNode(n)) => n.as_str().to_string(),
+            _ => String::new(),
+        };
+        let lit_value = |name: &str| -> Option<String> {
+            match s.get(name) {
+                Some(Term::Literal(l)) => Some(l.value().to_string()),
+                _ => None,
+            }
+        };
+
+        let hint = build_shacl_hint(
+            &in_values,
+            &node_kind,
+            min_count,
+            &datatype,
+            lit_value("minIncl"),
+            lit_value("maxIncl"),
+        );
         if !hint.is_empty() {
             hints.insert(key, hint);
         }
@@ -128,14 +151,58 @@ fn rdf_list_literals(store: &oxigraph::store::Store, head: &Term) -> Vec<String>
     out
 }
 
-fn build_shacl_hint(in_values: &[String], node_kind: &str, min_count: Option<u32>) -> String {
+/// Render an XSD datatype IRI as the word an author should see in a template.
+///
+/// The template is the surface people copy when creating a document, often
+/// without reading the ontology at all — so calling a boolean "str" teaches
+/// the wrong type on exactly the fields where getting it wrong is easiest
+/// (#100, tr1p's copia specimen: `lookAnatomyReject: # optional, str` for a
+/// hard boolean gate). Unknown types fall back to their own local name rather
+/// than to "str": naming a type we don't have a friendly word for is honest;
+/// calling it a string is not.
+fn friendly_datatype(datatype_iri: &str) -> Option<String> {
+    const XSD: &str = "http://www.w3.org/2001/XMLSchema#";
+    let local = datatype_iri.strip_prefix(XSD)?;
+    Some(match local {
+        "boolean" => "bool".to_string(),
+        "integer" | "int" | "long" | "short" | "nonNegativeInteger" | "positiveInteger"
+        | "negativeInteger" | "nonPositiveInteger" | "unsignedInt" | "unsignedLong" => {
+            "int".to_string()
+        }
+        "decimal" | "double" | "float" => "number".to_string(),
+        "date" => "date".to_string(),
+        "dateTime" => "datetime".to_string(),
+        "time" => "time".to_string(),
+        "anyURI" => "url".to_string(),
+        "string" => "str".to_string(),
+        other => other.to_string(),
+    })
+}
+
+fn build_shacl_hint(
+    in_values: &[String],
+    node_kind: &str,
+    min_count: Option<u32>,
+    datatype_iri: &str,
+    min_inclusive: Option<String>,
+    max_inclusive: Option<String>,
+) -> String {
     let required = min_count.map_or("optional", |n| if n > 0 { "required" } else { "optional" });
     if !in_values.is_empty() {
         format!("{}, enum: {}", required, in_values.join(", "))
     } else if node_kind == "sh:IRI" {
         format!("{}, IRI", required)
     } else {
-        format!("{}, str", required)
+        // Type word from the declared datatype; "str" only when that is what
+        // the ontology actually says (or when it says nothing at all).
+        let type_word = friendly_datatype(datatype_iri).unwrap_or_else(|| "str".to_string());
+        let range = match (min_inclusive, max_inclusive) {
+            (Some(lo), Some(hi)) => format!(" {}-{}", lo, hi),
+            (Some(lo), None) => format!(" min {}", lo),
+            (None, Some(hi)) => format!(" max {}", hi),
+            (None, None) => String::new(),
+        };
+        format!("{}, {}{}", required, type_word, range)
     }
 }
 
@@ -272,6 +339,62 @@ fn generate_shapes_from_store(
         }
     }
 
+    // Query 5: Find BOUNDED custom datatypes — `rdfs:Datatype` declared with
+    // `owl:onDatatype` (the base type) plus `owl:withRestrictions` (an RDF list
+    // of facet nodes, e.g. `[ xsd:minInclusive 1 ]`). This is the formally
+    // correct way to declare "an integer between 1 and 5", and before this
+    // query such a range produced NO constraint at all — not even the base
+    // datatype — because the emitter only recognized bare xsd types. Declaring
+    // the MORE precise type therefore left the data LESS protected than plain
+    // xsd:integer, silently (tr1p, copia LookScoreValue, 2026-08-11).
+    struct BoundedDatatype {
+        base: String,
+        // (facet local name, lexical value)
+        facets: Vec<(String, String)>,
+    }
+    let mut bounded_datatypes: HashMap<String, BoundedDatatype> = HashMap::new();
+    {
+        let q = "PREFIX owl: <http://www.w3.org/2002/07/owl#>
+                 PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>
+                 PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
+                 SELECT ?dtype ?base ?facet ?value WHERE {
+                     ?dtype a rdfs:Datatype ;
+                            owl:onDatatype ?base ;
+                            owl:withRestrictions ?list .
+                     ?list rdf:rest*/rdf:first ?restriction .
+                     ?restriction ?facet ?value .
+                 } ORDER BY ?dtype ?facet";
+        if let Ok(oxigraph::sparql::QueryResults::Solutions(sols)) = git_lex::eval_query(store, q) {
+            for s in sols.flatten() {
+                let iri_of = |name: &str| -> String {
+                    s.get(name).map(|t| match t {
+                        Term::NamedNode(n) => n.as_str().to_string(),
+                        _ => String::new(),
+                    }).unwrap_or_default()
+                };
+                let dtype = iri_of("dtype");
+                let base = iri_of("base");
+                let facet = iri_of("facet");
+                let value = s.get("value").map(|t| match t {
+                    Term::Literal(l) => l.value().to_string(),
+                    Term::NamedNode(n) => n.as_str().to_string(),
+                    _ => String::new(),
+                }).unwrap_or_default();
+                if dtype.is_empty() || base.is_empty() || facet.is_empty() {
+                    continue;
+                }
+                let entry = bounded_datatypes.entry(dtype).or_insert_with(|| BoundedDatatype {
+                    base: base.clone(),
+                    facets: Vec::new(),
+                });
+                let facet_local = facet.rsplit('#').next().unwrap_or(&facet).to_string();
+                if !value.is_empty() {
+                    entry.facets.push((facet_local, value));
+                }
+            }
+        }
+    }
+
     // Build the SHACL Turtle output
     let mut shacl = String::new();
     shacl.push_str("@prefix sh:    <http://www.w3.org/ns/shacl#> .\n");
@@ -322,6 +445,71 @@ fn generate_shapes_from_store(
                 let msg = format!("{} must be {}.",
                     prop_name,
                     values.iter().map(|v| format!("'{}'", v)).collect::<Vec<_>>().join(", "));
+                shacl.push_str(&format!("        sh:message \"{}\" ;\n", msg));
+            } else if let Some(bounded) = bounded_datatypes.get(&prop.range) {
+                // A bounded custom datatype: emit the base type AND the bounds.
+                let xsd_prefix = "http://www.w3.org/2001/XMLSchema#";
+                let base_local = if bounded.base.starts_with(xsd_prefix) {
+                    let t = &bounded.base[xsd_prefix.len()..];
+                    shacl.push_str(&format!("        sh:datatype xsd:{} ;\n", t));
+                    t.to_string()
+                } else {
+                    // A base we cannot express as an xsd type. Say so — a
+                    // constraint we silently dropped is the whole defect class.
+                    eprintln!(
+                        "warning: {} declares owl:onDatatype <{}>, which is not an XSD type — \
+no sh:datatype emitted for properties ranged at it. Range them at an XSD base type, \
+or the values save ungoverned.",
+                        local_name(&prop.range), bounded.base
+                    );
+                    String::new()
+                };
+
+                let mut described: Vec<String> = Vec::new();
+                for (facet, value) in &bounded.facets {
+                    // XSD facet -> SHACL constraint. Numeric facets take a bare
+                    // literal; pattern takes a quoted string.
+                    let emitted = match facet.as_str() {
+                        "minInclusive" => Some(("sh:minInclusive", true, format!("at least {}", value))),
+                        "maxInclusive" => Some(("sh:maxInclusive", true, format!("at most {}", value))),
+                        "minExclusive" => Some(("sh:minExclusive", true, format!("greater than {}", value))),
+                        "maxExclusive" => Some(("sh:maxExclusive", true, format!("less than {}", value))),
+                        "minLength"    => Some(("sh:minLength",    true, format!("at least {} characters", value))),
+                        "maxLength"    => Some(("sh:maxLength",    true, format!("at most {} characters", value))),
+                        "pattern"      => Some(("sh:pattern",      false, format!("matching {}", value))),
+                        _ => None,
+                    };
+                    match emitted {
+                        Some((sh_name, bare, description)) => {
+                            if bare {
+                                shacl.push_str(&format!("        {} {} ;\n", sh_name, value));
+                            } else {
+                                let esc = value.replace('\\', "\\\\").replace('"', "\\\"");
+                                shacl.push_str(&format!("        {} \"{}\" ;\n", sh_name, esc));
+                            }
+                            described.push(description);
+                        }
+                        None => {
+                            // NOT silently skipped — an untranslated facet is a
+                            // bound the author declared and the data will not carry.
+                            eprintln!(
+                                "warning: {} declares the XSD facet '{}' ({}), which git-lex does not \
+translate to a SHACL constraint — that bound is NOT enforced. Report it so the \
+generator learns it, or express the bound with a facet git-lex knows \
+(minInclusive, maxInclusive, minExclusive, maxExclusive, minLength, maxLength, pattern).",
+                                local_name(&prop.range), facet, value
+                            );
+                        }
+                    }
+                }
+
+                let msg = if described.is_empty() {
+                    format!("Expected datatype: xsd:{}.", base_local)
+                } else if base_local.is_empty() {
+                    format!("{} must be {}.", prop_name, described.join(", "))
+                } else {
+                    format!("{} must be an xsd:{} {}.", prop_name, base_local, described.join(", "))
+                };
                 shacl.push_str(&format!("        sh:message \"{}\" ;\n", msg));
             } else {
                 let xsd_prefix = "http://www.w3.org/2001/XMLSchema#";
@@ -390,3 +578,174 @@ pub(crate) fn build_shacl_shapes(kit: &str) -> Result<Option<PathBuf>, String> {
 }
 
 
+
+#[cfg(test)]
+mod bounded_datatype_tests {
+    use super::*;
+
+    /// tr1p's exact copia specimen (2026-08-11): a score declared as an integer
+    /// bounded 1..5 via `owl:withRestrictions`. Before this, the generator
+    /// emitted NOTHING for such a property — not even the base datatype — so
+    /// declaring the more precise type left the data less protected than plain
+    /// `xsd:integer`, silently.
+    const BOUNDED_TTL: &str = r#"
+@prefix owl:  <http://www.w3.org/2002/07/owl#> .
+@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+@prefix xsd:  <http://www.w3.org/2001/XMLSchema#> .
+@prefix t:    <https://repolex.ai/ontology/t/> .
+
+t:LookScoreValue a rdfs:Datatype ;
+    owl:onDatatype xsd:integer ;
+    owl:withRestrictions ( [ xsd:minInclusive 1 ] [ xsd:maxInclusive 5 ] ) .
+
+t:Look a owl:Class .
+
+t:lookTechnicalScore a owl:DatatypeProperty ;
+    rdfs:domain t:Look ;
+    rdfs:range t:LookScoreValue .
+"#;
+
+    fn shapes_for(ttl: &str) -> String {
+        let store = crate::kit::load_ttl_str(ttl, "test").expect("ttl loads");
+        generate_shapes_from_store(&store, "t", "https://repolex.ai/ontology/t/", "test")
+            .expect("shapes generate")
+    }
+
+    #[test]
+    fn bounded_datatype_emits_base_type_and_both_bounds() {
+        let out = shapes_for(BOUNDED_TTL);
+        assert!(out.contains("sh:datatype xsd:integer"),
+            "base type must survive the custom datatype:\n{out}");
+        assert!(out.contains("sh:minInclusive 1"), "lower bound missing:\n{out}");
+        assert!(out.contains("sh:maxInclusive 5"), "upper bound missing:\n{out}");
+    }
+
+    /// The regression that motivated the fix: the property must not come out
+    /// bare. Before, this shape had a path and a comment and nothing else.
+    #[test]
+    fn bounded_datatype_property_is_not_constraint_free() {
+        let out = shapes_for(BOUNDED_TTL);
+        let block = out
+            .split("sh:path t:lookTechnicalScore")
+            .nth(1)
+            .expect("property shape present");
+        let block = block.split("] ;").next().unwrap_or(block);
+        assert!(
+            block.contains("sh:datatype") || block.contains("sh:minInclusive"),
+            "property shape carries NO constraint — the exact defect:\n{block}"
+        );
+    }
+
+    /// The message should teach the bound, not just name a type.
+    #[test]
+    fn bounded_datatype_message_states_the_range() {
+        let out = shapes_for(BOUNDED_TTL);
+        assert!(out.contains("at least 1"), "message omits lower bound:\n{out}");
+        assert!(out.contains("at most 5"), "message omits upper bound:\n{out}");
+    }
+
+    /// A plain xsd range must keep working exactly as before.
+    #[test]
+    fn plain_xsd_range_unchanged() {
+        let ttl = r#"
+@prefix owl:  <http://www.w3.org/2002/07/owl#> .
+@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+@prefix xsd:  <http://www.w3.org/2001/XMLSchema#> .
+@prefix t:    <https://repolex.ai/ontology/t/> .
+t:Look a owl:Class .
+t:plainScore a owl:DatatypeProperty ;
+    rdfs:domain t:Look ;
+    rdfs:range xsd:integer .
+"#;
+        let out = shapes_for(ttl);
+        assert!(out.contains("sh:datatype xsd:integer"), "plain xsd regressed:\n{out}");
+    }
+}
+
+#[cfg(test)]
+mod template_hint_tests {
+    use super::*;
+
+    /// tr1p's copia specimen end to end (2026-08-11): ontology -> generated
+    /// shapes -> template hints. Before, BOTH ends dropped type information —
+    /// the shapes emitted nothing for a bounded datatype (#99) and the hint
+    /// called every literal "str" (#100). This walks the whole path so the two
+    /// fixes are pinned together: if either regresses, the hint goes wrong.
+    const KIT_TTL: &str = r#"
+@prefix owl:  <http://www.w3.org/2002/07/owl#> .
+@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+@prefix xsd:  <http://www.w3.org/2001/XMLSchema#> .
+@prefix t:    <https://repolex.ai/ontology/t/> .
+
+t:LookScoreValue a rdfs:Datatype ;
+    owl:onDatatype xsd:integer ;
+    owl:withRestrictions ( [ xsd:minInclusive 1 ] [ xsd:maxInclusive 5 ] ) .
+
+t:Look a owl:Class .
+
+t:lookTechnicalScore a owl:DatatypeProperty ;
+    rdfs:domain t:Look ;
+    rdfs:range t:LookScoreValue .
+
+t:lookAnatomyReject a owl:DatatypeProperty ;
+    rdfs:domain t:Look ;
+    rdfs:range xsd:boolean .
+
+t:lookNote a owl:DatatypeProperty ;
+    rdfs:domain t:Look ;
+    rdfs:range xsd:string .
+
+t:lookTakenOn a owl:DatatypeProperty ;
+    rdfs:domain t:Look ;
+    rdfs:range xsd:date .
+"#;
+
+    fn hints_for(ttl: &str) -> HashMap<String, String> {
+        let store = crate::kit::load_ttl_str(ttl, "test").expect("ttl loads");
+        let shapes =
+            generate_shapes_from_store(&store, "t", "https://repolex.ai/ontology/t/", "test")
+                .expect("shapes generate");
+        parse_shacl_hints(&shapes, "t")
+    }
+
+    #[test]
+    fn boolean_is_taught_as_bool_not_str() {
+        let h = hints_for(KIT_TTL);
+        let hint = h.get("t:lookAnatomyReject").expect("boolean prop has a hint");
+        assert!(hint.contains("bool"), "boolean taught as `{hint}` — a hard gate must not read as text");
+        assert!(!hint.contains("str"), "boolean still says str: {hint}");
+    }
+
+    #[test]
+    fn bounded_integer_is_taught_with_its_range() {
+        let h = hints_for(KIT_TTL);
+        let hint = h.get("t:lookTechnicalScore").expect("score prop has a hint");
+        assert!(hint.contains("int"), "score not taught as int: {hint}");
+        assert!(hint.contains("1-5"), "score omits its declared bound: {hint}");
+    }
+
+    #[test]
+    fn date_keeps_its_own_word() {
+        let h = hints_for(KIT_TTL);
+        let hint = h.get("t:lookTakenOn").expect("date prop has a hint");
+        assert!(hint.contains("date"), "date taught as `{hint}`");
+    }
+
+    /// A genuine string must still say str — the fix is about accuracy, not
+    /// about never saying "str".
+    #[test]
+    fn genuine_string_still_says_str() {
+        let h = hints_for(KIT_TTL);
+        let hint = h.get("t:lookNote").expect("string prop has a hint");
+        assert!(hint.contains("str"), "real string lost its word: {hint}");
+    }
+
+    #[test]
+    fn unknown_datatype_is_named_not_called_str() {
+        assert_eq!(
+            friendly_datatype("http://www.w3.org/2001/XMLSchema#gYear"),
+            Some("gYear".to_string()),
+            "an unfamiliar xsd type should name itself rather than pose as a string"
+        );
+    }
+}
