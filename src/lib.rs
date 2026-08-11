@@ -411,9 +411,14 @@ fn repeated_top_level_keys(yaml_str: &str) -> Vec<String> {
 /// stand behind — writing `someProperty` teaches the SYNTAX, which is what
 /// the author is missing.
 pub fn multivalue_teaching_block(short: &str, class_name: &str) -> String {
+    // States the CURRENT outcome, not the historical one. Until 1d13cbc a
+    // repeated key silently kept the last value; now it is rejected at save.
+    // Motivating the rule with a loss that can no longer happen reads as
+    // stale to anyone who tests it, and is weaker than the truth (tr1p's
+    // catch, 2026-08-11).
     format!(
-        "# More than one value for a key? Write a YAML list. Repeating a key does NOT\n\
-         # add a second value — YAML keeps only the last one and the rest are lost:\n\
+        "# More than one value for a key? Write a YAML list. Repeating a key is\n\
+         # REJECTED at save — YAML has no rule for it, so git-lex will not guess:\n\
          #\n\
          #     {}.{}.someProperty:\n\
          #       - \"first value\"\n\
@@ -428,7 +433,7 @@ pub fn multivalue_teaching_block(short: &str, class_name: &str) -> String {
 /// worked example, but this text lands in a real document and stays there,
 /// so it carries the rule and the shape and nothing else.
 pub fn multivalue_teaching_line() -> &'static str {
-    "# Multiple values for one key? Use a YAML list (`- value` per line) — a repeated key keeps only the last.\n"
+    "# Multiple values for one key? Use a YAML list (`- value` per line) — a repeated key is rejected at save.\n"
 }
 
 // ─── Kit namespace derivation (ONE authority) ──────────────────
