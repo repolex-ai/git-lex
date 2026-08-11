@@ -16,6 +16,37 @@ The pattern is `kit.Class.property`. Class names are case-sensitive and come
 from your kit — check the `__ClassName.md` template files in each folder for
 every valid property.
 
+## More than one value for a key
+
+Use a YAML list:
+
+```yaml
+---
+copia.Outfit.outfitId: "abyssal-drift"
+copia.Outfit.includesItemId:
+  - "abyssal-veil"
+  - "lumen-strand"
+---
+```
+
+**Do not repeat the key.** Repeating it looks like it should add a second
+value, and it doesn't — YAML keeps only the last one and throws the rest
+away:
+
+```yaml
+# WRONG — "abyssal-veil" is lost, only "lumen-strand" survives
+copia.Outfit.includesItemId: "abyssal-veil"
+copia.Outfit.includesItemId: "lumen-strand"
+```
+
+git-lex rejects a repeated key at save and names it, so the mistake can no
+longer land quietly. Before v0.1.1 it did land quietly: 28 documents in one
+soul repo kept only their last value, and the graph read as though the rest
+had never been written.
+
+Whether a given property *may* hold more than one value is a question for
+your kit's ontology — the list form is how you write it when it does.
+
 ## The reference rule (one sentence)
 
 **A reference is the document's repo-relative path (or a full IRI) — the

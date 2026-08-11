@@ -586,14 +586,20 @@ pub(crate) fn generate_frontmatter_nquads_with(
 
         // ONE frontmatter parser (review #9): the shared fence rule in lib.rs.
         if let (Some(yaml_str), _) = git_lex::split_frontmatter(&content) {
-            match serde_yaml::from_str::<HashMap<String, serde_yaml::Value>>(yaml_str) {
+            // ONE frontmatter YAML parser (#101): the shared duplicate-key
+            // gate in lib.rs. This path used to deserialize into a HashMap,
+            // which accepts a repeated key and keeps only the last value — so
+            // a walk silently re-emitted the same loss the save made.
+            match git_lex::parse_frontmatter_map(yaml_str) {
                 Ok(yaml) => {
-                    for (key, value) in &yaml {
-                        flatten_yaml(key, value, &mut spo_lines);
+                    for (key_node, value) in &yaml {
+                        if let Some(key) = key_node.as_str() {
+                            flatten_yaml(key, value, &mut spo_lines);
+                        }
                     }
                 }
                 Err(e) => {
-                    eprintln!("error: {}: malformed YAML frontmatter: {}", relpath_str, e);
+                    eprintln!("error: {}: {}", relpath_str, e);
                     total_errors += 1;
                 }
             }

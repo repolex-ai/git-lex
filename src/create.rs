@@ -242,6 +242,12 @@ pub(crate) fn cmd_create(doctype: &str, instance_id: Option<&str>, json: bool) {
     let type_label = ontology::get_class_type_label(&kit, &class_name);
     fm.push_str(&format!("type: {}\n", type_label));
 
+    // The list form, stated once at the top (#101). `create` builds its own
+    // frontmatter rather than copying __ClassName.md, so the worked example
+    // that lands in the template never reaches the document an agent
+    // actually authors in — this is the same fact at the second surface.
+    fm.push_str(git_lex::multivalue_teaching_line());
+
     for (prop_name, prop_type, _required, comment) in &properties {
         // Property names pass through as-is from the ontology (camelCase).
         // Class name is capitalized to match the ontology exactly.

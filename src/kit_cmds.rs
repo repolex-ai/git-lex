@@ -321,6 +321,10 @@ pub(crate) fn emit_class_templates(kit_name: &str, root: &std::path::Path, creat
 
         let mut tmpl = String::new();
         tmpl.push_str("---\n");
+        // How to write more than one value, on the surface people copy from
+        // (#101). Same argument the type words made in #100: the template
+        // gets read far more often than the ontology does.
+        tmpl.push_str(&git_lex::multivalue_teaching_block(&short, type_name));
         for (prop_name, prop_type, _required, _comment) in properties {
             let key = format!("{}.{}.{}", short, type_name, prop_name);
             let hint = shacl_hints.get(&format!("{}:{}", prefix_name, prop_name));

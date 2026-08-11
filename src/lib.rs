@@ -275,6 +275,137 @@ pub fn split_frontmatter(content: &str) -> (Option<&str>, &str) {
     (None, content)
 }
 
+/// Parse a frontmatter YAML block into an ordered mapping — THE frontmatter
+/// YAML parser, and the gate that stops a repeated key from eating data.
+///
+/// `serde_yaml` behaves differently depending on the target type, and the
+/// difference is the whole bug (#101). Deserializing into `HashMap` — what
+/// every call site used to do — accepts a repeated key and keeps only the
+/// LAST value, silently. `lUX/Copia/Outfit/the-cold-errand.md` wrote eight
+/// items that way and kept one; 28 documents and 60 facts went the same way
+/// across the fleet, with exit 0 and a clean save every time. Deserializing
+/// into `Mapping` makes serde_yaml itself reject the duplicate, at any
+/// nesting depth. So the fix is the target type, and this function is where
+/// it is written down once.
+///
+/// The error text is the other half of the job (Rob, 2026-08-11: the
+/// teaching matters more than the rejection). Repeating a key is a
+/// reasonable-looking thing to write and nothing anywhere shows the author
+/// that YAML already has a way to say "more than one" — so the message shows
+/// the list form spelled out with the author's OWN key, not a generic
+/// complaint.
+pub fn parse_frontmatter_map(yaml_str: &str) -> Result<serde_yaml::Mapping, String> {
+    match serde_yaml::from_str::<serde_yaml::Mapping>(yaml_str) {
+        Ok(map) => Ok(map),
+        Err(e) => {
+            let repeated = repeated_top_level_keys(yaml_str);
+            if repeated.is_empty() {
+                // Either genuinely malformed YAML, or a duplicate nested
+                // deeper than the scan below looks. serde's own message
+                // carries the line and column either way.
+                return Err(format!("malformed YAML frontmatter: {}", e));
+            }
+            let example = &repeated[0];
+            let what = if repeated.len() == 1 {
+                format!("the key `{}`", example)
+            } else {
+                format!("{} keys: {}", repeated.len(), repeated.join(", "))
+            };
+            // Assembled line by line rather than as one continued literal:
+            // a `\` line-continuation eats the following line's leading
+            // whitespace, which is exactly the indentation the worked
+            // example needs to be copy-pasteable.
+            let lines = [
+                format!("frontmatter repeats {} — a repeated key does NOT add a second value.", what),
+                "YAML keeps only the last one, so every earlier value is thrown away.".to_string(),
+                String::new(),
+                "To give a key more than one value, write a list:".to_string(),
+                String::new(),
+                format!("    {}:", example),
+                "      - \"first value\"".to_string(),
+                "      - \"second value\"".to_string(),
+                String::new(),
+                "Rewrite the repeated key(s) as lists and save again.".to_string(),
+                format!("(YAML parser: {})", e),
+            ];
+            Err(lines.join("\n"))
+        }
+    }
+}
+
+/// Collect top-level keys that appear more than once in a frontmatter block,
+/// in first-seen order.
+///
+/// PRESENTATION ONLY. serde_yaml is the authority on whether a duplicate
+/// exists — this scan runs afterwards, purely so the error can name every
+/// repeated key at once instead of making the author fix one, re-save, and
+/// meet the next. git-lex frontmatter is flat `kit.Class.property` keys, so a
+/// zero-indent scan sees the real cases exactly; if it ever misses one the
+/// caller still reports serde's message, so a miss costs detail, never the
+/// rejection itself.
+fn repeated_top_level_keys(yaml_str: &str) -> Vec<String> {
+    let mut seen: Vec<String> = Vec::new();
+    let mut repeated: Vec<String> = Vec::new();
+    for line in yaml_str.lines() {
+        // Zero-indent, non-comment, non-list lines only: anything indented
+        // belongs to a nested mapping or a block scalar, where a colon is
+        // just as likely to be prose as a key.
+        if line.starts_with([' ', '\t', '#', '-']) || line.trim().is_empty() {
+            continue;
+        }
+        let Some((key, _)) = line.split_once(':') else { continue };
+        let key = key.trim();
+        if key.is_empty() {
+            continue;
+        }
+        if seen.iter().any(|k| k == key) {
+            if !repeated.iter().any(|k| k == key) {
+                repeated.push(key.to_string());
+            }
+        } else {
+            seen.push(key.to_string());
+        }
+    }
+    repeated
+}
+
+/// The list-form teaching, worked out against a real class, for the
+/// `__ClassName.md` reference template.
+///
+/// The rejection in [`parse_frontmatter_map`] catches the mistake; this is
+/// the half that stops it being made (Rob, 2026-08-11: "more important than
+/// the rejection is the clear instructions about the right way to do
+/// multivalues"). Nothing in git-lex showed an author that YAML already has
+/// a way to say "more than one", and repeating a key looks entirely
+/// reasonable — so the syntax has to be visible on the surface people copy
+/// from, the same argument #100 made about type words.
+///
+/// The property name is deliberately a placeholder. Which fields accept more
+/// than one value is a cardinality question the kit ontologies mostly do not
+/// declare, and naming a real field here would teach a claim git-lex cannot
+/// stand behind — writing `someProperty` teaches the SYNTAX, which is what
+/// the author is missing.
+pub fn multivalue_teaching_block(short: &str, class_name: &str) -> String {
+    format!(
+        "# More than one value for a key? Write a YAML list. Repeating a key does NOT\n\
+         # add a second value — YAML keeps only the last one and the rest are lost:\n\
+         #\n\
+         #     {}.{}.someProperty:\n\
+         #       - \"first value\"\n\
+         #       - \"second value\"\n",
+        short, class_name,
+    )
+}
+
+/// The same teaching, one line, for the frontmatter `git lex create` writes.
+///
+/// Short by design: the template is a reference artifact that can afford a
+/// worked example, but this text lands in a real document and stays there,
+/// so it carries the rule and the shape and nothing else.
+pub fn multivalue_teaching_line() -> &'static str {
+    "# Multiple values for one key? Use a YAML list (`- value` per line) — a repeated key keeps only the last.\n"
+}
+
 // ─── Kit namespace derivation (ONE authority) ──────────────────
 
 /// The conventional kit namespace, used ONLY as a fallback when no installed
@@ -789,6 +920,77 @@ mod split_frontmatter_tests {
             split_frontmatter("---\nkey: v\n----\nx").0,
             None
         );
+    }
+}
+
+#[cfg(test)]
+mod frontmatter_duplicate_key_tests {
+    use super::*;
+
+    #[test]
+    fn repeated_key_is_rejected_and_names_the_key() {
+        let yaml = "copia.Outfit.outfitId: \"abyssal-drift\"\n\
+                    copia.Outfit.includesItemId: \"abyssal-veil\"\n\
+                    copia.Outfit.includesItemId: \"lumen-strand\"\n";
+        let err = parse_frontmatter_map(yaml).unwrap_err();
+        assert!(err.contains("copia.Outfit.includesItemId"), "{}", err);
+        // The whole point of the message: it shows the fix, spelled out
+        // with the author's own key.
+        assert!(err.contains("copia.Outfit.includesItemId:\n      - \"first value\""), "{}", err);
+    }
+
+    #[test]
+    fn every_repeated_key_is_listed_not_just_the_first() {
+        // serde_yaml stops at the first duplicate; the reporting scan exists
+        // so an author fixes all of them in one pass instead of meeting the
+        // next one on every re-save.
+        let yaml = "a: 1\nb: 2\na: 3\nb: 4\nc: 5\n";
+        let err = parse_frontmatter_map(yaml).unwrap_err();
+        assert!(err.contains("2 keys: a, b"), "{}", err);
+        assert!(!err.contains("a, b, c"), "unrepeated key should not be named: {}", err);
+    }
+
+    #[test]
+    fn the_list_form_is_accepted() {
+        // The form the error message teaches has to actually work.
+        let yaml = "copia.Outfit.includesItemId:\n  - \"abyssal-veil\"\n  - \"lumen-strand\"\n";
+        let map = parse_frontmatter_map(yaml).unwrap();
+        let v = map.get(serde_yaml::Value::String("copia.Outfit.includesItemId".into())).unwrap();
+        assert_eq!(v.as_sequence().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn nested_duplicate_is_rejected_too() {
+        // serde_yaml rejects at every depth; the top-level scan finds
+        // nothing here, so the message falls back to serde's own — which
+        // still carries the key, line and column.
+        let yaml = "outer:\n  inner: 1\n  inner: 2\n";
+        let err = parse_frontmatter_map(yaml).unwrap_err();
+        assert!(err.contains("duplicate entry"), "{}", err);
+    }
+
+    #[test]
+    fn clean_frontmatter_parses_in_authored_order() {
+        // Mapping (unlike the HashMap this replaced) keeps declaration
+        // order, so anything downstream that iterates is deterministic.
+        let yaml = "soul.Journal.journalId: \"day-58\"\nsoul.Journal.soulDay: 58\n";
+        let map = parse_frontmatter_map(yaml).unwrap();
+        let keys: Vec<&str> = map.keys().filter_map(|k| k.as_str()).collect();
+        assert_eq!(keys, vec!["soul.Journal.journalId", "soul.Journal.soulDay"]);
+    }
+
+    #[test]
+    fn malformed_yaml_still_reads_as_malformed() {
+        let err = parse_frontmatter_map("key: [unclosed\n").unwrap_err();
+        assert!(err.contains("malformed YAML frontmatter"), "{}", err);
+    }
+
+    #[test]
+    fn the_reporting_scan_ignores_nested_comment_and_list_lines() {
+        // A colon inside a block scalar or a list item is prose, not a key —
+        // counting those would name keys that were never repeated.
+        let yaml = "note: |\n  first: thing\n  first: thing\n# first: thing\nitems:\n  - first: thing\n  - first: thing\n";
+        assert!(repeated_top_level_keys(yaml).is_empty());
     }
 }
 

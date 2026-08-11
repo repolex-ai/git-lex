@@ -10,7 +10,6 @@
 //! (The Day-48 two-type-emitters drift NOTE that lived here is resolved:
 //! both paths now call `ontology::resolve_class_segment`, one casing rule.)
 
-use std::collections::HashMap;
 use std::fs;
 
 use git_lex::resolve_kit_spec;
@@ -159,8 +158,10 @@ pub(crate) fn frontmatter_to_turtle(
         return Ok(None);
     };
 
-    let yaml: HashMap<String, serde_yaml::Value> = serde_yaml::from_str(yaml_str)
-        .map_err(|e| format!("malformed YAML frontmatter: {}", e))?;
+    // ONE frontmatter YAML parser (#101): the shared duplicate-key gate in
+    // lib.rs. A repeated key used to reach here as a HashMap that had already
+    // dropped every value but the last.
+    let yaml = git_lex::parse_frontmatter_map(yaml_str)?;
 
     // Find dot notation keys matching this kit: kit.class.property
     // Use the short kit name (e.g., "soul") not the full spec
@@ -171,7 +172,8 @@ pub(crate) fn frontmatter_to_turtle(
     let mut doc_type: Option<String> = None;
     let mut kit_props: Vec<(String, String)> = Vec::new(); // (property_name, value)
 
-    for (key, value) in &yaml {
+    for (key_node, value) in &yaml {
+        let Some(key) = key_node.as_str() else { continue };
         if let Some(rest) = key.strip_prefix(&kit_prefix) {
             let segments: Vec<&str> = rest.splitn(2, '.').collect();
             if segments.len() == 2 {
