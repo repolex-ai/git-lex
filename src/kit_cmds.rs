@@ -401,15 +401,38 @@ pub(crate) fn cmd_kit_update(kit_arg: Option<String>) {
         exit(1);
     }
 
-    // The list of kits to update. Without a target arg, this is ALL installed
-    // kits: base + domain + optionals. With a target, just that one (still
-    // must be present in the installed list).
-    let kits_to_update = collect_kits_for_update(&root, kit_arg.as_deref());
+    // TWO SCOPES, and they are NOT the same one (#102). Keeping them as two
+    // named bindings is the fix: the bug was one list doing both jobs, so a
+    // narrowing meant for the network silently narrowed a local rebuild.
+    //
+    //   FETCH scope — narrowed by the argument. Downloading is per-kit,
+    //   remote and expensive, and "just refresh copia" is a reasonable ask.
+    //
+    //   REBUILD scope — ALWAYS every installed kit, whatever the argument.
+    //   Shapes and templates are derived from the installed payloads, and
+    //   converge_ontology_mirror below rewrites .lex/ontology/ for EVERY kit
+    //   as an exact mirror of its payload — which by design does not contain
+    //   the derived -shapes.ttl. So every kit's shapes are deleted on every
+    //   run and must be rebuilt on every run. Rebuilding only the fetched kit
+    //   left the others with no shapes at all.
+    //
+    // That was not merely cosmetic. The typed-literal map is parsed out of
+    // the generated shape files (ontology.rs get_property_datatypes_all_kits),
+    // so a kit with no shapes emits its literals UNTYPED — and an untyped
+    // literal does not match the typed one it should replace, so the retract
+    // never fires and the property ends up holding two contradictory values.
+    // Restoring the shapes does not heal it; only a full store rebuild does.
+    //
+    // THE RULE: an argument may narrow what you FETCH; it must never narrow
+    // what you REBUILD. Same scope leak as #28, which was this command
+    // reaping hooks from a partial kit set.
+    let kits_to_fetch = collect_kits_for_update(&root, kit_arg.as_deref());
+    let all_installed_kits = collect_kits_for_update(&root, None);
 
     // Fetch every kit fresh. Bail on any fetch failure — partial state is
     // worse than no state, and the only way to fail here is network/auth
     // (since the spec was validated against the installed list).
-    for spec in &kits_to_update {
+    for spec in &kits_to_fetch {
         let (org, repo, _) = resolve_kit_spec(spec);
         println!("Updating kit '{}/{}' from GitHub...", org, repo);
         if !fetch_kit_for_update(spec) {
@@ -434,7 +457,7 @@ pub(crate) fn cmd_kit_update(kit_arg: Option<String>) {
     // fleet kit-update printed the path twice and re-.bak'd it.
     let mut converged_by: std::collections::BTreeMap<String, Vec<String>> =
         std::collections::BTreeMap::new();
-    for spec in &kits_to_update {
+    for spec in &kits_to_fetch {
         let (org, repo, _) = resolve_kit_spec(spec);
         let kit_dir = lex_dir.join("kit").join(&org).join(&repo);
         let report = install_scaffold_files_from_skip_existing(&kit_dir);
@@ -517,8 +540,10 @@ pub(crate) fn cmd_kit_update(kit_arg: Option<String>) {
     ensure_engine_gitignore(&root);
 
     // Regenerate derived artifacts (shapes, class templates, folder audit)
-    // for each kit. Order matches kits_to_update so base goes first.
-    for spec in &kits_to_update {
+    // for EVERY installed kit — never just the fetched one (#102). The
+    // mirror above deleted every kit's shapes; whatever is not rebuilt here
+    // stays deleted. Base first, same ordering rule as the fetch list.
+    for spec in &all_installed_kits {
         let (org, repo, _) = resolve_kit_spec(spec);
         println!("Regenerating artifacts for '{}/{}'...", org, repo);
         regenerate_kit_artifacts(spec, &root, true);
@@ -548,7 +573,8 @@ pub(crate) fn cmd_kit_update(kit_arg: Option<String>) {
         eprintln!("`git lex sync`/`save` will refuse to run until it exists.");
     }
 
-    println!("Kit update complete: {} kit(s) refreshed.", kits_to_update.len());
+    println!("Kit update complete: {} kit(s) fetched, {} kit(s) rebuilt.",
+             kits_to_fetch.len(), all_installed_kits.len());
 
     // t-box refresh: kit vocab may have changed.
     reload_ontology_graph();
@@ -1418,5 +1444,77 @@ mod engine_gitignore_tests {
         // A missing folder is not reapable (nothing to do).
         assert!(!folder_is_scaffold_only(&dir.join("Nope"), "Nope"));
         fs::remove_dir_all(&dir).ok();
+    }
+}
+
+#[cfg(test)]
+mod update_scope_tests {
+    use super::*;
+    use std::fs;
+    use std::path::PathBuf;
+
+    fn tmp_repo(tag: &str, repo_yml: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "gitlex-update-scope-{}-{}",
+            tag,
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(dir.join(".lex")).unwrap();
+        fs::write(dir.join(".lex").join("repo.yml"), repo_yml).unwrap();
+        dir
+    }
+
+    const THREE_KITS: &str = "kit: repolex-ai/git-lex-kit-soul\n\
+                              optional_kits:\n  - repolex-ai/git-lex-kit-copia\n";
+
+    /// #102, stated as a test: an argument narrows the FETCH scope and must
+    /// leave the REBUILD scope alone.
+    ///
+    /// The rebuild scope is what regenerates SHACL shapes, and
+    /// converge_ontology_mirror deletes every kit's shapes on every run —
+    /// so a kit missing from this list ends up with NO shapes, which silently
+    /// untypes its literals. `kit-update copia` used to leave the soul kit in
+    /// exactly that state.
+    #[test]
+    fn an_argument_narrows_the_fetch_but_never_the_rebuild() {
+        let root = tmp_repo("narrow", THREE_KITS);
+
+        let rebuild = collect_kits_for_update(&root, None);
+        assert!(rebuild.len() >= 3, "expected base+soul+copia, got {:?}", rebuild);
+
+        // Narrowing to one kit narrows fetching...
+        let fetch = collect_kits_for_update(&root, Some("repolex-ai/git-lex-kit-copia"));
+        assert_eq!(fetch.len(), 1, "fetch scope should narrow: {:?}", fetch);
+
+        // ...and the rebuild scope, taken the way cmd_kit_update takes it,
+        // is unchanged and still covers every installed kit.
+        let rebuild_again = collect_kits_for_update(&root, None);
+        assert_eq!(rebuild, rebuild_again);
+        for kit in &rebuild {
+            assert!(
+                rebuild_again.contains(kit),
+                "{} dropped out of the rebuild scope — its shapes would be deleted \
+                 by the ontology mirror and never regenerated",
+                kit
+            );
+        }
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// Base is always in the rebuild scope, even when the argument names a
+    /// different kit — base ships git-lex's own vocabulary, so losing its
+    /// shapes untypes File/fm facts in every repo.
+    #[test]
+    fn base_kit_is_always_rebuilt() {
+        let root = tmp_repo("base", THREE_KITS);
+        let rebuild = collect_kits_for_update(&root, None);
+        assert!(
+            rebuild.iter().any(|k| k == BASE_KIT),
+            "base kit missing from rebuild scope: {:?}",
+            rebuild
+        );
+        let _ = fs::remove_dir_all(&root);
     }
 }
