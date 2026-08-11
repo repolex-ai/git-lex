@@ -359,18 +359,85 @@ pub(crate) fn find_kit_ttl(kit: &str) -> Option<PathBuf> {
     None
 }
 
-/// Load a kit TTL into an in-memory oxigraph store for SPARQL querying.
+/// Load a kit's ontology into an in-memory oxigraph store for SPARQL
+/// querying, together with EVERY other installed kit's vocabulary — the view
+/// shape generation needs to resolve a parent class living in another kit
+/// (#104).
 ///
-/// `Ok(None)` = the kit ships no ontology TTL (legitimate — nothing to
-/// load). `Err` = the TTL exists but could not be read or PARSED — that
-/// must be loud: a silently-skipped broken ontology means no SHACL shapes,
-/// validation "skipped", and object properties emitted as string literals
-/// (the ontology is the trust boundary).
-pub(crate) fn load_kit_into_store(kit: &str) -> Result<Option<Store>, String> {
-    let Some(ttl_path) = find_kit_ttl(kit) else { return Ok(None) };
-    let content = fs::read_to_string(&ttl_path)
-        .map_err(|e| format!("cannot read {}: {}", ttl_path.display(), e))?;
-    Ok(Some(load_ttl_str(&content, &ttl_path.display().to_string())?))
+/// `Ok(None)` = the kit ships no ontology TTL (legitimate — nothing to load).
+/// `Err` = the target kit's TTL exists but could not be read or PARSED, and
+/// that must be loud: a silently-skipped broken ontology means no SHACL
+/// shapes, validation "skipped", and object properties emitted as string
+/// literals (the ontology is the trust boundary).
+///
+/// Replaces the former single-kit loader, which read one TTL into an empty
+/// store. Nothing wanted that narrower view once inheritance existed: a
+/// vocabulary read in isolation cannot answer what its classes inherit.
+///
+/// A class declares `rdfs:subClassOf git-lex:Thing`, and Thing's properties are
+/// declared in the BASE kit. Reading one kit's TTL into an empty store — what
+/// shape generation used to do — means the parent is simply not present, so the
+/// chain cannot be walked and every inherited property reaches no shape. Same
+/// file walk `load_ontology_graph` already performs: the `.lex/ontology/`
+/// mirror is the one source of truth for installed vocabulary, and this is a
+/// second READER of it, not a second copy.
+///
+/// Deliberately a fresh in-memory store rather than a query against the
+/// persistent ontology graph. Shape generation touches no database today, and
+/// `kit-update` regenerates shapes at a moment when the stored graph has not
+/// necessarily been reloaded — pointing the generator at the database would
+/// create an ordering dependency between two steps of one command, which is
+/// the shape of #102.
+///
+/// Failure policy is split on purpose. The TARGET kit's TTL stays strict —
+/// `Err`, exactly as before, because a broken ontology must never silently
+/// yield empty shapes. Every OTHER kit is best-effort with a LOUD warning that
+/// names the consequence: one unrelated broken vocabulary should not block this
+/// kit's shapes, but it must not quietly delete inherited properties either.
+pub(crate) fn load_all_kit_ontologies_into_store(kit: &str) -> Result<Option<Store>, String> {
+    let Some(target_ttl) = find_kit_ttl(kit) else { return Ok(None) };
+    let target_content = fs::read_to_string(&target_ttl)
+        .map_err(|e| format!("cannot read {}: {}", target_ttl.display(), e))?;
+    let store = load_ttl_str(&target_content, &target_ttl.display().to_string())?;
+
+    let Some(root) = find_git_root() else { return Ok(Some(store)) };
+    let mut others: Vec<PathBuf> = Vec::new();
+    collect_vocabulary_ttls(&root.join(".lex").join("ontology"), &mut others);
+    others.sort();
+
+    for path in others {
+        if path == target_ttl {
+            continue;
+        }
+        let Ok(bytes) = fs::read(&path) else { continue };
+        if let Err(e) = store.load_from_reader(RdfFormat::Turtle, Cursor::new(bytes)) {
+            let rel = path.strip_prefix(&root).unwrap_or(&path);
+            eprintln!(
+                "warning: could not load {} while generating shapes for '{}' ({e}) — any \
+property '{}' inherits from a class declared there will be MISSING from these \
+shapes. Fix that TTL and re-run `git lex kit-update`.",
+                rel.display(), kit, kit
+            );
+        }
+    }
+    Ok(Some(store))
+}
+
+/// Every installed vocabulary TTL under `.lex/ontology/`, excluding the
+/// GENERATED `*-shapes.ttl` — those are derived output, not vocabulary, and
+/// loading them would feed the generator its own previous answer.
+fn collect_vocabulary_ttls(dir: &std::path::Path, out: &mut Vec<PathBuf>) {
+    let Ok(entries) = fs::read_dir(dir) else { return };
+    for e in entries.filter_map(|e| e.ok()) {
+        let p = e.path();
+        if p.is_dir() {
+            collect_vocabulary_ttls(&p, out);
+        } else if p.extension().is_some_and(|x| x == "ttl")
+            && !p.file_name().is_some_and(|n| n.to_string_lossy().ends_with("-shapes.ttl"))
+        {
+            out.push(p);
+        }
+    }
 }
 
 /// Load Turtle TEXT into a fresh in-memory store — the ONE way git-lex reads

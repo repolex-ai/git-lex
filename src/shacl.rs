@@ -102,6 +102,22 @@ pub(crate) fn parse_shacl_hints(shapes_ttl: &str, short: &str) -> HashMap<String
             lit_value("maxIncl"),
         );
         if !hint.is_empty() {
+            // An INHERITED property keeps its own (foreign) namespace in
+            // sh:path, so its key here is the bracketed IRI — but the template
+            // emitter looks properties up as `{thisKitPrefix}:{localName}`,
+            // because that is what the author's frontmatter key resolves to
+            // (Rob's own-class ruling: soul.Note.title, not git-lex.Thing.title).
+            // Index it under BOTH so an inherited field keeps its type hint
+            // instead of silently rendering blank (#104).
+            //
+            // `or_insert` not `insert`: if this kit declares its own property
+            // of the same local name, that one is the author's and wins.
+            if key.starts_with('<') {
+                if let Some(local) = path.as_str().rsplit(['/', '#']).next() {
+                    hints.entry(format!("{}:{}", prefix_name, local))
+                        .or_insert_with(|| hint.clone());
+                }
+            }
             hints.insert(key, hint);
         }
     }
@@ -146,6 +162,40 @@ fn rdf_list_literals(store: &oxigraph::store::Store, head: &Term) -> Vec<String>
         {
             Some(Ok(q)) => node = q.object,
             _ => break,
+        }
+    }
+    out
+}
+
+/// Every class `class_iri` inherits from, nearest parent first, transitively.
+///
+/// Named parents only: `rdfs:subClassOf` also carries the blank-node
+/// `owl:Restriction` axioms that declare cardinality, and those are not
+/// classes whose properties anyone inherits — Query 4 reads them separately.
+/// Cycle-guarded, because an ontology that says A is a B is an A should
+/// produce a wrong shape, not a hung command.
+fn ancestor_chain(store: &oxigraph::store::Store, class_iri: &str) -> Vec<String> {
+    const SUB_CLASS_OF: &str = "http://www.w3.org/2000/01/rdf-schema#subClassOf";
+    let Ok(pred) = oxigraph::model::NamedNodeRef::new(SUB_CLASS_OF) else { return Vec::new() };
+
+    let mut out: Vec<String> = Vec::new();
+    let mut seen: HashSet<String> = HashSet::new();
+    let mut frontier: Vec<String> = vec![class_iri.to_string()];
+    seen.insert(class_iri.to_string());
+
+    while let Some(current) = frontier.pop() {
+        let Ok(subject) = oxigraph::model::NamedNode::new(&current) else { continue };
+        for q in store
+            .quads_for_pattern(Some((&subject).into()), Some(pred), None, None)
+            .flatten()
+        {
+            if let Term::NamedNode(parent) = q.object {
+                let iri = parent.as_str().to_string();
+                if seen.insert(iri.clone()) {
+                    out.push(iri.clone());
+                    frontier.push(iri);
+                }
+            }
         }
     }
     out
@@ -412,10 +462,31 @@ fn generate_shapes_from_store(
         shacl.push_str(&format!("{}:{} a sh:NodeShape ;\n", prefix_name, shape_name));
         shacl.push_str(&format!("    sh:targetClass {}:{}", prefix_name, class_name));
 
-        // Collect properties for this class
-        let class_props: Vec<&PropInfo> = properties.iter()
+        // Properties of this class AND of every class it inherits from
+        // (#104). This used to be an exact IRI match on the domain, so a
+        // property declared on a parent reached no child at all.
+        //
+        // Not theoretical and not new: copia:Group is an abstract parent
+        // declaring groupTitle, groupDepictedBy and fromNocturneId, and its
+        // subclasses copia:Set and copia:Sequence received none of them —
+        // shipped, unnoticed only because nobody authors a Group. The
+        // git-lex:Thing properties are simply the first case where it had to
+        // work.
+        //
+        // Own properties first, then inherited, so the generated shape reads
+        // in the order the author thinks in. A child re-declaring a parent's
+        // property wins, because its own domain already placed it.
+        let ancestors = ancestor_chain(store, class_iri);
+        let mut class_props: Vec<&PropInfo> = properties.iter()
             .filter(|p| p.domain == *class_iri)
             .collect();
+        for ancestor in &ancestors {
+            for p in properties.iter().filter(|p| p.domain == *ancestor) {
+                if !class_props.iter().any(|existing| existing.iri == p.iri) {
+                    class_props.push(p);
+                }
+            }
+        }
 
         if class_props.is_empty() {
             shacl.push_str(" .\n");
@@ -425,10 +496,22 @@ fn generate_shapes_from_store(
         for (i, prop) in class_props.iter().enumerate() {
             let prop_name = local_name(&prop.iri);
             let is_last = i == class_props.len() - 1;
-            let is_required = required_props.contains(&(class_iri.clone(), prop.iri.clone()));
+            // A required-ness restriction can sit on the class OR on any
+            // ancestor — an inherited property that a parent declares required
+            // is required here too (#104).
+            let is_required = required_props.contains(&(class_iri.clone(), prop.iri.clone()))
+                || ancestors.iter().any(|a| required_props.contains(&(a.clone(), prop.iri.clone())));
 
             shacl.push_str(" ;\n    sh:property [\n");
-            shacl.push_str(&format!("        sh:path {}:{} ;\n", prefix_name, prop_name));
+            // An INHERITED property usually lives in another kit's namespace
+            // (git-lex:title on a soul class), where the local prefix would
+            // name a different IRI entirely. Full bracketed IRI in that case —
+            // always valid Turtle, and parse_shacl_hints already handles the
+            // bracketed form.
+            match prop.iri.strip_prefix(namespace) {
+                Some(local) => shacl.push_str(&format!("        sh:path {}:{} ;\n", prefix_name, local)),
+                None => shacl.push_str(&format!("        sh:path <{}> ;\n", prop.iri)),
+            }
 
             if !prop.comment.is_empty() {
                 let escaped = prop.comment.replace('\\', "\\\\").replace('"', "\\\"");
@@ -543,7 +626,12 @@ generator learns it, or express the bound with a facet git-lex knows \
 /// `Ok(None)` = kit has no ontology (nothing to generate). `Err` = the
 /// ontology exists but is broken — callers must be LOUD (finding #22).
 pub(crate) fn generate_shacl_shapes(kit: &str) -> Result<Option<String>, String> {
-    let Some(store) = crate::kit::load_kit_into_store(kit)? else { return Ok(None) };
+    // EVERY installed vocabulary, not just this kit's (#104) — a class whose
+    // parent lives in another kit (rdfs:subClassOf git-lex:Thing) cannot have
+    // its chain walked if the parent was never loaded. Class emission stays
+    // namespace-filtered below, so the extra vocabulary resolves parents
+    // without leaking other kits' shapes into this file.
+    let Some(store) = crate::kit::load_all_kit_ontologies_into_store(kit)? else { return Ok(None) };
     let Some(ttl_path) = crate::kit::find_kit_ttl(kit) else { return Ok(None) };
     let ttl_content = fs::read_to_string(&ttl_path)
         .map_err(|e| format!("cannot read {}: {}", ttl_path.display(), e))?;
