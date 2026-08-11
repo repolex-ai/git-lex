@@ -128,6 +128,19 @@ fn resource_base() -> &'static (String, String) {
 /// no-kit repo's `git-lex/File/README.md` follow one rule.
 pub(crate) const FILE_BASE: &str = "https://repolex.ai/git-lex/File/";
 
+/// THE one base every instance address resolves against.
+///
+/// Not a new hardcode — it is the part `GRAPH_BASE`, `FILE_BASE` and the
+/// per-repo derived base (`https://repolex.ai/<ns>`) already share, named once
+/// instead of spelled four times.
+///
+/// This is what the authored identifier form `<soul/Journal/day-7>` resolves
+/// against (Rob's notation ruling). The whole point of that form is that the
+/// namespace comes from the VALUE — so it must NOT resolve against the
+/// document's own kit base, or a copia Texture referenced from a soul Note
+/// lands under soul and joins to nothing.
+pub(crate) const RESOURCE_ROOT: &str = "https://repolex.ai/";
+
 /// A File node's IRI from its (already uri-encoded) repo-relative path.
 pub(crate) fn file_iri(encoded_path: &str) -> String {
     format!("{FILE_BASE}{encoded_path}")

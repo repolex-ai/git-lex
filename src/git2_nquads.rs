@@ -506,6 +506,17 @@ mod tests {
         let nq = generate_git2_nquads();
         for line in nq.lines() {
             for term in line.split_whitespace() {
+                // Only real IRI tokens. Splitting on whitespace also chops up
+                // LITERALS — and commit messages are literals, so a commit
+                // whose text happens to quote an ontology IRI used to read as
+                // an emitted term and fail this guard. It caught its own
+                // author: the #104 commit message quotes
+                // `<…/ontology/git-lex/title>` in prose. An IRI token opens
+                // with `<` AND closes with `>`; prose that merely starts that
+                // way does not.
+                if !(term.starts_with('<') && term.ends_with('>')) {
+                    continue;
+                }
                 if let Some(rest) = term.strip_prefix(&format!("<{GIT2_NS}")) {
                     let local = rest.trim_end_matches('>');
                     assert!(

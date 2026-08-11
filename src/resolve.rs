@@ -23,6 +23,16 @@
 //!    bare-name search made history non-deterministic (resolution depended
 //!    on which files existed at sync time).
 //!
+//! 3b. **The authored identifier form is `<namespace/Class/identifier>`**
+//!    (Rob's notation ruling) — `<soul/Journal/day-7>`,
+//!    `<copia/Texture/deep-water>`. The angle brackets are DELIMITERS, the
+//!    same punctuation Turtle and SPARQL use for an address; they are
+//!    stripped, never encoded into the id. It resolves against the ONE root
+//!    (`git::RESOURCE_ROOT`) and NEVER against the writing document's kit
+//!    base — that is the entire point of the form, and it is what makes a
+//!    cross-kit reference possible. A bracketed value with no `/` is still a
+//!    bare name and is still rejected under rule 3.
+//!
 //! 4. **Full IRIs are passed through unchanged.** If the value starts with
 //!    `http://` or `https://`, the resolver trusts it. This is the canonical
 //!    form for machine-generated references (e.g. claude-export's JSONL
@@ -91,6 +101,50 @@ pub fn resolve_frontmatter_value(raw: &str) -> ResolveResult {
             "@mention syntax is not allowed in frontmatter. \
              Write the repo-relative path instead (e.g. {}.md with its folder)",
             inner
+        ));
+    }
+
+    // Rule 3b: the authored identifier form, `<namespace/Class/id>`.
+    //
+    // The angle brackets are DELIMITERS, not part of the identifier — the same
+    // punctuation Turtle and SPARQL use to mean "this is an address". Their
+    // whole purpose is that the namespace comes from the VALUE, so this form
+    // resolves against the ONE root and NEVER against the writing document's
+    // own kit base. Before this rule the brackets were percent-encoded into
+    // the identifier and the wreckage glued under the document's kit, so
+    // `<copia/Texture/deep-water>` in a soul Note landed at
+    // `https://repolex.ai/soul/%3Ccopia/Texture/deep-water%3E` — silently, and
+    // as a WRONG join rather than no join, which is the worse failure.
+    //
+    // This is the same assumption #104 removed from the predicate side —
+    // "the document's kit is the right namespace" — still living in the
+    // values. A value's namespace comes from the value.
+    let trimmed = raw.trim();
+    if let Some(inner) = trimmed.strip_prefix('<').and_then(|r| r.strip_suffix('>')) {
+        let inner = inner.trim();
+        if inner.is_empty() {
+            return ResolveResult::Rejected(
+                "empty identifier '<>' — write <namespace/Class/identifier>, \
+                 e.g. <soul/Journal/day-7>".to_string(),
+            );
+        }
+        // An absolute address inside brackets is just an absolute address.
+        if inner.contains("://") {
+            return ResolveResult::Iri(format!("<{}>", crate::nquad::uri_encode_url(inner)));
+        }
+        // A bare name in brackets is still a bare name (rule 3): the brackets
+        // promise a namespace and a class, and one token supplies neither.
+        if !inner.contains('/') {
+            return ResolveResult::Rejected(format!(
+                "'<{inner}>' names no namespace or class — write \
+                 <namespace/Class/identifier>, e.g. <soul/Journal/day-7>. \
+                 The graph never guesses which kit a bare name belongs to.",
+            ));
+        }
+        return ResolveResult::Iri(format!(
+            "<{}{}>",
+            crate::git::RESOURCE_ROOT,
+            crate::nquad::uri_encode_path(inner)
         ));
     }
 
@@ -349,4 +403,86 @@ mod tests {
         }
     }
 
+}
+
+#[cfg(test)]
+mod authored_identifier_tests {
+    use super::*;
+
+    fn iri(raw: &str) -> String {
+        match resolve_frontmatter_value(raw) {
+            ResolveResult::Iri(s) => s,
+            other => panic!("expected an IRI for {raw:?}, got {other:?}"),
+        }
+    }
+
+    /// The brackets are DELIMITERS. They must not survive into the address.
+    #[test]
+    fn brackets_are_stripped_not_encoded() {
+        let got = iri("<soul/Journal/day-7>");
+        assert_eq!(got, "<https://repolex.ai/soul/Journal/day-7>");
+        assert!(!got.contains("%3C") && !got.contains("%3E"), "{got}");
+    }
+
+    /// THE point of the form, and the bug that prompted it: the namespace
+    /// comes from the VALUE, never from the document doing the writing. A
+    /// copia Texture referenced from a soul Note is a copia Texture.
+    #[test]
+    fn the_namespace_comes_from_the_value_not_the_document() {
+        assert_eq!(
+            iri("<copia/Texture/deep-water>"),
+            "<https://repolex.ai/copia/Texture/deep-water>"
+        );
+        assert_eq!(
+            iri("<git-lex/File/Soul/Journal/day-1.md>"),
+            "<https://repolex.ai/git-lex/File/Soul/Journal/day-1.md>"
+        );
+    }
+
+    /// tr1p's invariant: for a document carrying `id`, the resolved id must
+    /// be the same string as the document's own Thing subject. If these ever
+    /// diverge, the keystone property points at a mangled twin of the very
+    /// node it names.
+    #[test]
+    fn a_resolved_id_equals_the_thing_subject_it_names() {
+        // What derive_file_subjects builds for a soul-kit repo: base + Class + id.
+        let subject = "https://repolex.ai/soul/Note/thing-plane-first-flight";
+        assert_eq!(iri("<soul/Note/thing-plane-first-flight>"), format!("<{subject}>"));
+    }
+
+    /// An absolute address inside brackets is just an absolute address.
+    #[test]
+    fn an_absolute_iri_in_brackets_passes_through() {
+        assert_eq!(
+            iri("<https://example.org/thing/1>"),
+            "<https://example.org/thing/1>"
+        );
+    }
+
+    /// Brackets promise a namespace and a class. One token supplies neither,
+    /// so it stays a bare name and stays rejected (rule 3).
+    #[test]
+    fn a_bare_name_in_brackets_is_still_rejected() {
+        match resolve_frontmatter_value("<w4r3z>") {
+            ResolveResult::Rejected(msg) => {
+                assert!(msg.contains("<soul/Journal/day-7>"), "should teach the form: {msg}");
+            }
+            other => panic!("expected rejection, got {other:?}"),
+        }
+        match resolve_frontmatter_value("<>") {
+            ResolveResult::Rejected(_) => {}
+            other => panic!("expected rejection of '<>', got {other:?}"),
+        }
+    }
+
+    /// The unbracketed path form is UNCHANGED — it still resolves against the
+    /// document's own repo base, because that is what a repo-relative path
+    /// means. Only the bracketed form carries its own namespace.
+    #[test]
+    fn the_plain_path_form_is_untouched() {
+        match resolve_frontmatter_value("Soul/Journal/day-7.md") {
+            ResolveResult::Iri(s) => assert!(!s.contains("%3C"), "{s}"),
+            other => panic!("expected an IRI, got {other:?}"),
+        }
+    }
 }
