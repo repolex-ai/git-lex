@@ -254,6 +254,15 @@ pub(crate) struct ResolverContext {
     /// resolved to `<range-app>/<RangeClass>/<id>` at emission; without
     /// one, the legacy path/IRI resolver applies (resolve.rs).
     pub ref_ranges: HashMap<String, String>,
+    /// "{kit}/{Class}/{prop}" → the property's DECLARED IRI, from the
+    /// generated shapes. The predicate used to be built by gluing the
+    /// document's own kit namespace onto the key's property segment, which was
+    /// right only while every property a class carried came from that class's
+    /// own kit. Inheritance ended that (#104): `soul.Note.title` would have
+    /// emitted `.../soul/title` for a property declared at
+    /// `.../git-lex/title`. The ontology says where a property lives; the
+    /// emitter now asks instead of assuming.
+    pub prop_iris: HashMap<String, String>,
     /// "{kit}/{prop}" → optional replacement for owl:deprecated properties.
     /// Retired-by-deprecation keys are DECLARED (history stays replayable);
     /// the save-time note teaches the deprecation instead of falsely
@@ -273,6 +282,7 @@ impl ResolverContext {
             declared_props: crate::ontology::get_declared_properties_all_kits(),
             kit_namespaces: get_kit_namespaces_all_kits(),
             ref_ranges: crate::ontology::get_reference_ranges_all_kits(),
+            prop_iris: crate::ontology::get_property_iris_all_kits(),
             deprecated_props: crate::ontology::get_deprecated_properties_all_kits(),
         }
     }
@@ -730,6 +740,7 @@ pub(crate) fn emit_spo_line_nquads(
         declared_props,
         kit_namespaces,
         ref_ranges,
+        prop_iris,
         deprecated_props,
         ..
     } = ctx;
@@ -866,8 +877,6 @@ pub(crate) fn emit_spo_line_nquads(
             }
 
             // Property name passes through as-is (camelCase from ontology)
-            let kit_predicate = format!("<{}{}>", kit_ns, prop_seg);
-
             // Kit+class-qualified lookup (Rob-ruled 2026-07-21): the tables
             // key "{kit}/{Class}/{prop}", so THIS kit's and class's own
             // declaration governs how the value is processed. The old
@@ -877,6 +886,28 @@ pub(crate) fn emit_spo_line_nquads(
             let lookup_key = canonical_class
                 .as_ref()
                 .map(|c| format!("{}/{}/{}", kit_name, c, prop_seg));
+
+            // The predicate IRI comes from what the ontology DECLARED, via the
+            // generated shapes — not from gluing this document's kit namespace
+            // onto the key's property segment (#104).
+            //
+            // The glue was correct only while every property a class carried
+            // was declared by that class's own kit. `git-lex:Thing` ended that:
+            // the ruled key `soul.Note.title` would have emitted
+            // `.../ontology/soul/title` for a property declared at
+            // `.../ontology/git-lex/title` — a fact on an IRI no ontology
+            // declares, in every repo, breaking the one rule the rest of this
+            // pipeline exists to enforce.
+            //
+            // Fallback to the old construction when no kit declares the key:
+            // those are precisely the undeclared keys the save-time warning
+            // already reports, and inventing a different IRI for them here
+            // would change what unmigrated corpora replay to.
+            let kit_predicate = lookup_key
+                .as_ref()
+                .and_then(|k| prop_iris.get(k))
+                .map(|iri| format!("<{}>", iri))
+                .unwrap_or_else(|| format!("<{}{}>", kit_ns, prop_seg));
 
             // Check if this is an ObjectProperty (from ontology) → resolve as IRI
             if lookup_key.as_ref().is_some_and(|k| obj_props.contains(k)) {
@@ -1253,6 +1284,7 @@ mod tests {
             declared_props: HashSet::new(),
             kit_namespaces: namespaces,
             ref_ranges: HashMap::new(),
+            prop_iris: HashMap::new(),
             deprecated_props: HashMap::new(),
         };
 

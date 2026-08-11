@@ -120,6 +120,14 @@ pub(crate) fn all_shape_files() -> Vec<PathBuf> {
 struct ShapeProp {
     /// Local name (e.g. `confidence`).
     name: String,
+    /// The FULL property IRI from `sh:path`.
+    ///
+    /// Not the same as `{kit namespace}{name}` once inheritance exists (#104):
+    /// an inherited property keeps its declaring namespace, so
+    /// `soul.Note.title` has the local name `title` but the IRI
+    /// `https://repolex.ai/ontology/git-lex/title`. The emitter must write the
+    /// declared IRI, not one glued together from the document's own kit.
+    iri: String,
     /// True if `sh:nodeKind sh:IRI` — treat as reference/object property.
     is_iri: bool,
     /// XSD local name if `sh:datatype` present (e.g. `integer`, `date`).
@@ -237,6 +245,7 @@ fn parse_shape_file(content: &str, short_hint: &str) -> ShapeFile {
         if last_prop_key.as_ref() != Some(&prop_key) {
             shape.props.push(ShapeProp {
                 name: local_name_in(&out.namespace, path.as_str()),
+                iri: path.as_str().to_string(),
                 is_iri: false,
                 datatype: None,
                 required: false,
@@ -351,6 +360,45 @@ pub(crate) fn get_object_properties(kit: &str) -> HashSet<String> {
                 // kit's declaration silently rewrite another's (soul:source
                 // prose was comma-split as copia:source lineage edges).
                 out.insert(format!("{}/{}/{}", prefix, shape.class_name, p.name));
+            }
+        }
+    }
+    out
+}
+
+/// `"{kit}/{Class}/{prop}"` → the property's DECLARED IRI, for every installed
+/// kit.
+///
+/// The emitter used to build a predicate by gluing the document's own kit
+/// namespace onto the key's property segment. That was correct for exactly as
+/// long as every property a class carried was declared by that class's own kit
+/// — true until `git-lex:Thing` (#104). After it, the ruled key
+/// `soul.Note.title` would have emitted `.../ontology/soul/title` while the
+/// property is declared at `.../ontology/git-lex/title`: a fact on an IRI no
+/// ontology declares, fleet-wide, breaking the one rule everything else here
+/// enforces.
+///
+/// So the predicate IRI now comes from the SHAPES, which record what the
+/// ontology actually declared (including the inheritance walk), instead of
+/// from a naming convention re-derived at the call site. Declare once, derive
+/// the rest. Keys that no kit declares are absent here and fall back to the
+/// old construction, which is what the undeclared-key warning already covers.
+pub(crate) fn get_property_iris_all_kits() -> HashMap<String, String> {
+    let mut out = HashMap::new();
+    for path in all_shape_files() {
+        let Ok(content) = fs::read_to_string(&path) else { continue };
+        let short = path.file_stem()
+            .and_then(|s| s.to_str())
+            .and_then(|s| s.strip_suffix("-shapes"))
+            .unwrap_or("")
+            .to_string();
+        let parsed = parse_shape_file(&content, &short);
+        for shape in &parsed.shapes {
+            for p in &shape.props {
+                out.insert(
+                    format!("{}/{}/{}", short, shape.class_name, p.name),
+                    p.iri.clone(),
+                );
             }
         }
     }
