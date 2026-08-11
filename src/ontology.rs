@@ -269,11 +269,50 @@ fn parse_shape_file(content: &str, short_hint: &str) -> ShapeFile {
 }
 
 /// Parse the kit's own shapes file.
+///
+/// Memoized (#90). `frontmatter_to_turtle` asks four separate questions of
+/// this per FILE — prefix, namespace, object properties, datatypes — and each
+/// one used to re-read and re-parse the shapes TTL from disk.
+///
+/// Fingerprinted on the shapes file's (len, mtime) rather than cached
+/// outright: `kit-update` REGENERATES shapes inside a single process and then
+/// reads them back, so a plain cache would hand the pre-regeneration shapes to
+/// everything downstream. That is the stale-derived-state failure #102 was
+/// about, and it is not worth re-introducing to save a stat call.
 fn parse_kit_shapes(kit: &str) -> ShapeFile {
+    use std::sync::{Mutex, OnceLock};
+    type Fingerprint = Option<(u64, Option<std::time::SystemTime>)>;
+    static MEMO: OnceLock<Mutex<HashMap<String, (Fingerprint, ShapeFile)>>> = OnceLock::new();
+
+    let fingerprint: Fingerprint = kit_shapes_path(kit)
+        .and_then(|p| fs::metadata(p).ok())
+        .map(|m| (m.len(), m.modified().ok()));
+
+    let memo = MEMO.get_or_init(|| Mutex::new(HashMap::new()));
+    if let Some((seen, cached)) = memo.lock().unwrap().get(kit) {
+        if *seen == fingerprint {
+            return cached.clone();
+        }
+    }
+
     let content = read_kit_shapes(kit);
-    if content.is_empty() { return ShapeFile::default(); }
+    let parsed = if content.is_empty() {
+        ShapeFile::default()
+    } else {
+        let (_, _, short) = resolve_kit_spec(kit);
+        parse_shape_file(&content, &short)
+    };
+    memo.lock().unwrap().insert(kit.to_string(), (fingerprint, parsed.clone()));
+    parsed
+}
+
+/// Canonical on-disk location of a kit's generated shapes, or None outside a
+/// repo. Split out so the memo above fingerprints exactly the file
+/// [`read_kit_shapes`] will open.
+fn kit_shapes_path(kit: &str) -> Option<PathBuf> {
+    let root = find_git_root()?;
     let (_, _, short) = resolve_kit_spec(kit);
-    parse_shape_file(&content, &short)
+    Some(root.join(".lex").join("ontology").join(&short).join(format!("{}-shapes.ttl", short)))
 }
 
 // ─── Public API (runtime reads) ──────────────────────────────
@@ -677,20 +716,56 @@ fn kit_namespace_of(content: &str, short: &str) -> String {
 /// property, not the shape) — the emitter pairs it with the class-
 /// qualified obj_props membership test it already does.
 pub(crate) fn get_reference_ranges_all_kits() -> HashMap<String, String> {
+    // Memoized (#90). This reads and regex-parses EVERY installed kit's TTL,
+    // and `frontmatter_to_turtle` called it once per file — re-parsing the
+    // whole vocabulary set (280KB on a four-kit seat) for every document in
+    // the repo. Same fingerprint discipline as parse_kit_shapes: the memo is
+    // keyed on every TTL's (path, len, mtime), so any ontology change during
+    // the process invalidates it instead of going stale.
+    use std::sync::{Mutex, OnceLock};
+    type Fingerprint = Vec<(PathBuf, u64, Option<std::time::SystemTime>)>;
+    static MEMO: OnceLock<Mutex<Option<(Fingerprint, HashMap<String, String>)>>> = OnceLock::new();
+
     let mut out = HashMap::new();
     let Some(root) = find_git_root() else { return out };
     let ont_root = root.join(".lex").join("ontology");
     let Ok(entries) = fs::read_dir(&ont_root) else { return out };
+
+    // Collect the TTLs once, then decide whether the parse can be skipped.
+    let mut ttls: Vec<(String, PathBuf)> = Vec::new();
     for e in entries.filter_map(|e| e.ok()) {
         let dir = e.path();
         if !dir.is_dir() { continue }
         let Some(short) = dir.file_name().and_then(|n| n.to_str()).map(String::from) else { continue };
         let ttl = dir.join(format!("{}.ttl", short));
-        let Ok(content) = fs::read_to_string(&ttl) else { continue };
-        for (prop, range) in parse_reference_ranges(&content, &short) {
+        ttls.push((short, ttl));
+    }
+    ttls.sort();
+    let fingerprint: Fingerprint = ttls.iter()
+        .map(|(_, p)| {
+            let meta = fs::metadata(p).ok();
+            (
+                p.clone(),
+                meta.as_ref().map(|m| m.len()).unwrap_or(0),
+                meta.and_then(|m| m.modified().ok()),
+            )
+        })
+        .collect();
+
+    let memo = MEMO.get_or_init(|| Mutex::new(None));
+    if let Some((seen, cached)) = memo.lock().unwrap().as_ref() {
+        if *seen == fingerprint {
+            return cached.clone();
+        }
+    }
+
+    for (short, ttl) in &ttls {
+        let Ok(content) = fs::read_to_string(ttl) else { continue };
+        for (prop, range) in parse_reference_ranges(&content, short) {
             out.insert(format!("{}/{}", short, prop), range);
         }
     }
+    *memo.lock().unwrap() = Some((fingerprint, out.clone()));
     out
 }
 

@@ -10,7 +10,32 @@ use std::process::Command;
 pub const KIT_GITHUB_ORG: &str = "repolex-ai";
 
 /// Find the root of the current git repo.
+///
+/// Memoized per working directory (#90). This shells out to `git rev-parse`,
+/// which is a PROCESS SPAWN — cheap once, ruinous in a loop, and the validate
+/// path calls it several times for every file in the repo. On an 1,800-document
+/// repo that was roughly nine thousand spawns per save.
+///
+/// Keyed on the current directory rather than cached outright because
+/// `git lex init` does `set_current_dir` once, and a repo root cached before
+/// that would be wrong afterwards. Reading the cwd is a syscall; spawning git
+/// is not.
 pub fn find_git_root() -> Option<PathBuf> {
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
+    static MEMO: OnceLock<Mutex<HashMap<PathBuf, Option<PathBuf>>>> = OnceLock::new();
+
+    let cwd = std::env::current_dir().ok()?;
+    let memo = MEMO.get_or_init(|| Mutex::new(HashMap::new()));
+    if let Some(hit) = memo.lock().unwrap().get(&cwd) {
+        return hit.clone();
+    }
+    let found = git_root_uncached();
+    memo.lock().unwrap().insert(cwd, found.clone());
+    found
+}
+
+fn git_root_uncached() -> Option<PathBuf> {
     let output = Command::new("git")
         .args(["rev-parse", "--show-toplevel"])
         .output()
