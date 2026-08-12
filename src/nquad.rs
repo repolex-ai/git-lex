@@ -268,6 +268,13 @@ pub(crate) struct ResolverContext {
     /// the save-time note teaches the deprecation instead of falsely
     /// claiming the key does not exist.
     pub deprecated_props: HashMap<String, Option<String>>,
+    /// "{kit}/{prop}" → domain-open properties (no rdfs:domain — usable on
+    /// any class), read straight from the ontology TTLs. Shapes are
+    /// per-class, so every shapes-derived table above is blind to these by
+    /// construction — which is how a genuinely declared key was false-warned
+    /// as nonexistent (#82, soul:relatedTo). No class in the key on purpose:
+    /// no domain means every class is in scope.
+    pub domain_open_props: HashMap<String, crate::ontology::DomainOpenProp>,
 }
 
 impl ResolverContext {
@@ -284,6 +291,7 @@ impl ResolverContext {
             ref_ranges: crate::ontology::get_reference_ranges_all_kits(),
             prop_iris: crate::ontology::get_property_iris_all_kits(),
             deprecated_props: crate::ontology::get_deprecated_properties_all_kits(),
+            domain_open_props: crate::ontology::get_domain_open_properties_all_kits(),
         }
     }
 }
@@ -742,6 +750,7 @@ pub(crate) fn emit_spo_line_nquads(
         ref_ranges,
         prop_iris,
         deprecated_props,
+        domain_open_props,
         ..
     } = ctx;
     let mut errors: u32 = 0;
@@ -887,6 +896,13 @@ pub(crate) fn emit_spo_line_nquads(
                 .as_ref()
                 .map(|c| format!("{}/{}/{}", kit_name, c, prop_seg));
 
+            // Domain-open lookup (#82): a property declared with no
+            // rdfs:domain is on NO class's shape by construction, so the
+            // class-qualified tables above can never hold it. Its key
+            // carries no class — no domain means every class is in scope.
+            let open_key = format!("{}/{}", kit_name, prop_seg);
+            let domain_open = domain_open_props.get(&open_key);
+
             // The predicate IRI comes from what the ontology DECLARED, via the
             // generated shapes — not from gluing this document's kit namespace
             // onto the key's property segment (#104).
@@ -907,10 +923,15 @@ pub(crate) fn emit_spo_line_nquads(
                 .as_ref()
                 .and_then(|k| prop_iris.get(k))
                 .map(|iri| format!("<{}>", iri))
+                .or_else(|| domain_open.map(|d| format!("<{}>", d.iri)))
                 .unwrap_or_else(|| format!("<{}{}>", kit_ns, prop_seg));
 
-            // Check if this is an ObjectProperty (from ontology) → resolve as IRI
-            if lookup_key.as_ref().is_some_and(|k| obj_props.contains(k)) {
+            // Check if this is an ObjectProperty (from ontology) → resolve as IRI.
+            // Domain-open ObjectProperties (soul:relatedTo) qualify too: the
+            // declaration says reference, the absent domain says on-any-class.
+            if lookup_key.as_ref().is_some_and(|k| obj_props.contains(k))
+                || domain_open.is_some_and(|d| d.is_object)
+            {
                 // Law 6 (identity model): a DECLARED RANGE makes the
                 // authored value the TARGET'S ID — resolution is declared,
                 // never guessed: id → the range class's id-space → one
@@ -1009,7 +1030,12 @@ pub(crate) fn emit_spo_line_nquads(
                                 relpath_str, kit_name, class_seg, prop_seg,
                                 kit_name, repl
                             );
-                        } else if !declared_props.contains(key) && !obj_props.contains(key) {
+                        } else if !declared_props.contains(key)
+                            && !obj_props.contains(key)
+                            // #82: domain-open props are declared — telling
+                            // the author otherwise was the false warning.
+                            && domain_open.is_none()
+                        {
                         let kit_scope = format!("{}/", kit_name);
                         let prop_tail = format!("/{}", prop_seg);
                         let class_for_msg = canonical_class.as_deref().unwrap_or(class_seg);
@@ -1129,7 +1155,13 @@ pub(crate) fn emit_spo_line_nquads(
                     }
                 }
                 // DatatypeProperty: typed literal if ontology specifies a non-string range.
-                if let Some(datatype) = lookup_key.as_ref().and_then(|k| prop_datatypes.get(k)) {
+                // Domain-open datatype props carry their range in the ontology
+                // record directly — the shapes-derived table can't see them (#82).
+                if let Some(datatype) = lookup_key
+                    .as_ref()
+                    .and_then(|k| prop_datatypes.get(k))
+                    .or_else(|| domain_open.and_then(|d| d.datatype.as_ref()))
+                {
                     out.push_str(&format!(
                         "{} {} \"{}\"^^<{}> {} .\n",
                         line_subject, kit_predicate, nq_escape(object), datatype, graph
@@ -1286,6 +1318,7 @@ mod tests {
             ref_ranges: HashMap::new(),
             prop_iris: HashMap::new(),
             deprecated_props: HashMap::new(),
+            domain_open_props: HashMap::new(),
         };
 
         let mut types = HashSet::new();
@@ -1327,6 +1360,79 @@ mod tests {
         assert!(
             out2.contains("<https://repolex.ai/ontology/copia/beingName>"),
             "undeclared kit must use the conventional (app-tier) fallback, got: {out2}"
+        );
+    }
+
+    /// #82: a domain-open property (no rdfs:domain — soul:relatedTo) is on
+    /// no class's shape by construction, so the shapes-derived tables all
+    /// miss it. It must still behave as DECLARED: predicate from its own
+    /// declared IRI, ObjectProperty values resolved as references, non-string
+    /// ranges emitted as typed literals — and never the "does not exist"
+    /// false warning (the gate consults the same map these assertions do).
+    #[test]
+    fn domain_open_property_behaves_as_declared() {
+        let mut open: HashMap<String, crate::ontology::DomainOpenProp> = HashMap::new();
+        open.insert("soul/relatedTo".into(), crate::ontology::DomainOpenProp {
+            is_object: true,
+            datatype: None,
+            iri: "https://repolex.ai/ontology/soul/relatedTo".into(),
+        });
+        open.insert("soul/openDate".into(), crate::ontology::DomainOpenProp {
+            is_object: false,
+            datatype: Some("http://www.w3.org/2001/XMLSchema#date".into()),
+            iri: "https://repolex.ai/ontology/soul/openDate".into(),
+        });
+        let ctx = ResolverContext {
+            files: Vec::new(),
+            path_index: HashSet::new(),
+            obj_props: HashSet::new(),
+            prop_datatypes: HashMap::new(),
+            declared_props: HashSet::new(),
+            kit_namespaces: HashMap::new(),
+            ref_ranges: HashMap::new(),
+            prop_iris: HashMap::new(),
+            deprecated_props: HashMap::new(),
+            domain_open_props: open,
+        };
+        let subjects = FileSubjects {
+            file_uri: "<https://repolex.ai/git-lex/File/Soul/Note/a.md>".into(),
+            thing_uri: None,
+            thing_key: None,
+        };
+
+        // ObjectProperty lane: the bracketed identifier resolves to a Thing
+        // IRI, on the property's DECLARED predicate.
+        let mut types = HashSet::new();
+        let mut out = String::new();
+        emit_spo_line_nquads(
+            "soul.Note.relatedTo | hasValue | <copia/Texture/deep-water>",
+            &subjects,
+            "<https://repolex.ai/git-lex/NamedGraph/now>",
+            "Soul/Note/a.md",
+            &ctx, false,
+            &mut types, &mut out,
+        );
+        assert!(
+            out.contains(
+                "<https://repolex.ai/ontology/soul/relatedTo> \
+                 <https://repolex.ai/copia/Texture/deep-water>"
+            ),
+            "domain-open reference must resolve as an IRI on its declared predicate: {out}"
+        );
+
+        // Datatype lane: the declared non-string range types the literal.
+        let mut out2 = String::new();
+        emit_spo_line_nquads(
+            "soul.Note.openDate | hasValue | 2026-08-12",
+            &subjects,
+            "<https://repolex.ai/git-lex/NamedGraph/now>",
+            "Soul/Note/a.md",
+            &ctx, false,
+            &mut types, &mut out2,
+        );
+        assert!(
+            out2.contains("\"2026-08-12\"^^<http://www.w3.org/2001/XMLSchema#date>"),
+            "domain-open datatype must emit typed: {out2}"
         );
     }
 

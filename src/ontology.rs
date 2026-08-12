@@ -957,6 +957,96 @@ fn parse_deprecated_classes(
     out
 }
 
+/// A property the ontology declares with NO `rdfs:domain` — deliberately
+/// usable on any class (soul:relatedTo: "Domain left open so any doc-type
+/// may relate"). Shapes are generated per class, so a domain-open property
+/// can never appear in ANY shape — every shapes-derived table
+/// (declared_props, obj_props, prop_datatypes, prop_iris) is blind to it
+/// by construction. That blindness is #82: a key the ontology genuinely
+/// declares was reported to its author as nonexistent, with an instruction
+/// to report it to the kit owner. This record is read straight from the
+/// ontology TTL instead, and the emitter consults it wherever the shapes
+/// tables miss.
+pub(crate) struct DomainOpenProp {
+    /// `owl:ObjectProperty` → values resolve as references, not literals.
+    pub is_object: bool,
+    /// Full XSD datatype IRI when a non-string `rdfs:range` is declared
+    /// (same non-string convention as the shapes-derived datatype table).
+    pub datatype: Option<String>,
+    /// The property's declared IRI — the predicate to emit (#104's rule:
+    /// the ontology says where a property lives; ask, don't glue).
+    pub iri: String,
+}
+
+/// `"{kit}/{prop}"` → [`DomainOpenProp`] for every domain-open property in
+/// every installed kit ontology TTL. The key deliberately carries no class:
+/// no domain means every class is in scope, so a class-qualified key would
+/// re-invent the restriction the ontology chose not to declare.
+pub(crate) fn get_domain_open_properties_all_kits() -> HashMap<String, DomainOpenProp> {
+    let mut out = HashMap::new();
+    let Some(root) = find_git_root() else { return out };
+    let ont_root = root.join(".lex").join("ontology");
+    let Ok(entries) = fs::read_dir(&ont_root) else { return out };
+    for e in entries.filter_map(|e| e.ok()) {
+        let dir = e.path();
+        if !dir.is_dir() { continue }
+        let Some(short) = dir.file_name().and_then(|n| n.to_str()).map(String::from) else { continue };
+        let ttl = dir.join(format!("{}.ttl", short));
+        let Ok(content) = fs::read_to_string(&ttl) else { continue };
+        for (prop, rec) in parse_domain_open_properties(&content, &short) {
+            out.insert(format!("{}/{}", short, prop), rec);
+        }
+    }
+    out
+}
+
+/// Pure parser for domain-open properties in one kit TTL: every
+/// `owl:ObjectProperty` / `owl:DatatypeProperty` with no `rdfs:domain`.
+/// Properties outside the kit's own namespace are skipped. Deprecated
+/// properties are INCLUDED — deprecation is a separate axis (the save-time
+/// note fires first), and history replay needs their emission unchanged.
+fn parse_domain_open_properties(content: &str, short: &str) -> Vec<(String, DomainOpenProp)> {
+    let kit_ns = kit_namespace_of(content, short);
+    let store = match crate::kit::load_ttl_str(content, &format!("{} ontology", short)) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("warning: {} — domain-open properties unreadable", e);
+            return Vec::new();
+        }
+    };
+    let q = "SELECT ?p ?t ?r WHERE { \
+             ?p <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> ?t . \
+             FILTER (?t = <http://www.w3.org/2002/07/owl#ObjectProperty> \
+                  || ?t = <http://www.w3.org/2002/07/owl#DatatypeProperty>) \
+             FILTER NOT EXISTS { ?p <http://www.w3.org/2000/01/rdf-schema#domain> ?d } \
+             OPTIONAL { ?p <http://www.w3.org/2000/01/rdf-schema#range> ?r } }";
+    let mut out = Vec::new();
+    if let Ok(oxigraph::sparql::QueryResults::Solutions(sols)) = git_lex::eval_query(&store, q) {
+        for s in sols.flatten() {
+            let (Some(Term::NamedNode(p)), Some(Term::NamedNode(t))) = (s.get("p"), s.get("t")) else { continue };
+            let Some(prop) = p.as_str().strip_prefix(kit_ns.as_str()) else { continue };
+            if prop.is_empty() {
+                continue;
+            }
+            let is_object = t.as_str() == "http://www.w3.org/2002/07/owl#ObjectProperty";
+            let datatype = match s.get("r") {
+                Some(Term::NamedNode(r))
+                    if r.as_str().starts_with("http://www.w3.org/2001/XMLSchema#")
+                        && r.as_str() != "http://www.w3.org/2001/XMLSchema#string" =>
+                {
+                    Some(r.as_str().to_string())
+                }
+                _ => None,
+            };
+            out.push((
+                prop.to_string(),
+                DomainOpenProp { is_object, datatype, iri: p.as_str().to_string() },
+            ));
+        }
+    }
+    out
+}
+
 /// Pure parser for object-property ranges in one kit TTL. Returns
 /// `(property_local_name, range_class_iri)` pairs; XSD ranges and
 /// properties outside the kit's own namespace are skipped.
@@ -1123,6 +1213,55 @@ soul:Memory a owl:Class ;
     rdfs:label "Memory" .
 "#;
         assert!(parse_class_foldered(ttl, "soul", "Memory"));
+    }
+
+    // ── domain-open properties (#82) ──
+
+    /// A property declared with NO rdfs:domain is deliberately usable on
+    /// any class — shapes (per-class) can never see it, so it must come
+    /// straight from the TTL. Domained props and foreign-namespace props
+    /// stay out; string ranges carry no datatype (typed-literal convention).
+    #[test]
+    fn domain_open_parser_reads_the_declaration_not_the_shapes() {
+        let ttl = r#"
+@prefix soul: <https://repolex.ai/ontology/soul/> .
+@prefix owl: <http://www.w3.org/2002/07/owl#> .
+@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+@prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
+
+# The specimen: reference, domain left open so any doc-type may relate.
+soul:relatedTo a owl:ObjectProperty ;
+    rdfs:comment "Other documents this document references." .
+
+# Domain-open datatype property with a non-string range → typed.
+soul:openDate a owl:DatatypeProperty ;
+    rdfs:range xsd:date .
+
+# Domain-open string range → declared, but untyped (string convention).
+soul:openText a owl:DatatypeProperty ;
+    rdfs:range xsd:string .
+
+# Domained → the shapes tables own it; NOT domain-open.
+soul:noteId a owl:DatatypeProperty ;
+    rdfs:domain soul:Note ;
+    rdfs:range xsd:string .
+
+# Foreign namespace → skipped (each kit records only its own).
+<https://example.org/other/stray> a owl:ObjectProperty .
+"#;
+        let parsed: HashMap<String, DomainOpenProp> =
+            parse_domain_open_properties(ttl, "soul").into_iter().collect();
+        let related = parsed.get("relatedTo").expect("relatedTo is domain-open");
+        assert!(related.is_object, "ObjectProperty must resolve as reference");
+        assert_eq!(related.datatype, None);
+        assert_eq!(related.iri, "https://repolex.ai/ontology/soul/relatedTo");
+        let date = parsed.get("openDate").expect("openDate is domain-open");
+        assert!(!date.is_object);
+        assert_eq!(date.datatype.as_deref(), Some("http://www.w3.org/2001/XMLSchema#date"));
+        let text = parsed.get("openText").expect("openText is domain-open");
+        assert_eq!(text.datatype, None, "string ranges stay untyped");
+        assert!(!parsed.contains_key("noteId"), "a domained prop is not domain-open");
+        assert!(!parsed.contains_key("stray"), "foreign namespaces are skipped");
     }
 
     // ── type-label lookup — label → local-name chain ──
