@@ -156,10 +156,24 @@ pub(crate) fn cmd_save(message: &str, dry_run: bool) {
         .status();
     match status {
         Ok(s) if s.success() => {
+            // The reconciler teaching line (selkie's incident, link 4): save
+            // RECONCILES the working tree into git + graph — additions,
+            // edits, AND deletions — and derived state under .lex/ is not
+            // the caller's problem. Printed on every save so the mental
+            // model builds on first use.
+            println!(
+                "Extracts reconciled automatically (adds, edits, and deletions) — \
+                 .lex/ is maintained for you; never edit or delete it by hand."
+            );
+            // State change LAST: agents truncate output and keep the tail,
+            // so the one line a caller must see survives `| tail -3`.
             println!("Saved in {}: {} [as {}]", root.display(), message, author);
         }
         _ => {
-            eprintln!("fatal: git commit failed");
+            // An agent that doesn't know the transaction failed will assume
+            // success and move on — say it in the final line, loudly.
+            eprintln!("fatal: git commit failed — NOTHING WAS COMMITTED.");
+            eprintln!("The gate output above names each blocking file and its fix; fix and save again.");
             exit(1);
         }
     }
@@ -273,6 +287,12 @@ pub(crate) fn cmd_validate() -> bool {
 
     for filepath in &files {
         if !filepath.to_string_lossy().ends_with(".md") { continue; }
+        // __ClassName.md templates are kit-owned scaffolds, never documents.
+        // They were previously invisible here by accident (all-null values →
+        // no triples → Ok(None)); now that a classed document emits its type
+        // even with no values, the skip must be explicit — the same filter
+        // extraction's own walker applies.
+        if crate::nquad::is_template(filepath) { continue; }
         let ttl = match frontmatter_to_turtle(filepath, &root, &kit) {
             Ok(Some(t)) => t,
             Ok(None) => continue,
@@ -326,7 +346,18 @@ pub(crate) fn cmd_validate() -> bool {
                     eprintln!("  {} — {} violation(s):", relpath.display(), violations);
                     for result in report.results() {
                         let msg = result.message().unwrap_or("(no message)");
-                        eprintln!("    → {}", msg);
+                        // Name the PROPERTY: "MinCount(1) not satisfied" alone
+                        // tells the author nothing about which field to fix
+                        // (selkie's incident — three empty identity fields,
+                        // zero named). Local name is enough; the file line
+                        // above scopes the kit.
+                        match result.path().and_then(|p| p.pred()) {
+                            Some(pred) => {
+                                let local = pred.as_str().rsplit('/').next().unwrap_or(pred.as_str());
+                                eprintln!("    → {}: {}", local, msg);
+                            }
+                            None => eprintln!("    → {}", msg),
+                        }
                     }
                 }
             }

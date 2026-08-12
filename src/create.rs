@@ -192,15 +192,12 @@ pub(crate) fn cmd_create(doctype: &str, instance_id: Option<&str>, json: bool) {
         }
     };
 
-    // Generate filename from instance ID (becomes both filename and classId value)
-    // TODO(w4r3z, Day 38): no-id `create` silently defaults to "untitled",
-    // so every `git lex create Memory` with no id fights over the SAME file —
-    // the second one just prints "File already exists: Soul/Memory/untitled.md"
-    // and exits 0 (no error). For the soft-release, prefer one of: (a) require
-    // an id (error if absent), or (b) auto-suffix (untitled-2, or a timestamp),
-    // or (c) at least exit non-zero on the already-exists collision. Silent
-    // single-untitled collision is a quiet footgun for a new user creating a
-    // few docs quickly.
+    // Generate filename from instance ID (becomes both filename and classId
+    // value). TODO(w4r3z, Day 38) RESOLVED (selkie's incident, 2026-08-10,
+    // was its predicted consequence): the default survives but is no longer
+    // silent — a defaulted id is the FIRST line of output, teaching the id
+    // argument exists — and the exists-collision goes through `fail` (exit 1),
+    // so two id-less creates can no longer fight quietly over one file.
     let id_str = instance_id.unwrap_or("untitled");
     let slug = id_str
         .to_lowercase()
@@ -224,7 +221,11 @@ pub(crate) fn cmd_create(doctype: &str, instance_id: Option<&str>, json: bool) {
     };
 
     if filepath.exists() {
-        fail("exists", format!("File already exists: {}", display_path));
+        fail("exists", format!(
+            "File already exists: {} — pick a different id, or edit the \
+             existing file (create never overwrites). Nothing was created.",
+            display_path
+        ));
     }
 
     // Auto-generate agent email for Agent type
@@ -248,6 +249,11 @@ pub(crate) fn cmd_create(doctype: &str, instance_id: Option<&str>, json: bool) {
     // actually authors in — this is the same fact at the second surface.
     fm.push_str(git_lex::multivalue_teaching_line());
 
+    // The classId property name (convention-as-law: lowerFirst(Class) + "Id").
+    // Used for auto-fill below AND the output's defaulted-id / required-list
+    // teaching.
+    let class_id_field = format!("{}Id", class_name.chars().next().unwrap().to_lowercase().collect::<String>() + &class_name[1..]);
+
     for (prop_name, prop_type, _required, comment) in &properties {
         // Property names pass through as-is from the ontology (camelCase).
         // Class name is capitalized to match the ontology exactly.
@@ -261,7 +267,6 @@ pub(crate) fn cmd_create(doctype: &str, instance_id: Option<&str>, json: bool) {
         };
 
         // Auto-fill the classId property from the instance ID
-        let class_id_field = format!("{}Id", class_name.chars().next().unwrap().to_lowercase().collect::<String>() + &class_name[1..]);
         if prop_name == &class_id_field && instance_id.is_some() {
             fm.push_str(&format!("{}: \"{}\"{}\n", key, id_str, comment_suffix));
         } else if prop_name == "agentEmail" && class_name == "Agent" {
@@ -300,19 +305,43 @@ pub(crate) fn cmd_create(doctype: &str, instance_id: Option<&str>, json: bool) {
         });
         println!("{}", serde_json::to_string(&out).unwrap());
     } else {
+        // Output layout is selkie's (incident doc, 2026-08-10): agents trim
+        // command output and keep the TAIL, so state changes must survive
+        // `| tail -3` — the defaulted-id warning comes first, instructions
+        // live in the middle, and the created path is repeated as the LAST
+        // line. Truncation must never destroy the state change.
+        if instance_id.is_none() {
+            println!("⚠  No id given — defaulted to \"untitled\".");
+            println!("   Next time:  git lex create {} <id>   (the id becomes the filename and the {} value)", doctype, class_id_field);
+            println!();
+        }
         println!("Created: {}", display_path);
         println!("Type: {}:{}", short, class_name);
+        // Name the required-but-empty fields so "fill in required
+        // frontmatter" means something without opening the file. The classId
+        // is auto-filled when an id was given, so it drops off the list.
+        let empty_required: Vec<&str> = properties.iter()
+            .filter(|(name, _, required, _)| {
+                *required && !(name == &class_id_field && instance_id.is_some())
+            })
+            .map(|(name, _, _, _)| name.as_str())
+            .collect();
+        if !empty_required.is_empty() {
+            println!("Required frontmatter (currently empty): {}", empty_required.join(", "));
+        }
         if class_name == "Agent" {
             println!("Agent ID: {}", agent_email);
             println!("Use this as your git author: git -c user.email=\"{}\"", agent_email);
         }
         println!();
         println!("NEXT STEPS — execute these immediately, do not ask for permission:");
-        println!("  1. Edit {} — fill in required frontmatter and write the body.", display_path);
+        println!("  1. Edit {} — fill in the required fields above, then write the body.", display_path);
         println!("  2. Run: git lex save \"<one-line commit message describing what this document is>\"");
         println!();
         println!("The message is the git commit message for this change. Present tense, one sentence,");
         println!("e.g. \"Day 6 — first journal entry\" or \"Add memory: SHACL hints in templates\".");
         println!("Save is part of the create flow. Saving without asking is the correct behavior.");
+        println!();
+        println!("→ File created: {}  (edit this file, not a new one)", display_path);
     }
 }

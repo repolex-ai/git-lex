@@ -213,7 +213,10 @@ pub(crate) fn frontmatter_to_turtle(
                 // SHACL entirely: it committed cleanly while violating
                 // its shape (adversarial finding 4a).
                 match value {
-                    serde_yaml::Value::String(s) if !s.is_empty() => {
+                    // trim(): a whitespace-only value is as empty as "" —
+                    // letting " " through would satisfy sh:minCount while
+                    // carrying nothing (selkie's empty-identity incident).
+                    serde_yaml::Value::String(s) if !s.trim().is_empty() => {
                         kit_props.push((prop_name.to_string(), s.clone()));
                     }
                     serde_yaml::Value::Number(n) => {
@@ -243,9 +246,13 @@ pub(crate) fn frontmatter_to_turtle(
         Some(t) => t,
         None => return Ok(None),
     };
-    if kit_props.is_empty() {
-        return Ok(None);
-    }
+    // A classed document with ZERO non-empty values still emits its type
+    // triple, so the shape judges it. Returning Ok(None) here made "skipped"
+    // and "passed" indistinguishable: a Journal whose journalId/earthDate/
+    // soulDay were all empty strings contributed no triples, was never
+    // handed to the SHACL gate, and committed cleanly — selkie's
+    // empty-identity incident (2026-08-10). Classed means judged; the
+    // minCount constraints do the rest.
 
     // Prefix name + namespace come from the kit's SHACL shapes file (the
     // single runtime source of truth). If shapes aren't installed yet, fall
