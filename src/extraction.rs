@@ -145,6 +145,87 @@ pub(crate) fn flatten_yaml(prefix: &str, value: &serde_yaml::Value, lines: &mut 
 /// Returns `Ok(None)` for files that simply aren't kit documents (no
 /// frontmatter, no kit-prefixed keys). Malformed YAML is `Err` — a doc that
 /// TRIED to carry frontmatter and failed must fail validation, not skip it.
+/// Extract one parsed document's markdown-link `.spo` lines: `linksTo` for
+/// resolvable internal links, `md.externalLink` / `md.unresolvedLink` for
+/// the rest. THE one markdown-link extractor — `cmd_extract` (the `.md.spo`
+/// sidecar walk) and the now-graph builder (th34 #5: `git lex query` saw
+/// zero document-to-document edges while the synced store held 113) both
+/// call this, so the two views can never resolve links differently.
+pub(crate) fn extract_md_link_lines(
+    tree: &tree_sitter_md::MarkdownTree,
+    content: &str,
+    relpath_str: &str,
+    file_index: &std::collections::HashSet<String>,
+    spo_lines: &mut Vec<String>,
+) {
+    fn extract_links(node: tree_sitter::Node, source: &str, lines: &mut Vec<String>, file_index: &std::collections::HashSet<String>, doc_dir: &str, relpath: &str) {
+        if node.kind() == "inline_link" {
+            let dest = node.children(&mut node.walk())
+                .find(|c| c.kind() == "link_destination")
+                .map(|c| source[c.start_byte()..c.end_byte()].to_string())
+                .unwrap_or_default();
+
+            if !dest.is_empty() {
+                if dest.starts_with("http://") || dest.starts_with("https://") {
+                    // External link
+                    lines.push(format!("md.externalLink | hasValue | {}", dest));
+                } else {
+                    // Internal link. Strip any #fragment (a section
+                    // link still targets the file), percent-decode
+                    // (`my%20file.md` authors an on-disk space), then
+                    // resolve against the doc's directory with `./`
+                    // and `../` collapsed (review #27: the old naive
+                    // string join made every `../` link silently
+                    // unresolvable — the same file already shipped
+                    // the collapser; this lane just never called it).
+                    let target = percent_decode(dest.split('#').next().unwrap_or(""));
+                    if target.is_empty() {
+                        // pure same-page anchor (`#section`) — not a
+                        // document reference, no line at all
+                    } else if let Some(resolved) =
+                        normalize_wikilink_path(&target, doc_dir)
+                            .filter(|r| file_index.contains(r))
+                    {
+                        // Markdown links are THE document-reference
+                        // edge (Rob-ruled 2026-08-06): they emit
+                        // `linksTo`, the name the graph and viz
+                        // already consume. md.internalLink retired
+                        // with the wikilink reader.
+                        lines.push(format!("{} | linksTo | {}", relpath, resolved));
+                    } else {
+                        lines.push(format!("md.unresolvedLink | hasValue | {}", dest));
+                    }
+                }
+            }
+        }
+
+        // Also catch bare autolinks
+        if node.kind() == "uri_autolink" {
+            let text = &source[node.start_byte()..node.end_byte()];
+            let url = text.trim_matches(|c| c == '<' || c == '>');
+            if !url.is_empty() {
+                lines.push(format!("md.externalLink | hasValue | {}", url));
+            }
+        }
+
+        let mut cursor = node.walk();
+        if cursor.goto_first_child() {
+            loop {
+                extract_links(cursor.node(), source, lines, file_index, doc_dir, relpath);
+                if !cursor.goto_next_sibling() { break; }
+            }
+        }
+    }
+
+    let doc_dir = std::path::Path::new(relpath_str).parent()
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_default();
+
+    for inline_tree in tree.inline_trees() {
+        extract_links(inline_tree.root_node(), content, spo_lines, file_index, &doc_dir, relpath_str);
+    }
+}
+
 pub(crate) fn frontmatter_to_turtle(
     filepath: &std::path::Path,
     root: &std::path::Path,
@@ -456,76 +537,7 @@ pub(crate) fn extract_markdown_links() -> u32 {
         };
 
         let mut spo_lines: Vec<String> = Vec::new();
-
-        // Walk inline trees for links
-        for inline_tree in tree.inline_trees() {
-            let inline_root = inline_tree.root_node();
-
-            fn extract_links(node: tree_sitter::Node, source: &str, lines: &mut Vec<String>, file_index: &HashSet<String>, doc_dir: &str, relpath: &str) {
-                if node.kind() == "inline_link" {
-                    let dest = node.children(&mut node.walk())
-                        .find(|c| c.kind() == "link_destination")
-                        .map(|c| source[c.start_byte()..c.end_byte()].to_string())
-                        .unwrap_or_default();
-
-                    if !dest.is_empty() {
-                        if dest.starts_with("http://") || dest.starts_with("https://") {
-                            // External link
-                            lines.push(format!("md.externalLink | hasValue | {}", dest));
-                        } else {
-                            // Internal link. Strip any #fragment (a section
-                            // link still targets the file), percent-decode
-                            // (`my%20file.md` authors an on-disk space), then
-                            // resolve against the doc's directory with `./`
-                            // and `../` collapsed (review #27: the old naive
-                            // string join made every `../` link silently
-                            // unresolvable — the same file already shipped
-                            // the collapser; this lane just never called it).
-                            let target = percent_decode(dest.split('#').next().unwrap_or(""));
-                            if target.is_empty() {
-                                // pure same-page anchor (`#section`) — not a
-                                // document reference, no line at all
-                            } else if let Some(resolved) =
-                                normalize_wikilink_path(&target, doc_dir)
-                                    .filter(|r| file_index.contains(r))
-                            {
-                                // Markdown links are THE document-reference
-                                // edge (Rob-ruled 2026-08-06): they emit
-                                // `linksTo`, the name the graph and viz
-                                // already consume. md.internalLink retired
-                                // with the wikilink reader.
-                                lines.push(format!("{} | linksTo | {}", relpath, resolved));
-                            } else {
-                                lines.push(format!("md.unresolvedLink | hasValue | {}", dest));
-                            }
-                        }
-                    }
-                }
-
-                // Also catch bare autolinks
-                if node.kind() == "uri_autolink" {
-                    let text = &source[node.start_byte()..node.end_byte()];
-                    let url = text.trim_matches(|c| c == '<' || c == '>');
-                    if !url.is_empty() {
-                        lines.push(format!("md.externalLink | hasValue | {}", url));
-                    }
-                }
-
-                let mut cursor = node.walk();
-                if cursor.goto_first_child() {
-                    loop {
-                        extract_links(cursor.node(), source, lines, file_index, doc_dir, relpath);
-                        if !cursor.goto_next_sibling() { break; }
-                    }
-                }
-            }
-
-            let doc_dir = relpath.parent()
-                .map(|p| p.to_string_lossy().to_string())
-                .unwrap_or_default();
-
-            extract_links(inline_root, &content, &mut spo_lines, &file_index, &doc_dir, &relpath_str);
-        }
+        extract_md_link_lines(&tree, &content, &relpath_str, &file_index, &mut spo_lines);
 
         // Write .md.spo sidecar; when a doc's last link goes away its
         // sidecar must go away too, so the sync diff sees the lines vanish

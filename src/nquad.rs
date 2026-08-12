@@ -549,6 +549,21 @@ pub(crate) fn generate_frontmatter_nquads_with(
     let files = ctx.files.as_slice();
     let (obj_props, kit_namespaces) = (&ctx.obj_props, &ctx.kit_namespaces);
 
+    // Markdown-link lane (th34 #5): the now view used to carry ZERO
+    // document-to-document edges — linksTo lived only in the synced store,
+    // so `git lex query` proved "git-lex discards links" to anyone who
+    // checked. Same extractor, same md-only index as cmd_extract (a
+    // different index here would mean two resolution policies — the A5
+    // disease). Lines are emitted into the graph only, never written to
+    // the .fm.spo sidecar (that stays frontmatter-only; .md.spo is the
+    // link sidecar and cmd_extract owns it).
+    let mut md_parser = tree_sitter_md::MarkdownParser::default();
+    let md_index: HashSet<String> = files.iter()
+        .filter(|p| p.extension().is_some_and(|x| x == "md") && !is_template(p))
+        .filter_map(|p| p.strip_prefix(&root).ok())
+        .map(|p| p.to_string_lossy().to_string())
+        .collect();
+
     // entity_classes was used by the old range-aware resolver, which has been
     // replaced by src/resolve.rs. The range-check approach (matching class IRIs
     // across kits) had a cross-kit identity bug (squad:Agent ≠ soul:Agent) and
@@ -637,6 +652,17 @@ pub(crate) fn generate_frontmatter_nquads_with(
             write_sidecar_loud(&spo_path, &spo_content);
         } else if spo_path.exists() {
             remove_sidecar_loud(&spo_path);
+        }
+
+        // Markdown links join the emission stream AFTER the sidecar write —
+        // the .fm.spo sidecar carries frontmatter only (th34 #5; see the
+        // md_index comment above the loop).
+        if md_index.contains(&relpath_str) {
+            if let Some(tree) = md_parser.parse(content.as_bytes(), None) {
+                crate::extraction::extract_md_link_lines(
+                    &tree, &content, &relpath_str, &md_index, &mut spo_lines,
+                );
+            }
         }
 
         // --- Generate N-Quads for oxigraph (now graph) ---
@@ -1173,6 +1199,19 @@ pub(crate) fn emit_spo_line_nquads(
                     ));
                 }
             }
+        } else if subject == "md.externalLink" || subject == "md.unresolvedLink" {
+            // #97 (B6): these are the markdown-link extractor's OWN lines,
+            // not user frontmatter — and they were falling through to the
+            // fm: lane, landing on `fm:md.externalLink`, an IRI nothing
+            // declares, while the DECLARED md:externalLink sat with zero
+            // instances. The ontology-first rule broken by our own code.
+            // Sidecar lines replay from history too, so mapping at the
+            // reader heals old lines on the next rebuild.
+            let local = subject.strip_prefix("md.").unwrap_or(subject);
+            out.push_str(&format!(
+                "{} <https://repolex.ai/ontology/git-lex/md/{}> \"{}\" {} .\n",
+                subjects.file_uri, local, nq_escape(object), graph
+            ));
         } else {
             // Legacy or non-kit frontmatter (title, tags, etc.) — use fm: namespace
             let fm_predicate = format!("<https://repolex.ai/ontology/git-lex/fm/{}>", uri_encode_path(subject));
