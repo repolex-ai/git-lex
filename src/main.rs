@@ -11,6 +11,7 @@ use git_lex::{find_git_root,
 // allowed in frontmatter values are codified as tests in this module — read
 // the test suite for the definitive spec.
 mod resolve;
+mod man;
 mod sync;
 mod harness;
 mod git;
@@ -280,6 +281,10 @@ pub(crate) fn migrate_legacy_store(root: &std::path::Path) -> Result<(), String>
 // ─── main ──────────────────────────────────────────────────────
 
 fn main() {
+    // Bare `git lex --help` is answered by git via man(1), not by this
+    // binary — keep the man page converged so that path works (src/man.rs).
+    man::converge(<Cli as clap::CommandFactory>::command());
+
     let cli = Cli::parse();
 
     match cli.command {
