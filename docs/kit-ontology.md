@@ -1,6 +1,6 @@
 # Kit Ontology Design
 
-*Last updated for git-lex v0.1.0 (2026-08-02)*
+*Last updated for git-lex v0.1.0 (2026-08-12)*
 
 This guide is for kit builders defining **document types** — the vocabulary a
 kit gives its users. It covers where the ontology file lives, and the four
@@ -132,6 +132,21 @@ garden:health a owl:DatatypeProperty ;
 Validation rejects any other value at save time, with a clear message — that's
 the enum doing its job.
 
+When the constraint is a bound rather than a list, declare the base type plus
+its bounds the same way:
+
+```turtle
+garden:RatingValue a rdfs:Datatype ;
+    owl:onDatatype xsd:integer ;
+    owl:withRestrictions ( [ xsd:minInclusive 1 ] [ xsd:maxInclusive 5 ] ) .
+```
+
+The generated shape carries both the base type and the bounds. The facets
+git-lex translates: `xsd:minInclusive`, `xsd:maxInclusive`, `xsd:minExclusive`,
+`xsd:maxExclusive`, `xsd:minLength`, `xsd:maxLength`, `xsd:pattern`. Any other
+facet prints a warning that the bound is **not** enforced — declared bounds are
+never silently dropped.
+
 ## 7. Pointing at another Thing
 
 A reference property holds the **target's id**, and its name says so — end the
@@ -177,8 +192,10 @@ the body is yours.
 ```
 
 Frontmatter keys are `<kit>.<Class>.<property>`. Everything declared validates
-at save; a key the ontology doesn't declare still works as a plain
-frontmatter key, but joins nothing.
+at save. A kit-qualified key the ontology doesn't declare warns at save (with
+the closest declared keys suggested) and its value saves as plain ungoverned
+data; a bare key (`title:`) stays free. Multiple values for one key are a YAML
+list (`- value` per line) — a repeated key is rejected at save.
 
 ## 9. Graph-only kits (no authored documents)
 

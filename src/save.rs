@@ -70,6 +70,26 @@ pub(crate) fn cmd_save(message: &str, dry_run: bool) {
     // (fail-loud, #29 — the file is restorable via kit-update).
     soul_md::require_soul_md(&root);
 
+    // Hook floor: `git clone` does not copy .git/hooks, so a fresh clone
+    // silently loses EVERY save gate — and until 2026-08-14 save committed
+    // ungated without a word. Converge the hook before anything else; if it
+    // cannot be converged, refuse (a save without the hook is a save
+    // without gates, and a gate that can't run must not pretend it passed).
+    if root.join(".lex").exists() {
+        match crate::hooks::converge_hook() {
+            Ok(true) => println!(
+                "Repaired: the pre-commit hook was missing or stale (clones don't \
+                 carry hooks) — reinstalled, all save gates active."
+            ),
+            Ok(false) => {}
+            Err(e) => {
+                eprintln!("fatal: cannot install the pre-commit save gate: {e}");
+                eprintln!("Saving without it would commit with NO validation, cleanup, or identity gate — refusing.");
+                exit(1);
+            }
+        }
+    }
+
     // Resolve the agent's identity — THREE sources in precedence order
     // (see resolve_agent_identity): env (squad-repo case where the soul
     // session injects GIT_AUTHOR_*), then .lex/repo.yml (authoritative,

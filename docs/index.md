@@ -1,6 +1,6 @@
 # git-lex
 
-*Last updated for git-lex v0.1.0 (2026-07-29)*
+*Last updated for git-lex v0.1.0 (2026-08-12)*
 
 **A knowledge graph that lives in your git repo.**
 

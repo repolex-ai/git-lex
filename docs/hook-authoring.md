@@ -1,6 +1,6 @@
 # Hook Authoring Guide
 
-*Last updated for git-lex v0.1.0 (2026-07-29)*
+*Last updated for git-lex v0.1.0 (2026-08-12)*
 
 > **Being broken out.** The core hook material (naming, registration,
 > `settings.json` vs `settings.local.json`, the local→kit development flow,
@@ -16,12 +16,13 @@ Only `.sh` files register and fire (see
 logic — Python, an app's internals — the question is where that logic lives.
 
 **Preferred: the logic lives in the application package, and the `.sh` calls
-the app's blessed entrypoint.** Example shape for a copia hook:
+the app's blessed entrypoint.** Illustrative shape (no shipped kit hook uses
+this yet):
 
 ```bash
 #!/bin/bash
-# UserPromptSubmit-copia-cosee.sh — thin shim; all logic in the copia package
-exec uv run --project "$COPIA_HOME" python -m copia.hooks.coseehook
+# thin shim; all logic in the app's package
+exec uv run --project "$APP_HOME" python -m theapp.hooks.thehook
 ```
 
 Why this is the preferred shape:
@@ -35,20 +36,25 @@ Why this is the preferred shape:
   silently drifting from the app it belongs to.
 
 **If a loose helper file must ship anyway** (no app package to call), the
-convention is: same stem as the hook it serves, `.py` extension —
-`UserPromptSubmit-copia-cosee.sh` calls `UserPromptSubmit-copia-cosee.py`,
-sitting next to it in `.claude/hooks/`. The shared stem makes the pairing
-obvious from `ls` and keeps the helper covered by the same mental namespace
-as its hook. But treat this as the fallback, not the pattern.
+convention is: same stem as the hook it serves, `.py` extension. This shape
+ships today: copia's `PostToolUse-copia-read-seen.sh` calls
+`PostToolUse-copia-read-seen.py`, sitting next to it in `.claude/hooks/`.
+The shared stem makes the pairing obvious from `ls` and keeps the helper
+covered by the same mental namespace as its hook. The `.sh` pipes the hook
+payload to the `.py` on stdin and passes the program as a *file path* (not a
+heredoc — a heredoc would eat the stdin the payload rides on). Treat this as
+the fallback, not the pattern.
 
-<!-- TODO(docs pass): pin down the `uv run` invocation exactly once copia's
-     cosee hook ships as .sh — project path resolution ($COPIA_HOME vs
-     hardcoded), and what happens when the app env is missing. -->
+**One thing you cannot do: a shared `.sh` library in `.claude/hooks/`.**
+kit-update hard-errors on any `.sh` there whose leading filename segment is
+not a real Claude Code event (a hook that would never fire is worse than a
+crash), so a `hook-common.sh` cannot live in that directory. This is why the
+opt-out guard block is duplicated verbatim into every kit hook instead of
+being sourced from a shared script.
 
 ## Worked end-to-end example
 
-One real hook, followed start to finish. Sections marked *TODO* get filled
-during the docs pass.
+One real hook, followed start to finish.
 
 ### The hook: `SessionEnd-soul-save.sh`
 
@@ -108,12 +114,14 @@ Generated automatically — never hand-written. From a live soul repo:
 
 ### The `settings.local.json` stage (development phase)
 
-*TODO(docs pass):* the same hook as it would look **before** promotion —
-named `SessionEnd-local-save.sh`, hand-registered in `settings.local.json` —
-plus the promotion diff.
+Before promotion, the same hook would be named `SessionEnd-local-save.sh` and
+hand-registered in `settings.local.json`. That whole flow — the `-local-`
+protection, the registration JSON, the promotion steps — is documented in
+[Kit authoring §3.5](kit-authoring.md#35-the-hook-development-flow).
 
 ### With an app-package helper
 
-*TODO(docs pass):* the same walk-through for a hook whose logic lives in an
-application package (the `uv run` shim pattern above). Candidate: copia's
-cosee hook once it ships as `.sh`.
+No kit hook ships the app-package shim shape yet. The closest real specimen
+is the sibling-`.py` fallback: copia's `PostToolUse-copia-read-seen.sh` +
+`.py` pair (see the helper-code section above). This walk-through gets
+written when the first app-package hook ships.

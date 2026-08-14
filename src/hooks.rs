@@ -118,6 +118,30 @@ fn scrub_legacy_lines(content: &str) -> String {
         .collect()
 }
 
+/// Converge the pre-commit hook before a save, healing the clone gap:
+/// `git clone` does not copy `.git/hooks`, so every fresh clone of a
+/// git-lex repo silently lost ALL save gates — cleanup, extraction,
+/// validation, identity — and `save` committed ungated without a word.
+/// (Found 2026-08-14: two independent lifecycle measurements ran in
+/// hookless clones and reported the machinery broken; the machinery was
+/// fine, the hook was absent.) Same law as the man page: a derived
+/// artifact the binary can regenerate is converged, not assumed.
+///
+/// Returns Ok(true) if the hook file changed (caller narrates), Ok(false)
+/// if it was already current. An error means the hook CANNOT be converged
+/// (e.g. a damaged managed section) — the caller must refuse to save,
+/// because a save without the hook is a save without gates.
+pub(crate) fn converge_hook() -> std::io::Result<bool> {
+    let before = hooks_dir()
+        .map(|d| fs::read_to_string(d.join("pre-commit")).unwrap_or_default())
+        .unwrap_or_default();
+    install_hook()?;
+    let after = hooks_dir()
+        .map(|d| fs::read_to_string(d.join("pre-commit")).unwrap_or_default())
+        .unwrap_or_default();
+    Ok(before != after)
+}
+
 pub(crate) fn install_hook() -> std::io::Result<()> {
     let dir = hooks_dir().ok_or_else(|| std::io::Error::other(
         "could not locate .git/hooks (not a git repo?)",

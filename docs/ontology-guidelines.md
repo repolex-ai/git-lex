@@ -1,6 +1,6 @@
 # Ontology Guidelines
 
-*Last updated for git-lex v0.1.0 (2026-08-03)*
+*Last updated for git-lex v0.1.0 (2026-08-12)*
 
 This page is the **naming and identifier standard** for every ontology in the
 git-lex ecosystem. [Kit ontology design](kit-ontology.md) shows you the
@@ -205,9 +205,14 @@ cheaper to get right on day one.
 ## 6. Change discipline
 
 - **The graph is append-only; so is the vocabulary's story.** You don't edit
-  history — you supersede it. Retire a term by declaring the replacement,
-  saying so in both comments, and recording the move in the ontology's
-  changelog header (see copia.ttl's `# v0.27:` block for the shape).
+  history — you supersede it. Retire a term by marking it `owl:deprecated true`
+  and pointing at its successor with `dcterms:isReplacedBy`. The tooling reads
+  both: a deprecated property still saves and its history still replays, but
+  authors get a save-time note naming the replacement, and deprecated keys are
+  never suggested; a deprecated class keeps resolving but loses its folder, its
+  template, and its place in the `create` menu. Say the move in both comments
+  and record it in the ontology's changelog header (see copia.ttl's `# v0.27:`
+  block for the shape).
 - **Everything is derived; nothing is minted.** Ids come from filenames,
   IRIs from class + id, id properties from class names. If you're inventing
   an identifier at emission time that can't be re-derived from the source,
