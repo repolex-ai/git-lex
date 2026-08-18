@@ -831,8 +831,8 @@ pub(crate) const LEXHISTORY_GRAPH_IRI: &str = "https://repolex.ai/git-lex/LexHis
 
 /// The statement-lifecycle predicates, declared in git-lex.ttl v0.5+
 /// (kit-base 9e6f4bf): domain git-lex:SpoEvent, range git2:Commit.
-const ONEGRAPH_ASSERTED_IN: &str = "https://repolex.ai/ontology/git-lex/assertedIn";
-const ONEGRAPH_RETRACTED_IN: &str = "https://repolex.ai/ontology/git-lex/retractedIn";
+pub(crate) const ONEGRAPH_ASSERTED_IN: &str = "https://repolex.ai/ontology/git-lex/assertedIn";
+pub(crate) const ONEGRAPH_RETRACTED_IN: &str = "https://repolex.ai/ontology/git-lex/retractedIn";
 
 /// Build the one-graph N-Quads for a single resolved triple event.
 ///

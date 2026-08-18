@@ -218,13 +218,111 @@ fn fast_path_hit(store: &Store, root: &std::path::Path, head_sha: &str) -> bool 
             .ok()
             .map(|o| !o.stdout.is_empty())
             .unwrap_or(true); // on error, fall through to full sync
+        if dirty {
+            return false;
+        }
 
-        return !dirty;
+        // Rewind probe (#107): "HEAD is in the commits graph" is satisfied
+        // by ANY previously-synced ancestor — after `git reset --hard`,
+        // HEAD is exactly that, and this fast path would print "Already
+        // synced" over a one graph still carrying the rewound-away
+        // commits' events. Fall through; resume_point prints the loud
+        // line and forces the full rebuild.
+        return rewound_event_commits(store, root).is_empty();
     }
     false
 }
 
+/// Rewind probe (#107): commits the one graph WITNESSED that are no longer
+/// on the default branch's line.
+///
+/// After `git reset --hard` (or a rebase), HEAD is an ancestor the store
+/// already synced — so the fast path's "is HEAD in the commits graph?"
+/// answers yes, and the resume point (newest stored ancestor-of-HEAD) is
+/// HEAD itself, so the append phase appends nothing. Both checks look only
+/// at commits that ARE on the line; neither can see events from commits
+/// that no longer are. Result before this probe: rewound-away commits'
+/// statement events stayed in the one graph forever, and the now view kept
+/// describing a history the branch no longer has.
+///
+/// The one graph itself is the honest instrument: every event names the
+/// commit it was witnessed in (assertedIn/retractedIn), and the walk only
+/// ever follows the default branch — so every witnessed commit MUST be an
+/// ancestor of HEAD. Any that isn't means the line was rewritten, and the
+/// graph must be rebuilt from the line that exists now (same law as fetch
+/// scope vs rebuild scope: a total change to the source needs a total
+/// rebuild of the derivation).
+///
+/// One SPARQL DISTINCT + one `git rev-list HEAD` set. On git failure this
+/// returns empty (no forced rebuild): the sync phases run their own
+/// rev-list with a loud exit, so a broken repo fails there, not silently
+/// here.
+fn rewound_event_commits(store: &Store, root: &std::path::Path) -> Vec<String> {
+    let q = format!(
+        "SELECT DISTINCT ?c WHERE {{ GRAPH <{}> {{ \
+           {{ ?e <{}> ?c }} UNION {{ ?e <{}> ?c }} }} }}",
+        spo_events::LEXHISTORY_GRAPH_IRI,
+        spo_events::ONEGRAPH_ASSERTED_IN,
+        spo_events::ONEGRAPH_RETRACTED_IN
+    );
+    let commit_prefix = crate::git2_nquads::git2_uri("Commit/");
+    let witnessed: Vec<String> = oxigraph::sparql::SparqlEvaluator::new()
+        .parse_query(&q)
+        .ok()
+        .and_then(|q| q.on_store(store).execute().ok())
+        .map(|r| match r {
+            oxigraph::sparql::QueryResults::Solutions(sols) => sols
+                .flatten()
+                .filter_map(|s| match s.get("c") {
+                    Some(oxigraph::model::Term::NamedNode(n)) => n
+                        .as_str()
+                        .strip_prefix(commit_prefix.as_str())
+                        .map(|sha| sha.to_string()),
+                    _ => None,
+                })
+                .collect(),
+            _ => Vec::new(),
+        })
+        .unwrap_or_default();
+    if witnessed.is_empty() {
+        return Vec::new();
+    }
+    let out = Command::new("git")
+        .args(["rev-list", "HEAD"])
+        .current_dir(root)
+        .output();
+    let Ok(out) = out else { return Vec::new() };
+    if !out.status.success() {
+        return Vec::new();
+    }
+    let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
+    let on_line: std::collections::HashSet<&str> =
+        stdout.lines().map(|l| l.trim()).filter(|l| !l.is_empty()).collect();
+    witnessed
+        .into_iter()
+        .filter(|sha| !on_line.contains(sha.as_str()))
+        .collect()
+}
+
 fn resume_point(store: &Store, root: &std::path::Path) -> Option<String> {
+    // ─── Rewind check FIRST (#107): if the one graph witnessed commits
+    // that are no longer on the default branch's line, no resume point is
+    // valid — the graph describes a history the branch no longer has, and
+    // appending onto it would keep the phantom events forever. Full
+    // rebuild (the walk engine clears the one graph when resume is None),
+    // so the store equals what a fresh clone would derive from the line
+    // that exists now.
+    let rewound = rewound_event_commits(store, root);
+    if !rewound.is_empty() {
+        println!(
+            "One graph: history rewind detected — {} commit(s) it witnessed are no longer \
+             on the default branch (git reset/rebase). FULL rebuild from the current line; \
+             the rewound commits' events are dropped with their commits.",
+            rewound.len()
+        );
+        return None;
+    }
+
     // ─── One-graph resume point: read BEFORE Phase 1 clears the commits
     // graph. The resume commit = the NEWEST commit in the PREVIOUS sync's
     // commits graph that is an ANCESTOR OF HEAD. No stored marker
