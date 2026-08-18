@@ -757,6 +757,48 @@ pub(crate) fn generate_frontmatter_nquads_with(
 /// - `emitted_types`: in/out dedup set — the caller must zero this per doc
 ///   so each document emits its `rdf:type` assertions at most once
 /// - `out`: the N-Quad buffer being appended to
+/// Detect the documented identifier form `<namespace/Class/id>` written
+/// WITHOUT its angle brackets (tr1p's 2026-08-18 finding, lUX field data:
+/// 104 such values, every one resolving to an address nothing describes).
+///
+/// An unbracketed value falls into the rule-5 path lane (resolve.rs), which
+/// glues the WRITING repo's namespace onto it — `soul/Note/x` in a soul repo
+/// lands at `…/soul/soul/Note/x`. The wrong form produces no signal, which is
+/// exactly why a careful author wrote it 104 times against a correct
+/// rdfs:comment. This helper is DETECTION ONLY — resolution is untouched
+/// (changing it is a Rob ruling, options B/C in the 2026_08_18 bug doc).
+///
+/// Fires when the first path segment case-insensitively names an installed
+/// kit AND the value is not a tracked file path. The existence check is what
+/// keeps legitimate File-plane references quiet: `Soul/Note/x.md` pointing at
+/// a real file is the path lane's designed input; the same string pointing at
+/// nothing gets the note (and the suggested Thing form is correct either way,
+/// since the `Soul/` scaffold folder maps onto the namespace root).
+/// Returns the suggested bracketed identifier (first segment lowercased,
+/// `.md` dropped — a Thing IRI carries no extension).
+pub(crate) fn bare_kit_reference_suggestion(
+    val: &str,
+    kit_namespaces: &HashMap<String, String>,
+    path_index: &HashSet<String>,
+) -> Option<String> {
+    if val.starts_with('<') || val.contains("://") {
+        return None;
+    }
+    let (first, rest) = val.split_once('/')?;
+    if rest.is_empty() {
+        return None;
+    }
+    let first_lower = first.to_lowercase();
+    if !kit_namespaces.contains_key(&first_lower) {
+        return None;
+    }
+    if path_index.contains(val) {
+        return None;
+    }
+    let tail = rest.strip_suffix(".md").unwrap_or(rest);
+    Some(format!("{first_lower}/{tail}"))
+}
+
 pub(crate) fn emit_spo_line_nquads(
     line: &str,
     subjects: &FileSubjects,
@@ -991,6 +1033,26 @@ pub(crate) fn emit_spo_line_nquads(
                         continue;
                     }
                     // No declared range: the legacy path/IRI resolver.
+                    // But first, tr1p's 2026-08-18 finding: the documented
+                    // identifier form minus its brackets is the attractive
+                    // error, and the path lane swallows it silently. Note
+                    // (not error) — resolution below is unchanged.
+                    if warn {
+                        if let Some(suggested) =
+                            bare_kit_reference_suggestion(val, kit_namespaces, path_index)
+                        {
+                            eprintln!(
+                                "note: {}: `{}` on `{}` has no angle brackets, so it \
+                                 resolves as a repo-relative path to `{}` — an address \
+                                 nothing in the graph describes. Did you mean `<{}>`?",
+                                relpath_str,
+                                val,
+                                prop_seg,
+                                crate::git::resource_uri(&uri_encode_path(val)),
+                                suggested
+                            );
+                        }
+                    }
                     match resolve::resolve_frontmatter_value(val) {
                         resolve::ResolveResult::Iri(uri) => {
                             out.push_str(&format!(
@@ -1337,6 +1399,58 @@ pub(crate) fn load_ontology_graph(store: &oxigraph::store::Store) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// tr1p's 2026-08-18 finding, all five probe rows: the documented
+    /// identifier form written WITHOUT brackets must be detected (it
+    /// resolves to an address nothing describes), while the bracketed
+    /// form and legitimate File-plane paths stay quiet.
+    #[test]
+    fn bare_kit_reference_detection_matches_probe_table() {
+        let mut kits: HashMap<String, String> = HashMap::new();
+        kits.insert("soul".into(), "https://repolex.ai/ontology/soul/".into());
+        kits.insert("copia".into(), "https://repolex.ai/ontology/copia/".into());
+        let mut paths: HashSet<String> = HashSet::new();
+        paths.insert("Soul/Note/probe-delta.md".to_string());
+
+        // ✅ bracketed identifier form: never reaches this helper unbracketed,
+        // but if handed one, it must stay quiet.
+        assert_eq!(
+            bare_kit_reference_suggestion("<copia/Place/probe-alpha>", &kits, &paths),
+            None
+        );
+        // ⚠️→quiet: capitalized scaffold path to a REAL file is the path
+        // lane's designed input.
+        assert_eq!(
+            bare_kit_reference_suggestion("Soul/Note/probe-delta.md", &kits, &paths),
+            None
+        );
+        // ❌ capitalized kit folder, no such file → note, .md dropped.
+        assert_eq!(
+            bare_kit_reference_suggestion("Copia/Place/probe-echo.md", &kits, &paths),
+            Some("copia/Place/probe-echo".to_string())
+        );
+        // ❌ bare lowercase kit form (the 104-value attractor).
+        assert_eq!(
+            bare_kit_reference_suggestion("copia/Place/probe-bravo", &kits, &paths),
+            Some("copia/Place/probe-bravo".to_string())
+        );
+        // ❌ the visible soul/soul/ doubling case.
+        assert_eq!(
+            bare_kit_reference_suggestion("soul/Note/probe-charlie", &kits, &paths),
+            Some("soul/Note/probe-charlie".to_string())
+        );
+        // Quiet: ordinary repo paths, URLs, bare names, kit name alone.
+        assert_eq!(
+            bare_kit_reference_suggestion("Harness/Memory/foo.md", &kits, &paths),
+            None
+        );
+        assert_eq!(
+            bare_kit_reference_suggestion("https://repolex.ai/soul/Note/x", &kits, &paths),
+            None
+        );
+        assert_eq!(bare_kit_reference_suggestion("probe", &kits, &paths), None);
+        assert_eq!(bare_kit_reference_suggestion("soul/", &kits, &paths), None);
+    }
 
     /// The emitter's predicate/class namespace comes from the kit's own TTL
     /// declaration (via the kit_namespaces map), NOT a hardcoded pattern —
