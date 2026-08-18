@@ -698,6 +698,44 @@ pub(crate) fn derive_source_document(sidecar_rel_path: &str) -> Option<String> {
     None
 }
 
+/// Orphaned-sidecar convergence (#107): remove sidecars whose SOURCE
+/// document no longer exists in the working tree. Returns the removed
+/// sidecars' repo-relative paths, sorted.
+///
+/// [`cleanup_sidecars_for_staged_changes`] can only see damage save itself
+/// is about to commit — it reads the STAGED md changes. A sidecar orphaned
+/// by a raw git delete/rename OUTSIDE save (historically: hookless-clone
+/// commits) leaves the tree clean, so save short-circuited at "Nothing to
+/// save" and the orphan kept its facts alive in every future sync. Same
+/// ethos as save converging its own pre-commit hook: derived state under
+/// .lex/extract/ is save's product, so save converges it. The removal
+/// becomes a staged deletion in THIS save, and the next sync retracts the
+/// orphan's facts honestly. Unknown .spo suffixes are left untouched
+/// (derive_source_document returns None — never guess an attribution).
+pub(crate) fn remove_orphaned_sidecars(root: &std::path::Path) -> Vec<String> {
+    let extract_root = root.join(".lex").join("extract");
+    let mut removed = Vec::new();
+    let mut stack = vec![extract_root];
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else { continue };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                stack.push(path);
+                continue;
+            }
+            let Ok(rel) = path.strip_prefix(root) else { continue };
+            let rel_str = rel.to_string_lossy().replace('\\', "/");
+            let Some(source) = derive_source_document(&rel_str) else { continue };
+            if !root.join(&source).exists() && std::fs::remove_file(&path).is_ok() {
+                removed.push(rel_str);
+            }
+        }
+    }
+    removed.sort();
+    removed
+}
+
 /// Read a sidecar file's content at a specific git commit.
 /// Returns the non-empty, non-comment lines (the SPO lines).
 ///
@@ -1422,6 +1460,41 @@ fn take_term(s: &str) -> Option<(String, &str)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The orphan sweep removes exactly the sidecars whose source is gone:
+    /// live-source sidecars stay, unknown .spo suffixes stay (never guess
+    /// an attribution), and the orphan's file is actually deleted.
+    #[test]
+    fn orphan_sweep_removes_only_sourceless_sidecars() {
+        let root = std::env::temp_dir().join(format!(
+            "gitlex-orphan-sweep-test-{}",
+            std::process::id()
+        ));
+        let extract = root.join(".lex/extract/Soul/Note");
+        std::fs::create_dir_all(&extract).unwrap();
+        std::fs::create_dir_all(root.join("Soul/Note")).unwrap();
+        // Live source + its sidecar → kept.
+        std::fs::write(root.join("Soul/Note/alive.md"), "x").unwrap();
+        std::fs::write(extract.join("alive.md.fm.spo"), "x").unwrap();
+        // No source → orphan, removed (both extractor suffixes).
+        std::fs::write(extract.join("gone.md.fm.spo"), "x").unwrap();
+        std::fs::write(extract.join("gone.md.md.spo"), "x").unwrap();
+        // Unknown suffix → untouched even with no source.
+        std::fs::write(extract.join("gone.md.mystery.spo"), "x").unwrap();
+
+        let removed = remove_orphaned_sidecars(&root);
+        assert_eq!(
+            removed,
+            vec![
+                ".lex/extract/Soul/Note/gone.md.fm.spo".to_string(),
+                ".lex/extract/Soul/Note/gone.md.md.spo".to_string(),
+            ]
+        );
+        assert!(extract.join("alive.md.fm.spo").exists());
+        assert!(!extract.join("gone.md.fm.spo").exists());
+        assert!(extract.join("gone.md.mystery.spo").exists());
+        std::fs::remove_dir_all(&root).unwrap();
+    }
 
     // ─── v1 write-gate (validate_sidecar_v1) ───────────────────────────────
 

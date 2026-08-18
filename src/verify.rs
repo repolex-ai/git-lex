@@ -345,6 +345,94 @@ pub(crate) fn run_verify(store: &Store) -> usize {
         }
     }
 
+    // ── Check 6: identity-model lifecycle integrity (#107) ──────────────
+    // Both are store-internal joins (one graph base layer ↔ the filetree
+    // graph from the SAME sync), so a stale store can't false-alarm against
+    // a moved-on working tree — verify checks the store's own story.
+    //
+    // 6a: every fileId edge resolves to a file that exists at the synced
+    //     HEAD. A dangling File target means a delete/rename whose
+    //     retraction never landed (the lifecycle spec's "stale sidecar"
+    //     damage class — historically: hookless-clone saves).
+    // The File IRI carries the uri-encoded path; git2:path is the plain
+    // string — the join runs here in Rust through the same encoder the
+    // emitter uses, never through string surgery in SPARQL.
+    let filetree_paths = select_strings(
+        store,
+        "SELECT ?path WHERE { GRAPH ?g { ?e <https://repolex.ai/ontology/git-lex/git2/path> ?path } \
+           FILTER(STRSTARTS(STR(?g), \"https://repolex.ai/git-lex/NamedGraph/filetree/\")) }",
+        "path",
+    );
+    let fileid_targets = select_strings(
+        store,
+        "SELECT DISTINCT ?f WHERE { GRAPH <https://repolex.ai/git-lex/LexHistoryGraph> { \
+           ?t <https://repolex.ai/ontology/git-lex/fileId> ?f } }",
+        "f",
+    );
+    match (filetree_paths, fileid_targets) {
+        (Ok(paths), Ok(targets)) => {
+            let present: std::collections::HashSet<String> = paths
+                .iter()
+                .map(|p| crate::git::file_iri(&crate::nquad::uri_encode_path(p)))
+                .collect();
+            let dangling: Vec<&String> =
+                targets.iter().filter(|f| !present.contains(*f)).collect();
+            if dangling.is_empty() {
+                println!(
+                    "✓ check 6a: every fileId edge resolves to a file at HEAD ({} checked)",
+                    targets.len()
+                );
+            } else {
+                println!(
+                    "✗ check 6a: {} fileId edge(s) point at file(s) that no longer exist:",
+                    dangling.len()
+                );
+                for f in &dangling {
+                    println!("    {f}");
+                }
+                println!("    (a delete/rename whose retraction never landed — a raw git operation bypassed save; run `git lex save` — it removes the orphaned sidecar(s) — then `git lex sync`)");
+                failures += 1;
+            }
+        }
+        (Err(e), _) | (_, Err(e)) => {
+            println!("✗ check 6a could not run ({e})");
+            failures += 1;
+        }
+    }
+
+    // 6b: no ghost Things — a Thing-plane subject typed with a kit class
+    //     in the base layer must carry its fileId anchor. Type and fileId
+    //     emit together but diff separately, so a partial retraction can
+    //     orphan the type; that orphan is exactly what this finds.
+    //     File-plane subjects are excluded on purpose: unmigrated files
+    //     (no authored id) legitimately carry kit types on the File node.
+    match select_strings(
+        store,
+        "SELECT DISTINCT ?t WHERE { GRAPH <https://repolex.ai/git-lex/LexHistoryGraph> { \
+           ?t <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> ?c . \
+           FILTER(STRSTARTS(STR(?c), \"https://repolex.ai/ontology/\")) \
+           FILTER(!STRSTARTS(STR(?c), \"https://repolex.ai/ontology/git-lex/\")) \
+           FILTER(!STRSTARTS(STR(?t), \"https://repolex.ai/git-lex/File/\")) \
+           FILTER NOT EXISTS { ?t <https://repolex.ai/ontology/git-lex/fileId> ?f } } }",
+        "t",
+    ) {
+        Ok(ghosts) => {
+            if ghosts.is_empty() {
+                println!("✓ check 6b: zero ghost Things (every typed Thing carries its fileId anchor)");
+            } else {
+                println!("✗ check 6b: {} ghost Thing(s) — typed but anchored to no file:", ghosts.len());
+                for t in &ghosts {
+                    println!("    {t}");
+                }
+                failures += 1;
+            }
+        }
+        Err(e) => {
+            println!("✗ check 6b could not run ({e})");
+            failures += 1;
+        }
+    }
+
     println!("──────────────────────────────────────────────────");
     if failures == 0 {
         println!("ALL CHECKS PASSED");

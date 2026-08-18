@@ -148,6 +148,26 @@ pub(crate) fn cmd_save(message: &str, dry_run: bool) {
     harness::sync_all(&root);
 
 
+    // Orphaned-sidecar convergence (#107, same ethos as the hook floor
+    // above): a sidecar whose source document is gone can only come from a
+    // raw git delete/rename outside save (historically: hookless clones).
+    // The staged-changes cleanup in the hook can't see it — nothing is
+    // staged on a clean tree, so save printed "Nothing to save" OVER the
+    // damage while verify's check 6a reported it with no way to heal.
+    // Removing the orphan here makes it a staged deletion below: this save
+    // carries it, and the next sync retracts its facts honestly.
+    let orphans = spo_events::remove_orphaned_sidecars(&root);
+    if !orphans.is_empty() {
+        println!(
+            "Repaired: {} orphaned sidecar(s) whose source document is gone (a raw git \
+             delete/rename bypassed save) — removed, so this save retracts their facts:",
+            orphans.len()
+        );
+        for o in &orphans {
+            println!("  - {o}");
+        }
+    }
+
     // Add everything, commit; the pre-commit hook handles extract + validate
     // (NOT sync — the store is updated separately by `git lex sync`)
     let status = Command::new("git")
