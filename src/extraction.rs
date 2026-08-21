@@ -390,9 +390,36 @@ pub(crate) fn frontmatter_to_turtle(
             // comment block cites: one resolution policy, judged here as it
             // will be emitted there). Path-law resolution applies only to
             // ObjectProperties with no declared class range.
-            let range = ref_ranges.get(&format!("{}/{}", short, prop_name));
+            // Range table is keyed by the DECLARED property IRI
+            // (2026-08-20). This validate path only has the kit's own
+            // namespace in hand, so it consults with the glued own-kit IRI —
+            // exactly the entries the old `{kit}/{prop}` key reached, no
+            // more, no less. KNOWN LIMIT: an INHERITED property's range
+            // (declared in another kit, e.g. git-lex:relatedToId) is not
+            // visible here; its authoritative gate is the sync emitter's
+            // range lane (nquad.rs), which joins through the declared
+            // predicate IRI. Folding this path onto ResolverContext (which
+            // holds prop_iris) is the A5 unification this comment is the
+            // marker for.
+            let range = ref_ranges.get(&format!("{}{}", namespace, prop_name));
             for val in &values {
                 let val = val.as_str();
+                if range.map(String::as_str) == Some(crate::nquad::THING_CLASS_IRI) {
+                    // The angle-bracket lane (Rob-ruled 2026-08-20) —
+                    // mirror the emitter: identifier form only.
+                    match crate::resolve::resolve_thing_reference(val) {
+                        Ok(target) => {
+                            ttl.push_str(&format!(
+                                "<{}> {}:{} {} .\n",
+                                doc_iri, prefix_name, prop_name, target
+                            ));
+                        }
+                        Err(msg) => {
+                            return Err(format!("{}: {}", prop_name, msg));
+                        }
+                    }
+                    continue;
+                }
                 if let Some(range_iri) = range {
                     match crate::nquad::thing_iri_from_range(range_iri, val) {
                         Some(target) => {

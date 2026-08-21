@@ -4,9 +4,9 @@
 .DS_Store
 
 # >>> git-lex engine runtime (managed) >>>
+.lex/_ignore/
 .pool/
 .copia/
-.weave/
-.ravel/
-.pan/
+.ravel/_ignore/
+.pan/_ignore/
 # <<< git-lex engine runtime (managed) <<<

@@ -652,7 +652,33 @@ pub(crate) fn cmd_extract() {
                 if segs.len() != 3 {
                     continue;
                 }
-                let Some(range_iri) = ctx.ref_ranges.get(&format!("{}/{}", segs[0], segs[2])) else { continue };
+                // Range table is keyed by the DECLARED property IRI
+                // (2026-08-20): join through the shapes' prop_iris — the
+                // sidecar subject names the authoring kit+class, which for
+                // an inherited property is NOT where the range lives. The
+                // conventional-glue fallback covers same-kit properties in
+                // repos with no generated shapes.
+                let prop_iri = ctx
+                    .prop_iris
+                    .get(&format!("{}/{}/{}", segs[0], segs[1], segs[2]))
+                    .cloned()
+                    .unwrap_or_else(|| {
+                        let ns = ctx
+                            .kit_namespaces
+                            .get(segs[0])
+                            .cloned()
+                            .unwrap_or_else(|| git_lex::conventional_kit_namespace(segs[0]));
+                        format!("{}{}", ns, segs[2])
+                    });
+                let Some(range_iri) = ctx.ref_ranges.get(&prop_iri) else { continue };
+                // The Thing range never enters this gate: its values are
+                // full addresses (any class, any repo), so the foldered
+                // in-repo existence law below has no single id-space to
+                // check them against. Resolution/rejection already
+                // happened in the emit lane.
+                if range_iri == crate::nquad::THING_CLASS_IRI {
+                    continue;
+                }
                 let enforce = *foldered_cache.entry(range_iri.clone()).or_insert_with(|| {
                     let Some(cut) = range_iri.rfind('/') else { return false };
                     let (ns, class) = range_iri.split_at(cut + 1);

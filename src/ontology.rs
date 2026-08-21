@@ -755,7 +755,7 @@ fn kit_namespace_of(content: &str, short: &str) -> String {
         .unwrap_or_else(|| git_lex::conventional_kit_namespace(short))
 }
 
-/// Law-6 reference ranges: `"{kit}/{prop}"` → the range CLASS IRI, for
+/// Law-6 reference ranges: property IRI → the range CLASS IRI, for
 /// every `owl:ObjectProperty` with a non-XSD `rdfs:range` in every
 /// installed kit ontology TTL. This is what turns a declared reference
 /// (copia:lookBeingId, range copia:Being) into id→IRI resolution at
@@ -763,6 +763,14 @@ fn kit_namespace_of(content: &str, short: &str) -> String {
 /// `<range-app>/<RangeClass>/<id>`. Property-level (ranges live on the
 /// property, not the shape) — the emitter pairs it with the class-
 /// qualified obj_props membership test it already does.
+///
+/// Keyed by the property's FULL IRI (2026-08-20): a `{kit}/{prop}` key
+/// reconstructed from the AUTHORING side misses inherited properties —
+/// `soul.Note.relatedToId` authors under soul while git-lex declares the
+/// range. Consumers look up with the declared predicate IRI they already
+/// hold. The special range `git-lex:Thing` (see nquad.rs THING_CLASS_IRI)
+/// means "any Thing, any class" — the value must be the identifier form
+/// `<namespace/Class/id>`, not a bare id (Rob-ruled 2026-08-20).
 pub(crate) fn get_reference_ranges_all_kits() -> HashMap<String, String> {
     // Memoized (#90). This reads and regex-parses EVERY installed kit's TTL,
     // and `frontmatter_to_turtle` called it once per file — re-parsing the
@@ -809,8 +817,8 @@ pub(crate) fn get_reference_ranges_all_kits() -> HashMap<String, String> {
 
     for (short, ttl) in &ttls {
         let Ok(content) = fs::read_to_string(ttl) else { continue };
-        for (prop, range) in parse_reference_ranges(&content, short) {
-            out.insert(format!("{}/{}", short, prop), range);
+        for (prop_iri, range) in parse_reference_ranges(&content, short) {
+            out.insert(prop_iri, range);
         }
     }
     *memo.lock().unwrap() = Some((fingerprint, out.clone()));
@@ -1048,8 +1056,17 @@ fn parse_domain_open_properties(content: &str, short: &str) -> Vec<(String, Doma
 }
 
 /// Pure parser for object-property ranges in one kit TTL. Returns
-/// `(property_local_name, range_class_iri)` pairs; XSD ranges and
-/// properties outside the kit's own namespace are skipped.
+/// `(property_IRI, range_class_iri)` pairs; XSD ranges and properties
+/// outside the kit's own namespace are skipped.
+///
+/// Keyed by the property's FULL IRI (2026-08-20, the range=Thing build):
+/// the old `(local_name, …)` shape forced consumers to reconstruct a
+/// `{kit}/{prop}` key from the AUTHORING kit — which misses every
+/// INHERITED property (`soul.Note.relatedToId` authors under soul, but
+/// git-lex declares the range). The ontology speaks in IRIs; consumers
+/// already hold the declared predicate IRI (via shapes/prop_iris), so the
+/// IRI is the one join that cannot mis-attribute. (#82's key-mismatch
+/// class, fixed at the table instead of per-consumer.)
 fn parse_reference_ranges(content: &str, short: &str) -> Vec<(String, String)> {
     let kit_ns = kit_namespace_of(content, short);
     let store = match crate::kit::load_ttl_str(content, &format!("{} ontology", short)) {
@@ -1067,11 +1084,12 @@ fn parse_reference_ranges(content: &str, short: &str) -> Vec<(String, String)> {
     if let Ok(oxigraph::sparql::QueryResults::Solutions(sols)) = git_lex::eval_query(&store, q) {
         for s in sols.flatten() {
             let (Some(Term::NamedNode(p)), Some(Term::NamedNode(r))) = (s.get("p"), s.get("r")) else { continue };
+            // Own-namespace FILTER only — the emitted key is the full IRI.
             let Some(prop) = p.as_str().strip_prefix(kit_ns.as_str()) else { continue };
             if prop.is_empty() || r.as_str().starts_with("http://www.w3.org/2001/XMLSchema#") {
                 continue;
             }
-            out.push((prop.to_string(), r.as_str().to_string()));
+            out.push((p.as_str().to_string(), r.as_str().to_string()));
         }
     }
     out
@@ -1135,9 +1153,37 @@ copia:firstVisited a owl:DatatypeProperty ; rdfs:range xsd:date .
         assert_eq!(
             pairs,
             vec![
-                ("lookBeingId".to_string(), "https://repolex.ai/ontology/copia/Being".to_string()),
-                ("lookMomentId".to_string(), "https://repolex.ai/ontology/copia/Moment".to_string()),
+                (
+                    "https://repolex.ai/ontology/copia/lookBeingId".to_string(),
+                    "https://repolex.ai/ontology/copia/Being".to_string()
+                ),
+                (
+                    "https://repolex.ai/ontology/copia/lookMomentId".to_string(),
+                    "https://repolex.ai/ontology/copia/Moment".to_string()
+                ),
             ]
+        );
+    }
+
+    /// The range=Thing declaration (Rob-ruled 2026-08-20) parses like any
+    /// other non-XSD range — the SPECIAL meaning (identifier-form-only
+    /// values) is the emitter's, not the parser's.
+    #[test]
+    fn parse_reference_ranges_accepts_thing_range() {
+        let ttl = r#"
+@prefix git-lex: <https://repolex.ai/ontology/git-lex/> .
+@prefix owl: <http://www.w3.org/2002/07/owl#> .
+@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+
+git-lex: a owl:Ontology .
+git-lex:relatedToId a owl:ObjectProperty ; rdfs:range git-lex:Thing .
+"#;
+        assert_eq!(
+            parse_reference_ranges(ttl, "git-lex"),
+            vec![(
+                "https://repolex.ai/ontology/git-lex/relatedToId".to_string(),
+                "https://repolex.ai/ontology/git-lex/Thing".to_string()
+            )]
         );
     }
 

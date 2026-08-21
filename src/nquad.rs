@@ -248,11 +248,15 @@ pub(crate) struct ResolverContext {
     /// xsd:string property by design and must never gate the warning.
     pub declared_props: HashSet<String>,
     pub kit_namespaces: HashMap<String, String>,
-    /// Law-6 reference ranges: "{kit}/{prop}" → range class IRI, from
-    /// installed kit TTLs (owl:ObjectProperty + non-XSD rdfs:range). A
-    /// declared range makes the property's authored value a TARGET ID,
-    /// resolved to `<range-app>/<RangeClass>/<id>` at emission; without
-    /// one, the legacy path/IRI resolver applies (resolve.rs).
+    /// Law-6 reference ranges: property IRI → range class IRI, from
+    /// installed kit TTLs (owl:ObjectProperty + non-XSD rdfs:range).
+    /// IRI-keyed (2026-08-20) so INHERITED properties join — the authoring
+    /// kit's `{kit}/{prop}` key missed ranges declared where the property
+    /// lives. A declared range makes the property's authored value a
+    /// TARGET ID, resolved to `<range-app>/<RangeClass>/<id>` at emission;
+    /// range git-lex:Thing (THING_CLASS_IRI) is the angle-bracket lane
+    /// (identifier form only); without any range, the legacy path/IRI
+    /// resolver applies (resolve.rs).
     pub ref_ranges: HashMap<String, String>,
     /// "{kit}/{Class}/{prop}" → the property's DECLARED IRI, from the
     /// generated shapes. The predicate used to be built by gluing the
@@ -295,6 +299,13 @@ impl ResolverContext {
         }
     }
 }
+
+/// The universal Thing class (git-lex.ttl). As a DECLARED RANGE it is the
+/// "angle-bracket field" switch (Rob-ruled 2026-08-20): the target could be
+/// any class in any kit, so the authored value must carry its own namespace
+/// and class — the identifier form `<namespace/Class/id>`, resolved by
+/// `resolve::resolve_thing_reference`, everything else rejected at save.
+pub(crate) const THING_CLASS_IRI: &str = "https://repolex.ai/ontology/git-lex/Thing";
 
 /// A Thing IRI derived from a range CLASS IRI + a bare target id:
 /// `https://repolex.ai/ontology/copia/Being` + `lux`
@@ -1005,13 +1016,59 @@ pub(crate) fn emit_spo_line_nquads(
                 // never guessed: id → the range class's id-space → one
                 // Thing IRI. Deterministic at every commit, dangling or
                 // not (existence is the save gate's job, not derivation's).
-                let range = ref_ranges.get(&format!("{}/{}", kit_name, prop_seg));
+                //
+                // Looked up by the DECLARED predicate IRI, not a key rebuilt
+                // from the authoring kit — an inherited property authors
+                // under the subclass's kit (`soul.Note.relatedToId`) while
+                // its range is declared where the property lives (git-lex).
+                // The `{kit}/{prop}` key missed exactly those (#82's
+                // key-mismatch class; table re-keyed 2026-08-20).
+                let range =
+                    ref_ranges.get(kit_predicate.trim_start_matches('<').trim_end_matches('>'));
                 // URL-aware split (review #26): a comma INSIDE a URL is part
                 // of the value, not a list separator.
                 let values = split_object_values(object);
                 for val in &values {
                     let val = val.as_str();
                     if val.is_empty() { continue; }
+                    // Range git-lex:Thing (Rob-ruled 2026-08-20): "any
+                    // Thing, any class" — the bare-id derivation below
+                    // cannot apply (there is no one id-space), so the value
+                    // must be the full identifier form <namespace/Class/id>
+                    // and ONLY that form. The angle-bracket lane.
+                    if range.map(String::as_str) == Some(THING_CLASS_IRI) {
+                        match resolve::resolve_thing_reference(val) {
+                            Ok(target) => {
+                                out.push_str(&format!(
+                                    "{} {} {} {} .\n",
+                                    line_subject, kit_predicate, target, graph
+                                ));
+                            }
+                            Err(msg) => {
+                                if warn {
+                                    // Enrich with the concrete fix when the
+                                    // value is recognizably the identifier
+                                    // form minus brackets. NO tracked-file
+                                    // veto here: under a Thing range even a
+                                    // real path is invalid.
+                                    let empty = HashSet::new();
+                                    let hint = bare_kit_reference_suggestion(
+                                        val,
+                                        kit_namespaces,
+                                        &empty,
+                                    )
+                                    .map(|s| format!(" Did you mean `<{s}>`?"))
+                                    .unwrap_or_default();
+                                    eprintln!(
+                                        "error: {}: {} — {}{}",
+                                        relpath_str, prop_seg, msg, hint
+                                    );
+                                }
+                                errors += 1;
+                            }
+                        }
+                        continue;
+                    }
                     if let Some(range_iri) = range {
                         match thing_iri_from_range(range_iri, val) {
                             Some(target) => {
@@ -1513,6 +1570,115 @@ mod tests {
         assert!(
             out2.contains("<https://repolex.ai/ontology/copia/beingName>"),
             "undeclared kit must use the conventional (app-tier) fallback, got: {out2}"
+        );
+    }
+
+    /// Range git-lex:Thing = the angle-bracket lane (Rob-ruled 2026-08-20),
+    /// exercised through the INHERITED-property join that motivated the
+    /// IRI-keyed range table: `soul.Note.relatedToId` authors under soul,
+    /// the range is declared on the git-lex property — the lookup must go
+    /// through the declared predicate IRI, and a concrete range must keep
+    /// working through the same key.
+    #[test]
+    fn thing_range_is_the_angle_bracket_lane() {
+        let mut obj_props = HashSet::new();
+        obj_props.insert("soul/Note/relatedToId".to_string());
+        obj_props.insert("copia/Look/lookBeingId".to_string());
+        let mut prop_iris = HashMap::new();
+        prop_iris.insert(
+            "soul/Note/relatedToId".to_string(),
+            "https://repolex.ai/ontology/git-lex/relatedToId".to_string(),
+        );
+        prop_iris.insert(
+            "copia/Look/lookBeingId".to_string(),
+            "https://repolex.ai/ontology/copia/lookBeingId".to_string(),
+        );
+        let mut ref_ranges = HashMap::new();
+        ref_ranges.insert(
+            "https://repolex.ai/ontology/git-lex/relatedToId".to_string(),
+            THING_CLASS_IRI.to_string(),
+        );
+        ref_ranges.insert(
+            "https://repolex.ai/ontology/copia/lookBeingId".to_string(),
+            "https://repolex.ai/ontology/copia/Being".to_string(),
+        );
+        let ctx = ResolverContext {
+            files: Vec::new(),
+            path_index: HashSet::new(),
+            obj_props,
+            prop_datatypes: HashMap::new(),
+            declared_props: HashSet::new(),
+            kit_namespaces: HashMap::new(),
+            ref_ranges,
+            prop_iris,
+            deprecated_props: HashMap::new(),
+            domain_open_props: HashMap::new(),
+        };
+        let subjects = FileSubjects {
+            file_uri: "<https://repolex.ai/git-lex/File/Soul/Note/a.md>".into(),
+            thing_uri: None,
+            thing_key: None,
+        };
+
+        // The identifier form resolves against the ONE root, on the
+        // DECLARED (git-lex) predicate — through the soul-authored key.
+        let mut types = HashSet::new();
+        let mut out = String::new();
+        let errs = emit_spo_line_nquads(
+            "soul.Note.relatedToId | hasValue | <copia/Place/ocean-park-room>",
+            &subjects,
+            "<https://repolex.ai/git-lex/NamedGraph/now>",
+            "Soul/Note/a.md",
+            &ctx, false,
+            &mut types, &mut out,
+        );
+        assert_eq!(errs, 0);
+        assert!(
+            out.contains(
+                "<https://repolex.ai/ontology/git-lex/relatedToId> \
+                 <https://repolex.ai/copia/Place/ocean-park-room>"
+            ),
+            "bracketed identifier must resolve under the Thing range: {out}"
+        );
+
+        // Everything else REJECTS under the Thing range: the bare form,
+        // a real-looking file path, and a URL. No fact emitted for any.
+        for bad in [
+            "copia/Place/ocean-park-room",
+            "Soul/Note/other.md",
+            "https://example.com/thing",
+        ] {
+            let mut out_bad = String::new();
+            let errs = emit_spo_line_nquads(
+                &format!("soul.Note.relatedToId | hasValue | {bad}"),
+                &subjects,
+                "<https://repolex.ai/git-lex/NamedGraph/now>",
+                "Soul/Note/a.md",
+                &ctx, false,
+                &mut types, &mut out_bad,
+            );
+            assert_eq!(errs, 1, "`{bad}` must reject under range Thing");
+            assert!(
+                !out_bad.contains("relatedToId"),
+                "`{bad}` must emit NO fact, got: {out_bad}"
+            );
+        }
+
+        // A concrete range still resolves the bare id through the same
+        // IRI-keyed table (Law 6 unchanged).
+        let mut out_fk = String::new();
+        let errs = emit_spo_line_nquads(
+            "copia.Look.lookBeingId | hasValue | lux",
+            &subjects,
+            "<https://repolex.ai/git-lex/NamedGraph/now>",
+            "looks/l1.md",
+            &ctx, false,
+            &mut types, &mut out_fk,
+        );
+        assert_eq!(errs, 0);
+        assert!(
+            out_fk.contains("<https://repolex.ai/copia/Being/lux>"),
+            "concrete range must keep Law-6 id resolution: {out_fk}"
         );
     }
 

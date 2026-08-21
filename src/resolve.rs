@@ -181,6 +181,63 @@ pub fn resolve_frontmatter_value(raw: &str) -> ResolveResult {
     ))
 }
 
+/// The ANGLE-BRACKET lane (Rob-ruled 2026-08-20): resolution for a property
+/// whose declared range is `git-lex:Thing` — "points at a Thing, ANY class,
+/// any kit."
+///
+/// Because the target's class is not fixed, the value must carry its own
+/// namespace and class: the identifier form `<namespace/Class/id>`, and
+/// ONLY that form. This is what the range declaration MEANS once the
+/// resolver honors it — a concrete range makes the bare id sufficient
+/// (Law 6); the universal range makes the full address necessary.
+///
+/// Everything else rejects with the fix spelled out: bare paths and REAL
+/// file paths (a File is not a Thing — the address would carry `.md` and
+/// join nothing), URLs (Rob-ruled: forbidden — an external URL is not a
+/// Thing), bare names, and absolute IRIs inside brackets (one authored
+/// form, no aliases; the spec-is-law posture). This closes the residue the
+/// bare-value warning (2026-08-18, tr1p's report §4) could only report:
+/// under a declared Thing range, the path lane has no correct output, so
+/// accepting the input was the bug.
+pub(crate) fn resolve_thing_reference(raw: &str) -> Result<String, String> {
+    let trimmed = raw.trim();
+    let Some(inner) = trimmed.strip_prefix('<').and_then(|r| r.strip_suffix('>')) else {
+        return Err(format!(
+            "`{raw}` has no angle brackets. This property's declared range is \
+             git-lex:Thing, so its value is a Thing ADDRESS: \
+             <namespace/Class/identifier>, e.g. <soul/Note/my-note>. \
+             Paths and URLs do not resolve to Things."
+        ));
+    };
+    let inner = inner.trim();
+    if inner.is_empty() {
+        return Err(
+            "empty identifier '<>' — write <namespace/Class/identifier>, \
+             e.g. <soul/Journal/day-7>"
+                .to_string(),
+        );
+    }
+    if inner.contains("://") {
+        return Err(format!(
+            "'<{inner}>' is an absolute URL — a Thing reference is written \
+             relative to the one root, exactly one way: \
+             <namespace/Class/identifier>, e.g. <soul/Journal/day-7>."
+        ));
+    }
+    if !inner.contains('/') {
+        return Err(format!(
+            "'<{inner}>' names no namespace or class — write \
+             <namespace/Class/identifier>, e.g. <soul/Journal/day-7>. \
+             The graph never guesses which kit a bare name belongs to."
+        ));
+    }
+    Ok(format!(
+        "<{}{}>",
+        crate::git::RESOURCE_ROOT,
+        crate::nquad::uri_encode_path(inner)
+    ))
+}
+
 // ════════════════════════════════════════════════════════════════════════════
 // Tests — these ARE the rules documentation. Each test name and doc comment
 // states a rule; the test body proves the code enforces it.
@@ -483,6 +540,36 @@ mod authored_identifier_tests {
         match resolve_frontmatter_value("Soul/Journal/day-7.md") {
             ResolveResult::Iri(s) => assert!(!s.contains("%3C"), "{s}"),
             other => panic!("expected an IRI, got {other:?}"),
+        }
+    }
+
+    /// Range git-lex:Thing (Rob-ruled 2026-08-20): the identifier form and
+    /// ONLY the identifier form. Paths (even real ones), URLs, bare names,
+    /// absolute IRIs inside brackets — all reject with the fix spelled out.
+    #[test]
+    fn thing_reference_accepts_only_the_identifier_form() {
+        assert_eq!(
+            resolve_thing_reference("<soul/Journal/day-7>").unwrap(),
+            "<https://repolex.ai/soul/Journal/day-7>"
+        );
+        assert_eq!(
+            resolve_thing_reference("  <copia/Place/ocean park>  ").unwrap(),
+            "<https://repolex.ai/copia/Place/ocean%20park>"
+        );
+        for bad in [
+            "soul/Journal/day-7",
+            "Soul/Note/x.md",
+            "https://example.com/x",
+            "<https://repolex.ai/soul/Note/x>",
+            "<day-7>",
+            "<>",
+            "day-7",
+            "",
+        ] {
+            assert!(
+                resolve_thing_reference(bad).is_err(),
+                "`{bad}` must reject under range git-lex:Thing"
+            );
         }
     }
 }
