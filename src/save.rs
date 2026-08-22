@@ -7,7 +7,7 @@ use git_lex::get_kit;
 use crate::nquad;
 use crate::require_git_root;
 use crate::nquad::generate_frontmatter_nquads;
-use crate::extraction::{extract_markdown_links, frontmatter_to_turtle};
+use crate::extraction::frontmatter_to_turtle;
 use crate::kit::read_repo_yml_fields;
 use crate::{harness, ontology, soul_md, spo_events};
 
@@ -533,24 +533,26 @@ pub(crate) fn cmd_extract() {
         }
     }
 
-    // Run frontmatter extraction (writes .spo sidecars as a side effect).
-    // The context is built here and shared with the identity gate below.
+    // Run the ONE working-tree walk: frontmatter + markdown links, writing
+    // both sidecar families (.fm.spo/.md.spo) in a single read + parse per
+    // document. build_nquads is off — save needs the gates and the sidecars,
+    // and used to build the full now-graph text only to discard it here.
+    // Extraction errors join the save gate (review #23): an unextractable
+    // doc keeps a stale sidecar. The context is built here and shared with
+    // the identity gate below.
+    let walk_opts = nquad::NowWalkOpts { write_sidecars: true, build_nquads: false };
     let ctx_root = git_lex::find_git_root();
-    let (_nq, mut extraction_errors, extract_ctx) = match &ctx_root {
+    let (extraction_errors, extract_ctx) = match &ctx_root {
         Some(root) => {
             let ctx = nquad::ResolverContext::build(root);
-            let (nq, errs) = nquad::generate_frontmatter_nquads_with(root, &ctx);
-            (nq, errs, Some(ctx))
+            let (_, errs) = nquad::generate_frontmatter_nquads_with(root, &ctx, walk_opts);
+            (errs, Some(ctx))
         }
         None => {
-            let (nq, errs) = generate_frontmatter_nquads();
-            (nq, errs, None)
+            let (_, errs) = generate_frontmatter_nquads(walk_opts);
+            (errs, None)
         }
     };
-
-    // Run markdown link extraction via tree-sitter. Its errors join the
-    // save gate (review #23): an unextractable doc keeps a stale sidecar.
-    extraction_errors += extract_markdown_links();
 
     // (The .jsonl session extractor ran here 2026-04→08: claude-code-kit
     // only, 13 ad-hoc operators no ontology declared, zero sidecars ever

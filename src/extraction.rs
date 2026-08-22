@@ -147,10 +147,13 @@ pub(crate) fn flatten_yaml(prefix: &str, value: &serde_yaml::Value, lines: &mut 
 /// TRIED to carry frontmatter and failed must fail validation, not skip it.
 /// Extract one parsed document's markdown-link `.spo` lines: `linksTo` for
 /// resolvable internal links, `md.externalLink` / `md.unresolvedLink` for
-/// the rest. THE one markdown-link extractor — `cmd_extract` (the `.md.spo`
-/// sidecar walk) and the now-graph builder (th34 #5: `git lex query` saw
-/// zero document-to-document edges while the synced store held 113) both
-/// call this, so the two views can never resolve links differently.
+/// the rest. THE one markdown-link extractor — the now-graph walk in
+/// nquad.rs is its single caller and both surfaces (`.md.spo` sidecar +
+/// graph emission) come from that one call per document (th34 #5: `git lex
+/// query` saw zero document-to-document edges while the synced store held
+/// 113 — one extractor, one resolution policy, so the views can never
+/// resolve links differently; the separate sidecar walk this doc once
+/// named is retired).
 pub(crate) fn extract_md_link_lines(
     tree: &tree_sitter_md::MarkdownTree,
     content: &str,
@@ -483,108 +486,6 @@ pub(crate) fn frontmatter_to_turtle(
         eprintln!("=== TTL for {} ===\n{}", filepath.display(), ttl);
     }
     Ok(Some(ttl))
-}
-
-// ─── Tree-sitter markdown link extractor ───────────────────────
-
-/// Extract markdown links from body text using tree-sitter.
-/// Writes `.md.spo` sidecars with link type (internal/external/unresolved)
-/// and destination. Returns the number of extraction ERRORS (unreadable or
-/// unparseable docs) — the caller folds them into the save gate, because a
-/// doc that can't be re-extracted keeps its stale sidecar and a stale
-/// sidecar keeps dead links alive in the graph forever (review #23).
-pub(crate) fn extract_markdown_links() -> u32 {
-    use std::collections::HashSet;
-    use std::path::PathBuf;
-    use git_lex::find_git_root;
-
-    let mut errors: u32 = 0;
-    let root = match find_git_root() {
-        Some(r) => r,
-        None => return 0,
-    };
-
-    let extract_dir = root.join(".lex").join("extract");
-    fs::create_dir_all(&extract_dir).ok();
-
-    let mut parser = tree_sitter_md::MarkdownParser::default();
-
-    // One walker for the whole codebase; this consumer narrows EXPLICITLY:
-    // markdown only (tree-sitter md parser) and no `__Class.md` templates
-    // (kit scaffolds aren't content — their example links would pollute
-    // the graph).
-    let files: Vec<PathBuf> = crate::nquad::walk_repo_docs(&root)
-        .into_iter()
-        .filter(|p| p.extension().is_some_and(|x| x == "md") && !crate::nquad::is_template(p))
-        .collect();
-
-    // Build file index for resolving internal links
-    let mut file_index: HashSet<String> = HashSet::new();
-    for f in &files {
-        if let Ok(rel) = f.strip_prefix(&root) {
-            file_index.insert(rel.to_string_lossy().to_string());
-        }
-    }
-
-    let mut total_links = 0;
-
-    for filepath in &files {
-        // Unreadable/unparseable docs are LOUD and counted (review #23):
-        // the skip bypasses the sidecar-removal branch below, so the doc's
-        // existing sidecar keeps asserting facts the doc may no longer
-        // carry — and the sync diff never sees them vanish.
-        let content = match fs::read_to_string(filepath) {
-            Ok(c) => c,
-            Err(e) => {
-                eprintln!(
-                    "error: cannot read {} for link extraction ({e}) — its \
-                     existing sidecar (if any) is NOT updated; fix the file \
-                     (permissions / invalid UTF-8) or delete it",
-                    filepath.display()
-                );
-                errors += 1;
-                continue;
-            }
-        };
-
-        let relpath = filepath.strip_prefix(&root).unwrap_or(filepath);
-        let relpath_str = relpath.to_string_lossy().to_string();
-
-        let tree = match parser.parse(content.as_bytes(), None) {
-            Some(t) => t,
-            None => {
-                eprintln!(
-                    "error: tree-sitter could not parse {} — its existing \
-                     sidecar (if any) is NOT updated",
-                    filepath.display()
-                );
-                errors += 1;
-                continue;
-            }
-        };
-
-        let mut spo_lines: Vec<String> = Vec::new();
-        extract_md_link_lines(&tree, &content, &relpath_str, &file_index, &mut spo_lines);
-
-        // Write .md.spo sidecar; when a doc's last link goes away its
-        // sidecar must go away too, so the sync diff sees the lines vanish
-        // and records retractions — same contract as the `.fm.spo` path
-        // (a stale sidecar keeps dead links alive in the graph forever).
-        let spo_path = extract_dir.join(format!("{}.md.spo", relpath_str));
-        if !spo_lines.is_empty() {
-            spo_lines.sort();
-            spo_lines.dedup();
-            crate::nquad::write_sidecar_loud(&spo_path, &(spo_lines.join("\n") + "\n"));
-            total_links += spo_lines.len();
-        } else if spo_path.exists() {
-            crate::nquad::remove_sidecar_loud(&spo_path);
-        }
-    }
-
-    if total_links > 0 {
-        eprintln!("Markdown links: {} from {} files", total_links, files.len());
-    }
-    errors
 }
 
 #[cfg(test)]

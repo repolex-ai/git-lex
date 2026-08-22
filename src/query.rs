@@ -180,9 +180,15 @@ pub(crate) fn cmd_query(query: String, json: bool) {
         .load_from_reader(RdfFormat::NQuads, Cursor::new(git_nq.as_bytes()))
         .expect("failed to load git triples");
 
-    // The live "now" graph: extract frontmatter + wikilinks straight from the
-    // working-tree .md files (this is what `save` would extract, computed fresh).
-    let (fm_nq, _errs) = generate_frontmatter_nquads();
+    // The live "now" graph: extract frontmatter + markdown links straight
+    // from the working-tree .md files (this is what `save` would extract,
+    // computed fresh). write_sidecars is OFF — query is a READ command; it
+    // used to rewrite the .spo sidecars as a side effect, dirtying the tree
+    // from a question.
+    let (fm_nq, _errs) = generate_frontmatter_nquads(crate::nquad::NowWalkOpts {
+        write_sidecars: false,
+        build_nquads: true,
+    });
     let lex_count = fm_nq.lines().filter(|l| !l.is_empty()).count();
     if !fm_nq.is_empty() {
         store

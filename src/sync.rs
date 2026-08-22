@@ -75,16 +75,18 @@ pub(crate) fn cmd_sync() {
         .load_from_reader(RdfFormat::NQuads, Cursor::new(git_nq.as_bytes()))
         .expect("failed to load git triples");
 
-    // Extraction: generate_frontmatter_nquads WRITES the .spo sidecars (the
-    // one graph's source) and derives the working-tree now view. The now
-    // view is NO LONGER loaded into the store (Rob-ruled: the now graph
-    // died as a store product — the one graph's base layer is current
-    // state). The derived text is discarded; the extraction side effect is
-    // what sync needs. (Splitting extraction from emission is a refactor
-    // deferred until the direct query path's disposition is ruled — the
-    // same function serves `git lex query`.)
+    // Extraction: the ONE working-tree walk WRITES both sidecar families
+    // (.fm.spo + .md.spo — the one graph's source) and derives the
+    // working-tree now view. The now view is NO LONGER loaded into the
+    // store (Rob-ruled: the now graph died as a store product — the one
+    // graph's base layer is current state); the text is still built here
+    // because the sync report counts its facts.
     let resolver_ctx = crate::nquad::ResolverContext::build(&root);
-    let (fm_nq, fm_errors) = crate::nquad::generate_frontmatter_nquads_with(&root, &resolver_ctx);
+    let (fm_nq, fm_errors) = crate::nquad::generate_frontmatter_nquads_with(
+        &root,
+        &resolver_ctx,
+        crate::nquad::NowWalkOpts { write_sidecars: true, build_nquads: true },
+    );
     if fm_errors > 0 {
         eprintln!(
             "warning: {fm_errors} live document(s) carry values the data rules reject (each is listed above with its file). \

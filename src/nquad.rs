@@ -614,18 +614,38 @@ pub(crate) fn emit_file_anchor_nquads(
     ));
 }
 
+/// What each caller needs from the ONE working-tree walk. Three callers,
+/// three shapes — save wants the sidecars and gates but discards the text,
+/// sync wants both, query wants the text and must not write (a read-only
+/// command dirtying the tree was the old behavior, not a feature). A struct
+/// rather than two positional bools: identical adjacent types are how the
+/// emitter's argument-swap bug compiled clean (review #15).
+#[derive(Clone, Copy)]
+pub(crate) struct NowWalkOpts {
+    /// Write/refresh the `.fm.spo` and `.md.spo` sidecars (and remove stale
+    /// ones). False on the query path — query never touches the tree.
+    pub write_sidecars: bool,
+    /// Accumulate and return the now-graph N-Quads text. False on the save
+    /// path, which used to build the full string only to drop it on the
+    /// floor. Resolution, warnings, and the returned error COUNT are
+    /// identical either way — the gates run in full regardless.
+    pub build_nquads: bool,
+}
+
 /// Extract frontmatter from all .md/.txt files in the repo into the "now"
-/// graph, writing `.fm.spo` sidecars as a side effect. Body linking is
-/// markdown links, extracted in extraction.rs (`linksTo`); the wikilink
-/// reader and commit-message scanning this doc once promised are retired
-/// (Rob-ruled 2026-08-06 — `[[...]]` in a body is plain prose).
-pub(crate) fn generate_frontmatter_nquads() -> (String, u32) {
+/// graph. Sidecar writing (`.fm.spo` + `.md.spo`) and N-Quads emission are
+/// selected per caller via [`NowWalkOpts`]. Body linking is markdown links
+/// (`linksTo`), extracted in the SAME pass — one read + one tree-sitter
+/// parse per document; the wikilink reader and commit-message scanning this
+/// doc once promised are retired (Rob-ruled 2026-08-06 — `[[...]]` in a
+/// body is plain prose).
+pub(crate) fn generate_frontmatter_nquads(opts: NowWalkOpts) -> (String, u32) {
     let root = match find_git_root() {
         Some(r) => r,
         None => return (String::new(), 0),
     };
     let ctx = ResolverContext::build(&root);
-    generate_frontmatter_nquads_with(&root, &ctx)
+    generate_frontmatter_nquads_with(&root, &ctx, opts)
 }
 
 /// [`generate_frontmatter_nquads`] against a caller-built context — sync
@@ -633,6 +653,7 @@ pub(crate) fn generate_frontmatter_nquads() -> (String, u32) {
 pub(crate) fn generate_frontmatter_nquads_with(
     root: &std::path::Path,
     ctx: &ResolverContext,
+    opts: NowWalkOpts,
 ) -> (String, u32) {
     let root = root.to_path_buf();
 
@@ -669,6 +690,7 @@ pub(crate) fn generate_frontmatter_nquads_with(
     // the .fm.spo sidecar (that stays frontmatter-only; .md.spo is the
     // link sidecar and cmd_extract owns it).
     let mut md_parser = tree_sitter_md::MarkdownParser::default();
+    let mut total_links: usize = 0;
     let md_index: HashSet<String> = files.iter()
         .filter(|p| p.extension().is_some_and(|x| x == "md") && !is_template(p))
         .filter_map(|p| p.strip_prefix(&root).ok())
@@ -706,18 +728,24 @@ pub(crate) fn generate_frontmatter_nquads_with(
         let relpath = filepath.strip_prefix(&root).unwrap_or(filepath);
         let relpath_str = relpath.to_string_lossy().to_string();
 
-        // Get blob hash from git index (staging area)
-        let blob_hash = repo.as_ref().and_then(|r| {
-            if let Ok(index) = r.index() {
-                if let Some(entry) = index.get_path(std::path::Path::new(&relpath_str), 0) {
-                    return Some(entry.id.to_string());
+        // Get blob hash from git index (staging area). Feeds only the
+        // emitted text, so the no-nquads path skips the per-file index
+        // lookups entirely.
+        let blob_hash = if opts.build_nquads {
+            repo.as_ref().and_then(|r| {
+                if let Ok(index) = r.index() {
+                    if let Some(entry) = index.get_path(std::path::Path::new(&relpath_str), 0) {
+                        return Some(entry.id.to_string());
+                    }
                 }
-            }
-            let head = r.head().ok()?;
-            let tree = head.peel_to_tree().ok()?;
-            let entry = tree.get_path(std::path::Path::new(&relpath_str)).ok()?;
-            Some(entry.id().to_string())
-        }).unwrap_or_default();
+                let head = r.head().ok()?;
+                let tree = head.peel_to_tree().ok()?;
+                let entry = tree.get_path(std::path::Path::new(&relpath_str)).ok()?;
+                Some(entry.id().to_string())
+            }).unwrap_or_default()
+        } else {
+            String::new()
+        };
 
         // --- Frontmatter extraction ---
         // Only the YAML block is read here. The BODY is deliberately not
@@ -758,21 +786,55 @@ pub(crate) fn generate_frontmatter_nquads_with(
         // vanish and records retractions (the one graph's only
         // signal — the now graph rebuilds from files and never notices).
         let spo_path = extract_dir.join(format!("{}.fm.spo", relpath_str));
-        if !spo_lines.is_empty() {
-            let spo_content = spo_lines.join("\n") + "\n";
-            write_sidecar_loud(&spo_path, &spo_content);
-        } else if spo_path.exists() {
-            remove_sidecar_loud(&spo_path);
+        if opts.write_sidecars {
+            if !spo_lines.is_empty() {
+                let spo_content = spo_lines.join("\n") + "\n";
+                write_sidecar_loud(&spo_path, &spo_content);
+            } else if spo_path.exists() {
+                remove_sidecar_loud(&spo_path);
+            }
         }
 
         // Markdown links join the emission stream AFTER the sidecar write —
         // the .fm.spo sidecar carries frontmatter only (th34 #5; see the
-        // md_index comment above the loop).
+        // md_index comment above the loop). This is THE md walk: the same
+        // parse also writes the `.md.spo` sidecar (link lines only,
+        // sorted+deduped — the bytes the retired second walk in
+        // extraction.rs produced), so each document is read and
+        // tree-sitter-parsed exactly once per run.
         if md_index.contains(&relpath_str) {
-            if let Some(tree) = md_parser.parse(content.as_bytes(), None) {
-                crate::extraction::extract_md_link_lines(
-                    &tree, &content, &relpath_str, &md_index, &mut spo_lines,
-                );
+            let fm_len = spo_lines.len();
+            match md_parser.parse(content.as_bytes(), None) {
+                Some(tree) => {
+                    crate::extraction::extract_md_link_lines(
+                        &tree, &content, &relpath_str, &md_index, &mut spo_lines,
+                    );
+                    if opts.write_sidecars {
+                        let mut md_lines: Vec<String> = spo_lines[fm_len..].to_vec();
+                        md_lines.sort();
+                        md_lines.dedup();
+                        let md_path =
+                            extract_dir.join(format!("{}.md.spo", relpath_str));
+                        if !md_lines.is_empty() {
+                            write_sidecar_loud(&md_path, &(md_lines.join("\n") + "\n"));
+                            total_links += md_lines.len();
+                        } else if md_path.exists() {
+                            remove_sidecar_loud(&md_path);
+                        }
+                    }
+                }
+                None => {
+                    // Same contract as the read-failure above: skipping
+                    // bypasses the sidecar-removal branch, so the doc's
+                    // existing sidecar keeps asserting links the doc may no
+                    // longer carry — be LOUD and count it.
+                    eprintln!(
+                        "error: tree-sitter could not parse {} — its existing \
+                         sidecar (if any) is NOT updated",
+                        filepath.display()
+                    );
+                    total_errors += 1;
+                }
             }
         }
 
@@ -832,6 +894,17 @@ pub(crate) fn generate_frontmatter_nquads_with(
                 &mut nq,
             );
         }
+
+        // Emission ran for its gates (resolution errors, warnings); when the
+        // caller discards the text, drop this file's quads now — the buffer's
+        // capacity is reused instead of accumulating the whole repo's worth.
+        if !opts.build_nquads {
+            nq.clear();
+        }
+    }
+
+    if opts.write_sidecars && total_links > 0 {
+        eprintln!("Markdown links: {} from {} files", total_links, md_index.len());
     }
 
     // Commit-message [[wikilink]] scanning: RETIRED with the wikilink reader
