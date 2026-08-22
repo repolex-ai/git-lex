@@ -407,6 +407,67 @@ pub(crate) fn derive_file_subjects(
         return FileSubjects { file_uri, thing_uri: None, thing_key: None };
     };
 
+    // ═══ THE UNIVERSAL id LANE (Rob-ruled 2026-08-21) — tried FIRST. ═══
+    // `{kit}.{Class}.id` (git-lex:id, inherited onto every Thing subclass)
+    // carries the Thing's FULL address: `<namespace/Class/identifier>`.
+    // The id value is THE identity authority — namespace, class, and
+    // identifier all come from inside it; the folder, the filename, and
+    // the key prefix are just where the Thing is parked (which is what
+    // buys subfolder freedom: Soul/Note/archive/x.md can still BE
+    // <soul/Note/x>). On any disagreement with the key prefix, the id
+    // wins — the file's kit-line facts still anchor to the id's Thing.
+    //
+    // The per-class convention lane below (`noteId` = lowerFirst(Class) +
+    // "Id") is the TRANSITION fallback: the unmigrated corpus anchors
+    // exactly as before; `create` scaffolds BOTH during the window
+    // (Rob-ruled); the one-swoop removal comes after tr1p's deprecation.
+    let universal_key = format!("{}.{}.id", kit, class);
+    let universal_value = spo_lines.iter().find_map(|line| {
+        let parts: Vec<&str> = line.splitn(3, " | ").collect();
+        if parts.len() == 3
+            && parts[1] == "hasValue"
+            && parts[0] == universal_key
+            && !parts[2].trim().is_empty()
+        {
+            Some(parts[2].trim().to_string())
+        } else {
+            None
+        }
+    });
+    if let Some(raw) = universal_value {
+        match parse_universal_id(&raw) {
+            Ok((id_ns, id_class, _identifier, inner)) => {
+                if (id_ns.as_str(), id_class.as_str()) != (kit.as_str(), class.as_str()) && warn {
+                    eprintln!(
+                        "note: {relpath_str}: the id `{raw}` declares `{id_ns}/{id_class}` while \
+                         the file's keys say `{kit}.{class}` — the id is the identity authority \
+                         and wins; align the keys (or the folder) when convenient."
+                    );
+                }
+                let thing_uri = format!(
+                    "<{}{}>",
+                    crate::git::RESOURCE_ROOT,
+                    uri_encode_path(&inner)
+                );
+                return FileSubjects {
+                    file_uri,
+                    thing_uri: Some(thing_uri),
+                    thing_key: Some((id_ns, id_class)),
+                };
+            }
+            Err(msg) => {
+                if warn {
+                    eprintln!(
+                        "warning: {relpath_str}: `{universal_key}` — {msg} The per-class id \
+                         (if present) anchors this file for now."
+                    );
+                }
+                // Fall through to the convention lane: a malformed .id
+                // must not cost the file the identity it already had.
+            }
+        }
+    }
+
     // Convention-as-law: id property = lowerFirst(Class) + "Id", valid
     // only if the class actually declares it.
     let id_prop = {
@@ -476,6 +537,45 @@ pub(crate) fn derive_file_subjects(
         thing_uri: Some(thing_uri),
         thing_key: Some((kit, class)),
     }
+}
+
+/// Parse a universal-id value: `<namespace/Class/identifier>`. Returns
+/// `(namespace, Class, identifier, inner)` or a teaching message.
+///
+/// The identifier may itself contain slashes — the address is what it is;
+/// namespace and Class are the first two segments, everything after is the
+/// identifier. (File-side subfolders never appear here: the id is the
+/// Thing's address, not the file's path.)
+pub(crate) fn parse_universal_id(raw: &str) -> Result<(String, String, String, String), String> {
+    let trimmed = raw.trim();
+    let Some(inner) = trimmed.strip_prefix('<').and_then(|r| r.strip_suffix('>')) else {
+        return Err(format!(
+            "the value `{raw}` has no angle brackets — the universal id is the Thing's \
+             full address, written <namespace/Class/identifier>, e.g. \
+             <soul/Note/20260821-my-note>."
+        ));
+    };
+    let inner = inner.trim();
+    if inner.contains("://") {
+        return Err(
+            "the id is written relative to the one root — <namespace/Class/identifier>, \
+             never a full URL."
+                .to_string(),
+        );
+    }
+    let segs: Vec<&str> = inner.split('/').collect();
+    if segs.len() < 3 || segs.iter().take(3).any(|s| s.is_empty()) {
+        return Err(format!(
+            "`<{inner}>` does not name namespace, Class, AND identifier — three segments, \
+             e.g. <soul/Note/20260821-my-note>."
+        ));
+    }
+    Ok((
+        segs[0].to_string(),
+        segs[1].to_string(),
+        segs[2..].join("/"),
+        inner.to_string(),
+    ))
 }
 
 /// Emit the per-file anchor facts shared by BOTH graph paths:
@@ -1814,6 +1914,79 @@ mod tests {
         assert_eq!(s.file_uri, "<https://repolex.ai/git-lex/File/README.md>");
         assert!(s.thing_uri.is_none());
         assert!(s.thing_key.is_none());
+    }
+
+    /// The universal-id value form (Rob-ruled 2026-08-21): full address in
+    /// brackets, three segments minimum, identifier may carry slashes,
+    /// URLs and bare stems reject with teaching.
+    #[test]
+    fn universal_id_parses_the_full_address_form() {
+        let (ns, class, ident, inner) =
+            parse_universal_id("<soul/Note/20260821-abc123>").unwrap();
+        assert_eq!(
+            (ns.as_str(), class.as_str(), ident.as_str(), inner.as_str()),
+            ("soul", "Note", "20260821-abc123", "soul/Note/20260821-abc123")
+        );
+        // Identifier with its own slashes: address is what it is.
+        let (_, _, ident, _) = parse_universal_id("<copia/Place/rooms/attic>").unwrap();
+        assert_eq!(ident, "rooms/attic");
+        for bad in ["20260821-abc123", "<soul/Note>", "<https://repolex.ai/soul/Note/x>", "<>", "<//x>"] {
+            assert!(parse_universal_id(bad).is_err(), "`{bad}` must reject");
+        }
+    }
+
+    /// Anchor priority (Rob-ruled 2026-08-21): the universal `.id` is the
+    /// identity authority — tried first, wins over the per-class field
+    /// when both are present (the transition window's normal state); the
+    /// per-class convention still anchors alone (unmigrated corpus); a
+    /// malformed `.id` falls back instead of costing the file its
+    /// existing identity.
+    #[test]
+    fn universal_id_anchors_first_convention_is_fallback() {
+        let mut declared = HashSet::new();
+        declared.insert("soul/Note/noteId".to_string());
+        let obj_props = HashSet::new();
+        let namespaces = HashMap::new();
+
+        // Both present, deliberately different stems: the .id wins.
+        let lines = vec![
+            "soul.Note.noteId | hasValue | old-stem".to_string(),
+            "soul.Note.id | hasValue | <soul/Note/20260821-new-stem>".to_string(),
+        ];
+        let s = derive_file_subjects(&lines, "Soul/Note/x.md", &declared, &obj_props, &namespaces, false);
+        assert_eq!(
+            s.thing_uri.as_deref(),
+            Some("<https://repolex.ai/soul/Note/20260821-new-stem>")
+        );
+        assert_eq!(s.thing_key, Some(("soul".to_string(), "Note".to_string())));
+
+        // Universal only — the end state after the one-swoop removal.
+        let lines = vec![
+            "soul.Note.id | hasValue | <soul/Note/solo>".to_string(),
+        ];
+        let s = derive_file_subjects(&lines, "Soul/Note/y.md", &declared, &obj_props, &namespaces, false);
+        assert_eq!(s.thing_uri.as_deref(), Some("<https://repolex.ai/soul/Note/solo>"));
+
+        // Malformed universal id: falls back to the per-class anchor.
+        let lines = vec![
+            "soul.Note.id | hasValue | no-brackets-here".to_string(),
+            "soul.Note.noteId | hasValue | fallback-stem".to_string(),
+        ];
+        let s = derive_file_subjects(&lines, "Soul/Note/z.md", &declared, &obj_props, &namespaces, false);
+        let thing = s.thing_uri.expect("convention lane must still anchor");
+        assert!(thing.contains("fallback-stem"), "{thing}");
+
+        // The id is the authority even against its own key prefix: an id
+        // declaring another namespace/class carries the Thing there.
+        let lines = vec![
+            "soul.Note.id | hasValue | <copia/Place/parked-elsewhere>".to_string(),
+        ];
+        let s = derive_file_subjects(&lines, "Soul/Note/w.md", &declared, &obj_props, &namespaces, false);
+        assert_eq!(
+            s.thing_uri.as_deref(),
+            Some("<https://repolex.ai/copia/Place/parked-elsewhere>")
+        );
+        assert_eq!(s.thing_key, Some(("copia".to_string(), "Place".to_string())));
     }
 
     /// Review #26: a comma INSIDE a URL is part of the value; a comma that

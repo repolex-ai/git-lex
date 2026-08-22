@@ -269,6 +269,16 @@ pub(crate) fn cmd_create(doctype: &str, instance_id: Option<&str>, json: bool) {
         // Auto-fill the classId property from the instance ID
         if prop_name == &class_id_field && instance_id.is_some() {
             fm.push_str(&format!("{}: \"{}\"{}\n", key, id_str, comment_suffix));
+        } else if prop_name == "id" && instance_id.is_some() {
+            // The UNIVERSAL id (git-lex:id, Rob-ruled 2026-08-21): the
+            // Thing's full address, pre-filled in final form. Scaffolded
+            // ALONGSIDE the per-class id during the transition window —
+            // the one-swoop removal of the per-class fields comes after
+            // the fleet migrates and the kits deprecate them.
+            fm.push_str(&format!(
+                "{}: <{}/{}/{}>{}\n",
+                key, short, class_name, id_str, comment_suffix
+            ));
         } else if prop_name == "agentEmail" && class_name == "Agent" {
             // Auto-fill agentEmail for Agent type
             fm.push_str(&format!("{}: \"{}\"{}\n", key, agent_email, comment_suffix));
