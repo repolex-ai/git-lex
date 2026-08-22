@@ -708,48 +708,65 @@ pub(crate) fn setup_substrate_claude(root: &std::path::Path, agent_name: &str) {
     // .claude/settings.local.json (gitignored); it moved to committed
     // settings.json (souls are portable). Claude Code loads local AFTER
     // project, so a leftover GIT_* env block silently outvotes the file we
-    // just wrote and saves attribute to the wrong author. Warn ONLY when
-    // that override is actually present — settings.local.json itself is a
-    // healthy, live file (Claude Code keeps permission grants there, and
-    // the kit-hook opt-out `soul.disabledHooks` lives there by design), so
-    // its mere existence is not a finding (the 2026-08-22 rewrite: the old
-    // exists-check warned every repo with any local settings at all).
+    // just wrote and saves attribute to the wrong author. Warn ONLY on an
+    // actual CONFLICT — a local key whose value differs from the identity
+    // just written. settings.local.json itself is a healthy, live file
+    // (Claude Code keeps permission grants there; `soul.disabledHooks`
+    // lives there by design), and a local block that agrees with the
+    // committed one changes nothing, so neither is a finding. A warning
+    // someone sees fifty times on a healthy repo teaches them to ignore
+    // warnings (Rob, 2026-08-22 — the old exists-check did exactly that).
     let local_path = root.join(".claude").join("settings.local.json");
     if let Ok(txt) = fs::read_to_string(&local_path) {
-        let keys = local_settings_git_env_keys(&txt);
-        if !keys.is_empty() {
+        let conflicts = local_settings_identity_conflicts(&txt, agent_name, &email);
+        if !conflicts.is_empty() {
             eprintln!();
             eprintln!(
-                "warning: .claude/settings.local.json sets {} in its env block.\n\
+                "warning: .claude/settings.local.json overrides your git identity: {}.\n\
                  Claude Code loads that file AFTER .claude/settings.json, so the \
                  LOCAL values win: `git lex save` will sign commits with them, not \
-                 with the identity kit-update just wrote to settings.json. If that \
-                 is not intentional, remove those key(s) from the env block of \
-                 .claude/settings.local.json — keep the rest of the file, Claude \
-                 Code stores permissions and hook opt-outs there.",
-                keys.join(", ")
+                 with the identity kit-update just wrote to settings.json (from \
+                 .lex/repo.yml). If that is not intentional, remove those key(s) \
+                 from the env block of .claude/settings.local.json — keep the rest \
+                 of the file, Claude Code stores permissions and hook opt-outs \
+                 there.",
+                conflicts.join(", ")
             );
         }
     }
 }
 
-/// The git author/committer env keys a `.claude/settings.local.json` sets,
-/// if any — the ONE thing in that file that outvotes the identity git-lex
-/// writes to committed settings.json. Pure (takes the file text) so the
+/// The git author/committer env keys in a `.claude/settings.local.json`
+/// whose values CONFLICT with the identity being written to committed
+/// settings.json — the one thing in that file that changes who signs a
+/// save. Keys that agree with the committed identity are not conflicts
+/// (redundant, but they change nothing; the moment repo.yml changes, they
+/// stop agreeing and this fires — exactly when it matters). Pure so the
 /// gate is testable; unparseable JSON returns empty — a broken local
-/// settings file breaks Claude Code visibly on its own, it is not this
-/// warning's finding.
-fn local_settings_git_env_keys(txt: &str) -> Vec<String> {
+/// settings file breaks Claude Code visibly on its own.
+fn local_settings_identity_conflicts(txt: &str, name: &str, email: &str) -> Vec<String> {
     let Ok(v) = serde_json::from_str::<serde_json::Value>(txt) else {
         return Vec::new();
     };
     let Some(env) = v.get("env").and_then(|e| e.as_object()) else {
         return Vec::new();
     };
-    ["GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL", "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL"]
+    let expected = [
+        ("GIT_AUTHOR_NAME", name),
+        ("GIT_AUTHOR_EMAIL", email),
+        ("GIT_COMMITTER_NAME", name),
+        ("GIT_COMMITTER_EMAIL", email),
+    ];
+    expected
         .iter()
-        .filter(|k| env.contains_key(**k))
-        .map(|k| k.to_string())
+        .filter_map(|(k, want)| {
+            let got = env.get(*k)?.as_str().unwrap_or("");
+            if got != *want {
+                Some(format!("{k}=\"{got}\" (committed: \"{want}\")"))
+            } else {
+                None
+            }
+        })
         .collect()
 }
 
@@ -1185,21 +1202,30 @@ mod local_settings_warning_tests {
     use super::*;
 
     /// The false-positive Selkie hit (2026-08-22): a healthy local settings
-    /// file — permissions, hook opt-outs, even a non-git env var — must not
-    /// warn. Only a GIT_* author/committer override is the finding.
+    /// file — permissions, hook opt-outs, a non-git env var, even a GIT_*
+    /// block that AGREES with the committed identity — must never warn. A
+    /// warning seen fifty times on a healthy repo teaches people to ignore
+    /// warnings; only a value that would change who signs a save fires.
     #[test]
     fn healthy_local_settings_do_not_warn() {
-        assert!(local_settings_git_env_keys(r#"{"permissions":{"allow":["Bash"]}}"#).is_empty());
-        assert!(local_settings_git_env_keys(r#"{"soul.disabledHooks":["x"],"env":{"MY_VAR":"1"}}"#).is_empty());
-        assert!(local_settings_git_env_keys("not json at all").is_empty());
-        assert!(local_settings_git_env_keys(r#"{}"#).is_empty());
+        let quiet = |txt: &str| local_settings_identity_conflicts(txt, "selkie", "selkie@repolex.ai");
+        assert!(quiet(r#"{"permissions":{"allow":["Bash"]}}"#).is_empty());
+        assert!(quiet(r#"{"soul.disabledHooks":["x"],"env":{"MY_VAR":"1"}}"#).is_empty());
+        assert!(quiet("not json at all").is_empty());
+        assert!(quiet(r#"{}"#).is_empty());
+        // Agreeing override: redundant, changes nothing, stays silent.
+        assert!(quiet(
+            r#"{"env":{"GIT_AUTHOR_NAME":"selkie","GIT_AUTHOR_EMAIL":"selkie@repolex.ai"}}"#
+        ).is_empty());
     }
 
     #[test]
-    fn git_author_override_is_named_key_by_key() {
-        let keys = local_settings_git_env_keys(
-            r#"{"env":{"GIT_AUTHOR_NAME":"old-me","GIT_AUTHOR_EMAIL":"old@x","OTHER":"y"}}"#,
+    fn conflicting_override_names_local_and_committed_values() {
+        let conflicts = local_settings_identity_conflicts(
+            r#"{"env":{"GIT_AUTHOR_NAME":"old-me","GIT_AUTHOR_EMAIL":"selkie@repolex.ai"}}"#,
+            "selkie",
+            "selkie@repolex.ai",
         );
-        assert_eq!(keys, vec!["GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL"]);
+        assert_eq!(conflicts, vec![r#"GIT_AUTHOR_NAME="old-me" (committed: "selkie")"#]);
     }
 }
