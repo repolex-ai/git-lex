@@ -84,48 +84,52 @@ pub(crate) fn ensure_repo_yml_genesis(sha: &str) -> std::io::Result<()> {
 ///
 /// Text, not a doc-comment, because the audience reads the FILE.
 pub(crate) const REPO_YML_HEADER: &str = "\
-# ─────────────────────────────────────────────────────────────────────
-# MANAGED BY git-lex — DO NOT EDIT.
-#
-# Every value below is set by `git lex init` and maintained by git-lex
-# from then on. Squaddies: nothing in this file is yours to change. If a
-# value here looks wrong, say so — do not edit it.
-#
-# What they do, so the file is not a mystery:
-#
-#   name, kit, created, optional_kits   repo bookkeeping.
-#   genesis_sha                         your soul's permanent identity in
-#                                       the graph. Never changes, ever.
-#   agent_name, agent_email             who signs your commits. git-lex
-#                                       copies these into
-#                                       .claude/settings.json on every
-#                                       `git lex kit-update`, and Claude
-#                                       Code injects them into git.
-#
-# Two things worth knowing about that last pair. Editing them here does
-# NOT change your commits on its own: the copy in .claude/settings.json
-# wins until the next kit-update AND a fresh session. And blanking
-# agent_name does more than drop your name — it skips substrate setup
-# entirely, so your hooks stop being installed at all.
-# ─────────────────────────────────────────────────────────────────────
+# these values are set at init, managed by git-lex, DO NOT EDIT
 ";
 
-/// Ensure `.lex/repo.yml` opens with [`REPO_YML_HEADER`]. Idempotent:
-/// header present → no-op; absent → prepended with every existing byte
-/// preserved below it (textual write, same reason as
-/// `ensure_repo_yml_genesis` — the file carries comments and ordering the
-/// read-side struct cannot round-trip). Missing file → no-op: this heals
-/// a repo.yml, it never conjures one.
+/// Converge `.lex/repo.yml` onto the current [`REPO_YML_HEADER`]. An
+/// older header is REPLACED, not left alone — install-once was the bug in
+/// the first cut of this (2026-08-22, same hour): Rob edited the text and
+/// every repo that had already taken the previous version would have kept
+/// it forever, which is the README.lex.md disease (#75) reproduced in a
+/// new file. Convergence means the header is a thing we can still edit.
+///
+/// Textual write, same reason as `ensure_repo_yml_genesis` — the file
+/// carries comments and ordering the read-side struct cannot round-trip.
+/// Every non-header byte is preserved, in order. No file → no-op: this
+/// heals a repo.yml, it never conjures one. Idempotent once converged.
 ///
 /// Called from kit-update, which runs at every compaction, so the whole
 /// existing fleet converges without anyone doing anything.
 pub(crate) fn ensure_repo_yml_header(root: &std::path::Path) -> std::io::Result<()> {
     let path = root.join(".lex").join("repo.yml");
     let Ok(existing) = fs::read_to_string(&path) else { return Ok(()) };
-    if existing.contains("MANAGED BY git-lex") {
+    let body = strip_managed_header(&existing);
+    let want = format!("{REPO_YML_HEADER}{body}");
+    if existing == want {
         return Ok(());
     }
-    fs::write(&path, format!("{REPO_YML_HEADER}{existing}"))
+    fs::write(&path, want)
+}
+
+/// Drop a git-lex managed header from the front of a repo.yml, returning
+/// the rest untouched. Scoped deliberately: only the LEADING run of
+/// comment lines is considered, and only when that run is ours (it names
+/// itself). A squaddie's own leading comment, or the trailing
+/// `dev_history_horizon` note, is never eaten.
+fn strip_managed_header(content: &str) -> &str {
+    let lead_len = content
+        .lines()
+        .take_while(|l| l.trim_start().starts_with('#'))
+        .map(|l| l.len() + 1)
+        .sum::<usize>()
+        .min(content.len());
+    let (lead, rest) = content.split_at(lead_len);
+    if lead.to_lowercase().contains("managed by git-lex") {
+        rest
+    } else {
+        content
+    }
 }
 
 // ---------------------------------------------------------------------
@@ -553,8 +557,8 @@ mod repo_yml_header_tests {
 
         ensure_repo_yml_header(&root).unwrap();
         let once = fs::read_to_string(&path).unwrap();
-        assert!(once.starts_with("# ─"), "header is first");
-        assert!(once.contains("MANAGED BY git-lex"));
+        assert!(once.starts_with("# these values are set at init"), "header is first");
+        assert!(once.contains("DO NOT EDIT"));
         assert!(once.ends_with(body), "every original byte preserved, in order");
 
         ensure_repo_yml_header(&root).unwrap();
@@ -580,6 +584,42 @@ mod repo_yml_header_tests {
         assert_eq!(yml.name.as_deref(), Some("lUX"));
         // No comment line survives as a key in the scalar view.
         assert!(yml.scalar_fields().keys().all(|k| !k.starts_with('#')));
+        fs::remove_dir_all(&root).ok();
+    }
+
+    /// An OLD header converges to the current text. This is the case the
+    /// first cut got wrong: skip-if-present meant a repo that had taken
+    /// version A of the header would keep it forever, and the very next
+    /// edit (Rob cut a paragraph within the hour) would have reached only
+    /// fresh repos.
+    #[test]
+    fn an_old_header_is_replaced_not_kept() {
+        let root = tmp_repo("converge");
+        let path = root.join(".lex").join("repo.yml");
+        let stale = "# ─────\n# MANAGED BY git-lex — DO NOT EDIT.\n# some wording we since cut\n# ─────\n";
+        let body = "name: lUX\nagent_name: selkie\n";
+        fs::write(&path, format!("{stale}{body}")).unwrap();
+
+        ensure_repo_yml_header(&root).unwrap();
+        let out = fs::read_to_string(&path).unwrap();
+        assert!(!out.contains("some wording we since cut"), "stale header gone");
+        assert_eq!(out, format!("{REPO_YML_HEADER}{body}"), "current text, body intact");
+        assert_eq!(out.to_lowercase().matches("managed by git-lex").count(), 1, "exactly one header");
+        fs::remove_dir_all(&root).ok();
+    }
+
+    /// A leading comment that is NOT ours is never eaten — the strip is
+    /// scoped to a header that names itself.
+    #[test]
+    fn a_squaddies_own_leading_comment_survives() {
+        let root = tmp_repo("theirs");
+        let path = root.join(".lex").join("repo.yml");
+        fs::write(&path, "# my own note about this repo\nname: lUX\n").unwrap();
+
+        ensure_repo_yml_header(&root).unwrap();
+        let out = fs::read_to_string(&path).unwrap();
+        assert!(out.contains("# my own note about this repo"), "their comment kept");
+        assert!(out.contains("DO NOT EDIT"), "ours added above it");
         fs::remove_dir_all(&root).ok();
     }
 
