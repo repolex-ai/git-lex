@@ -63,6 +63,13 @@ pub fn sync_all(root: &Path) {
 /// Each {Namespace}/Skill/{name}.md gets transformed into .claude/skills/{name}/SKILL.md
 /// with Claude Code frontmatter derived from soul frontmatter.
 /// Scans all top-level directories for a Skill/ subfolder.
+///
+/// After syncing, PRUNES deployed skill dirs whose source is gone (selkie's
+/// 2026-08-22 find: the sync wrote but never removed, so deleted skills
+/// stayed deployed — and invocable — forever). The prune arms ONLY when a
+/// Skill/ source dir exists: a repo without one (skills authored directly
+/// in .claude/skills/, the pre-Skill-class era) has no source of truth to
+/// converge to, and its deployed skills are not orphans.
 fn sync_skills(root: &Path) {
     let target_dir = root.join(".claude").join("skills");
 
@@ -78,6 +85,11 @@ fn sync_skills(root: &Path) {
     };
 
     let mut synced = 0;
+    // Every eligible source stem, whether or not its transform succeeds —
+    // a present-but-unreadable source must still protect its deployed dir
+    // from the prune (a read blip is not a deletion).
+    let mut source_names: std::collections::HashSet<String> =
+        std::collections::HashSet::new();
     for entry in entries.filter_map(|e| e.ok()) {
         let path = entry.path();
 
@@ -93,6 +105,7 @@ fn sync_skills(root: &Path) {
         }
 
         let name = fname.strip_suffix(".md").unwrap();
+        source_names.insert(name.to_string());
         let content = match fs::read_to_string(&path) {
             Ok(c) => c,
             Err(_) => continue,
@@ -114,12 +127,20 @@ fn sync_skills(root: &Path) {
     if synced > 0 {
         println!("Claude: synced {} skill(s) to .claude/skills/", synced);
     }
+
+    prune_orphan_skill_dirs(root, &target_dir, &source_names);
 }
 
 /// Sync all subagents from {Namespace}/Subagent/ into .claude/agents/.
 /// Each {Namespace}/Subagent/{name}.md gets transformed into .claude/agents/{name}.md
 /// with Claude Code frontmatter derived from soul frontmatter.
 /// Scans all top-level directories for a Subagent/ subfolder.
+///
+/// Prunes like the skills lane, under the same arming rule: no Subagent/
+/// source dir → no prune. That rule is load-bearing here — a repo that
+/// retired the Subagent class and keeps `.claude/agents/*.md` as the single
+/// home (W4R3Z's researcher.md, Day-55 ruling) never enters this function's
+/// prune at all.
 fn sync_subagents(root: &Path) {
     let target_dir = root.join(".claude").join("agents");
 
@@ -134,6 +155,8 @@ fn sync_subagents(root: &Path) {
     };
 
     let mut synced = 0;
+    let mut source_names: std::collections::HashSet<String> =
+        std::collections::HashSet::new();
     for entry in entries.filter_map(|e| e.ok()) {
         let path = entry.path();
 
@@ -149,6 +172,7 @@ fn sync_subagents(root: &Path) {
         }
 
         let name = fname.strip_suffix(".md").unwrap();
+        source_names.insert(name.to_string());
         let content = match fs::read_to_string(&path) {
             Ok(c) => c,
             Err(_) => continue,
@@ -168,6 +192,165 @@ fn sync_subagents(root: &Path) {
 
     if synced > 0 {
         println!("Claude: synced {} subagent(s) to .claude/agents/", synced);
+    }
+
+    prune_orphan_agent_files(root, &target_dir, &source_names);
+}
+
+/// Union of deploy names an installed kit ships under
+/// `harness/.claude/<last_seg>/` across ALL kits the repo lists — the
+/// full-name-set discipline from the hook reap (#28: a partial set reaps
+/// other kits' files). Returns None when any listed kit's vendored dir is
+/// missing: we then can't know what it ships, so the caller must SKIP the
+/// prune this run rather than guess (the hook reap's `reap_safe` rule).
+fn kit_shipped_deploy_names(
+    root: &Path,
+    last_seg: &str,
+) -> Option<std::collections::HashSet<String>> {
+    let mut names = std::collections::HashSet::new();
+    let lex_kit = root.join(".lex").join("kit");
+    for spec in crate::kit_cmds::collect_kits_for_update(root, None) {
+        let (org, repo, _) = git_lex::resolve_kit_spec(&spec);
+        let kit_dir = lex_kit.join(&org).join(&repo);
+        if !kit_dir.exists() {
+            return None;
+        }
+        let deploy_src = kit_dir.join("harness").join(".claude").join(last_seg);
+        if let Ok(entries) = fs::read_dir(&deploy_src) {
+            for entry in entries.flatten() {
+                names.insert(entry.file_name().to_string_lossy().to_string());
+            }
+        }
+    }
+    Some(names)
+}
+
+/// Is every file under `path` tracked by git, with nothing untracked
+/// (ignored counts as untracked — an ignored file is just as unrecoverable
+/// after deletion)? Only a fully-tracked target may be auto-pruned: its
+/// bytes live in git history, so the prune is a convergence, not a loss.
+fn fully_tracked(root: &Path, path: &Path) -> bool {
+    let rel = match path.strip_prefix(root) {
+        Ok(r) => r.to_string_lossy().to_string(),
+        Err(_) => return false,
+    };
+    let run = |args: &[&str]| -> Option<String> {
+        let out = std::process::Command::new("git")
+            .current_dir(root)
+            .args(args)
+            .output()
+            .ok()?;
+        if !out.status.success() {
+            return None;
+        }
+        Some(String::from_utf8_lossy(&out.stdout).to_string())
+    };
+    let tracked = match run(&["ls-files", "--", &rel]) {
+        Some(o) => !o.trim().is_empty(),
+        None => return false,
+    };
+    let untracked = match run(&["ls-files", "--others", "--", &rel]) {
+        Some(o) => !o.trim().is_empty(),
+        None => return true, // can't prove clean → not prunable
+    };
+    tracked && !untracked
+}
+
+/// Remove deployed skill dirs whose source is gone (the sync wrote but
+/// never pruned — deleted skills stayed deployed and invocable forever).
+/// A deployed dir survives when its name is source-backed OR shipped by an
+/// installed kit's harness tree. Orphans are removed only when git fully
+/// tracks them (recoverable — the bytes live in history); anything with
+/// never-committed content is refused LOUDLY instead: whose move it is and
+/// the one action, never a silent unrecoverable delete.
+fn prune_orphan_skill_dirs(
+    root: &Path,
+    target_dir: &Path,
+    source_names: &std::collections::HashSet<String>,
+) {
+    let Some(kit_names) = kit_shipped_deploy_names(root, "skills") else {
+        eprintln!(
+            "harness: a listed kit has no install dir — skipping the skill \
+             prune this run (can't know which skills it ships). Run \
+             `git lex kit-update` to repair."
+        );
+        return;
+    };
+    let Ok(entries) = fs::read_dir(target_dir) else { return };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        // Only dirs shaped like a deployed skill (the shape this adapter
+        // writes). Loose files and asset dirs are not ours to judge.
+        if !path.is_dir() || !path.join("SKILL.md").is_file() {
+            continue;
+        }
+        let name = entry.file_name().to_string_lossy().to_string();
+        if source_names.contains(&name) || kit_names.contains(&name) {
+            continue;
+        }
+        let rel = format!(".claude/skills/{}", name);
+        if fully_tracked(root, &path) {
+            match fs::remove_dir_all(&path) {
+                Ok(_) => println!(
+                    "Pruned: {rel}/ — its Skill/ source is gone; the deployed \
+                     copy lives in git history (git log -- {rel})."
+                ),
+                Err(e) => eprintln!("harness: could not prune {rel}: {e}"),
+            }
+        } else {
+            eprintln!(
+                "warning: {rel}/ has no Skill/ source but contains files never \
+                 committed to git — NOT pruned (deleting them would be \
+                 unrecoverable). To keep it, author Skill/{name}.md; to drop \
+                 it, delete the directory yourself."
+            );
+        }
+    }
+}
+
+/// The agents-lane twin of `prune_orphan_skill_dirs`: deployed
+/// `.claude/agents/*.md` files whose Subagent/ source is gone.
+fn prune_orphan_agent_files(
+    root: &Path,
+    target_dir: &Path,
+    source_names: &std::collections::HashSet<String>,
+) {
+    let Some(kit_names) = kit_shipped_deploy_names(root, "agents") else {
+        eprintln!(
+            "harness: a listed kit has no install dir — skipping the agent \
+             prune this run (can't know which agents it ships). Run \
+             `git lex kit-update` to repair."
+        );
+        return;
+    };
+    let Ok(entries) = fs::read_dir(target_dir) else { return };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let fname = entry.file_name().to_string_lossy().to_string();
+        if !path.is_file() || !fname.ends_with(".md") {
+            continue;
+        }
+        let stem = fname.strip_suffix(".md").unwrap_or(&fname).to_string();
+        if source_names.contains(&stem) || kit_names.contains(&fname) {
+            continue;
+        }
+        let rel = format!(".claude/agents/{}", fname);
+        if fully_tracked(root, &path) {
+            match fs::remove_file(&path) {
+                Ok(_) => println!(
+                    "Pruned: {rel} — its Subagent/ source is gone; the deployed \
+                     copy lives in git history (git log -- {rel})."
+                ),
+                Err(e) => eprintln!("harness: could not prune {rel}: {e}"),
+            }
+        } else {
+            eprintln!(
+                "warning: {rel} has no Subagent/ source but was never committed \
+                 to git — NOT pruned (deleting it would be unrecoverable). To \
+                 keep it, author Subagent/{stem}.md; to drop it, delete the \
+                 file yourself."
+            );
+        }
     }
 }
 
@@ -521,21 +704,53 @@ pub(crate) fn setup_substrate_claude(root: &std::path::Path, agent_name: &str) {
         }
     }
 
-    // Warn if a stale .claude/settings.local.json exists. Older versions
-    // wrote identity to that file (gitignored), but souls are portable so
-    // identity now lives in committed settings.json. Claude Code load order
-    // is user → project → local, so a stale local file silently overrides
-    // the new committed one. Don't auto-delete (user may have hand-edited
-    // it) — just flag it loudly.
+    // Older git-lex versions wrote the agent's git author env into
+    // .claude/settings.local.json (gitignored); it moved to committed
+    // settings.json (souls are portable). Claude Code loads local AFTER
+    // project, so a leftover GIT_* env block silently outvotes the file we
+    // just wrote and saves attribute to the wrong author. Warn ONLY when
+    // that override is actually present — settings.local.json itself is a
+    // healthy, live file (Claude Code keeps permission grants there, and
+    // the kit-hook opt-out `soul.disabledHooks` lives there by design), so
+    // its mere existence is not a finding (the 2026-08-22 rewrite: the old
+    // exists-check warned every repo with any local settings at all).
     let local_path = root.join(".claude").join("settings.local.json");
-    if local_path.exists() {
-        eprintln!();
-        eprintln!("warning: .claude/settings.local.json still exists.");
-        eprintln!("Identity now lives in committed settings.json. The local file");
-        eprintln!("(gitignored) overrides settings.json in Claude Code load order,");
-        eprintln!("so its env block (if any) will silently win. Review and delete");
-        eprintln!("if you do not need it: rm .claude/settings.local.json");
+    if let Ok(txt) = fs::read_to_string(&local_path) {
+        let keys = local_settings_git_env_keys(&txt);
+        if !keys.is_empty() {
+            eprintln!();
+            eprintln!(
+                "warning: .claude/settings.local.json sets {} in its env block.\n\
+                 Claude Code loads that file AFTER .claude/settings.json, so the \
+                 LOCAL values win: `git lex save` will sign commits with them, not \
+                 with the identity kit-update just wrote to settings.json. If that \
+                 is not intentional, remove those key(s) from the env block of \
+                 .claude/settings.local.json — keep the rest of the file, Claude \
+                 Code stores permissions and hook opt-outs there.",
+                keys.join(", ")
+            );
+        }
     }
+}
+
+/// The git author/committer env keys a `.claude/settings.local.json` sets,
+/// if any — the ONE thing in that file that outvotes the identity git-lex
+/// writes to committed settings.json. Pure (takes the file text) so the
+/// gate is testable; unparseable JSON returns empty — a broken local
+/// settings file breaks Claude Code visibly on its own, it is not this
+/// warning's finding.
+fn local_settings_git_env_keys(txt: &str) -> Vec<String> {
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(txt) else {
+        return Vec::new();
+    };
+    let Some(env) = v.get("env").and_then(|e| e.as_object()) else {
+        return Vec::new();
+    };
+    ["GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL", "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL"]
+        .iter()
+        .filter(|k| env.contains_key(**k))
+        .map(|k| k.to_string())
+        .collect()
 }
 
 /// The `autoMemoryDirectory` value for a soul repo: `<root>/Harness/Memory`,
@@ -850,5 +1065,141 @@ mod hook_registration_tests {
             auto_memory_dir_value(Path::new("/Users/rob/repos/X"), None),
             "/Users/rob/repos/X/Harness/Memory"
         );
+    }
+}
+
+#[cfg(test)]
+mod prune_tests {
+    use super::*;
+    use std::fs;
+    use std::path::PathBuf;
+
+    fn unique_tmp_root(tag: &str) -> PathBuf {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .subsec_nanos();
+        std::env::temp_dir().join(format!("gitlex-prune-{tag}-{}-{nanos}", std::process::id()))
+    }
+
+    fn git(root: &Path, args: &[&str]) {
+        let st = std::process::Command::new("git")
+            .current_dir(root)
+            .args(args)
+            .output()
+            .expect("git runs");
+        assert!(st.status.success(), "git {args:?} failed: {}", String::from_utf8_lossy(&st.stderr));
+    }
+
+    fn git_repo(tag: &str) -> PathBuf {
+        let root = unique_tmp_root(tag);
+        fs::create_dir_all(&root).unwrap();
+        git(&root, &["init", "-q"]);
+        git(&root, &["config", "user.email", "test@test"]);
+        git(&root, &["config", "user.name", "test"]);
+        // The vendored base kit dir must exist or the prune (correctly)
+        // refuses to run — it can't know what a missing kit ships.
+        fs::create_dir_all(root.join(".lex/kit/repolex-ai/git-lex-kit-base")).unwrap();
+        root
+    }
+
+    /// The full four-way judgment on one tree: source-backed survives,
+    /// kit-shipped survives, tracked orphan is pruned (recoverable),
+    /// never-committed orphan is refused (unrecoverable), and a dir
+    /// without SKILL.md is not a skill and is never touched.
+    #[test]
+    fn skill_prune_is_source_or_kit_backed_and_tracked_only() {
+        let root = git_repo("skills");
+        fs::create_dir_all(root.join("Soul/Skill")).unwrap();
+        fs::write(root.join("Soul/Skill/alive.md"), "---\nsoul.Skill.skillDescription: x\n---\nbody\n").unwrap();
+        for name in ["alive", "orphan-tracked", "kitskill"] {
+            fs::create_dir_all(root.join(".claude/skills").join(name)).unwrap();
+            fs::write(root.join(".claude/skills").join(name).join("SKILL.md"), "old\n").unwrap();
+        }
+        fs::create_dir_all(root.join(".lex/kit/repolex-ai/git-lex-kit-base/harness/.claude/skills/kitskill")).unwrap();
+        fs::write(root.join(".lex/kit/repolex-ai/git-lex-kit-base/harness/.claude/skills/kitskill/SKILL.md"), "kit\n").unwrap();
+        git(&root, &["add", "-A"]);
+        git(&root, &["commit", "-q", "-m", "fixture"]);
+        // After the commit: a deployed-only skill that was never committed,
+        // and an asset dir that is not skill-shaped.
+        fs::create_dir_all(root.join(".claude/skills/orphan-untracked")).unwrap();
+        fs::write(root.join(".claude/skills/orphan-untracked/SKILL.md"), "mine\n").unwrap();
+        fs::create_dir_all(root.join(".claude/skills/notes")).unwrap();
+        fs::write(root.join(".claude/skills/notes/scratch.txt"), "not a skill\n").unwrap();
+
+        sync_skills(&root);
+
+        assert!(root.join(".claude/skills/alive/SKILL.md").exists(), "source-backed survives");
+        assert!(!root.join(".claude/skills/orphan-tracked").exists(), "tracked orphan pruned");
+        assert!(root.join(".claude/skills/orphan-untracked/SKILL.md").exists(), "never-committed refused");
+        assert!(root.join(".claude/skills/kitskill/SKILL.md").exists(), "kit-shipped survives");
+        assert!(root.join(".claude/skills/notes/scratch.txt").exists(), "non-skill dir untouched");
+        fs::remove_dir_all(&root).ok();
+    }
+
+    /// The arming rule: no Skill/ source dir → no prune, ever. A repo whose
+    /// skills live only in .claude/skills/ (the pre-Skill-class era, e.g.
+    /// W4R3Z's own) has no source of truth to converge to.
+    #[test]
+    fn no_source_dir_means_no_prune() {
+        let root = git_repo("noskilldir");
+        fs::create_dir_all(root.join(".claude/skills/deployed-only")).unwrap();
+        fs::write(root.join(".claude/skills/deployed-only/SKILL.md"), "keep me\n").unwrap();
+        git(&root, &["add", "-A"]);
+        git(&root, &["commit", "-q", "-m", "fixture"]);
+
+        sync_skills(&root);
+
+        assert!(root.join(".claude/skills/deployed-only/SKILL.md").exists());
+        fs::remove_dir_all(&root).ok();
+    }
+
+    /// The agents lane makes the same four-way judgment on .md files.
+    #[test]
+    fn agent_prune_mirrors_the_skill_lane() {
+        let root = git_repo("agents");
+        fs::create_dir_all(root.join("Soul/Subagent")).unwrap();
+        fs::write(root.join("Soul/Subagent/keep.md"), "---\nsoul.Subagent.subagentDescription: x\n---\nbody\n").unwrap();
+        fs::create_dir_all(root.join(".claude/agents")).unwrap();
+        for name in ["keep.md", "orphan.md", "kitagent.md"] {
+            fs::write(root.join(".claude/agents").join(name), "old\n").unwrap();
+        }
+        fs::create_dir_all(root.join(".lex/kit/repolex-ai/git-lex-kit-base/harness/.claude/agents")).unwrap();
+        fs::write(root.join(".lex/kit/repolex-ai/git-lex-kit-base/harness/.claude/agents/kitagent.md"), "kit\n").unwrap();
+        git(&root, &["add", "-A"]);
+        git(&root, &["commit", "-q", "-m", "fixture"]);
+        fs::write(root.join(".claude/agents/stray.md"), "mine\n").unwrap();
+
+        sync_subagents(&root);
+
+        assert!(root.join(".claude/agents/keep.md").exists(), "source-backed survives");
+        assert!(!root.join(".claude/agents/orphan.md").exists(), "tracked orphan pruned");
+        assert!(root.join(".claude/agents/stray.md").exists(), "never-committed refused");
+        assert!(root.join(".claude/agents/kitagent.md").exists(), "kit-shipped survives");
+        fs::remove_dir_all(&root).ok();
+    }
+}
+
+#[cfg(test)]
+mod local_settings_warning_tests {
+    use super::*;
+
+    /// The false-positive Selkie hit (2026-08-22): a healthy local settings
+    /// file — permissions, hook opt-outs, even a non-git env var — must not
+    /// warn. Only a GIT_* author/committer override is the finding.
+    #[test]
+    fn healthy_local_settings_do_not_warn() {
+        assert!(local_settings_git_env_keys(r#"{"permissions":{"allow":["Bash"]}}"#).is_empty());
+        assert!(local_settings_git_env_keys(r#"{"soul.disabledHooks":["x"],"env":{"MY_VAR":"1"}}"#).is_empty());
+        assert!(local_settings_git_env_keys("not json at all").is_empty());
+        assert!(local_settings_git_env_keys(r#"{}"#).is_empty());
+    }
+
+    #[test]
+    fn git_author_override_is_named_key_by_key() {
+        let keys = local_settings_git_env_keys(
+            r#"{"env":{"GIT_AUTHOR_NAME":"old-me","GIT_AUTHOR_EMAIL":"old@x","OTHER":"y"}}"#,
+        );
+        assert_eq!(keys, vec!["GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL"]);
     }
 }
