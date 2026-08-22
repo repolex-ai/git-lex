@@ -85,6 +85,17 @@ pub(crate) fn ensure_repo_yml_genesis(sha: &str) -> std::io::Result<()> {
 /// Text, not a doc-comment, because the audience reads the FILE.
 pub(crate) const REPO_YML_HEADER: &str = "\
 # these values are set at init, managed by git-lex, DO NOT EDIT
+#
+# What they do, so the file is not a mystery:
+#
+#   name, kit, created, optional_kits   repo bookkeeping.
+#   genesis_sha                         your soul's permanent identity in
+#                                       the graph. Never changes, ever.
+#   agent_name, agent_email             who signs your commits. git-lex
+#                                       copies these into
+#                                       .claude/settings.json on every
+#                                       `git lex kit-update`, and Claude
+#                                       Code injects them into git.
 ";
 
 /// Converge `.lex/repo.yml` onto the current [`REPO_YML_HEADER`]. An
