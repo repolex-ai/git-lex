@@ -96,7 +96,12 @@ enum Commands {
         /// Hook event name (e.g., pre-commit)
         event: String,
     },
-    /// Sync git data + .lex/*.nq into the persistent store
+    /// Compile committed history into the persistent store (the one graph)
+    ///
+    /// Incremental since the last sync; a rewritten history (reset/rebase)
+    /// triggers a loud FULL rebuild. Also refreshes the .spo sidecars from
+    /// the working tree. Hand-authored `.lex/**/*.nq` files are read by
+    /// `query`, not by sync.
     Sync,
     /// List all document classes defined across the repo's installed shapes
     ///
@@ -134,8 +139,8 @@ enum Commands {
     /// Re-download and reinstall the kit without touching content or extractions
     ///
     /// Kit files always converge to the kit's version: a local file that
-    /// differs is renamed `<file>.bak` and replaced. `SOUL.md` is never
-    /// overwritten.
+    /// differs is overwritten — no backup copies, the old bytes live in git
+    /// history (`git log -p -- <file>`). `SOUL.md` is never overwritten.
     KitUpdate {
         /// Kit to update (e.g., repolex-ai/git-lex-kit-squad). If omitted,
         /// updates ALL installed kits (base + domain + optionals).

@@ -673,8 +673,8 @@ pub(crate) fn install_scaffold_files_from(kit_dir: &std::path::Path) -> usize {
 ///
 /// - `installed`: files that were missing locally, copied from the kit.
 /// - `skipped`: files already byte-identical to the kit's version.
-/// - `updated`: files whose local copy differed — the old copy was renamed
-///   `<file>.bak` and the kit's version put in place.
+/// - `updated`: files whose local copy differed — overwritten with the
+///   kit's version (no backup copy; the old bytes live in git history).
 ///
 /// Paths are relative to the repo root, for display.
 #[derive(Default)]
@@ -801,7 +801,8 @@ pub(crate) fn reap_non_kit_non_local_hooks(
 
 /// Delete every `*.kit-latest` file under the repo (skipping `.git/`). The
 /// `.kit-latest` drift-sidecar mechanism was retired 2026-07-29 (kit files now
-/// simply overwrite, old copy → `.bak`), so any remaining sidecar is debris
+/// simply overwrite — the interim `.bak` backup was itself retired 2026-08-08,
+/// git history is the backup), so any remaining sidecar is debris
 /// from the old mechanism. Returns rel-paths of removed files.
 pub(crate) fn sweep_kit_latest_files(root: &Path) -> Vec<String> {
     let mut swept = Vec::new();
@@ -826,9 +827,9 @@ pub(crate) fn sweep_kit_latest_files(root: &Path) -> Vec<String> {
 
 /// The ONE file kit-update never overwrites: `SOUL.md` — a soul's identity is
 /// the squaddie's own, never the kit's. Everything else a kit ships converges
-/// to the kit version on update (Rob-ruled 2026-07-29: "kit sees newer file →
-/// removes old file, puts new file in place, old one named .bak" — the agent
-/// never decides).
+/// to the kit version on update (Rob-ruled 2026-07-29: kit sees newer file →
+/// kit version put in place, the agent never decides; the ruling's `.bak`
+/// backup half was superseded 2026-08-08 — git history is the backup).
 fn is_never_overwrite(dest: &Path) -> bool {
     dest.file_name().map(|n| n == "SOUL.md").unwrap_or(false)
 }
@@ -837,8 +838,9 @@ fn is_never_overwrite(dest: &Path) -> bool {
 /// repo:
 ///   - Missing files: copied from kit (counted as `installed`).
 ///   - Identical files: silent no-op (counted as `skipped`).
-///   - Differing files: old copy renamed `<file>.bak`, kit version put in
-///     place (recorded in `updated`). No agent decision, no diff homework.
+///   - Differing files: overwritten with the kit version (recorded in
+///     `updated`) — no backup copy, the old bytes live in git history.
+///     No agent decision, no diff homework.
 ///   - `SOUL.md`: never overwritten (identity is the squaddie's own).
 pub(crate) fn install_scaffold_files_from_skip_existing(
     kit_dir: &std::path::Path,
@@ -1452,7 +1454,8 @@ mod overwrite_policy_tests {
         assert!(is_never_overwrite(Path::new("/repo/SOUL.md")));
         assert!(is_never_overwrite(Path::new("SOUL.md")));
 
-        // Everything else a kit ships converges (old copy → .bak).
+        // Everything else a kit ships converges (overwritten; git history
+        // is the backup).
         for p in [
             "/repo/.claude/hooks/PreCompact-soul-journal.sh",
             "/repo/.claude/skills/search-your-soul/SKILL.md",
