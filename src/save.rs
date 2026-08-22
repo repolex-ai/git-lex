@@ -178,6 +178,33 @@ pub(crate) fn cmd_save(message: &str, dry_run: bool) {
         exit(1);
     }
 
+    // Markdown link healing (Rob-ruled 2026-08-14, lifecycle spec ruling
+    // 1): staged .md renames pull every inline link that pointed at the
+    // old path onto the new one — same commit, every edited file named.
+    // A healer that cannot run fails the save: proceeding would commit a
+    // rename while silently breaking the links the ruling promises to
+    // carry ("a gate that can't run must not pretend it passed").
+    match crate::heal::heal_staged_renames(&root) {
+        Ok(report) if !report.is_empty() => {
+            let total: usize = report.iter().map(|(_, n)| n).sum();
+            println!(
+                "Healed: {} markdown link(s) followed the staged rename(s) — {} file(s) edited in this same save:",
+                total,
+                report.len()
+            );
+            for (path, n) in &report {
+                println!("  - {path} ({n} link(s))");
+            }
+        }
+        Ok(_) => {}
+        Err(e) => {
+            eprintln!("fatal: markdown link healing failed: {e}");
+            eprintln!("A staged rename may leave dangling links if this save proceeds — refusing.");
+            eprintln!("fatal: git commit was not attempted — NOTHING WAS COMMITTED.");
+            exit(1);
+        }
+    }
+
     // Check if there's anything to commit
     let diff = Command::new("git")
         .args(["diff", "--cached", "--quiet"])

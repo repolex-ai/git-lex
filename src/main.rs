@@ -11,6 +11,7 @@ use git_lex::{find_git_root,
 // allowed in frontmatter values are codified as tests in this module — read
 // the test suite for the definitive spec.
 mod resolve;
+mod heal;
 mod man;
 mod sync;
 mod harness;
