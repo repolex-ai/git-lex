@@ -75,6 +75,59 @@ pub(crate) fn ensure_repo_yml_genesis(sha: &str) -> std::io::Result<()> {
     fs::write(&path, content)
 }
 
+/// The MANAGED-BY header every `.lex/repo.yml` carries (Rob-ruled
+/// 2026-08-22). The file mixes machine bookkeeping with the two keys that
+/// decide who signs commits, and nothing in it marked which was which or
+/// who owned them — so nobody, Rob included, could tell what was safe to
+/// touch. The ruling settles it: ALL of repo.yml is git-lex's, none of it
+/// is the squaddie's, and the file now says so in its own first lines.
+///
+/// Text, not a doc-comment, because the audience reads the FILE.
+pub(crate) const REPO_YML_HEADER: &str = "\
+# ─────────────────────────────────────────────────────────────────────
+# MANAGED BY git-lex — DO NOT EDIT.
+#
+# Every value below is set by `git lex init` and maintained by git-lex
+# from then on. Squaddies: nothing in this file is yours to change. If a
+# value here looks wrong, say so — do not edit it.
+#
+# What they do, so the file is not a mystery:
+#
+#   name, kit, created, optional_kits   repo bookkeeping.
+#   genesis_sha                         your soul's permanent identity in
+#                                       the graph. Never changes, ever.
+#   agent_name, agent_email             who signs your commits. git-lex
+#                                       copies these into
+#                                       .claude/settings.json on every
+#                                       `git lex kit-update`, and Claude
+#                                       Code injects them into git.
+#
+# Two things worth knowing about that last pair. Editing them here does
+# NOT change your commits on its own: the copy in .claude/settings.json
+# wins until the next kit-update AND a fresh session. And blanking
+# agent_name does more than drop your name — it skips substrate setup
+# entirely, so your hooks stop being installed at all.
+# ─────────────────────────────────────────────────────────────────────
+";
+
+/// Ensure `.lex/repo.yml` opens with [`REPO_YML_HEADER`]. Idempotent:
+/// header present → no-op; absent → prepended with every existing byte
+/// preserved below it (textual write, same reason as
+/// `ensure_repo_yml_genesis` — the file carries comments and ordering the
+/// read-side struct cannot round-trip). Missing file → no-op: this heals
+/// a repo.yml, it never conjures one.
+///
+/// Called from kit-update, which runs at every compaction, so the whole
+/// existing fleet converges without anyone doing anything.
+pub(crate) fn ensure_repo_yml_header(root: &std::path::Path) -> std::io::Result<()> {
+    let path = root.join(".lex").join("repo.yml");
+    let Ok(existing) = fs::read_to_string(&path) else { return Ok(()) };
+    if existing.contains("MANAGED BY git-lex") {
+        return Ok(());
+    }
+    fs::write(&path, format!("{REPO_YML_HEADER}{existing}"))
+}
+
 // ---------------------------------------------------------------------
 // Task-2 IRI families (Day-50 decisions): graph names + instance subjects
 // carry NO soul identity. The store is the scope; one query works against
@@ -473,5 +526,69 @@ mod tests {
         );
         let decision = identity_yml_rewrite_decision(&both, TEST_SHA);
         assert!(decision.is_none(), "both-keys present should be no-op");
+    }
+}
+
+#[cfg(test)]
+mod repo_yml_header_tests {
+    use super::*;
+
+    fn tmp_repo(tag: &str) -> std::path::PathBuf {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH).unwrap().subsec_nanos();
+        let root = std::env::temp_dir().join(format!("gitlex-hdr-{tag}-{}-{nanos}", std::process::id()));
+        fs::create_dir_all(root.join(".lex")).unwrap();
+        root
+    }
+
+    /// The heal prepends and preserves: every original byte survives below
+    /// the header, in order, and a second run is a no-op (idempotent — this
+    /// runs at every compaction, fleet-wide, forever).
+    #[test]
+    fn header_prepends_once_and_preserves_everything() {
+        let root = tmp_repo("prepend");
+        let body = "name: lUX\nagent_name: selkie\nagent_email: selkie@repolex.ai\n\noptional_kits:\n  - repolex-ai/git-lex-kit-copia\n";
+        let path = root.join(".lex").join("repo.yml");
+        fs::write(&path, body).unwrap();
+
+        ensure_repo_yml_header(&root).unwrap();
+        let once = fs::read_to_string(&path).unwrap();
+        assert!(once.starts_with("# ─"), "header is first");
+        assert!(once.contains("MANAGED BY git-lex"));
+        assert!(once.ends_with(body), "every original byte preserved, in order");
+
+        ensure_repo_yml_header(&root).unwrap();
+        assert_eq!(once, fs::read_to_string(&path).unwrap(), "second run is a no-op");
+        fs::remove_dir_all(&root).ok();
+    }
+
+    /// The header must not disturb the readers: the YAML struct still parses
+    /// every field, and the graph emitter skips comment lines (verified
+    /// against the real parser, not assumed).
+    #[test]
+    fn header_is_invisible_to_the_readers() {
+        let root = tmp_repo("readers");
+        fs::write(
+            root.join(".lex").join("repo.yml"),
+            "name: lUX\nkit: repolex-ai/git-lex-kit-soul\nagent_name: selkie\nagent_email: selkie@repolex.ai\n",
+        ).unwrap();
+        ensure_repo_yml_header(&root).unwrap();
+
+        let yml = git_lex::RepoYml::load(&root);
+        assert_eq!(yml.agent_name.as_deref(), Some("selkie"));
+        assert_eq!(yml.agent_email.as_deref(), Some("selkie@repolex.ai"));
+        assert_eq!(yml.name.as_deref(), Some("lUX"));
+        // No comment line survives as a key in the scalar view.
+        assert!(yml.scalar_fields().keys().all(|k| !k.starts_with('#')));
+        fs::remove_dir_all(&root).ok();
+    }
+
+    /// No repo.yml → no-op. The heal repairs a file, it never conjures one.
+    #[test]
+    fn missing_repo_yml_is_left_alone() {
+        let root = tmp_repo("missing");
+        ensure_repo_yml_header(&root).unwrap();
+        assert!(!root.join(".lex").join("repo.yml").exists());
+        fs::remove_dir_all(&root).ok();
     }
 }

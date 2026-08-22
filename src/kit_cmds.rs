@@ -523,6 +523,15 @@ pub(crate) fn cmd_kit_update(kit_arg: Option<String>) {
     // on the convergence rollout, Day 50 — #67).
     harness::run_substrate_setup(&root, None);
 
+    // Converge the managed-by header onto .lex/repo.yml (Rob-ruled
+    // 2026-08-22). Runs here because kit-update runs at every compaction,
+    // so the existing fleet grows the header with no one doing anything.
+    // Idempotent; a failure is a warning, never a blocked update — a
+    // missing comment is a teaching gap, not a broken repo.
+    if let Err(e) = crate::git::ensure_repo_yml_header(&root) {
+        eprintln!("warning: could not add the managed-by header to .lex/repo.yml: {e}");
+    }
+
     // Retired-mechanism sweeps (legacy .env, ontology/kit/ tier,
     // link_semantics key) — extracted step, see fn doc.
     sweep_legacy_layouts(&root);
