@@ -33,6 +33,23 @@ use crate::resolve;
 /// carried on" means facts that never happened as far as history is
 /// concerned (review finding A8).
 pub(crate) fn write_sidecar_loud(path: &std::path::Path, content: &str) {
+    // Already byte-identical → nothing to do. The walk regenerates EVERY
+    // sidecar on EVERY run, so on a repo where one file changed this was
+    // thousands of writes of bytes already on disk (5,840 of them per sync
+    // on the fleet's largest repo — 2026-08-23 measurement).
+    //
+    // Skipping is safe precisely BECAUSE the test is on content: the end
+    // state is identical either way, and the file's own bytes are the
+    // instrument — no mtime, no cache, nothing to go stale.
+    //
+    // A read error is NOT a decision. Fall through and write, so a
+    // permissions or encoding problem surfaces at the loud write below
+    // instead of being silently mistaken for "unchanged".
+    if let Ok(existing) = fs::read_to_string(path) {
+        if existing == content {
+            return;
+        }
+    }
     if let Some(parent) = path.parent() {
         if let Err(e) = fs::create_dir_all(parent) {
             eprintln!("fatal: failed to create sidecar dir {}: {e}", parent.display());
@@ -2128,3 +2145,70 @@ mod tests {
     }
 }
 
+
+#[cfg(test)]
+mod sidecar_write_tests {
+    use super::write_sidecar_loud;
+
+    fn tmp(name: &str) -> std::path::PathBuf {
+        let d = std::env::temp_dir().join(format!(
+            "gitlex-sidecar-write-{}-{}",
+            std::process::id(),
+            name
+        ));
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    /// Missing file → written. The skip must never swallow a first write.
+    #[test]
+    fn writes_when_absent() {
+        let d = tmp("absent");
+        let p = d.join("a.fm.spo");
+        write_sidecar_loud(&p, "one | hasValue | 1\n");
+        assert_eq!(std::fs::read_to_string(&p).unwrap(), "one | hasValue | 1\n");
+        std::fs::remove_dir_all(&d).unwrap();
+    }
+
+    /// Differing content → overwritten. This is the case that MUST still
+    /// write: a sidecar that silently keeps stale bytes is a permanent
+    /// history gap (the committed diff is the one graph's only event source).
+    #[test]
+    fn overwrites_when_content_differs() {
+        let d = tmp("differs");
+        let p = d.join("a.fm.spo");
+        std::fs::write(&p, "old | hasValue | 1\n").unwrap();
+        write_sidecar_loud(&p, "new | hasValue | 2\n");
+        assert_eq!(std::fs::read_to_string(&p).unwrap(), "new | hasValue | 2\n");
+        std::fs::remove_dir_all(&d).unwrap();
+    }
+
+    /// Identical content → the file is not touched. Proved by mtime: the
+    /// end state is the same either way, so content alone cannot show that
+    /// the write was skipped.
+    #[test]
+    fn skips_the_write_when_content_is_identical() {
+        let d = tmp("identical");
+        let p = d.join("a.fm.spo");
+        let body = "same | hasValue | 1\n";
+        write_sidecar_loud(&p, body);
+        let before = std::fs::metadata(&p).unwrap().modified().unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        write_sidecar_loud(&p, body);
+        let after = std::fs::metadata(&p).unwrap().modified().unwrap();
+        assert_eq!(before, after, "identical content must not re-write the file");
+        assert_eq!(std::fs::read_to_string(&p).unwrap(), body);
+        std::fs::remove_dir_all(&d).unwrap();
+    }
+
+    /// Parent directory missing → still created. The early return must not
+    /// jump over create_dir_all for a genuinely new sidecar tree.
+    #[test]
+    fn creates_missing_parent_dirs() {
+        let d = tmp("nested");
+        let p = d.join("deep/deeper/a.fm.spo");
+        write_sidecar_loud(&p, "x | hasValue | 1\n");
+        assert!(p.exists());
+        std::fs::remove_dir_all(&d).unwrap();
+    }
+}

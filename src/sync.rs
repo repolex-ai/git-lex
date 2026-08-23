@@ -502,6 +502,50 @@ fn materialize_now_view(store: &Store) {
 }
 
 
+/// How many facts the HISTORY says are true right now — the derived half of
+/// the state-parity check, compared against `base_count` (what the base layer
+/// actually holds). A disagreement means the store is corrupt.
+///
+/// ── Why this shape (2026-08-23) ──────────────────────────────────────────
+/// A statement is live when its LATEST assertion is later than its LATEST
+/// retraction (and trivially live when it was never retracted). Two grouped
+/// MAX aggregates and one comparison — each side scanned once.
+///
+/// The previous formulation asked the equivalent question the other way:
+/// "does SOME assertion of this statement have no retraction at-or-after
+/// it?", as a correlated FILTER NOT EXISTS carrying a two-graph join. The
+/// planner ran that inner join once per candidate assertion, so cost grew
+/// with events SQUARED while the aggregate form grows linearly. Measured
+/// head-to-head on real stores, same answer both ways:
+///
+///     W4R3Z (24k quads,  7,237 events):   4,322 ms →     139 ms   (31x)
+///     lUX (479k quads, 132,456 events): 844,446 ms →   1,560 ms  (541x)
+///
+/// On lUX that one query WAS a one-commit sync: 14m04s of a 14m44s run.
+///
+/// EQUIVALENCE (the claim the tests below pin, including the boundary):
+///   - maxAssert > maxRetract → the assertion at maxAssert has nothing
+///     at-or-after it, so the old query counts it. Live both ways.
+///   - maxAssert <= maxRetract → EVERY assertion has the retraction at
+///     maxRetract at-or-after it, so the old query counts none of them.
+///     Dead both ways — including maxAssert == maxRetract, i.e. asserted
+///     and retracted in the SAME commit, which both forms treat as dead.
+///   - Never asserted → neither form counts it (both are driven by asserts).
+const DERIVED_COUNT_Q: &str = "\
+PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> \
+PREFIX gl: <https://repolex.ai/ontology/git-lex/> \
+PREFIX g2: <https://repolex.ai/ontology/git-lex/git2/> \
+SELECT (COUNT(*) AS ?n) WHERE { \
+  { SELECT ?tt (MAX(?oa) AS ?maxA) WHERE { \
+      GRAPH <https://repolex.ai/git-lex/LexHistoryGraph> { ?a rdf:reifies ?tt ; gl:assertedIn ?ca } \
+      GRAPH <https://repolex.ai/git-lex/NamedGraph/commits> { ?ca g2:ordinalDerived ?oa } \
+    } GROUP BY ?tt } \
+  OPTIONAL { SELECT ?tt (MAX(?orr) AS ?maxR) WHERE { \
+      GRAPH <https://repolex.ai/git-lex/LexHistoryGraph> { ?r rdf:reifies ?tt ; gl:retractedIn ?cr } \
+      GRAPH <https://repolex.ai/git-lex/NamedGraph/commits> { ?cr g2:ordinalDerived ?orr } \
+    } GROUP BY ?tt } \
+  FILTER(!BOUND(?maxR) || ?maxR < ?maxA) }";
+
 fn sync_onegraph_phase(store: &Store, root: &std::path::Path, resume_sha: Option<String>, ctx: &crate::nquad::ResolverContext) {
     let one_graph_uri = format!("<{}>", spo_events::LEXHISTORY_GRAPH_IRI);
 
@@ -710,18 +754,7 @@ fn sync_onegraph_phase(store: &Store, root: &std::path::Path, resume_sha: Option
            FILTER NOT EXISTS { ?s a <https://repolex.ai/ontology/git-lex/SpoEvent> } \
            FILTER(?p != <http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies>) } }",
     );
-    let derived_count = count_q(
-        "PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> \
-         PREFIX gl: <https://repolex.ai/ontology/git-lex/> \
-         PREFIX g2: <https://repolex.ai/ontology/git-lex/git2/> \
-         SELECT (COUNT(DISTINCT ?tt) AS ?n) WHERE { \
-           GRAPH <https://repolex.ai/git-lex/LexHistoryGraph> { ?a rdf:reifies ?tt ; gl:assertedIn ?ca } \
-           GRAPH <https://repolex.ai/git-lex/NamedGraph/commits> { ?ca g2:ordinalDerived ?oa } \
-           FILTER NOT EXISTS { \
-             GRAPH <https://repolex.ai/git-lex/LexHistoryGraph> { ?r rdf:reifies ?tt ; gl:retractedIn ?cr } \
-             GRAPH <https://repolex.ai/git-lex/NamedGraph/commits> { ?cr g2:ordinalDerived ?or } \
-             FILTER(?or >= ?oa) } }",
-    );
+    let derived_count = count_q(DERIVED_COUNT_Q);
     match (dangling, base_count, derived_count) {
         (Some(0), Some(b), Some(d)) if b == d => {}
         (None, _, _) | (_, None, _) | (_, _, None) => {
@@ -795,4 +828,143 @@ fn resolve_dev_horizon(root: &std::path::Path) -> Option<String> {
         eprintln!("warning: dev_history_horizon '{date}' matches no commit — walking full history");
     }
     first
+}
+
+#[cfg(test)]
+mod derived_count_tests {
+    use super::*;
+    use oxigraph::store::Store;
+
+    /// The formulation `DERIVED_COUNT_Q` replaced (2026-08-23). Kept HERE, in
+    /// the tests only, as the ORACLE: every fixture asserts new == old, so the
+    /// rewrite is proved equivalent rather than pinned to a number someone
+    /// later "fixes" to match a regression.
+    const OLD_DERIVED_COUNT_Q: &str = "\
+PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> \
+PREFIX gl: <https://repolex.ai/ontology/git-lex/> \
+PREFIX g2: <https://repolex.ai/ontology/git-lex/git2/> \
+SELECT (COUNT(DISTINCT ?tt) AS ?n) WHERE { \
+  GRAPH <https://repolex.ai/git-lex/LexHistoryGraph> { ?a rdf:reifies ?tt ; gl:assertedIn ?ca } \
+  GRAPH <https://repolex.ai/git-lex/NamedGraph/commits> { ?ca g2:ordinalDerived ?oa } \
+  FILTER NOT EXISTS { \
+    GRAPH <https://repolex.ai/git-lex/LexHistoryGraph> { ?r rdf:reifies ?tt ; gl:retractedIn ?cr } \
+    GRAPH <https://repolex.ai/git-lex/NamedGraph/commits> { ?cr g2:ordinalDerived ?or } \
+    FILTER(?or >= ?oa) } }";
+
+    fn count(store: &Store, q: &str) -> u64 {
+        match git_lex::eval_query(store, q) {
+            Ok(oxigraph::sparql::QueryResults::Solutions(mut sols)) => sols
+                .next()
+                .and_then(|r| r.ok())
+                .and_then(|r| r.get("n").map(|t| t.to_string()))
+                .and_then(|v| v.split('"').nth(1).and_then(|x| x.parse().ok()))
+                .expect("count query returned no usable row"),
+            other => panic!("count query failed: {:?}", other.is_ok()),
+        }
+    }
+
+    /// Build a store from a list of `(statement_id, direction, commit_ordinal)`
+    /// events. Each statement is a distinct reified triple; each ordinal is a
+    /// distinct commit in the commits graph. `dir` is "a" (assert) or "r".
+    fn store_with(events: &[(&str, &str, i64)]) -> Store {
+        let store = Store::new().unwrap();
+        let lh = "https://repolex.ai/git-lex/LexHistoryGraph";
+        let cg = "https://repolex.ai/git-lex/NamedGraph/commits";
+        let mut nq = String::new();
+        let mut ordinals: Vec<i64> = events.iter().map(|(_, _, o)| *o).collect();
+        ordinals.sort_unstable();
+        ordinals.dedup();
+        for o in &ordinals {
+            nq.push_str(&format!(
+                "<https://ex/c{o}> <https://repolex.ai/ontology/git-lex/git2/ordinalDerived> \
+                 \"{o}\"^^<http://www.w3.org/2001/XMLSchema#integer> <{cg}> .\n"
+            ));
+        }
+        for (i, (stmt, dir, ord)) in events.iter().enumerate() {
+            let pred = if *dir == "a" { "assertedIn" } else { "retractedIn" };
+            // One event node per event; all events for a statement reify the
+            // SAME triple term, which is what makes them the same statement.
+            nq.push_str(&format!(
+                "<https://ex/e{i}> <http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies> \
+                 <<( <https://ex/s{stmt}> <https://ex/p> \"v{stmt}\" )>> <{lh}> .\n\
+                 <https://ex/e{i}> <https://repolex.ai/ontology/git-lex/{pred}> \
+                 <https://ex/c{ord}> <{lh}> .\n"
+            ));
+        }
+        store
+            .load_from_reader(RdfFormat::NQuads, Cursor::new(nq.as_bytes()))
+            .expect("fixture n-quads failed to load");
+        store
+    }
+
+    fn assert_agree(events: &[(&str, &str, i64)], expected_live: u64) {
+        let store = store_with(events);
+        let new = count(&store, DERIVED_COUNT_Q);
+        let old = count(&store, OLD_DERIVED_COUNT_Q);
+        assert_eq!(new, old, "rewrite disagrees with the oracle on {events:?}");
+        assert_eq!(new, expected_live, "wrong live count for {events:?}");
+    }
+
+    #[test]
+    fn asserted_never_retracted_is_live() {
+        assert_agree(&[("1", "a", 1), ("2", "a", 2)], 2);
+    }
+
+    #[test]
+    fn retracted_after_assert_is_dead() {
+        assert_agree(&[("1", "a", 1), ("1", "r", 2)], 0);
+    }
+
+    /// THE BOUNDARY: asserted and retracted in the SAME commit. The old form
+    /// kills it via `?or >= ?oa`; the new form via `maxR < maxA` being false
+    /// on equality. Both say dead — this is the case a careless rewrite to
+    /// `>` / `<=` would silently flip.
+    #[test]
+    fn assert_and_retract_in_same_commit_is_dead() {
+        assert_agree(&[("1", "a", 5), ("1", "r", 5)], 0);
+    }
+
+    #[test]
+    fn re_asserted_after_retract_is_live_again() {
+        assert_agree(&[("1", "a", 1), ("1", "r", 2), ("1", "a", 3)], 1);
+    }
+
+    /// Retract lands BETWEEN two asserts: latest assert (5) beats latest
+    /// retract (3), so live. The old form finds the assert at 5 has nothing
+    /// at-or-after it; the new form compares 5 > 3.
+    #[test]
+    fn interleaved_events_follow_the_latest() {
+        assert_agree(&[("1", "a", 1), ("1", "r", 3), ("1", "a", 5)], 1);
+    }
+
+    /// Same shape, but the last event is the retraction — dead both ways.
+    #[test]
+    fn interleaved_ending_in_retract_is_dead() {
+        assert_agree(&[("1", "a", 1), ("1", "a", 3), ("1", "r", 5)], 0);
+    }
+
+    #[test]
+    fn mixed_population_counts_only_the_live() {
+        assert_agree(
+            &[
+                ("1", "a", 1),                              // live
+                ("2", "a", 1), ("2", "r", 2),               // dead
+                ("3", "a", 1), ("3", "r", 2), ("3", "a", 4), // live again
+                ("4", "a", 7), ("4", "r", 7),               // dead, same commit
+            ],
+            2,
+        );
+    }
+
+    #[test]
+    fn empty_graph_counts_zero() {
+        assert_agree(&[], 0);
+    }
+
+    /// A retraction with no assertion anywhere is not a live fact — neither
+    /// form is driven by retractions, so both ignore it.
+    #[test]
+    fn retract_without_assert_is_not_live() {
+        assert_agree(&[("1", "r", 2)], 0);
+    }
 }
