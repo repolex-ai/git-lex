@@ -411,18 +411,21 @@ fn repeated_top_level_keys(yaml_str: &str) -> Vec<String> {
 /// stand behind — writing `someProperty` teaches the SYNTAX, which is what
 /// the author is missing.
 pub fn multivalue_teaching_block(short: &str, class_name: &str) -> String {
-    // States the CURRENT outcome, not the historical one. Until 1d13cbc a
-    // repeated key silently kept the last value; now it is rejected at save.
-    // Motivating the rule with a loss that can no longer happen reads as
-    // stale to anyone who tests it, and is weaker than the truth (tr1p's
-    // catch, 2026-08-11).
+    // INSTRUCTIONS, not rationale (Rob, 2026-08-24: "it should just be giving
+    // instructions of how to use repeating values, not a narrative about
+    // git-lex guessing"). The previous wording spent its first two lines
+    // explaining why the tool behaves as it does — "YAML has no rule for it,
+    // so git-lex will not guess" — before showing the shape. A reader here
+    // wants to know what to type. Show the shape first; the consequence of
+    // getting it wrong is one clause at the end, not the opening argument.
     format!(
-        "# More than one value for a key? Write a YAML list. Repeating a key is\n\
-         # REJECTED at save — YAML has no rule for it, so git-lex will not guess:\n\
+        "# To give a key more than one value, list them:\n\
          #\n\
          #     {}.{}.someProperty:\n\
          #       - \"first value\"\n\
-         #       - \"second value\"\n",
+         #       - \"second value\"\n\
+         #\n\
+         # Write the key once. A key repeated on two lines is rejected at save.\n",
         short, class_name,
     )
 }
