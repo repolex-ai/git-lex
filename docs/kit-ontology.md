@@ -1,6 +1,6 @@
 # Kit Ontology Design
 
-*Last updated for git-lex v0.1.0 (2026-08-12)*
+*Last updated for kit-base 0.11.0 (2026-08-24)*
 
 This guide is for kit builders defining **document types** — the vocabulary a
 kit gives its users. It covers where the ontology file lives, and the four
@@ -79,6 +79,38 @@ Two rules:
   and who writes it. A class nobody can explain in one line is a class that
   shouldn't ship.
 
+### Telling authors what goes in the body
+
+`rdfs:comment` describes every *field*. To say what belongs in the document's
+**body**, add `git-lex:authoringGuidance`:
+
+```turtle
+garden:Plant a owl:Class ;
+    git-lex:foldered true ;
+    rdfs:label "Plant" ;
+    rdfs:comment "A plant under care: what it is, where it lives, how it's doing." ;
+    git-lex:authoringGuidance """
+## Condition
+What it looks like right now. Observations, not plans.
+
+## History
+What you've done to it and when.
+""" .
+```
+
+This is delivered two ways: `git lex create` shows it, and it is written into
+the class's `__Plant.md` template for anyone writing files without calling
+`create`. **It does not land in the document**, so nobody has to delete it.
+
+**It is never enforced** — no gate, no warning, nothing in `verify`. A document
+that ignores its guidance is a perfectly valid document. The moment guidance can
+fail something, it stops being help and becomes one more gate to satisfy.
+
+On length: let the class decide. A freeform class gets a sentence; a class with
+real required structure gets the headings with one line under each. If you're
+writing paragraphs you're writing a manual, and a manual belongs somewhere this
+can point at.
+
 ## 4. The id property (required on every class)
 
 Every class declares an id property, named `<class>Id`:
@@ -150,7 +182,31 @@ never silently dropped.
 ## 7. Pointing at another Thing
 
 A reference property holds the **target's id**, and its name says so — end the
-name with `Id`:
+name with `Id`.
+
+**Before you write one, pick your lane. The `rdfs:range` you declare decides
+what the author is allowed to type**, and the two forms are not
+interchangeable.
+
+### Lane A — pointing anywhere: `rdfs:range git-lex:Thing`
+
+```turtle
+garden:relatedToId a owl:ObjectProperty ;
+    rdfs:comment "Anything related to this plant, written <namespace/Class/id>." ;
+    rdfs:domain garden:Plant ;
+    rdfs:range git-lex:Thing .
+```
+```yaml
+garden.Plant.relatedToId:
+  - <garden/Bed/south-wall>
+  - <soul/Note/why-mulch>
+```
+
+Values are full addresses in angle brackets. This is the lane that works
+**across kits** with no coordination, and it is the one to use when in doubt.
+Anything that isn't a bracketed address is rejected at save, with the fix named.
+
+### Lane B — pointing at one known class: `rdfs:range <that class>`
 
 ```turtle
 garden:livesInBedId a owl:ObjectProperty ;
@@ -159,6 +215,35 @@ garden:livesInBedId a owl:ObjectProperty ;
     rdfs:domain garden:Plant ;
     rdfs:range garden:Bed .
 ```
+```yaml
+garden.Plant.livesInBedId: south-wall
+```
+
+The value is a **bare id**, and the class comes from the declaration.
+
+### The mistake this causes, and what it looks like
+
+The two lanes are chosen by **exact match on the range IRI** — no subclass
+walk, and your property's name is never consulted. So if you declare the
+precise class but the author writes the address form, **nothing errors.** The
+brackets are treated as part of the id:
+
+```yaml
+# declared: rdfs:range garden:Bed   (Lane B — expects a bare id)
+garden.Plant.livesInBedId: <garden/Bed/south-wall>
+```
+
+    you meant   →   https://repolex.ai/garden/Bed/south-wall
+    you got     →   https://repolex.ai/garden/Bed/%3Cgarden/Bed/south-wall%3E
+
+No warning. The reference simply points at an address nothing describes, and
+every query that joins on it silently returns nothing.
+
+**So: naming the exact class feels more correct and is the riskier choice.** Use
+Lane B when the target is genuinely always one class in your own kit and the
+terse value is worth it. Use `git-lex:Thing` otherwise — and always for anything
+in the `relatedTo…Id` family, which is a stack-wide convention that the value is
+a bracketed address.
 
 The naming rule, stack-wide:
 

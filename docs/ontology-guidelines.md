@@ -1,6 +1,6 @@
 # Ontology Guidelines
 
-*Last updated for git-lex v0.1.0 (2026-08-12)*
+*Last updated for kit-base 0.11.0 (2026-08-24)*
 
 This page is the **naming and identifier standard** for every ontology in the
 git-lex ecosystem. [Kit ontology design](kit-ontology.md) shows you the
@@ -202,17 +202,88 @@ an id, a path, a label, or a Being at all. The rename wave that fixed it
 touched 22 properties and queued a fleet-wide data migration. Names are much
 cheaper to get right on day one.
 
+### 5a. The range is not documentation — it selects the value form
+
+**This is the sharpest trap in the system, so read it before you declare any
+reference property.**
+
+In most vocabularies `rdfs:range` is a note about intent. Here it is a
+**contract about what the author is allowed to type**, and git-lex parses the
+value differently depending on which one you declared. There are exactly two
+lanes, and selection is **exact equality on the declared range IRI** — there is
+no subclass walk, and the property's *name* is never consulted.
+
+**Lane A — `rdfs:range git-lex:Thing` → bracketed address.**
+
+```turtle
+soul:relatedToPursuitId rdfs:range git-lex:Thing .
+```
+```yaml
+soul.Exploration.relatedToPursuitId:
+  - <soul/Pursuit/spo-shell>
+```
+
+The angle-bracket form is the **only** accepted value. Anything else is
+rejected at save, blocking, with the fix named for that value.
+
+**Lane B — `rdfs:range <a concrete class>` → bare id.**
+
+```turtle
+copia:lookMomentId rdfs:range copia:Moment .
+```
+```yaml
+copia.Look.lookMomentId: some-moment-id
+```
+
+**The trap.** A correctly-bracketed value under a *concrete* range does **not**
+raise an error. It gets percent-encoded into the identifier:
+
+    <soul/Pursuit/x>   →   .../Pursuit/%3Csoul/Pursuit/x%3E
+
+No warning, no failure — just a reference pointing at an address nothing
+describes. **The precise, obvious-looking declaration is the dangerous one.**
+If you want addresses, declare `git-lex:Thing`, even though naming the exact
+class feels more correct.
+
+**And the range means something whether or not you intended it.** In RDFS a
+range is an *inference rule*, not a filter:
+
+    P rdfs:range C   +   x P y   ⊨   y a C
+
+Nothing validates; the type is **inferred**. So `relatedToId`'s Thing range
+means that pointing at something makes it a Thing in the data, declared or not.
+This is useful as a decision procedure: the question is rarely "should we
+declare this?" and usually "what does the data already say, and is our ontology
+merely declining to write it down?"
+
 ## 6. Change discipline
 
-- **The graph is append-only; so is the vocabulary's story.** You don't edit
-  history — you supersede it. Retire a term by marking it `owl:deprecated true`
-  and pointing at its successor with `dcterms:isReplacedBy`. The tooling reads
-  both: a deprecated property still saves and its history still replays, but
-  authors get a save-time note naming the replacement, and deprecated keys are
-  never suggested; a deprecated class keeps resolving but loses its folder, its
+- **Unused properties get deleted, not retired** (Rob-ruled 2026-08-20 —
+  tombstoning them was slowing development for no benefit). Predicates are
+  derived from the frontmatter key text; nothing consults the ontology to
+  decide that a predicate exists. So removing a property you aren't using costs
+  governance and nothing else. Take it out, and say so in the changelog.
+- **DEPRECATE-NEVER-DELETE is a rule about CLASSES.** Classes are subjects, and
+  subjects *do* consult the ontology. Retire a class by marking it
+  `owl:deprecated true` and pointing at its successor with
+  `dcterms:isReplacedBy`: it keeps resolving, but loses its folder, its
   template, and its place in the `create` menu. Say the move in both comments
-  and record it in the ontology's changelog header (see copia.ttl's `# v0.27:`
-  block for the shape).
+  and record it in the changelog header (see copia.ttl's `# v0.27:` block).
+- **The one exception, and it bites silently: identity properties ARE read.**
+  Deleting `soul:noteId` doesn't just remove a field — it removes the anchor
+  that lifts a Note onto the Thing plane, quietly demoting every
+  convention-anchored Note to the File plane, where its facts die on the next
+  rename. If a deletion touches an identity property, the same change must
+  remove the reader's fallback lane too, so the ontology and the code can never
+  disagree.
+- **Ship the reader before the declaration.** If a change alters how existing
+  values are *interpreted*, deploy the code that reads them first and land the
+  ontology line after. `relatedToId`'s Thing range shipped as a binary
+  fleet-wide before the declaration; the reverse order would have minted
+  garbage IRIs everywhere.
+- **Declare toothless, backfill, then require.** A new required property walls
+  people out of their own repos. Ship it with no `minCount`, let everyone
+  backfill, and make requiring it a separate decision later.
 - **Everything is derived; nothing is minted.** Ids come from filenames,
   IRIs from class + id, id properties from class names. If you're inventing
   an identifier at emission time that can't be re-derived from the source,
