@@ -20,6 +20,24 @@ kinds of things:
 | Content    | `content/`                  | repo root                        | Class folders, document templates, starter docs. |
 | Harness    | `harness/`                  | repo root (`.claude/…`, `AGENTS.md`, …) | Substrate wiring: hooks, skills, agent instructions. |
 | Www        | `www/`                      | `.lex/www/`                      | Static site assets (GitHub Pages). |
+| Reference  | `reference/`                | *ships, does not install*        | Material that must travel with the kit and stay current, but must never enter a repo's graph or root. |
+
+**The `reference/` layer is the odd one.** Only `ontology/<kit>/` is mirrored
+into `.lex/ontology/`, so anything outside it rides along in
+`.lex/kit/<org>/<repo>/` without being loaded, scaffolded, or validated. That
+buys automatic freshness — every `kit-update` refetches it — with no risk of
+polluting the graph.
+
+kit-base uses it for the ontology-authoring standard:
+
+- `reference/EXAMPLE-KIT.ttl` — how to write a kit ontology, as a **working
+  Turtle file** rather than a snippet, so it parses and can be tested and cannot
+  rot into something invalid unnoticed. Versioned separately, with its own
+  changelog.
+- `reference/check-kit-ontology.py` — runs the mechanical half of that
+  standard's checklist against any kit TTL.
+
+If you are writing or changing a kit ontology, start there.
 
 The ontology path is a pinned contract: a kit ships
 `ontology/<kit>/<kit>.ttl` and it lands at `.lex/ontology/<kit>/<kit>.ttl`,
