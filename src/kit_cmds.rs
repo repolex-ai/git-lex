@@ -851,6 +851,12 @@ const ENGINE_IGNORE: &[EngineIgnore] = &[
     // Legacy path list not yet confirmed by the copia owner — whole-dir
     // until it is.
     EngineIgnore { dir: ".copia/", legacy: None },
+    // Horae (nomia's ask, Rob-approved 2026-08-26): live render queue is
+    // ~170MB of machine-local sqlite at .horae/sqlite/ — already swept into
+    // a lUX commit once and caught. Whole-dir until nomia confirms the
+    // legacy path list (queue home + PNG spool), then flips to the pocket
+    // like every post-law engine.
+    EngineIgnore { dir: ".horae/", legacy: None },
     // spaceGOAT-confirmed complete (disk survey ×3 installs + sync.rs writes
     // only these two): store + transcript mirror.
     EngineIgnore { dir: ".ravel/", legacy: Some(&["oxigraph", "transcripts"]) },
@@ -1294,7 +1300,7 @@ mod engine_gitignore_tests {
         let lines = block_lines(&got);
         assert_eq!(
             lines,
-            vec![".lex/_ignore/", ".pool/", ".copia/", ".ravel/_ignore/", ".pan/_ignore/"]
+            vec![".lex/_ignore/", ".pool/", ".copia/", ".horae/", ".ravel/_ignore/", ".pan/_ignore/"]
         );
         // .weave/ retired 2026-08-04 (Rob; fleet swept clean first) — a
         // re-emitted block must NOT reintroduce it.
@@ -1409,7 +1415,7 @@ mod engine_gitignore_tests {
         let lines = block_lines(&got);
         assert_eq!(
             lines,
-            vec![".lex/_ignore/", ".pool/", ".copia/", ".ravel/_ignore/", ".pan/_ignore/"]
+            vec![".lex/_ignore/", ".pool/", ".copia/", ".horae/", ".ravel/_ignore/", ".pan/_ignore/"]
         );
         assert!(!got.contains(".weave/"), "retired entry must be dropped on rewrite");
         assert!(got.contains("keepme/"), "content before the block is preserved");
@@ -1426,7 +1432,7 @@ mod engine_gitignore_tests {
         let lines = block_lines(&got);
         assert_eq!(
             lines,
-            vec![".lex/_ignore/", ".pool/", ".copia/", ".ravel/_ignore/", ".pan/_ignore/"]
+            vec![".lex/_ignore/", ".pool/", ".copia/", ".horae/", ".ravel/_ignore/", ".pan/_ignore/"]
         );
         assert!(!got.contains(".weave/"));
         assert_eq!(got.matches(ENGINE_GITIGNORE_BEGIN).count(), 1);

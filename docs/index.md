@@ -17,6 +17,7 @@ became true and when it stopped*.
 - [Kit ontology design](kit-ontology.md) — defining your document types: classes, ids, enums, references
 - [Ontology guidelines](ontology-guidelines.md) — the naming and identifier standard: the identity law, the four kinds of id-valued properties, reference naming
 - [Hook authoring](hook-authoring.md) — placeholder; hook material lives in Kit authoring §3 until the docs pass
+- [Engine runtime dirs](engine-runtime-dirs.md) — the `_ignore/` pocket law: what in a tool's dotdir is committed and what never is
 - [History](history.md) — how git-lex remembers everything that ever changed
 - [Querying](queries.md) — SPARQL over your repo, with worked examples
 - [Serve & visualize](serve-and-viz.md) — the local web view and SPARQL endpoint
