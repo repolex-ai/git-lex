@@ -465,9 +465,18 @@ pub(crate) fn cmd_validate() -> bool {
 // re-running extractors.
 
 /// Combined extraction + validation, called by the pre-commit hook.
-/// Runs sidecar cleanup, frontmatter extraction, markdown link extraction,
-/// stages artifacts, then SHACL validates. Exits non-zero if anything fails.
+/// Stamps machine-maintained dates, runs sidecar cleanup, frontmatter
+/// extraction, markdown link extraction, stages artifacts, then SHACL
+/// validates. Exits non-zero if anything fails.
 pub(crate) fn hook_pre_commit() {
+    // Phase 0: machine-maintained dates (git-lex:dateUpdated, Rob-ruled
+    // 2026-08-26). BEFORE extraction, so the stamped value reaches the
+    // sidecar and both land in the same commit. Lives in the hook, not in
+    // cmd_save, so `git lex save` and a plain `git commit` behave
+    // identically — one door's documents must not date-drift from the
+    // other's.
+    stamp_dates_for_staged_changes();
+
     // Phase 1: extraction
     cmd_extract();
 
@@ -498,6 +507,206 @@ pub(crate) fn hook_pre_commit() {
     if !cmd_validate() {
         exit(1);
     }
+}
+
+/// Stamp `<kit>.<Class>.dateUpdated: <today>` into every staged
+/// modified/renamed .md document, and `dateCreated` too on staged NEW
+/// documents (first save: dateCreated = dateUpdated — Rob's rule). The
+/// property is declared "Maintained by git-lex on save — do not hand-edit",
+/// and this is the maintenance.
+///
+/// Quiet skips, in order: templates (`__Class.md` is kit scaffold, not a
+/// document); files with no git-lex frontmatter key (README and friends);
+/// classes whose kit does not declare `dateUpdated` (stamping an undeclared
+/// key would trip the save gate's own warning). Existing `dateCreated`
+/// values on modified files are never touched — "set once at birth."
+///
+/// Stamped files are re-staged so the commit carries the stamped bytes.
+fn stamp_dates_for_staged_changes() {
+    let Some(today) = local_date_today() else { return };
+
+    let out = Command::new("git")
+        .args(["diff", "--cached", "--name-status", "-M", "--", "*.md"])
+        .output();
+    let Ok(out) = out else { return };
+    let listing = String::from_utf8_lossy(&out.stdout).to_string();
+
+    // Lazy per-kit map of Class → declared property names, so the declared
+    // gate costs one shapes parse per touched kit, not per file.
+    let mut kit_props: std::collections::HashMap<
+        String,
+        std::collections::HashMap<String, std::collections::HashSet<String>>,
+    > = std::collections::HashMap::new();
+
+    let mut stamped = 0usize;
+    let mut born = 0usize;
+    for line in listing.lines() {
+        let mut cols = line.split('\t');
+        let Some(status) = cols.next() else { continue };
+        // Rename rows carry two paths; the stamp goes on where the file IS.
+        let path = match status.chars().next() {
+            Some('A') | Some('M') => cols.next(),
+            Some('R') => cols.nth(1),
+            _ => None,
+        };
+        let Some(path) = path else { continue };
+        let path = std::path::Path::new(path);
+        if crate::nquad::is_template(path) {
+            continue;
+        }
+        let Ok(content) = std::fs::read_to_string(path) else { continue };
+        let Some(prefix) = frontmatter_kit_class(&content) else { continue };
+
+        // The declared gate: only stamp classes that carry the property
+        // (inherited from git-lex:Thing via the kit's shapes).
+        let (kit, class) = match prefix.split_once('.') {
+            Some(p) => p,
+            None => continue,
+        };
+        let declared = kit_props.entry(kit.to_string()).or_insert_with(|| {
+            crate::ontology::get_kit_types(kit)
+                .into_iter()
+                .map(|(class, props)| {
+                    (class, props.into_iter().map(|(name, _, _, _)| name).collect())
+                })
+                .collect()
+        });
+        let has_date_updated = declared
+            .get(class)
+            .is_some_and(|props: &std::collections::HashSet<String>| props.contains("dateUpdated"));
+        if !has_date_updated {
+            continue;
+        }
+
+        let is_new = status.starts_with('A');
+        if let Some(new_content) = stamp_frontmatter_dates(&content, &prefix, &today, is_new) {
+            if std::fs::write(path, &new_content).is_err() {
+                eprintln!("warning: could not stamp dateUpdated into {} — the \
+                           file commits undated", path.display());
+                continue;
+            }
+            let _ = Command::new("git")
+                .args(["add", "--"])
+                .arg(path)
+                .status();
+            stamped += 1;
+            if is_new {
+                born += 1;
+            }
+        }
+    }
+    if stamped > 0 {
+        if born > 0 {
+            println!("Dated: {} document(s) → dateUpdated {} ({} new → dateCreated too)",
+                stamped, today, born);
+        } else {
+            println!("Dated: {} document(s) → dateUpdated {}", stamped, today);
+        }
+    }
+}
+
+/// Today in the machine's local timezone, `YYYY-MM-DD` — same source init
+/// uses for repo.yml's created date. None (and no stamp) if the platform
+/// `date` is unavailable: never guess a date into a permanent record.
+fn local_date_today() -> Option<String> {
+    let out = Command::new("date").args(["+%Y-%m-%d"]).output().ok()?;
+    let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if s.len() == 10 { Some(s) } else { None }
+}
+
+/// The document's `<kit>.<Class>` key prefix, read from the first flat
+/// dot-notation key in its frontmatter. None when the file has no
+/// frontmatter or no such key — that file is not a git-lex document and
+/// is never stamped.
+fn frontmatter_kit_class(content: &str) -> Option<String> {
+    let mut lines = content.lines();
+    if lines.next()? != "---" {
+        return None;
+    }
+    for line in lines {
+        if line == "---" {
+            return None;
+        }
+        let trimmed = line.trim_start();
+        if trimmed.starts_with('#') {
+            continue;
+        }
+        let key = trimmed.split(':').next()?.trim();
+        let mut parts = key.split('.');
+        if let (Some(kit), Some(class), Some(_prop), None) =
+            (parts.next(), parts.next(), parts.next(), parts.next())
+        {
+            if !kit.is_empty()
+                && class.chars().next().is_some_and(|c| c.is_ascii_uppercase())
+            {
+                return Some(format!("{}.{}", kit, class));
+            }
+        }
+    }
+    None
+}
+
+/// Pure stamping: returns the new content, or None when nothing changes.
+/// A present key line is rewritten whole (`key: date` — the scaffold's
+/// teaching comment retires once the machine owns the value); an absent
+/// key is inserted just above the closing `---`, dateCreated before
+/// dateUpdated. `dateCreated` is written ONLY when `is_new`; a modified
+/// document's birth date is never touched, whatever it holds.
+fn stamp_frontmatter_dates(
+    content: &str,
+    kit_class: &str,
+    date: &str,
+    is_new: bool,
+) -> Option<String> {
+    let updated_key = format!("{}.dateUpdated", kit_class);
+    let created_key = format!("{}.dateCreated", kit_class);
+
+    let mut lines: Vec<String> = content.lines().map(str::to_string).collect();
+    if lines.first().map(String::as_str) != Some("---") {
+        return None;
+    }
+    let close = lines.iter().skip(1).position(|l| l == "---")? + 1;
+
+    let mut changed = false;
+    let mut found_updated = false;
+    let mut found_created = false;
+    for line in &mut lines[1..close] {
+        let key = line.trim_start().split(':').next().unwrap_or("").trim();
+        let (target, stamp_it) = if key == updated_key {
+            found_updated = true;
+            (&updated_key, true)
+        } else if key == created_key {
+            found_created = true;
+            (&created_key, is_new)
+        } else {
+            continue;
+        };
+        if stamp_it {
+            let stamped_line = format!("{}: {}", target, date);
+            if *line != stamped_line {
+                *line = stamped_line;
+                changed = true;
+            }
+        }
+    }
+    // Insert what's missing above the closing `---`, created before updated.
+    if !found_updated {
+        lines.insert(close, format!("{}: {}", updated_key, date));
+        changed = true;
+    }
+    if is_new && !found_created {
+        lines.insert(close, format!("{}: {}", created_key, date));
+        changed = true;
+    }
+    if !changed {
+        return None;
+    }
+    // lines() drops the trailing newline; every document ends with one.
+    let mut out = lines.join("\n");
+    if content.ends_with('\n') {
+        out.push('\n');
+    }
+    Some(out)
 }
 
 pub(crate) fn cmd_extract() {
@@ -743,5 +952,78 @@ pub(crate) fn cmd_extract() {
     if extraction_errors > 0 {
         eprintln!("fatal: {} frontmatter error(s) — fix before committing", extraction_errors);
         std::process::exit(1);
+    }
+}
+
+#[cfg(test)]
+mod date_stamp_tests {
+    use super::{frontmatter_kit_class, stamp_frontmatter_dates};
+
+    const DOC: &str = "---\n\
+type: Journal\n\
+# a teaching comment line\n\
+soul.Journal.journalId: \"day-9\"\n\
+soul.Journal.dateCreated: 2026-08-01\n\
+soul.Journal.dateUpdated: 2026-08-01\n\
+---\n\
+\n\
+# day-9\n\
+\n\
+body text stays byte-identical\n";
+
+    #[test]
+    fn kit_class_prefix_reads_first_dot_key() {
+        assert_eq!(frontmatter_kit_class(DOC).as_deref(), Some("soul.Journal"));
+        assert_eq!(frontmatter_kit_class("no frontmatter\n"), None);
+        assert_eq!(frontmatter_kit_class("---\ntitle: x\n---\n"), None);
+    }
+
+    #[test]
+    fn modified_doc_gets_date_updated_only() {
+        let out = stamp_frontmatter_dates(DOC, "soul.Journal", "2026-08-26", false).unwrap();
+        assert!(out.contains("soul.Journal.dateUpdated: 2026-08-26"));
+        // Birth date untouched — "set once at birth."
+        assert!(out.contains("soul.Journal.dateCreated: 2026-08-01"));
+        assert!(out.ends_with("body text stays byte-identical\n"));
+    }
+
+    #[test]
+    fn new_doc_gets_both_dates_equal() {
+        let out = stamp_frontmatter_dates(DOC, "soul.Journal", "2026-08-26", true).unwrap();
+        assert!(out.contains("soul.Journal.dateCreated: 2026-08-26"));
+        assert!(out.contains("soul.Journal.dateUpdated: 2026-08-26"));
+    }
+
+    #[test]
+    fn scaffolded_empty_value_with_comment_is_rewritten_whole() {
+        let doc = "---\n\
+soul.Journal.journalId: \"x\"\n\
+soul.Journal.dateUpdated: \"\"  # Maintained by git-lex on save — do not hand-edit.\n\
+---\nbody\n";
+        let out = stamp_frontmatter_dates(doc, "soul.Journal", "2026-08-26", false).unwrap();
+        assert!(out.contains("soul.Journal.dateUpdated: 2026-08-26\n"));
+        assert!(!out.contains("Maintained by git-lex"), "the teaching comment retires");
+    }
+
+    #[test]
+    fn absent_keys_are_inserted_above_the_close_created_first() {
+        let doc = "---\nsoul.Note.noteId: \"n\"\n---\nbody\n";
+        let out = stamp_frontmatter_dates(doc, "soul.Note", "2026-08-26", true).unwrap();
+        let created = out.find("soul.Note.dateCreated: 2026-08-26").unwrap();
+        let updated = out.find("soul.Note.dateUpdated: 2026-08-26").unwrap();
+        let close = out.rfind("---").unwrap();
+        assert!(created < updated && updated < close);
+        assert!(out.ends_with("---\nbody\n"));
+    }
+
+    #[test]
+    fn already_stamped_today_is_a_no_op() {
+        let doc = "---\nsoul.Note.noteId: \"n\"\nsoul.Note.dateUpdated: 2026-08-26\n---\nbody\n";
+        assert_eq!(stamp_frontmatter_dates(doc, "soul.Note", "2026-08-26", false), None);
+    }
+
+    #[test]
+    fn no_frontmatter_is_never_stamped() {
+        assert_eq!(stamp_frontmatter_dates("# plain md\n", "soul.Note", "2026-08-26", false), None);
     }
 }

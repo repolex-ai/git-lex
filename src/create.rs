@@ -327,15 +327,15 @@ pub(crate) fn cmd_create(doctype: &str, instance_id: Option<&str>, json: bool) {
         }
         println!("Created: {}", display_path);
         // Class-level annotations, one lookup for both: the rdfs:comment
-        // rides the Type line (the sentence saying what this class IS),
-        // the authoringGuidance prints as a block below. Terminal-only —
-        // the created DOCUMENT is not a delivery surface (ruled in the
-        // property's own declaration; the same text lands permanently in
-        // the class's __<Class>.md template), and --json keeps its shape.
+        // prints as plain text (no "Type:" label — Rob, 2026-08-26: "just
+        // print the text"), the authoringGuidance as a block below.
+        // Terminal-only — the created DOCUMENT is not a delivery surface
+        // (ruled in the property's own declaration; the same text lands
+        // permanently in the class's __<Class>.md template), and --json
+        // keeps its shape.
         let authoring = ontology::get_class_authoring(&kit, &class_name);
-        match &authoring.comment {
-            Some(c) => println!("Type: {}:{} — {}", short, class_name, c),
-            None => println!("Type: {}:{}", short, class_name),
+        if let Some(c) = &authoring.comment {
+            println!("{}", c);
         }
         // Name the required-but-empty fields so "fill in required
         // frontmatter" means something without opening the file. The classId
