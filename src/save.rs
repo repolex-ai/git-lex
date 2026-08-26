@@ -523,7 +523,30 @@ pub(crate) fn hook_pre_commit() {
 ///
 /// Stamped files are re-staged so the commit carries the stamped bytes.
 fn stamp_dates_for_staged_changes() {
-    let Some(today) = local_date_today() else { return };
+    // BOTH-SHAPES WINDOW (Rob-ruled 2026-08-26, both date props →
+    // xsd:dateTime): the stamp emits whichever form the INSTALLED ontology
+    // declares — plain date under the old kit, full timestamp under the
+    // new — so deploy order per repo can never produce a value its own
+    // shapes reject. The fleet converges one kit-update at a time; no
+    // flag day.
+    let datetime_declared = installed_dates_are_datetime();
+    let stamp_value = if datetime_declared {
+        local_datetime_now()
+    } else {
+        local_date_today()
+    };
+    let Some(today) = stamp_value else { return };
+
+    // TRANSITIONAL converge, once per machine per repo: the moment the
+    // installed ontology declares dateTime, every existing plain-date
+    // value upgrades — dateCreated from the file's FIRST commit
+    // timestamp, dateUpdated from its LAST. Git already holds the honest
+    // instants; no midnight is ever fabricated. Marker-gated in the
+    // _ignore pocket; delete the marker to force a re-scan. Dies in
+    // ship-prep once the fleet is clean.
+    if datetime_declared {
+        converge_plain_dates_once();
+    }
 
     let out = Command::new("git")
         .args(["diff", "--cached", "--name-status", "-M", "--", "*.md"])
@@ -612,6 +635,195 @@ fn local_date_today() -> Option<String> {
     let out = Command::new("date").args(["+%Y-%m-%d"]).output().ok()?;
     let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
     if s.len() == 10 { Some(s) } else { None }
+}
+
+/// Now, ISO-8601 with the machine's UTC offset (`2026-08-26T14:32:05-07:00`)
+/// — a valid xsd:dateTime. Same never-guess contract as the date form.
+fn local_datetime_now() -> Option<String> {
+    let out = Command::new("date").args(["-Iseconds"]).output().ok()?;
+    let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if s.len() >= 19 && s.as_bytes().get(10) == Some(&b'T') { Some(s) } else { None }
+}
+
+/// Does the INSTALLED git-lex ontology declare the date properties as
+/// xsd:dateTime? Real parse + ASK against `.lex/ontology/git-lex/git-lex.ttl`
+/// — the file kit-update maintains, which makes it the per-repo switch for
+/// the date→dateTime transition. False on any doubt (missing file, parse
+/// failure, old declaration): doubt means stamp the old form, which the
+/// old shapes accept.
+fn installed_dates_are_datetime() -> bool {
+    let Some(root) = git_lex::find_git_root() else { return false };
+    let path = root.join(".lex").join("ontology").join("git-lex").join("git-lex.ttl");
+    let Ok(content) = std::fs::read_to_string(&path) else { return false };
+    let Ok(store) = crate::kit::load_ttl_str(&content, "git-lex ontology") else { return false };
+    matches!(
+        git_lex::eval_query(
+            &store,
+            "ASK { <https://repolex.ai/ontology/git-lex/dateUpdated> \
+                   <http://www.w3.org/2000/01/rdf-schema#range> \
+                   <http://www.w3.org/2001/XMLSchema#dateTime> }",
+        ),
+        Ok(oxigraph::sparql::QueryResults::Boolean(true))
+    )
+}
+
+/// TRANSITIONAL (dies in ship-prep): upgrade every tracked document's
+/// plain-date `dateCreated`/`dateUpdated` values to full timestamps
+/// derived from git's own record — first-commit time for dateCreated,
+/// last-commit time for dateUpdated. Runs once per machine per repo
+/// (marker in the `_ignore` pocket), and only after the installed
+/// ontology declares dateTime. Prints every file it touches; stages what
+/// it rewrites so the upgrade rides the commit that triggered it.
+fn converge_plain_dates_once() {
+    let Some(root) = git_lex::find_git_root() else { return };
+    let marker = root.join(".lex").join("_ignore").join("dates-converged");
+    if marker.exists() {
+        return;
+    }
+    let Ok(ls) = Command::new("git").args(["ls-files", "--", "*.md"]).output() else { return };
+    let mut converged: Vec<String> = Vec::new();
+    for rel in String::from_utf8_lossy(&ls.stdout).lines() {
+        let path = root.join(rel);
+        if crate::nquad::is_template(&path) {
+            continue;
+        }
+        let Ok(content) = std::fs::read_to_string(&path) else { continue };
+        let Some(prefix) = frontmatter_kit_class(&content) else { continue };
+        if !has_plain_date_value(&content, &prefix) {
+            continue;
+        }
+        // git's instants for this file (%aI = strict ISO author time) —
+        // corroboration evidence, not automatic truth. tr1p's receipt
+        // (0.13.0 changelog): first-commit records REPO-ENTRY, not
+        // authorship — his April-written memories first-committed at the
+        // August migration. So dateCreated keeps the authored day unless
+        // git corroborates it (same day → git's full instant; different
+        // day → authored day + T00:00:00, timezone-less: the day is the
+        // truth, the instant is honestly unknown). dateUpdated takes
+        // git's last-commit instant unconditionally — "last changed" IS
+        // what git's last commit records.
+        let first = git_file_time(rel, true);
+        let last = git_file_time(rel, false);
+        if let Some(new_content) = upgrade_plain_dates(&content, &prefix, first.as_deref(), last.as_deref()) {
+            if std::fs::write(&path, &new_content).is_ok() {
+                let _ = Command::new("git").args(["add", "--"]).arg(&path).status();
+                converged.push(rel.to_string());
+            }
+        }
+    }
+    if !converged.is_empty() {
+        println!(
+            "Converged {} document(s) to timestamp dates (derived from git history):",
+            converged.len()
+        );
+        for f in &converged {
+            println!("  {}", f);
+        }
+    }
+    if let Some(p) = marker.parent() {
+        let _ = std::fs::create_dir_all(p);
+    }
+    let _ = std::fs::write(&marker, "date->dateTime converge ran\n");
+}
+
+/// First (`--diff-filter=A`) or last author timestamp of a file, ISO-8601.
+fn git_file_time(rel: &str, first: bool) -> Option<String> {
+    let out = if first {
+        Command::new("git")
+            .args(["log", "--diff-filter=A", "--follow", "--format=%aI", "--", rel])
+            .output()
+            .ok()?
+    } else {
+        Command::new("git")
+            .args(["log", "-1", "--format=%aI", "--", rel])
+            .output()
+            .ok()?
+    };
+    let text = String::from_utf8_lossy(&out.stdout);
+    let line = if first { text.lines().last() } else { text.lines().next() };
+    line.map(str::trim).filter(|s| !s.is_empty()).map(str::to_string)
+}
+
+/// Does the frontmatter hold a PLAIN-DATE value (10 chars, no `T`) on
+/// either machine-maintained date key?
+fn has_plain_date_value(content: &str, kit_class: &str) -> bool {
+    for key in [format!("{}.dateCreated", kit_class), format!("{}.dateUpdated", kit_class)] {
+        if plain_date_line_value(content, &key).is_some() {
+            return true;
+        }
+    }
+    false
+}
+
+fn plain_date_line_value(content: &str, key: &str) -> Option<String> {
+    for line in content.lines() {
+        let t = line.trim_start();
+        if let Some(rest) = t.strip_prefix(key) {
+            if let Some(v) = rest.strip_prefix(':') {
+                let v = v.split('#').next().unwrap_or("").trim().trim_matches('"');
+                if v.len() == 10 && v.as_bytes()[4] == b'-' && !v.contains('T') {
+                    return Some(v.to_string());
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Pure upgrade of plain-date values to timestamps. dateCreated is
+/// corroborate-or-preserve: git's first-commit instant only when its DAY
+/// matches the authored day; otherwise the authored day extends to a
+/// timezone-less midnight (`YYYY-MM-DDT00:00:00` — valid xsd:dateTime;
+/// the day is authored truth, the instant honestly unknown, and git's
+/// first-commit day on a migrated file is the migration, not the birth).
+/// dateUpdated takes git's last-commit instant — that IS "last changed".
+/// A key whose derivation is unavailable keeps its old value. None =
+/// nothing changed.
+fn upgrade_plain_dates(
+    content: &str,
+    kit_class: &str,
+    first_ts: Option<&str>,
+    last_ts: Option<&str>,
+) -> Option<String> {
+    let created_key = format!("{}.dateCreated", kit_class);
+    let updated_key = format!("{}.dateUpdated", kit_class);
+    let created_val = plain_date_line_value(content, &created_key);
+    let updated_val = plain_date_line_value(content, &updated_key);
+    let created_new = created_val.as_deref().map(|day| {
+        match first_ts {
+            Some(ts) if ts.starts_with(day) => ts.to_string(),
+            _ => format!("{}T00:00:00", day),
+        }
+    });
+    let updated_new = updated_val.as_deref().and_then(|_| last_ts.map(str::to_string));
+
+    let mut changed = false;
+    let mut out_lines: Vec<String> = Vec::new();
+    for line in content.lines() {
+        let t = line.trim_start();
+        let replacement = if t.starts_with(&created_key) && created_val.is_some() {
+            created_new.as_ref().map(|ts| format!("{}: {}", created_key, ts))
+        } else if t.starts_with(&updated_key) && updated_val.is_some() {
+            updated_new.as_ref().map(|ts| format!("{}: {}", updated_key, ts))
+        } else {
+            None
+        };
+        match replacement {
+            Some(new_line) if new_line != *line => {
+                out_lines.push(new_line);
+                changed = true;
+            }
+            _ => out_lines.push(line.to_string()),
+        }
+    }
+    if !changed {
+        return None;
+    }
+    let mut out = out_lines.join("\n");
+    if content.ends_with('\n') {
+        out.push('\n');
+    }
+    Some(out)
 }
 
 /// The document's `<kit>.<Class>` key prefix, read from the first flat
@@ -1025,5 +1237,72 @@ soul.Journal.dateUpdated: \"\"  # Maintained by git-lex on save — do not hand-
     #[test]
     fn no_frontmatter_is_never_stamped() {
         assert_eq!(stamp_frontmatter_dates("# plain md\n", "soul.Note", "2026-08-26", false), None);
+    }
+}
+
+#[cfg(test)]
+mod date_converge_tests {
+    use super::upgrade_plain_dates;
+
+    fn doc(created: &str, updated: &str) -> String {
+        format!(
+            "---\nsoul.Note.noteId: \"n\"\nsoul.Note.dateCreated: {created}\nsoul.Note.dateUpdated: {updated}\n---\nbody\n"
+        )
+    }
+
+    #[test]
+    fn corroborated_day_takes_gits_full_instant() {
+        let d = doc("2026-08-02", "2026-08-25");
+        let out = upgrade_plain_dates(
+            &d, "soul.Note",
+            Some("2026-08-02T09:14:33-07:00"),
+            Some("2026-08-25T21:03:12-07:00"),
+        ).unwrap();
+        assert!(out.contains("soul.Note.dateCreated: 2026-08-02T09:14:33-07:00"));
+        assert!(out.contains("soul.Note.dateUpdated: 2026-08-25T21:03:12-07:00"));
+    }
+
+    /// tr1p's receipt (kit-base 0.13.0 changelog): a memory WRITTEN
+    /// 2026-04-04 but first-committed at the 2026-08-02 migration. The
+    /// authored day is the truth; git's first-commit day is the artifact.
+    /// Preserve the day, never replace it with the migration date.
+    #[test]
+    fn migrated_file_keeps_its_authored_day() {
+        let d = doc("2026-04-04", "2026-08-25");
+        let out = upgrade_plain_dates(
+            &d, "soul.Note",
+            Some("2026-08-02T09:14:33-07:00"),
+            Some("2026-08-25T21:03:12-07:00"),
+        ).unwrap();
+        assert!(out.contains("soul.Note.dateCreated: 2026-04-04T00:00:00"),
+            "authored day must survive:\n{out}");
+        assert!(!out.contains("2026-08-02"), "migration day must NOT replace the birth:\n{out}");
+    }
+
+    #[test]
+    fn already_datetime_values_are_untouched() {
+        let d = doc("2026-04-04T00:00:00", "2026-08-25T21:03:12-07:00");
+        assert_eq!(
+            upgrade_plain_dates(&d, "soul.Note", Some("2026-08-02T09:14:33-07:00"), Some("2026-08-26T01:00:00-07:00")),
+            None,
+            "no plain-date values means nothing to converge"
+        );
+    }
+
+    #[test]
+    fn unavailable_derivation_keeps_old_values() {
+        let d = doc("2026-04-04", "2026-08-25");
+        let out = upgrade_plain_dates(&d, "soul.Note", None, None).unwrap();
+        // created still upgrades (day-preserving needs no git evidence)…
+        assert!(out.contains("soul.Note.dateCreated: 2026-04-04T00:00:00"));
+        // …but updated has no honest instant without git — old value stays.
+        assert!(out.contains("soul.Note.dateUpdated: 2026-08-25\n"));
+    }
+
+    #[test]
+    fn body_survives_byte_for_byte() {
+        let d = doc("2026-04-04", "2026-08-25");
+        let out = upgrade_plain_dates(&d, "soul.Note", None, Some("2026-08-26T01:00:00-07:00")).unwrap();
+        assert!(out.ends_with("---\nbody\n"));
     }
 }
