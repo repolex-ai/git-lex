@@ -239,11 +239,26 @@ garden.Plant.livesInBedId: <garden/Bed/south-wall>
 No warning. The reference simply points at an address nothing describes, and
 every query that joins on it silently returns nothing.
 
-**So: naming the exact class feels more correct and is the riskier choice.** Use
-Lane B when the target is genuinely always one class in your own kit and the
-terse value is worth it. Use `git-lex:Thing` otherwise — and always for anything
-in the `relatedTo…Id` family, which is a stack-wide convention that the value is
-a bracketed address.
+**So: naming the exact class feels more correct and is the riskier choice** — not
+because Lane B is wrong, but because choosing it commits your authors to the bare
+form, and a bracketed value typed into it fails silently instead of loudly.
+
+Which lane to pick:
+
+- **Use Lane A (`git-lex:Thing`) when the target could be anything** — any class,
+  any kit. `relatedToId` itself is the type case. Values are bracketed addresses.
+- **Use Lane B (a concrete class) when the target is always one known class**, and
+  you want a dangling reference to fail **at save**. The declared range is what
+  makes that check possible: git-lex derives the full IRI from the range plus the
+  bare id, so a target that doesn't exist is caught rather than stored.
+
+Both are in live use. `soul:relatedToPursuitId` is Lane A; copia's
+`relatedToScenarioId` / `relatedToPlaceId` / `relatedToBeingId` are Lane B. If
+you are adding a typed `relatedTo<Class>Id`, **ask Rob which lane before you
+declare it** — the two kits currently differ, and the reconciliation is his.
+
+What is *not* in dispute is the mechanism: the range you declare picks the lane,
+by exact match, and the author has to write the matching form.
 
 The naming rule, stack-wide:
 
