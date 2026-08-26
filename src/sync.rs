@@ -686,18 +686,23 @@ fn sync_onegraph_phase(store: &Store, root: &std::path::Path, resume_sha: Option
     // Structural integrity (runs EVERY build): each SpoEvent has exactly one
     // statement (rdf:reifies) and exactly one direction. A violation means a
     // 16-hex id collision or an emitter bug — LOUD, never silently deduped.
+    // Aggregate arms (2026-08-26 rewrite; oracle in integrity_query_tests):
+    // "more than one X" as GROUP BY ?e HAVING(COUNT > 1) instead of a
+    // pairwise self-join per arm — same COUNT(DISTINCT ?e), one scan per
+    // arm. The store dedups quads, so COUNT(?t) counts DISTINCT objects by
+    // construction.
     let integrity = format!(
-        "SELECT (COUNT(DISTINCT ?e) AS ?bad) WHERE {{ GRAPH <{}> {{ \
-           {{ ?e <https://repolex.ai/ontology/git-lex/assertedIn> ?a ; \
-                <https://repolex.ai/ontology/git-lex/retractedIn> ?r }} \
+        "SELECT (COUNT(DISTINCT ?e) AS ?bad) WHERE {{ \
+           {{ GRAPH <{g}> {{ ?e <https://repolex.ai/ontology/git-lex/assertedIn> ?a ; \
+                             <https://repolex.ai/ontology/git-lex/retractedIn> ?r }} }} \
            UNION \
-           {{ ?e <http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies> ?t1 , ?t2 . FILTER(?t1 != ?t2) }} \
+           {{ SELECT ?e WHERE {{ GRAPH <{g}> {{ ?e <http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies> ?t }} }} GROUP BY ?e HAVING(COUNT(?t) > 1) }} \
            UNION \
-           {{ ?e <https://repolex.ai/ontology/git-lex/assertedIn> ?c1 , ?c2 . FILTER(?c1 != ?c2) }} \
+           {{ SELECT ?e WHERE {{ GRAPH <{g}> {{ ?e <https://repolex.ai/ontology/git-lex/assertedIn> ?c }} }} GROUP BY ?e HAVING(COUNT(?c) > 1) }} \
            UNION \
-           {{ ?e <https://repolex.ai/ontology/git-lex/retractedIn> ?d1 , ?d2 . FILTER(?d1 != ?d2) }} \
-        }} }}",
-        spo_events::LEXHISTORY_GRAPH_IRI
+           {{ SELECT ?e WHERE {{ GRAPH <{g}> {{ ?e <https://repolex.ai/ontology/git-lex/retractedIn> ?d }} }} GROUP BY ?e HAVING(COUNT(?d) > 1) }} \
+        }}",
+        g = spo_events::LEXHISTORY_GRAPH_IRI
     );
     // The check itself failing to run is ALSO a failure — an unverified graph
     // must not report a successful sync (`unwrap_or(0)` here used to turn a
@@ -740,19 +745,27 @@ fn sync_onegraph_phase(store: &Store, root: &std::path::Path, resume_sha: Option
             _ => None,
         }
     };
+    // DISTINCT-first (2026-08-26 rewrite; oracle in coherence_query_tests):
+    // the NOT EXISTS probe runs once per DISTINCT commit (~2k) instead of
+    // once per event binding (~265k on lUX).
     let dangling = count_q(
-        "SELECT (COUNT(DISTINCT ?c) AS ?n) WHERE { \
-           GRAPH <https://repolex.ai/git-lex/LexHistoryGraph> { \
-             { ?e <https://repolex.ai/ontology/git-lex/assertedIn> ?c } UNION \
-             { ?e <https://repolex.ai/ontology/git-lex/retractedIn> ?c } } \
+        "SELECT (COUNT(*) AS ?n) WHERE { \
+           { SELECT DISTINCT ?c WHERE { \
+               GRAPH <https://repolex.ai/git-lex/LexHistoryGraph> { \
+                 { ?e <https://repolex.ai/ontology/git-lex/assertedIn> ?c } UNION \
+                 { ?e <https://repolex.ai/ontology/git-lex/retractedIn> ?c } } } } \
            FILTER NOT EXISTS { GRAPH <https://repolex.ai/git-lex/NamedGraph/commits> { ?c ?p ?o } } \
         }",
     );
+    // MINUS anti-join (2026-08-26 rewrite; oracle in coherence_query_tests):
+    // one hash anti-join on ?s instead of a correlated NOT EXISTS probe per
+    // triple (479k on lUX). Equivalent because the right side binds exactly
+    // the shared ?s and nothing else.
     let base_count = count_q(
         "SELECT (COUNT(*) AS ?n) WHERE { GRAPH <https://repolex.ai/git-lex/LexHistoryGraph> { \
            ?s ?p ?o . \
-           FILTER NOT EXISTS { ?s a <https://repolex.ai/ontology/git-lex/SpoEvent> } \
-           FILTER(?p != <http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies>) } }",
+           FILTER(?p != <http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies>) \
+           MINUS { ?s a <https://repolex.ai/ontology/git-lex/SpoEvent> } } }",
     );
     let derived_count = count_q(DERIVED_COUNT_Q);
     match (dangling, base_count, derived_count) {
@@ -966,5 +979,157 @@ SELECT (COUNT(DISTINCT ?tt) AS ?n) WHERE { \
     #[test]
     fn retract_without_assert_is_not_live() {
         assert_agree(&[("1", "r", 2)], 0);
+    }
+}
+
+#[cfg(test)]
+mod coherence_query_tests {
+    use oxigraph::io::RdfFormat;
+    use oxigraph::store::Store;
+    use std::io::Cursor;
+
+    const LH: &str = "https://repolex.ai/git-lex/LexHistoryGraph";
+    const CG: &str = "https://repolex.ai/git-lex/NamedGraph/commits";
+    const GL: &str = "https://repolex.ai/ontology/git-lex/";
+    const RDF: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#";
+
+    /// The three formulations replaced 2026-08-26, kept as ORACLES —
+    /// every fixture asserts new == old (same discipline as
+    /// derived_count_tests; the rewrite is proved, not pinned to numbers).
+    fn old_dangling() -> String {
+        format!(
+            "SELECT (COUNT(DISTINCT ?c) AS ?n) WHERE {{ GRAPH <{LH}> {{ \
+               {{ ?e <{GL}assertedIn> ?c }} UNION {{ ?e <{GL}retractedIn> ?c }} }} \
+               FILTER NOT EXISTS {{ GRAPH <{CG}> {{ ?c ?p ?o }} }} }}"
+        )
+    }
+    fn new_dangling() -> String {
+        format!(
+            "SELECT (COUNT(*) AS ?n) WHERE {{ \
+               {{ SELECT DISTINCT ?c WHERE {{ GRAPH <{LH}> {{ \
+                    {{ ?e <{GL}assertedIn> ?c }} UNION {{ ?e <{GL}retractedIn> ?c }} }} }} }} \
+               FILTER NOT EXISTS {{ GRAPH <{CG}> {{ ?c ?p ?o }} }} }}"
+        )
+    }
+    fn old_base() -> String {
+        format!(
+            "SELECT (COUNT(*) AS ?n) WHERE {{ GRAPH <{LH}> {{ ?s ?p ?o . \
+               FILTER NOT EXISTS {{ ?s a <{GL}SpoEvent> }} \
+               FILTER(?p != <{RDF}reifies>) }} }}"
+        )
+    }
+    fn new_base() -> String {
+        format!(
+            "SELECT (COUNT(*) AS ?n) WHERE {{ GRAPH <{LH}> {{ ?s ?p ?o . \
+               FILTER(?p != <{RDF}reifies>) \
+               MINUS {{ ?s a <{GL}SpoEvent> }} }} }}"
+        )
+    }
+    fn old_integrity() -> String {
+        format!(
+            "SELECT (COUNT(DISTINCT ?e) AS ?bad) WHERE {{ GRAPH <{LH}> {{ \
+               {{ ?e <{GL}assertedIn> ?a ; <{GL}retractedIn> ?r }} UNION \
+               {{ ?e <{RDF}reifies> ?t1 , ?t2 . FILTER(?t1 != ?t2) }} UNION \
+               {{ ?e <{GL}assertedIn> ?c1 , ?c2 . FILTER(?c1 != ?c2) }} UNION \
+               {{ ?e <{GL}retractedIn> ?d1 , ?d2 . FILTER(?d1 != ?d2) }} }} }}"
+        )
+    }
+    fn new_integrity() -> String {
+        format!(
+            "SELECT (COUNT(DISTINCT ?e) AS ?bad) WHERE {{ \
+               {{ GRAPH <{LH}> {{ ?e <{GL}assertedIn> ?a ; <{GL}retractedIn> ?r }} }} UNION \
+               {{ SELECT ?e WHERE {{ GRAPH <{LH}> {{ ?e <{RDF}reifies> ?t }} }} GROUP BY ?e HAVING(COUNT(?t) > 1) }} UNION \
+               {{ SELECT ?e WHERE {{ GRAPH <{LH}> {{ ?e <{GL}assertedIn> ?c }} }} GROUP BY ?e HAVING(COUNT(?c) > 1) }} UNION \
+               {{ SELECT ?e WHERE {{ GRAPH <{LH}> {{ ?e <{GL}retractedIn> ?d }} }} GROUP BY ?e HAVING(COUNT(?d) > 1) }} }}"
+        )
+    }
+
+    fn store_from(nq: &str) -> Store {
+        let store = Store::new().unwrap();
+        store.load_from_reader(RdfFormat::NQuads, Cursor::new(nq.as_bytes())).unwrap();
+        store
+    }
+
+    fn n(store: &Store, q: &str) -> u64 {
+        match git_lex::eval_query(store, q) {
+            Ok(oxigraph::sparql::QueryResults::Solutions(mut sols)) => sols
+                .next().and_then(|r| r.ok())
+                .and_then(|r| r.iter().next().map(|(_, t)| t.to_string()))
+                .and_then(|v| v.split('"').nth(1).and_then(|x| x.parse().ok()))
+                .expect("no count row"),
+            _ => panic!("query failed"),
+        }
+    }
+
+    fn agree(store: &Store, old: &str, new: &str, expected: u64, what: &str) {
+        let o = n(store, old);
+        let nw = n(store, new);
+        assert_eq!(nw, o, "{what}: rewrite disagrees with oracle");
+        assert_eq!(nw, expected, "{what}: wrong count");
+    }
+
+    #[test]
+    fn dangling_counts_only_commitless_commits() {
+        let nq = format!(
+            "<https://ex/e1> <{GL}assertedIn> <https://ex/c1> <{LH}> .\n\
+             <https://ex/e2> <{GL}retractedIn> <https://ex/cX> <{LH}> .\n\
+             <https://ex/e3> <{GL}assertedIn> <https://ex/cX> <{LH}> .\n\
+             <https://ex/c1> <{GL}git2/ordinalDerived> \"1\" <{CG}> .\n"
+        );
+        let s = store_from(&nq);
+        // cX referenced twice but counted ONCE; c1 present in commits → 0.
+        agree(&s, &old_dangling(), &new_dangling(), 1, "dangling");
+    }
+
+    #[test]
+    fn dangling_zero_when_all_commits_known() {
+        let nq = format!(
+            "<https://ex/e1> <{GL}assertedIn> <https://ex/c1> <{LH}> .\n\
+             <https://ex/c1> <{GL}git2/ordinalDerived> \"1\" <{CG}> .\n"
+        );
+        agree(&store_from(&nq), &old_dangling(), &new_dangling(), 0, "dangling-clean");
+    }
+
+    #[test]
+    fn base_count_excludes_event_triples_and_reifies() {
+        let nq = format!(
+            "<https://ex/doc> <https://ex/p> \"base fact\" <{LH}> .\n\
+             <https://ex/doc> <https://ex/q> \"another\" <{LH}> .\n\
+             <https://ex/e1> <{RDF}type> <{GL}SpoEvent> <{LH}> .\n\
+             <https://ex/e1> <{GL}assertedIn> <https://ex/c1> <{LH}> .\n\
+             <https://ex/e1> <{RDF}reifies> <<( <https://ex/doc> <https://ex/p> \"base fact\" )>> <{LH}> .\n"
+        );
+        // Only the two base facts count: event's own triples excluded by
+        // subject, reifies excluded by predicate.
+        agree(&store_from(&nq), &old_base(), &new_base(), 2, "base_count");
+    }
+
+    #[test]
+    fn integrity_arms_agree_and_dedup_the_violator() {
+        let nq = format!(
+            // eBoth: both directions (arm 1) AND two asserts (arm 3) — ONE event.
+            "<https://ex/eBoth> <{GL}assertedIn> <https://ex/c1> <{LH}> .\n\
+             <https://ex/eBoth> <{GL}assertedIn> <https://ex/c2> <{LH}> .\n\
+             <https://ex/eBoth> <{GL}retractedIn> <https://ex/c1> <{LH}> .\n\
+             # eTwoReify: two different statements (arm 2).\n\
+             <https://ex/eTwoReify> <{RDF}reifies> <<( <https://ex/s1> <https://ex/p> \"a\" )>> <{LH}> .\n\
+             <https://ex/eTwoReify> <{RDF}reifies> <<( <https://ex/s2> <https://ex/p> \"b\" )>> <{LH}> .\n\
+             # eClean: one statement, one direction.\n\
+             <https://ex/eClean> <{RDF}reifies> <<( <https://ex/s3> <https://ex/p> \"c\" )>> <{LH}> .\n\
+             <https://ex/eClean> <{GL}assertedIn> <https://ex/c1> <{LH}> .\n"
+        );
+        // Two distinct violators; the double-violator counts once.
+        agree(&store_from(&nq), &old_integrity(), &new_integrity(), 2, "integrity");
+    }
+
+    #[test]
+    fn integrity_zero_on_clean_events() {
+        let nq = format!(
+            "<https://ex/e1> <{RDF}reifies> <<( <https://ex/s1> <https://ex/p> \"a\" )>> <{LH}> .\n\
+             <https://ex/e1> <{GL}assertedIn> <https://ex/c1> <{LH}> .\n\
+             <https://ex/e2> <{RDF}reifies> <<( <https://ex/s1> <https://ex/p> \"a\" )>> <{LH}> .\n\
+             <https://ex/e2> <{GL}retractedIn> <https://ex/c2> <{LH}> .\n"
+        );
+        agree(&store_from(&nq), &old_integrity(), &new_integrity(), 0, "integrity-clean");
     }
 }
