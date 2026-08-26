@@ -751,6 +751,52 @@ t:plainScore a owl:DatatypeProperty ;
 }
 
 #[cfg(test)]
+mod class_annotation_tests {
+    use super::*;
+
+    /// tr1p's pin (authoringGuidance review, 2026-08-24): an annotation ON A
+    /// CLASS has no business producing a `sh:property`, and "it didn't" is
+    /// worth a test rather than an assumption. The generator's property
+    /// discovery filters on owl:DatatypeProperty/owl:ObjectProperty; this
+    /// holds that line for git-lex:authoringGuidance and git-lex:foldered
+    /// (both owl:AnnotationProperty since kit-base 0.10.3).
+    #[test]
+    fn class_annotations_never_reach_the_shapes() {
+        let ttl = r###"
+@prefix owl:  <http://www.w3.org/2002/07/owl#> .
+@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+@prefix xsd:  <http://www.w3.org/2001/XMLSchema#> .
+@prefix t:    <https://repolex.ai/ontology/t/> .
+@prefix git-lex: <https://repolex.ai/ontology/git-lex/> .
+
+git-lex:foldered a owl:AnnotationProperty .
+git-lex:authoringGuidance a owl:AnnotationProperty ;
+    rdfs:domain owl:Class ;
+    rdfs:range xsd:string .
+
+t:Journal a owl:Class ;
+    git-lex:foldered true ;
+    git-lex:authoringGuidance """## Sections
+One line each.""" .
+
+t:journalId a owl:DatatypeProperty ;
+    rdfs:domain t:Journal ;
+    rdfs:range xsd:string .
+"###;
+        let store = crate::kit::load_ttl_str(ttl, "test").expect("ttl loads");
+        let out =
+            generate_shapes_from_store(&store, "t", "https://repolex.ai/ontology/t/", "test")
+                .expect("shapes generate");
+        assert!(out.contains("sh:path t:journalId"),
+            "the real property must still shape:\n{out}");
+        assert!(!out.contains("authoringGuidance"),
+            "class annotation leaked into the shapes:\n{out}");
+        assert!(!out.contains("foldered"),
+            "foldered leaked into the shapes:\n{out}");
+    }
+}
+
+#[cfg(test)]
 mod template_hint_tests {
     use super::*;
 

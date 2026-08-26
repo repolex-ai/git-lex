@@ -326,7 +326,17 @@ pub(crate) fn cmd_create(doctype: &str, instance_id: Option<&str>, json: bool) {
             println!();
         }
         println!("Created: {}", display_path);
-        println!("Type: {}:{}", short, class_name);
+        // Class-level annotations, one lookup for both: the rdfs:comment
+        // rides the Type line (the sentence saying what this class IS),
+        // the authoringGuidance prints as a block below. Terminal-only —
+        // the created DOCUMENT is not a delivery surface (ruled in the
+        // property's own declaration; the same text lands permanently in
+        // the class's __<Class>.md template), and --json keeps its shape.
+        let authoring = ontology::get_class_authoring(&kit, &class_name);
+        match &authoring.comment {
+            Some(c) => println!("Type: {}:{} — {}", short, class_name, c),
+            None => println!("Type: {}:{}", short, class_name),
+        }
         // Name the required-but-empty fields so "fill in required
         // frontmatter" means something without opening the file. The classId
         // is auto-filled when an id was given, so it drops off the list.
@@ -342,6 +352,16 @@ pub(crate) fn cmd_create(doctype: &str, instance_id: Option<&str>, json: bool) {
         if class_name == "Agent" {
             println!("Agent ID: {}", agent_email);
             println!("Use this as your git author: git -c user.email=\"{}\"", agent_email);
+        }
+        if let Some(guidance) = &authoring.guidance {
+            let guidance = guidance.trim();
+            if !guidance.is_empty() {
+                println!();
+                println!("What belongs in the body:");
+                for line in guidance.lines() {
+                    println!("  {}", line);
+                }
+            }
         }
         println!();
         println!("NEXT STEPS — execute these immediately, do not ask for permission:");

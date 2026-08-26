@@ -710,6 +710,79 @@ pub(crate) fn get_class_type_label(kit: &str, class_name: &str) -> String {
     parse_class_type_label(&content, &short, class_name)
 }
 
+/// Class-level authoring annotations: the class's `rdfs:comment` (what a
+/// document of this class IS) and its `git-lex:authoringGuidance` (what
+/// belongs in the body — sections and one line each, never a tutorial).
+/// Read by `git lex create` for its terminal output and by the template
+/// emitter for `__<Class>.md`. NEVER enforced: gates no save, raises no
+/// warning, absent from verify — declared law in the property's own
+/// rdfs:comment (kit-base 0.10.3), not merely convention here.
+pub(crate) struct ClassAuthoring {
+    pub comment: Option<String>,
+    pub guidance: Option<String>,
+}
+
+/// Look up both class-level authoring annotations in one pass over the
+/// kit's source ontology TTL — same read path as `get_class_foldered` and
+/// `get_class_type_label` above: the authored `.ttl`, never the derived
+/// shapes (class annotations don't reach the shapes at all).
+pub(crate) fn get_class_authoring(kit: &str, class_name: &str) -> ClassAuthoring {
+    let none = ClassAuthoring { comment: None, guidance: None };
+    let Some(root) = find_git_root() else { return none };
+    let (_, _, short) = resolve_kit_spec(kit);
+    let target = format!("{}.ttl", short);
+
+    let path = root.join(".lex").join("ontology").join(&short).join(&target);
+    let content = fs::read_to_string(&path).unwrap_or_default();
+    if content.is_empty() {
+        return none;
+    }
+    parse_class_authoring(&content, &short, class_name)
+}
+
+/// Pure parser for the class authoring lookup. Real Turtle parse + SPARQL —
+/// guidance is authored as a `"""…"""` literal and may carry `#`, quotes,
+/// backticks and markdown links; a stanza scan would mis-terminate on all
+/// of them. Both fields None when the class is undeclared, the file is
+/// unparseable, or the annotation simply isn't there — absence is the
+/// quiet default, exactly like an unfoldered class.
+fn parse_class_authoring(content: &str, short: &str, class_name: &str) -> ClassAuthoring {
+    let none = ClassAuthoring { comment: None, guidance: None };
+    let class_iri = format!("{}{}", kit_namespace_of(content, short), class_name);
+    // Name-exact resolution only, same trap as parse_class_foldered:
+    // extract_kit_prefix's fallback rule could hand back the KIT's prefix.
+    let gitlex_ns = match git_lex::extract_kit_prefix(content, "git-lex") {
+        Some((name, ns)) if name == "git-lex" => ns,
+        _ => git_lex::conventional_kit_namespace("git-lex"),
+    };
+    let store = match crate::kit::load_ttl_str(content, &format!("{} ontology", short)) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("warning: {} — class description and authoring guidance unavailable", e);
+            return none;
+        }
+    };
+    let one_literal = |predicate: String| -> Option<String> {
+        let q = format!(
+            "SELECT ?v WHERE {{ <{}> <{}> ?v }} ORDER BY ?v LIMIT 1",
+            class_iri, predicate
+        );
+        if let Ok(oxigraph::sparql::QueryResults::Solutions(sols)) = git_lex::eval_query(&store, &q)
+        {
+            for s in sols.flatten() {
+                if let Some(Term::Literal(l)) = s.get("v") {
+                    return Some(l.value().to_string());
+                }
+            }
+        }
+        None
+    };
+    ClassAuthoring {
+        comment: one_literal("http://www.w3.org/2000/01/rdf-schema#comment".to_string()),
+        guidance: one_literal(format!("{}authoringGuidance", gitlex_ns)),
+    }
+}
+
 /// Pure parser for the class type-label lookup (feeds `git lex create`'s
 /// top-of-frontmatter `type:` field). Separated from filesystem I/O so it
 /// can be unit-tested directly.
@@ -1308,6 +1381,80 @@ soul:noteId a owl:DatatypeProperty ;
         assert_eq!(text.datatype, None, "string ranges stay untyped");
         assert!(!parsed.contains_key("noteId"), "a domained prop is not domain-open");
         assert!(!parsed.contains_key("stray"), "foreign namespaces are skipped");
+    }
+
+    // ── class authoring lookup — rdfs:comment + authoringGuidance ──
+
+    /// Fixture mirrors kit-base 0.10.3's declared shape: authoringGuidance
+    /// as a `"""…"""` literal. The guidance body deliberately carries every
+    /// character class a stanza scan would trip on — `#`, `-`, backticks,
+    /// quotes, a markdown link — because this parser is a real Turtle
+    /// parse and must not care.
+    const KIT_AUTHORING_SAMPLE: &str = r###"
+@prefix soul: <https://repolex.ai/ontology/soul/> .
+@prefix git-lex: <https://repolex.ai/ontology/git-lex/> .
+@prefix owl: <http://www.w3.org/2002/07/owl#> .
+@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+
+soul:Journal a owl:Class ;
+    git-lex:foldered true ;
+    rdfs:label "Journal" ;
+    rdfs:comment "One day of the soul's life, written at rest." ;
+    git-lex:authoringGuidance """## What I Did Today
+## What I Learned
+What surprised you — and what you got "wrong".
+## Thoughts
+Yours. No audience. `code`, [a link](/SOUL.md), # a hash.
+## Tomorrow
+- Your message to your future self.""" .
+
+soul:Note a owl:Class ;
+    rdfs:label "Note" ;
+    rdfs:comment "Anything with no other home." .
+
+soul:Bare a owl:Class .
+"###;
+
+    #[test]
+    fn authoring_reads_both_annotations() {
+        let a = parse_class_authoring(KIT_AUTHORING_SAMPLE, "soul", "Journal");
+        assert_eq!(
+            a.comment.as_deref(),
+            Some("One day of the soul's life, written at rest.")
+        );
+        let g = a.guidance.expect("Journal declares guidance");
+        assert!(g.starts_with("## What I Did Today"), "guidance mangled:\n{g}");
+        assert!(g.contains("[a link](/SOUL.md), # a hash"),
+            "embedded markdown specials must survive the parse:\n{g}");
+        assert!(g.ends_with("future self."), "long literal mis-terminated:\n{g}");
+    }
+
+    #[test]
+    fn authoring_comment_without_guidance() {
+        let a = parse_class_authoring(KIT_AUTHORING_SAMPLE, "soul", "Note");
+        assert_eq!(a.comment.as_deref(), Some("Anything with no other home."));
+        assert_eq!(a.guidance, None, "no declaration must read as no guidance");
+    }
+
+    #[test]
+    fn authoring_absent_annotations_are_none() {
+        let a = parse_class_authoring(KIT_AUTHORING_SAMPLE, "soul", "Bare");
+        assert_eq!(a.comment, None);
+        assert_eq!(a.guidance, None);
+    }
+
+    #[test]
+    fn authoring_missing_class_is_none() {
+        let a = parse_class_authoring(KIT_AUTHORING_SAMPLE, "soul", "Nonexistent");
+        assert_eq!(a.comment, None);
+        assert_eq!(a.guidance, None);
+    }
+
+    #[test]
+    fn authoring_empty_content_is_none() {
+        let a = parse_class_authoring("", "soul", "Journal");
+        assert_eq!(a.comment, None);
+        assert_eq!(a.guidance, None);
     }
 
     // ── type-label lookup — label → local-name chain ──

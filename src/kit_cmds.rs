@@ -338,6 +338,19 @@ pub(crate) fn emit_class_templates(kit_name: &str, root: &std::path::Path, creat
             tmpl.push_str(&format!("{}: {}\n", key, comment.trim_start()));
         }
         tmpl.push_str("---\n");
+        // The class's authoringGuidance, as the template's BODY. This is the
+        // surface that matters most: an agent writing a document by hand —
+        // no `git lex create` in the loop — has this template and nothing
+        // else. Safe to carry markdown: `__` templates are never walked
+        // (nquad::is_template), so nothing here can reach the graph.
+        if let Some(guidance) = ontology::get_class_authoring(kit_name, type_name).guidance {
+            let guidance = guidance.trim();
+            if !guidance.is_empty() {
+                tmpl.push('\n');
+                tmpl.push_str(guidance);
+                tmpl.push('\n');
+            }
+        }
         // Count only what actually landed (review #54): a swallowed write
         // still counted, so "N template(s) regenerated" could be a lie —
         // leaving a stale __Class.md that scaffolds docs with retired keys.
@@ -1527,3 +1540,4 @@ mod update_scope_tests {
         let _ = fs::remove_dir_all(&root);
     }
 }
+
