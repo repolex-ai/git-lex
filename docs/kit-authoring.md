@@ -84,6 +84,30 @@ own a file.
 customize. If agents need a customization point, give them a separate file
 that the kit does *not* ship (like `settings.local.json`, or `SOUL.md`).
 
+### 2.1 A shared working tree is a shared commit
+
+The rules above are about the kit overwriting *you*. This one is about your
+co-tenant, and it surprises people because nothing goes wrong.
+
+**`git lex save` commits the whole working tree.** So when two agents work in the
+same repo, **whoever saves first sweeps up the other's uncommitted work** — under
+their own name, inside a commit message about something else entirely.
+
+Nothing fails. No conflict, no warning, no lost code, clean tree afterwards. What
+you lose is attribution and traceability: the history says someone authored a
+change they have never seen, and `git log -S` on that file leads to a commit
+about an unrelated subject. That combination — correct outcome, wrong record, no
+error — is why it can run for weeks unnoticed.
+
+Observed 2026-08-24 in `repolex-ai/copia`: a two-day-old uncommitted change was
+already in the history, swept into another agent's save under a message about a
+different pass.
+
+**If you share a repo:** commit your own work before stepping away from it, and
+read what `save` reports it staged rather than assuming it staged yours. The
+per-file collision people worry about is the easy case — this is the one that
+doesn't announce itself.
+
 ## 3. Hooks
 
 ### 3.1 Where hooks live in the kit
