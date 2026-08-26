@@ -724,6 +724,28 @@ pub(crate) fn generate_frontmatter_nquads_with(
     let extract_dir = root.join(".lex").join("extract");
     fs::create_dir_all(&extract_dir).ok();
 
+    // The walk cache (incremental-sync spec §4.3, Rob-approved 2026-08-26):
+    // per-file finished fragments keyed on CONTENT IDENTITY (working-tree
+    // blob hash + index blob hash), under a context hash that carries the
+    // two total gates — the installed ontology's bytes and the document
+    // existence set. Either gate trips → the context hash changes → the
+    // cache refuses to load → this run IS the full walk, which is exactly
+    // today's behavior. GIT_LEX_FULL_WALK=1 forces that path by hand.
+    let ctx_hash = crate::walkcache::context_hash(&root, files);
+    let force_full = std::env::var_os("GIT_LEX_FULL_WALK").is_some();
+    let mut cache = if force_full {
+        crate::walkcache::WalkCache::empty(&root, &ctx_hash)
+    } else {
+        crate::walkcache::WalkCache::load(&root, &ctx_hash)
+            .unwrap_or_else(|| crate::walkcache::WalkCache::empty(&root, &ctx_hash))
+    };
+    // The tampered-sidecar belt: a sidecar dirty in git while its source
+    // file is unchanged means the on-disk sidecar diverged from what the
+    // last commit pinned — send its source through the full pipeline so
+    // the sidecar write converges it. One `git status` for the whole run.
+    let forced_sources = dirty_sidecar_sources(&root);
+    let mut cache_hits: usize = 0;
+
     for filepath in files {
         // Unreadable docs are LOUD and counted (review #23): skipping one
         // bypasses the stale-sidecar removal below, so its existing sidecar
@@ -745,24 +767,44 @@ pub(crate) fn generate_frontmatter_nquads_with(
         let relpath = filepath.strip_prefix(&root).unwrap_or(filepath);
         let relpath_str = relpath.to_string_lossy().to_string();
 
-        // Get blob hash from git index (staging area). Feeds only the
-        // emitted text, so the no-nquads path skips the per-file index
-        // lookups entirely.
-        let blob_hash = if opts.build_nquads {
-            repo.as_ref().and_then(|r| {
-                if let Ok(index) = r.index() {
-                    if let Some(entry) = index.get_path(std::path::Path::new(&relpath_str), 0) {
-                        return Some(entry.id.to_string());
-                    }
+        // Blob hash from the git index (staging area) — feeds the emitted
+        // `git/blobHash` quad AND the cache identity, so it is computed on
+        // every path now (it is one index lookup; the cache it enables
+        // skips a YAML parse, a tree-sitter parse and the quad emission).
+        let blob_hash = repo.as_ref().and_then(|r| {
+            if let Ok(index) = r.index() {
+                if let Some(entry) = index.get_path(std::path::Path::new(&relpath_str), 0) {
+                    return Some(entry.id.to_string());
                 }
-                let head = r.head().ok()?;
-                let tree = head.peel_to_tree().ok()?;
-                let entry = tree.get_path(std::path::Path::new(&relpath_str)).ok()?;
-                Some(entry.id().to_string())
-            }).unwrap_or_default()
-        } else {
-            String::new()
-        };
+            }
+            let head = r.head().ok()?;
+            let tree = head.peel_to_tree().ok()?;
+            let entry = tree.get_path(std::path::Path::new(&relpath_str)).ok()?;
+            Some(entry.id().to_string())
+        }).unwrap_or_default();
+
+        // Cache hit: the file's bytes and index state are exactly what
+        // produced the stored fragment, and no belt forces it through.
+        // Its quads append verbatim; its sidecars are already right (same
+        // bytes → same extraction). Warnings for unchanged files go quiet
+        // until the file is next edited — deliberate; they fired at the
+        // save that introduced them and fire again on any change.
+        let bytes_hash = crate::walkcache::blob_hash_of(content.as_bytes());
+        if !force_full && !forced_sources.contains(&relpath_str) {
+            if let Some((frag, links)) =
+                cache.hit(&relpath_str, &bytes_hash, &blob_hash, opts.build_nquads)
+            {
+                cache_hits += 1;
+                total_links += links;
+                if opts.build_nquads {
+                    nq.push_str(&frag);
+                }
+                continue;
+            }
+        }
+        let file_errors_start = total_errors;
+        let file_nq_start = nq.len();
+        let mut file_links: usize = 0;
 
         // --- Frontmatter extraction ---
         // Only the YAML block is read here. The BODY is deliberately not
@@ -826,10 +868,11 @@ pub(crate) fn generate_frontmatter_nquads_with(
                     crate::extraction::extract_md_link_lines(
                         &tree, &content, &relpath_str, &md_index, &mut spo_lines,
                     );
+                    let mut md_lines: Vec<String> = spo_lines[fm_len..].to_vec();
+                    md_lines.sort();
+                    md_lines.dedup();
+                    file_links = md_lines.len();
                     if opts.write_sidecars {
-                        let mut md_lines: Vec<String> = spo_lines[fm_len..].to_vec();
-                        md_lines.sort();
-                        md_lines.dedup();
                         let md_path =
                             extract_dir.join(format!("{}.md.spo", relpath_str));
                         if !md_lines.is_empty() {
@@ -912,12 +955,33 @@ pub(crate) fn generate_frontmatter_nquads_with(
             );
         }
 
+        // Cache what this file produced — but NEVER a file whose extraction
+        // errored: errors must stay loud on every run, and a cached error
+        // would read as clean forever.
+        if total_errors == file_errors_start {
+            cache.store(
+                &relpath_str,
+                &bytes_hash,
+                &blob_hash,
+                &nq[file_nq_start..],
+                file_links,
+            );
+        }
+
         // Emission ran for its gates (resolution errors, warnings); when the
         // caller discards the text, drop this file's quads now — the buffer's
         // capacity is reused instead of accumulating the whole repo's worth.
         if !opts.build_nquads {
             nq.clear();
         }
+    }
+    cache.save();
+    if opts.write_sidecars && cache_hits > 0 {
+        eprintln!(
+            "Walk: {} unchanged (cached), {} extracted",
+            cache_hits,
+            files.len() - cache_hits
+        );
     }
 
     if opts.write_sidecars && total_links > 0 {
@@ -929,6 +993,36 @@ pub(crate) fn generate_frontmatter_nquads_with(
     // bracketed name in a commit subject is prose.
 
     (nq, total_errors)
+}
+
+/// Source documents whose SIDECARS are dirty in git — the on-disk sidecar
+/// diverged from the committed pair (a revert after sync, a hand edit, a
+/// hookless-clone commit). Those sources are forced through the full
+/// pipeline so the sidecar write converges them; everything else may trust
+/// the cache. One subprocess for the whole walk.
+fn dirty_sidecar_sources(root: &std::path::Path) -> HashSet<String> {
+    let mut out = HashSet::new();
+    let Ok(o) = std::process::Command::new("git")
+        .args(["status", "--porcelain", "--", ".lex/extract/"])
+        .current_dir(root)
+        .output()
+    else {
+        return out;
+    };
+    for line in String::from_utf8_lossy(&o.stdout).lines() {
+        if line.len() < 4 {
+            continue;
+        }
+        // "XY path" (rename rows: "XY old -> new" — the new side is live).
+        let path = line[3..].split(" -> ").last().unwrap_or("").trim_matches('"');
+        let Some(side) = path.strip_prefix(".lex/extract/") else { continue };
+        for suffix in [".fm.spo", ".md.spo"] {
+            if let Some(src) = side.strip_suffix(suffix) {
+                out.insert(src.to_string());
+            }
+        }
+    }
+    out
 }
 
 /// Emit N-Quads for a single `.spo` line (`subject | predicate | object`).

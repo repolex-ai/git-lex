@@ -30,6 +30,7 @@ mod soul_md;
 mod create;
 mod save;
 mod query;
+mod walkcache;
 
 use crate::git::auto_commit_snapshot;
 
