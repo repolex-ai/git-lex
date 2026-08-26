@@ -219,6 +219,32 @@ Same convergence rules as everything else. Kits ship skills under
 a **new** skill file the kit doesn't ship, rather than editing a kit-shipped
 one (the edit would be reverted).
 
+### 4.1 Skill naming
+
+Kit-shipped skills are named:
+
+```
+<namespace>-<base|fork>-<name>
+```
+
+- **`<namespace>`** — whose skill it is (`lex` for git-lex's own).
+- **`<base|fork>`** — whether it is meant to be run from a fork, or only from
+  the base repo. This is the part that saves someone from running a skill
+  somewhere it will do the wrong thing.
+- **`<name>`** — what it does, in the fewest words that stay clear.
+
+Example: `lex-base-write-ontology`.
+
+**The filename, the `skillId`, and every documented invocation must match.** A
+skill whose id and invocation disagree is worse than one with a poor name,
+because the failure shows up at call time rather than at read time.
+
+The three oldest kit-shipped skills — `journal`, `search-your-soul`,
+`check-mail` — predate this and do not conform yet. Migrating them is a
+coordinated change (`journal` is referenced by name in `AGENTS.md` and by the
+journal flow itself), so they stay as they are until that is scheduled
+deliberately.
+
 ## 5. kit-update, end to end
 
 `git lex kit-update` refreshes every installed kit; `git lex kit-update <kit>`
