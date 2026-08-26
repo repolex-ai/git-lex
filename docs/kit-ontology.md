@@ -252,10 +252,18 @@ Which lane to pick:
   makes that check possible: git-lex derives the full IRI from the range plus the
   bare id, so a target that doesn't exist is caught rather than stored.
 
-Both are in live use. `soul:relatedToPursuitId` is Lane A; copia's
-`relatedToScenarioId` / `relatedToPlaceId` / `relatedToBeingId` are Lane B. If
-you are adding a typed `relatedTo<Class>Id`, **ask Rob which lane before you
-declare it** — the two kits currently differ, and the reconciliation is his.
+**Anything named `relatedTo…Id` uses Lane A** — including the typed forms like
+`relatedToPursuitId` or `relatedToPlaceId`. The class named in the property is
+the author's signal about what to point at; it is not carried by the range. So a
+typed reference property still declares `rdfs:range git-lex:Thing` and still
+takes a bracketed address.
+
+Lane B is for a property whose value genuinely is a bare id and which is not part
+of that family — `copia:lookMomentId` is the shape.
+
+One consequence to know: under Lane A, a well-formed address pointing at
+something that does not exist saves cleanly. The concrete range was what allowed
+a dangling target to be rejected at save, and typed references give that up.
 
 What is *not* in dispute is the mechanism: the range you declare picks the lane,
 by exact match, and the author has to write the matching form.
