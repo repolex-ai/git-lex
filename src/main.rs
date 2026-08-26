@@ -77,8 +77,13 @@ enum Commands {
     /// Examples:
     ///   git lex query "SELECT * WHERE { ?s ?p ?o } LIMIT 10"
     ///   git lex query "SELECT ?c WHERE { ?c a git2:Commit } LIMIT 5"
+    ///   git lex query recent
+    ///
+    /// A bare name runs the STORED query saved as .lex/query/<name>.md —
+    /// plain markdown whose first code block is the query; the rest of the
+    /// file is notes. Save your own alongside the starters.
     Query {
-        /// The SPARQL query string
+        /// SPARQL text, or the name of a stored query in .lex/query/
         query: String,
         /// Emit SPARQL 1.1 JSON Results format on stdout. Suppresses the
         /// human-readable table and the trailing stats line (stats go to stderr).

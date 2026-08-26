@@ -239,6 +239,9 @@ pub(crate) fn cmd_init(directory: Option<String>, kit: Option<String>) {
         println!("Created class templates");
     }
 
+    // Stored-query starters — .lex/query/ with the defaults, first init only.
+    crate::query::scaffold_default_queries(&root);
+
     // Collect kit-declared init variables (agent name, etc.) by prompting
     // the user. On re-init, reuse values carried over from the previous
     // repo.yml so the user doesn't re-answer the same prompts.

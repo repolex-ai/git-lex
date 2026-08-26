@@ -502,6 +502,10 @@ pub(crate) fn cmd_kit_update(kit_arg: Option<String>) {
         }
     }
 
+    // Stored-query starters: create .lex/query/ with the defaults if this
+    // repo has never had one (folder exists = operator's, untouched).
+    crate::query::scaffold_default_queries(&root);
+
     // File-level hook reap (twin of the registration reap) — extracted
     // step, see fn doc.
     reap_stale_hooks(&root);
