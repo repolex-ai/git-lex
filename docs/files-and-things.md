@@ -90,7 +90,7 @@ to add:
 that's not yours to fix — report it to the kit owner. Your facts still save,
 attached to the file.)
 
-## The eight universal properties
+## The nine universal properties
 
 Because every document class is a Thing, these are declared once — on
 `git-lex:Thing` — and available to every class in every kit. You write them
@@ -107,6 +107,7 @@ with your document's own class (`soul.Note.title`, never
 | `relatedToId` | another Thing, any class in any kit — `<copia/Texture/deep-water>` (list) |
 | `dateCreated` | the date this document was first written, `YYYY-MM-DD` |
 | `dateUpdated` | the date it last changed — git-lex keeps this; don't hand-edit it |
+| `substrate`   | the model that last saved it, e.g. `claude-fable-5` — git-lex keeps this too |
 
 **`description` and `abstract` are not long and short versions of each other.**
 The difference is who writes them and whether you can rely on them.
