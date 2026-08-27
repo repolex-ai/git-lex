@@ -48,6 +48,22 @@ pub(crate) enum HealOutcome {
 /// Fill or correct `soul.Soul.soulId:` in the root SOUL.md from the genesis
 /// sha. Returns what happened; writes the file only when the value changes.
 pub(crate) fn heal_soul_id(root: &Path) -> HealOutcome {
+    heal_soul_id_inner(root, true)
+}
+
+/// What `heal_soul_id` WOULD do, without doing it.
+///
+/// `save --dry-run` is a probe: it must report what a real save would do and
+/// change nothing. Healing from inside the probe would mean a dry run edits
+/// the identity file — the one file whose whole point is that it is not
+/// casually rewritten.
+pub(crate) fn preview_soul_id_heal(root: &Path) -> HealOutcome {
+    heal_soul_id_inner(root, false)
+}
+
+/// Shared body. `write` is the only difference between doing and previewing,
+/// so the two can never drift into disagreeing about what needs fixing.
+fn heal_soul_id_inner(root: &Path, write: bool) -> HealOutcome {
     if !soul_kit_installed(root) {
         return HealOutcome::NotSoulRepo;
     }
@@ -61,22 +77,28 @@ pub(crate) fn heal_soul_id(root: &Path) -> HealOutcome {
     match healed_content(&content, &sha) {
         None => HealOutcome::Unchanged,
         Some((updated, previous)) => {
-            if let Err(e) = fs::write(&path, updated) {
-                eprintln!("warning: could not write SOUL.md soulId: {}", e);
-                return HealOutcome::Unchanged;
+            if write {
+                if let Err(e) = fs::write(&path, updated) {
+                    eprintln!("warning: could not write SOUL.md soulId: {}", e);
+                    return HealOutcome::Unchanged;
+                }
             }
             match previous {
                 None => {
-                    println!("SOUL.md: soulId filled from genesis sha ({}).", &sha[..8.min(sha.len())]);
+                    if write {
+                        println!("SOUL.md: soulId filled from genesis sha ({}).", &sha[..8.min(sha.len())]);
+                    }
                     HealOutcome::Filled
                 }
                 Some(prev) => {
-                    println!(
-                        "SOUL.md: soulId healed to the genesis sha ({}) — was `{}`. \
-                         soulId is derived; never edit it by hand.",
-                        &sha[..8.min(sha.len())],
-                        prev
-                    );
+                    if write {
+                        println!(
+                            "SOUL.md: soulId healed to the genesis sha ({}) — was `{}`. \
+                             soulId is derived; never edit it by hand.",
+                            &sha[..8.min(sha.len())],
+                            prev
+                        );
+                    }
                     HealOutcome::Healed
                 }
             }
@@ -252,5 +274,27 @@ mod tests {
             healed_content(content, SHA).is_none(),
             "malformed file: extraction fails loud; healing must not compound it"
         );
+    }
+
+    /// The bug this split exists to prevent: gating save's identity heal
+    /// behind `dry_run` was added and the FIRST version healed inside the
+    /// probe too — a `--dry-run` that rewrites the identity file. Preview and
+    /// heal must agree on WHAT needs fixing and disagree only on writing.
+    #[test]
+    fn preview_reports_the_same_drift_it_refuses_to_write() {
+        let tampered = format!("---\n{}: kira\nsoul.Soul.role: builder\n---\n\n# W4R3Z\n", SOUL_ID_KEY);
+
+        // The shared body decides; both entry points read the same answer.
+        let (updated, previous) = healed_content(&tampered, SHA)
+            .expect("a hand-edited soulId is drift and must be detected");
+        assert_eq!(previous.as_deref(), Some("kira"),
+            "the preview has to be able to NAME the wrong value, not just flag it");
+        assert!(updated.contains(&format!("{}: {}", SOUL_ID_KEY, SHA)),
+            "the correction is the genesis sha, derived — never invented");
+
+        // And a correct file is drift-free, so neither path fires on it.
+        let clean = format!("---\n{}: {}\n---\n\n# W4R3Z\n", SOUL_ID_KEY, SHA);
+        assert!(healed_content(&clean, SHA).is_none(),
+            "a correct soulId must not be rewritten — a heal that always fires is churn");
     }
 }

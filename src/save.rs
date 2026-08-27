@@ -70,6 +70,42 @@ pub(crate) fn cmd_save(message: &str, dry_run: bool) {
     // (fail-loud, #29 — the file is restorable via kit-update).
     soul_md::require_soul_md(&root);
 
+    // ...and the file EXISTING is not the same as its identity being right.
+    // soulId is derived from the genesis sha and the code says so twice — the
+    // module header calls the IRI "DERIVED, never stored" and the heal message
+    // tells the agent never to edit it by hand. But until now the only two
+    // places that enforced it were `init` and `kit-update`. save checked
+    // existence and nothing else, so a hand-edited soulId committed cleanly,
+    // the store derived the Thing IRI straight from it, and the next
+    // kit-update silently revoked the identity the soul had been walking
+    // around under in between. @w3bl0rd reproduced exactly that: kira set
+    // hers to `kira`, saved, and the store minted .../Soul/kira without a
+    // word of objection.
+    //
+    // Heal here rather than refuse: the correct value is derived, so there is
+    // nothing for the agent to decide, and heal_soul_id already says loudly
+    // what it changed and why. Placed BEFORE the `git add -A` below, so the
+    // correction lands in the same commit as the work — never as a surprise
+    // diff the next save has to explain.
+    //
+    // A dry run PREVIEWS it. The probe must not edit the identity file: the
+    // one file whose point is that it is not casually rewritten is the last
+    // one a --dry-run should touch.
+    if dry_run {
+        match soul_md::preview_soul_id_heal(&root) {
+            soul_md::HealOutcome::Healed => eprintln!(
+                "DRY RUN: SOUL.md carries a hand-edited soulId — a real save would \
+                 correct it to the genesis sha. soulId is derived; never edit it by hand."
+            ),
+            soul_md::HealOutcome::Filled => eprintln!(
+                "DRY RUN: SOUL.md has no soulId — a real save would fill it from the genesis sha."
+            ),
+            _ => {}
+        }
+    } else {
+        soul_md::heal_soul_id(&root);
+    }
+
     // Hook floor: `git clone` does not copy .git/hooks, so a fresh clone
     // silently loses EVERY save gate — and until 2026-08-14 save committed
     // ungated without a word. Converge the hook before anything else; if it
