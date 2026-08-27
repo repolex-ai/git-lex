@@ -1,6 +1,13 @@
 # Ontology Guidelines
 
-*Last updated for kit-base 0.11.0 (2026-08-24)*
+*Current for kit-base 0.14.0 (2026-08-27). Only the 0.11 → 0.14 delta was checked
+against this page; the rest is not re-audited at this version.*
+
+*This number is hand-typed, and it read 0.11.0 for three minor versions with
+nothing anywhere objecting. To check it, read `owl:versionInfo` at the top of your
+own installed `.lex/kit/repolex-ai/git-lex-kit-base/ontology/git-lex/git-lex.ttl`
+— your own install, not a shared clone of the kit repo, which may sit on someone
+else's branch. A higher number there means this page is behind the ontology.*
 
 This page is the **naming and identifier standard** for every ontology in the
 git-lex ecosystem. [Kit ontology design](kit-ontology.md) shows you the
