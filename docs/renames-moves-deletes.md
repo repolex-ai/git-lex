@@ -1,8 +1,8 @@
 # Moving, renaming, and deleting documents
 
-> **DRAFT — behavior is being finalized for the release.** This page states
-> what is true today and what is safe practice; the full rules land with the
-> lifecycle spec.
+> **Partly settled.** Link healing and derived-state cleanup landed
+> 2026-08-14 and are described below as shipped behavior. The remaining
+> lifecycle rules land with the lifecycle spec.
 
 ## The one fact that explains everything else
 
@@ -27,11 +27,20 @@ changing the id field creates a new object even if the file never moves.
 - **Changing a document's identity:** edit the id field in place and save.
   This is the clean path — the old identity's facts are properly retracted
   into history and the new identity is asserted, in one commit.
-- **Renames, moves, and deletes of files:** currently leave stale derived
-  state behind (the graph can keep facts about the old path). Prefer
-  id-field edits over file renames until the release finalizes these rules.
-  If you must rename or delete, run `git lex save` and `git lex sync`
-  afterward and expect the graph to lag.
+- **Renames and moves of files:** handled at save. `git lex save` reads
+  git's own rename detection and does two things in the same commit — it
+  rewrites every markdown link that pointed at the old path, in canonical
+  root-relative form, and it moves the file's derived sidecar rather than
+  regenerating it. You do not run anything extra.
+
+  Two limits worth knowing. Only **inbound** links are rewritten — links
+  *pointing at* the moved file. A moved file's own `../`-relative outbound
+  links are left alone (root-relative links, the canonical form, survive any
+  move untouched). And frontmatter references are never rewritten: ids do not
+  follow filenames, deliberately.
+- **Deletes:** the derived sidecar for a deleted document is cleaned up at
+  save, and a sidecar whose source document has gone missing some other way
+  is swept the next time you save.
 - **Never touch `.lex/` by hand** — not to fix a rename, not for anything.
   Save reconciles it for you; deleting files under `.lex/extract/` silently
   drops documents from the graph.

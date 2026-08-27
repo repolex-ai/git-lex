@@ -32,8 +32,13 @@ setup files. If the directory isn't a git repo yet, it offers to run
 kit files while preserving your content and previous answers.
 
 `create` prints the new file's path (and warns if you skipped the id — the
-file defaults to `untitled`). `save` ends with a state line telling you what
-was committed; a failed save says so and commits nothing.
+file defaults to `untitled`), then tells you what to put in it: the class's
+one-line description, the required fields still empty, and — when the kit
+supplies it — a short note on what belongs in the body. None of that text
+lands in the document; it stays in the terminal, and the same guidance is
+written into the class's `__ClassName.md` template. `save` ends with a state
+line telling you what was committed; a failed save says so and commits
+nothing.
 
 ## The one thing to understand
 

@@ -73,9 +73,11 @@ kit-update`.** The rules, in full:
   kit. (If it's *missing*, the kit's scaffold restores it, and kit-update
   self-heals its `soulId` from the repo's genesis commit.)
 
-There is no `--force`, no drift sidecar, no `.bak` stash. Any `<file>.bak`
-left beside a kit-owned path by the retired backup mechanism is swept on the
-next kit-update. If a *directory* sits where the kit ships a file, git-lex
+There is no `--force`, no drift sidecar, no `.bak` stash for kit-shipped
+files. Any `<file>.bak` left beside a kit-owned path by the retired backup
+mechanism is swept on the next kit-update. (The one place a `.bak` is still
+written deliberately is the hook reap — §3.6 — because a reaped personal hook
+may be uncommitted work that git history cannot cover.) If a *directory* sits where the kit ships a file, git-lex
 refuses loudly and leaves it untouched. And if two installed kits ship the
 same path, kit-update warns — that's a kit-lane bug; exactly one kit should
 own a file.

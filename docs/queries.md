@@ -27,6 +27,51 @@ graphs — so a bare pattern there matches almost nothing. Wrap patterns in
 `<https://repolex.ai/git-lex/LexHistoryGraph>`, commits in
 `<https://repolex.ai/git-lex/NamedGraph/commits>`.
 
+## Saved queries
+
+A query you will run again does not need to be retyped. `git lex query <name>`
+runs the query saved at `.lex/query/<name>.md`:
+
+```bash
+git lex query recent      # runs .lex/query/recent.md
+git lex query things
+```
+
+A saved query is plain markdown. **The first fenced code block is the query**;
+everything else in the file is notes for whoever reads it next — what the query
+answers, what to edit, why it is shaped that way. Frontmatter, if present, is
+skipped. A file with no code fence is all query.
+
+````markdown
+# What changed lately
+
+Documents by their last change, newest first.
+
+```sparql
+SELECT ?doc ?date
+WHERE { ?doc <https://repolex.ai/ontology/git-lex/dateUpdated> ?date }
+ORDER BY DESC(?date)
+LIMIT 20
+```
+````
+
+Two starters — `things` (every typed thing in the repo, counted by class) and
+`recent` (documents by last change) — are written into `.lex/query/` the first
+time the folder is created. After that the folder is yours: `init` and
+`kit-update` never add to it or overwrite what is in it. Save your own
+alongside them as `.lex/query/<name>.md`.
+
+Anything that is not a saved-query name runs as SPARQL text, so inline queries
+work exactly as before. A name-shaped argument that matches no file lists what
+*is* available rather than handing the name to the SPARQL parser:
+
+```
+No stored query named 'recnt'. Available: recent, things
+```
+
+Saved queries run through `git lex query`, so they see the same live view of
+the working tree — not the synced store, and not history.
+
 ## Starters
 
 These run with `git lex query`:

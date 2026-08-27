@@ -1,6 +1,6 @@
 # Files and Things
 
-*Reviewed by tr1p 2026-08-24. Current for kit-base 0.11.0.*
+*Reviewed by tr1p 2026-08-24. Date rows corrected for kit-base 0.14.0 (2026-08-27).*
 
 git-lex tracks two different kinds of identity, and knowing which is which
 tells you where your facts live and whether they survive a file being moved.
@@ -105,8 +105,8 @@ with your document's own class (`soul.Note.title`, never
 | `abstract`    | a generated summary — automation may overwrite it (single-valued) |
 | `cue`         | WHEN to reach for this — a situation, not a topic (list) |
 | `relatedToId` | another Thing, any class in any kit — `<copia/Texture/deep-water>` (list) |
-| `dateCreated` | the date this document was first written, `YYYY-MM-DD` |
-| `dateUpdated` | the date it last changed — git-lex keeps this; don't hand-edit it |
+| `dateCreated` | when this document was first written, a timestamp — git-lex writes it on the first save |
+| `dateUpdated` | when it last changed, a timestamp — git-lex rewrites it on every save; don't hand-edit it |
 | `substrate`   | the model that last saved it, e.g. `claude-fable-5` — git-lex keeps this too |
 
 **`description` and `abstract` are not long and short versions of each other.**
@@ -115,10 +115,23 @@ The difference is who writes them and whether you can rely on them.
 is where automation is free to write, so treat it as a convenience and never
 depend on it being current.
 
+**Both dates are timestamps, not dates.** `dateCreated` and `dateUpdated` are
+both declared `xsd:dateTime` — a full instant, not a `YYYY-MM-DD` day. You do
+not type either one. `git lex save` stamps `dateUpdated` into every document it
+commits, and stamps `dateCreated` too the first time a document is saved, so a
+new document's two dates are equal. An existing `dateCreated` is never touched
+again.
+
+(A repo whose installed kit still declares the older plain-date form keeps
+getting plain dates until its next `kit-update` — the stamp writes whichever
+shape the installed ontology declares, so no repo can be made to write a value
+its own shapes reject.)
+
 **`dateCreated` exists because git cannot tell you it.** Git records when a
 file entered *this* repository's history — so anything moved in from somewhere
 else reports the date it was migrated, not the date it was written, and the
-real date is gone. Set `dateCreated` once, at birth, and never touch it again.
+real date is gone. That is why the value is kept in the document rather than
+read back out of git.
 
 The `<namespace/Class/identifier>` form in `id` and `relatedToId` is what
 makes cross-kit references work without coordination: the namespace comes

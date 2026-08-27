@@ -11,7 +11,7 @@ page), and every subcommand answers `--help` too.
 | `git lex create <type> [id] [--json]` | Scaffold a new document of a kit type |
 | `git lex save ["msg"] [--dry-run]` | Stage, validate, extract, commit; `--dry-run` runs every gate, commits nothing |
 | `git lex sync` | Build/update the synced knowledge graph store from commits |
-| `git lex query "SPARQL" [--json]` | Query a fresh view of the working tree (does NOT read the synced store) |
+| `git lex query "SPARQL"\|<name> [--json]` | Query a fresh view of the working tree (does NOT read the synced store); a bare name runs the saved query `.lex/query/<name>.md` |
 | `git lex list [--json]` | List every document class the installed kits define |
 | `git lex kit-add <kit>` | Add an optional kit |
 | `git lex kit-update [<kit>]` | Refresh kits (no argument = all installed kits) |
@@ -23,6 +23,9 @@ page), and every subcommand answers `--help` too.
 
 The `--json` flags emit machine-readable output on stdout (SPARQL 1.1 JSON
 Results for `query`; JSON summaries for `create` and `list`).
+
+`git lex query` takes either SPARQL text or the name of a saved query kept in
+`.lex/query/` — see [Querying](queries.md#saved-queries).
 
 There is also a hidden `git lex hook` subcommand — it is the entrypoint git's
 pre-commit hook calls, not for direct use.
