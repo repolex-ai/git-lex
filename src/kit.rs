@@ -453,6 +453,72 @@ pub(crate) fn load_ttl_str(content: &str, label: &str) -> Result<Store, String> 
 
 // ─── install pipeline ──────────────────────────────────────────
 
+/// Display form for a commit id — first 8 chars, or the whole thing if it is
+/// somehow shorter. Display only: the full sha is what gets recorded, because
+/// a truncated id is an identity you cannot compare later.
+pub(crate) fn short_sha(sha: &str) -> &str {
+    &sha[..8.min(sha.len())]
+}
+
+/// The file inside an installed kit that records WHICH commit was fetched.
+///
+/// Lives at `.lex/kit/<org>/<repo>/.kit-sha`, inside the kit's own directory,
+/// because it describes THIS install and nothing else. `fetch_kit_for_update`
+/// wipes that directory before every fetch, so the marker cannot outlive the
+/// bytes it describes — a stale marker is not possible by construction.
+pub(crate) const KIT_SHA_FILE: &str = ".kit-sha";
+
+/// The commit currently installed for a kit, if it was recorded.
+///
+/// `None` means "installed before this marker existed, or fetched while the
+/// remote was unreachable" — NOT "up to date". Callers must report unknown as
+/// unknown; an absent receipt is a gap in the record, never a clean bill.
+pub(crate) fn installed_kit_sha(kit_dir: &std::path::Path) -> Option<String> {
+    let s = fs::read_to_string(kit_dir.join(KIT_SHA_FILE)).ok()?;
+    let s = s.trim().to_string();
+    if s.is_empty() { None } else { Some(s) }
+}
+
+/// Write the fetched commit into the kit's install directory.
+///
+/// Best-effort: a kit whose bytes landed but whose receipt could not be
+/// written is still a working kit, so this never fails the update. It does
+/// warn, because silently having no receipt is the exact condition this
+/// whole mechanism exists to end.
+pub(crate) fn record_kit_sha(kit_dir: &std::path::Path, sha: &str) {
+    if let Err(e) = fs::write(kit_dir.join(KIT_SHA_FILE), format!("{}\n", sha)) {
+        eprintln!("warning: kit fetched but its version receipt could not be written to {}: {}",
+            kit_dir.join(KIT_SHA_FILE).display(), e);
+        eprintln!("         the kit works; `git lex kit-update` just will not be able to tell you what changed next time.");
+    }
+}
+
+/// Resolve a kit's remote `main` tip WITHOUT cloning or fetching it.
+///
+/// `git ls-remote` over https needs no auth, no API token, and hits no rate
+/// limit, and git is already a hard dependency — so this costs one round trip
+/// and gives the one fact the tarball fetch cannot carry. The tarball is an
+/// archive of `refs/heads/main` with no commit id inside it, which is why
+/// kit-update could report success for months without being able to say what
+/// it had actually landed.
+///
+/// Returns `None` on any failure. The caller reports that as unknown rather
+/// than guessing — a wrong version claim is worse than no version claim.
+pub(crate) fn remote_kit_sha(kit_spec: &str) -> Option<String> {
+    let (org, repo, _) = resolve_kit_spec(kit_spec);
+    let url = format!("https://github.com/{}/{}", org, repo);
+    let out = Command::new("git")
+        .args(["ls-remote", &url, "refs/heads/main"])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&out.stdout);
+    let sha = text.split_whitespace().next()?.trim().to_string();
+    if sha.len() < 7 { None } else { Some(sha) }
+}
+
 /// Fetch a kit tarball from GitHub and extract it into `target_dir`.
 ///
 /// Uses `curl | tar --strip-components=1` so the extract goes straight
@@ -1467,5 +1533,48 @@ mod overwrite_policy_tests {
         ] {
             assert!(!is_never_overwrite(Path::new(p)), "{p} must converge");
         }
+    }
+
+}
+
+/// The kit version receipt — the fact `kit-update` could not report for
+/// months, and the reason a soul could not tell a real update from a no-op.
+#[cfg(test)]
+mod kit_version_receipt_tests {
+    use super::*;
+
+    /// The receipt round-trips, and a MISSING receipt reads as unknown rather
+    /// than as up-to-date. This is the whole point of the mechanism: kira's
+    /// update reported success and delivered nothing, and an absent version
+    /// must never be reported as a clean bill.
+    #[test]
+    fn absent_kit_sha_is_unknown_not_current() {
+        let dir = std::env::temp_dir().join(format!("gl-kitsha-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+
+        assert_eq!(installed_kit_sha(&dir), None,
+            "a kit with no receipt must read as unknown");
+
+        record_kit_sha(&dir, "6da3a09612345678901234567890123456789012");
+        assert_eq!(installed_kit_sha(&dir).as_deref(),
+            Some("6da3a09612345678901234567890123456789012"),
+            "the receipt must round-trip in full — a truncated id cannot be compared later");
+
+        // Whitespace-only is as absent as absent: a receipt that says nothing
+        // is not a version, and reporting it as one would resurrect the bug.
+        fs::write(dir.join(KIT_SHA_FILE), "   \n").unwrap();
+        assert_eq!(installed_kit_sha(&dir), None);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// Display truncation never touches what is stored, and never panics on a
+    /// short input.
+    #[test]
+    fn short_sha_truncates_for_display_only() {
+        assert_eq!(short_sha("6da3a09612345678901234567890123456789012"), "6da3a096");
+        assert_eq!(short_sha("abc"), "abc");
+        assert_eq!(short_sha(""), "");
     }
 }

@@ -14,6 +14,7 @@ use git_lex::{find_git_root, resolve_kit_spec};
 use crate::harness;
 use crate::hooks;
 use crate::kit::{append_optional_kit, fetch_and_validate_optional_kit, fetch_kit_from_github,
+                 installed_kit_sha, record_kit_sha, remote_kit_sha, short_sha,
                  install_scaffold_files_from_skip_existing, kit_config_str,
                  read_repo_yml_optional_kits, remove_kit_install_dir, remove_optional_kit,
                  KitFetchOutcome};
@@ -445,13 +446,47 @@ pub(crate) fn cmd_kit_update(kit_arg: Option<String>) {
     // Fetch every kit fresh. Bail on any fetch failure — partial state is
     // worse than no state, and the only way to fail here is network/auth
     // (since the spec was validated against the installed list).
+    // Version receipt. The tarball fetch is an archive of refs/heads/main with
+    // no commit id inside it, so "Kit update complete" could report success
+    // for months while landing byte-identical content — and no soul could tell
+    // the difference from inside their own repo. kira read one such report as
+    // evidence her viz fix had arrived; it had not, and there was nothing she
+    // could have checked. So: resolve the remote tip BEFORE the fetch, read
+    // what was installed BEFORE the wipe, and say plainly which of the three
+    // things happened.
+    let mut already_current = 0usize;
     for spec in &kits_to_fetch {
         let (org, repo, _) = resolve_kit_spec(spec);
+        let kit_dir = root.join(".lex").join("kit").join(&org).join(&repo);
+        let before = installed_kit_sha(&kit_dir);
+        let remote = remote_kit_sha(spec);
+
         println!("Updating kit '{}/{}' from GitHub...", org, repo);
         if !fetch_kit_for_update(spec) {
             eprintln!("Failed to fetch kit '{}' from GitHub.", spec);
             eprintln!("Check network access to https://github.com/{}/{}", org, repo);
             exit(1);
+        }
+
+        match (&before, &remote) {
+            // Already current is a FIRST-CLASS outcome, not a quieter success
+            // (@w3bl0rd's call, and he is right): "nothing changed" is the
+            // reading people most need and the one a success message is most
+            // likely to swallow.
+            (Some(b), Some(r)) if b == r => {
+                println!("  already current ({})", short_sha(r));
+                already_current += 1;
+            }
+            (Some(b), Some(r)) => println!("  {} -> {}", short_sha(b), short_sha(r)),
+            (None, Some(r)) => println!("  now at {} (no previous version recorded)", short_sha(r)),
+            // Unknown is reported as unknown. A fetch that worked while
+            // ls-remote did not is still a real fetch, but this run cannot
+            // say what landed, and pretending otherwise is the whole defect.
+            (_, None) => println!("  fetched, but the version could not be determined \
+                                   (could not reach the remote to ask)"),
+        }
+        if let Some(r) = &remote {
+            record_kit_sha(&kit_dir, r);
         }
     }
 
@@ -599,6 +634,10 @@ pub(crate) fn cmd_kit_update(kit_arg: Option<String>) {
         eprintln!("`git lex sync`/`save` will refuse to run until it exists.");
     }
 
+    if already_current > 0 {
+        println!("{} of {} kit(s) were already current — nothing changed for those.",
+            already_current, kits_to_fetch.len());
+    }
     println!("Kit update complete: {} kit(s) fetched, {} kit(s) rebuilt.",
              kits_to_fetch.len(), all_installed_kits.len());
 
