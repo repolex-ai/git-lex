@@ -27,5 +27,8 @@ documents. `--force` skips the prompt.
 Kits are the contract that makes repos queryable *together*: two repos on the
 same kit answer the same SPARQL.
 
-<!-- TODO(additive): authoring your own kit; the adaptive `_ontology/`
-     mechanism; how kit files land in .lex/ -->
+Building a kit of your own is a different job from using one — it has its own
+section: [Kit development](../kit-development/kit-authoring.md).
+
+<!-- TODO(additive): the adaptive `_ontology/` mechanism; how kit files land
+     in .lex/ -->
