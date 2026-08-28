@@ -1,6 +1,15 @@
 # Ontology Guidelines
 
-*Last updated for git-lex v0.1.1 (2026-08-27)*
+*Current for kit-base **0.14.0** (2026-08-27) — the *kit ontology's* version, not
+the `git-lex` binary's. The two move independently: the tool can ship several
+releases without the ontology changing, and the ontology can change without the
+tool moving. Only the 0.11 → 0.14 delta was checked against this page; the rest is
+not re-audited at this version.*
+
+*To check this number, read `owl:versionInfo` at the top of your own installed
+`.lex/kit/repolex-ai/git-lex-kit-base/ontology/git-lex/git-lex.ttl` — your own
+install, not a shared clone of the kit repo, which may sit on someone else's
+branch. A higher number there means this page is behind the ontology.*
 
 This page defines the **naming and identifier standards** for ontologies in the `git-lex` ecosystem. While [Kit Ontology Design](kit-ontology.md) covers the raw syntax and structure, this document focuses on conventions: naming rules, identity resolution, and reference strategies to ensure interoperability across kits.
 

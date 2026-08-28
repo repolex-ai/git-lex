@@ -883,3 +883,84 @@ t:lookTakenOn a owl:DatatypeProperty ;
         );
     }
 }
+
+#[cfg(test)]
+mod qualified_value_shape_support_tests {
+    use rudof_rdf::rdf_core::RDFFormat;
+    use rudof_rdf::rdf_impl::{InMemoryGraph, ReaderMode};
+    use sparql_service::RdfData;
+    use shacl_rdf::ShaclParser;
+    use shacl_ir::compiled::schema_ir::SchemaIR as ShaclSchemaIR;
+    use shacl_validation::shacl_processor::{GraphValidation, ShaclProcessor, ShaclValidationMode};
+    use shacl_validation::store::Graph;
+
+    const SHAPES: &str = r#"
+@prefix sh: <http://www.w3.org/ns/shacl#> .
+@prefix ex: <http://example.org/> .
+ex:SceneShape a sh:NodeShape ;
+    sh:targetClass ex:Scene ;
+    sh:property [ sh:path ex:relatedToId ; sh:minCount 1 ;
+                  sh:qualifiedValueShape [ sh:class ex:Place ] ; sh:qualifiedMinCount 1 ] ;
+    sh:property [ sh:path ex:relatedToId ;
+                  sh:qualifiedValueShape [ sh:class ex:Being ] ; sh:qualifiedMinCount 1 ] .
+"#;
+
+    fn validate(data: &str) -> Result<usize, String> {
+        let sg = InMemoryGraph::from_reader(&mut SHAPES.as_bytes(), "s", &RDFFormat::Turtle, None, &ReaderMode::Lax)
+            .map_err(|e| format!("shapes parse: {e}"))?;
+        let sr = RdfData::from_graph(sg).map_err(|e| format!("shapes load: {e}"))?;
+        let schema = ShaclParser::new(sr).parse().map_err(|e| format!("shacl parse: {e}"))?;
+        let compiled = ShaclSchemaIR::compile(&schema).map_err(|e| format!("compile: {e}"))?;
+        let dg = InMemoryGraph::from_reader(&mut data.as_bytes(), "d", &RDFFormat::Turtle, None, &ReaderMode::Strict)
+            .map_err(|e| format!("data parse: {e}"))?;
+        let dr = RdfData::from_graph(dg).map_err(|e| format!("data load: {e}"))?;
+        let store = Graph::from_data(dr);
+        let mut p = GraphValidation::from_graph(store, ShaclValidationMode::Native);
+        let report = p.validate(&compiled).map_err(|e| format!("validate: {e}"))?;
+        Ok(report.results().len())
+    }
+
+    /// tr1p's Q1: does the stack we SHIP support sh:qualifiedValueShape at all?
+    /// Everything else is theory until this passes.
+    #[test]
+    fn probe_qualified_value_shape_capability() {
+        // Satisfied: one Place, one Being, both typed IN THIS GRAPH.
+        let ok = r#"
+@prefix ex: <http://example.org/> .
+ex:s1 a ex:Scene ; ex:relatedToId ex:p1, ex:b1 .
+ex:p1 a ex:Place . ex:b1 a ex:Being .
+"#;
+        // Violated: Place present, Being MISSING entirely.
+        let bad = r#"
+@prefix ex: <http://example.org/> .
+ex:s2 a ex:Scene ; ex:relatedToId ex:p1 .
+ex:p1 a ex:Place .
+"#;
+        // tr1p's Q2: the referenced node exists but its TYPE is not in the
+        // graph — the cross-repo case. Pass or fail?
+        let unresolvable = r#"
+@prefix ex: <http://example.org/> .
+ex:s3 a ex:Scene ; ex:relatedToId ex:elsewhere .
+"#;
+        assert_eq!(validate(ok), Ok(0),
+            "the shipped SHACL stack DOES support sh:qualifiedValueShape + \
+             sh:qualifiedMinCount — two property shapes on the same sh:path, each \
+             constraining a different qualified subset (@tr1p's design)");
+        assert_eq!(validate(bad), Ok(1),
+            "a Scene with a Place but no Being must violate exactly the Being shape");
+
+        // THE ANSWER THAT DECIDES THE DESIGN. When the referenced node's TYPE
+        // is absent from the graph being validated, sh:class does not quietly
+        // pass — it FAILS BOTH qualified constraints, because neither a Place
+        // nor a Being can be found. Not a silent gate; a blocking one.
+        //
+        // Combined with the fact that `cmd_validate` builds one graph PER
+        // DOCUMENT, this means the referenced Thing is never present at save
+        // time — not even for a same-repo reference. So sh:class can never
+        // resolve at the save gate as it is built today, and every Scene would
+        // fail every save. That is why the IRI-pattern fallback is not merely
+        // the cross-repo option; it is the only one that can work here now.
+        assert_eq!(validate(unresolvable), Ok(2),
+            "an unresolvable target FAILS both qualified shapes — loud, not silent");
+    }
+}
