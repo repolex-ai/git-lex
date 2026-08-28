@@ -920,6 +920,61 @@ ex:SceneShape a sh:NodeShape ;
         Ok(report.results().len())
     }
 
+    const PATTERN_SHAPES: &str = r#"
+@prefix sh: <http://www.w3.org/ns/shacl#> .
+@prefix ex: <http://example.org/> .
+ex:SceneShape a sh:NodeShape ;
+    sh:targetClass ex:Scene ;
+    sh:property [ sh:path ex:relatedToId ; sh:minCount 1 ] ;
+    sh:property [ sh:path ex:relatedToId ;
+                  sh:qualifiedValueShape [ sh:pattern "/Place/" ] ; sh:qualifiedMinCount 1 ] ;
+    sh:property [ sh:path ex:relatedToId ;
+                  sh:qualifiedValueShape [ sh:pattern "/Being/" ] ; sh:qualifiedMinCount 1 ] .
+"#;
+
+    fn validate_with(shapes: &str, data: &str) -> Result<usize, String> {
+        let sg = InMemoryGraph::from_reader(&mut shapes.as_bytes(), "s", &RDFFormat::Turtle, None, &ReaderMode::Lax)
+            .map_err(|e| format!("shapes parse: {e}"))?;
+        let sr = RdfData::from_graph(sg).map_err(|e| format!("shapes load: {e}"))?;
+        let schema = ShaclParser::new(sr).parse().map_err(|e| format!("shacl parse: {e}"))?;
+        let compiled = ShaclSchemaIR::compile(&schema).map_err(|e| format!("compile: {e}"))?;
+        let dg = InMemoryGraph::from_reader(&mut data.as_bytes(), "d", &RDFFormat::Turtle, None, &ReaderMode::Strict)
+            .map_err(|e| format!("data parse: {e}"))?;
+        let dr = RdfData::from_graph(dg).map_err(|e| format!("data load: {e}"))?;
+        let store = Graph::from_data(dr);
+        let mut p = GraphValidation::from_graph(store, ShaclValidationMode::Native);
+        let report = p.validate(&compiled).map_err(|e| format!("validate: {e}"))?;
+        Ok(report.results().len())
+    }
+
+    /// @tr1p's Q(B): sh:pattern INSIDE sh:qualifiedValueShape. Legal SHACL, but
+    /// he asked me to finish the way I started — by probing, not assuming. This
+    /// is the form the spec actually ships, so it is the one that must work.
+    #[test]
+    fn probe_pattern_inside_qualified_value_shape() {
+        // IRIs carry the class in the path (Rob's naming law, 2026-07-16).
+        let ok = r#"
+@prefix ex: <http://example.org/> .
+ex:s1 a ex:Scene ; ex:relatedToId <https://repolex.ai/copia/Place/greenhouse>,
+                                  <https://repolex.ai/copia/Being/selkie> .
+"#;
+        let no_being = r#"
+@prefix ex: <http://example.org/> .
+ex:s2 a ex:Scene ; ex:relatedToId <https://repolex.ai/copia/Place/greenhouse> .
+"#;
+        assert_eq!(validate_with(PATTERN_SHAPES, ok), Ok(0),
+            "sh:pattern inside sh:qualifiedValueShape IS supported — this is the form \
+             @tr1p's spec ships, so it had to be probed rather than assumed");
+        assert_eq!(validate_with(PATTERN_SHAPES, no_being), Ok(1),
+            "a Scene with a Place and no Being must violate exactly the Being shape");
+
+        // NOTE the dependency this rests on, which the shape itself cannot show:
+        // it reads the CLASS OUT OF THE IRI PATH, sound only because instance
+        // IRIs are <namespace/Class/id> by the naming law Rob ruled 2026-07-16.
+        // No target node is resolved. If that law softens, this check silently
+        // weakens and nothing here will say so. (@tr1p's words, kept.)
+    }
+
     /// tr1p's Q1: does the stack we SHIP support sh:qualifiedValueShape at all?
     /// Everything else is theory until this passes.
     #[test]
