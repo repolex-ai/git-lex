@@ -511,12 +511,30 @@ pub(crate) fn derive_file_subjects(
     }
 
     // Find the id value in this file's own lines.
+    //
+    // `class` here is the CANONICAL name — resolve_class_segment already
+    // granted case tolerance and warned about it. The authored line still
+    // carries whatever the author typed. Comparing the whole key as a string
+    // made these two halves disagree: a document written `soul.journal.` was
+    // promoted to class Journal by the resolver and then reported as HAVING NO
+    // ID by this lookup, because `soul.Journal.journalId` != `soul.journal.
+    // journalId`. It fell back to the File IRI while its rdf:type still said
+    // Journal — so class counts looked healthy while the identity was split,
+    // and any join keyed on the instance IRI silently dropped it. @m4rq had 8
+    // of 9 journals in exactly that state (2026-08-27).
+    //
+    // The cure is to grant the id lookup the SAME tolerance the class resolver
+    // already grants, so the two cannot disagree. The class segment matches
+    // case-insensitively; kit and property segments stay exact, because
+    // nothing upstream has forgiven those and quietly widening them here would
+    // repeat the mistake in the other direction.
     let id_line_key = format!("{}.{}.{}", kit, class, id_prop);
+    let key_matches = |authored: &str| id_key_matches(authored, &kit, &class, &id_prop);
     let id_value = spo_lines.iter().find_map(|line| {
         let parts: Vec<&str> = line.splitn(3, " | ").collect();
         if parts.len() == 3
             && parts[1] == "hasValue"
-            && parts[0] == id_line_key
+            && key_matches(parts[0])
             && !parts[2].trim().is_empty()
         {
             Some(parts[2].trim().to_string())
@@ -2314,5 +2332,57 @@ mod sidecar_write_tests {
         write_sidecar_loud(&p, "x | hasValue | 1\n");
         assert!(p.exists());
         std::fs::remove_dir_all(&d).unwrap();
+    }
+}
+
+/// Does an AUTHORED frontmatter key name this document's id property?
+///
+/// The class segment matches case-insensitively — the SAME tolerance
+/// `resolve_class_segment` already grants and warns about — while kit and
+/// property segments stay exact. Splitting from the RIGHT matters: a kit
+/// segment can itself contain dots (`repolex-ai/git-lex-kit-soul`).
+pub(crate) fn id_key_matches(authored: &str, kit: &str, class: &str, id_prop: &str) -> bool {
+    if authored == format!("{}.{}.{}", kit, class, id_prop) {
+        return true;
+    }
+    let Some((rest, prop)) = authored.rsplit_once('.') else { return false };
+    let Some((a_kit, a_class)) = rest.rsplit_once('.') else { return false };
+    a_kit == kit && prop == id_prop && a_class.eq_ignore_ascii_case(class)
+}
+
+#[cfg(test)]
+mod id_key_case_tolerance_tests {
+    use super::id_key_matches;
+
+    /// @m4rq, 2026-08-27: `soul.journal.journalId` was promoted to class
+    /// Journal by the class resolver and then reported as HAVING NO ID here,
+    /// because the two halves compared the key differently. 8 of his 9
+    /// journals were identified by file path instead of identity, while the
+    /// class count looked perfectly healthy.
+    #[test]
+    fn miscased_class_segment_still_finds_the_id() {
+        assert!(id_key_matches("soul.journal.journalId", "soul", "Journal", "journalId"));
+        assert!(id_key_matches("soul.JOURNAL.journalId", "soul", "Journal", "journalId"));
+        assert!(id_key_matches("soul.Journal.journalId", "soul", "Journal", "journalId"));
+    }
+
+    /// A kit segment containing dots must still split correctly — this is why
+    /// the split runs from the right.
+    #[test]
+    fn dotted_kit_segment_splits_from_the_right() {
+        assert!(id_key_matches(
+            "repolex-ai/git-lex-kit-soul.journal.journalId",
+            "repolex-ai/git-lex-kit-soul", "Journal", "journalId"));
+    }
+
+    /// Tolerance stops at the class segment. Nothing upstream forgives a
+    /// miscased PROPERTY or a wrong kit, and widening it here would repeat the
+    /// original mistake in the other direction.
+    #[test]
+    fn tolerance_does_not_leak_to_kit_or_property() {
+        assert!(!id_key_matches("soul.Journal.journalid", "soul", "Journal", "journalId"));
+        assert!(!id_key_matches("copia.Journal.journalId", "soul", "Journal", "journalId"));
+        assert!(!id_key_matches("soul.Note.journalId", "soul", "Journal", "journalId"));
+        assert!(!id_key_matches("journalId", "soul", "Journal", "journalId"));
     }
 }
