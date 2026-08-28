@@ -616,20 +616,33 @@ pub(crate) fn fetch_kit_from_github(kit_spec: &str, target_dir: &std::path::Path
                     if let Some(declared) = declared {
                         if declared != requested_short {
                             eprintln!(
-                                "fatal: asked for kit '{}' and received kit '{}'.",
+                                "There is no kit called '{}'. It was renamed to '{}'.",
                                 requested_short, declared
                             );
                             eprintln!(
-                                "       https://github.com/{}/{} redirects to a repo that declares \
-                                 itself '{}' — almost certainly a rename.",
-                                org, repo, declared
+                                "Run your command again with '{}' instead — for example: \
+                                 git lex init --kit {}",
+                                declared, declared
                             );
-                            eprintln!(
-                                "       Installing it would record '{}' while its ontology installs \
-                                 under '{}', and every document type would then be invisible.",
-                                requested_short, declared
-                            );
-                            eprintln!("       Fix: re-run with `--kit {}`.", declared);
+                            eprintln!("Nothing was installed.");
+                            // THE PROSE ABOVE IS FOR SOMEONE SETTING UP A REPO,
+                            // not for us. Rob read the previous version and said
+                            // he had no idea what it meant, and he was right: it
+                            // led with the mechanism (redirects, declares itself),
+                            // used our words (ontology, document type), and
+                            // described an outcome — "every document type would be
+                            // invisible" — that nobody has ever seen and so cannot
+                            // picture. Four lines to deliver one instruction.
+                            //
+                            // The mechanism, for whoever debugs this later: GitHub
+                            // serves renamed repos through a redirect, so the fetch
+                            // succeeds and returns a DIFFERENT kit. Installing it
+                            // would record the requested short name in repo.yml
+                            // while the ontology installs under the real one, and
+                            // every type lookup would then miss. The diagnosis
+                            // belongs here in the source; the instruction belongs
+                            // on the terminal. (@w3bl0rd relayed the ruling.)
+                            //
                             // Take the wrong bytes with us. Leaving
                             // .lex/kit/<org>/git-lex-kit-solo/ on disk holding
                             // SOUL content is the exact artifact this gate
@@ -660,10 +673,12 @@ pub(crate) fn fetch_kit_from_github(kit_spec: &str, target_dir: &std::path::Path
                     // No kit.yml means identity cannot be confirmed. Say so
                     // rather than passing silently — an unverifiable install
                     // is exactly what this check exists to stop being quiet.
+                    // Same register check as the branch above: say what happened
+                    // and what it means for the reader, not what the file layout is.
                     eprintln!(
-                        "warning: kit '{}' ships no kit.yml, so it could not be confirmed as the kit \
-                         you asked for.",
-                        kit_spec
+                        "Note: this kit does not say which kit it is, so git-lex could not check \
+                         that '{}' is what you actually got. Installing it anyway.",
+                        requested_short
                     );
                 }
             }
