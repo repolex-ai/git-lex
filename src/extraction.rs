@@ -264,7 +264,39 @@ fn declared_property_iris() -> &'static std::collections::HashMap<String, String
 fn emit_predicate(lookup_key: &str, prefix_name: &str, prop_name: &str) -> String {
     match declared_property_iris().get(lookup_key) {
         Some(iri) => format!("<{}>", iri),
-        None => format!("{}:{}", prefix_name, prop_name),
+        None => {
+            // NO SILENT INVENTION. Gluing the kit prefix onto an undeclared
+            // property mints vocabulary that exists nowhere in any ontology —
+            // `soul.Texture.id` became `soul:id`, and `soul:id` appears ZERO
+            // times in the soul TTL (@nug3, 2026-08-28). The document looked
+            // correct, the value kept its angle brackets as a plain string,
+            // and no query for git-lex:id could ever see it.
+            //
+            // The cause is upstream and it is NOT deprecation: soul:Texture is
+            // simply not declared `rdfs:subClassOf git-lex:Thing`, so it
+            // inherits none of the Thing properties. git-lex is right to give
+            // it none. What it must not do is invent one and say nothing.
+            //
+            // This matters NOW because .id is being enforced: a soul holding
+            // documents in a class that is not declared a Thing would hit an
+            // unfixable block with no clue why. One warning, once per key, is
+            // the difference between a five-minute fix and an outage.
+            static WARNED: std::sync::Mutex<Option<std::collections::HashSet<String>>> =
+                std::sync::Mutex::new(None);
+            if let Ok(mut guard) = WARNED.lock() {
+                let seen = guard.get_or_insert_with(std::collections::HashSet::new);
+                if seen.insert(lookup_key.to_string()) {
+                    eprintln!(
+                        "warning: the key `{}` is not declared for this document's class, so its \
+                         value is being saved under an invented name (`{}:{}`) that no query will \
+                         find. Usually this means the class is not declared as a Thing in its \
+                         ontology. Report it to the `{}` ontology owner; the value is safe on disk.",
+                        lookup_key, prefix_name, prop_name, prefix_name
+                    );
+                }
+            }
+            format!("{}:{}", prefix_name, prop_name)
+        }
     }
 }
 
