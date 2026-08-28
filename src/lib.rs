@@ -675,6 +675,138 @@ pub fn canonical_kit_ontology_path(root: &std::path::Path, spec: &str) -> PathBu
         .join(format!("{short}.ttl"))
 }
 
+/// Turn a SPARQL parse failure into a sentence, when the failure is an unbound
+/// prefix.
+///
+/// The parser's own message for this is a five-line dump of unicode character
+/// classes with the phrase "Prefix not found" buried mid-list, so it reads like
+/// a syntax error in the user's own query. @selkie rewrote her query twice
+/// before working out that the prefix was simply not bound — a one-second fix
+/// that cost five minutes because the message pointed at the wrong thing.
+///
+/// Returns `None` when the error is not an unbound prefix, so the raw parser
+/// message still surfaces for everything else. A wrong explanation would be
+/// worse than the dump.
+pub fn explain_unbound_prefix(prefixed_query: &str, err: &str) -> Option<String> {
+    if !err.contains("Prefix not found") {
+        return None;
+    }
+
+    // What the injected block actually bound.
+    let mut declared: Vec<String> = Vec::new();
+    for line in prefixed_query.lines() {
+        let t = line.trim_start();
+        // `?` here would abandon the whole explanation the moment a line is
+        // not a PREFIX line — which is every query body. Skip, never bail.
+        let Some(rest) = t.strip_prefix("PREFIX ").or_else(|| t.strip_prefix("prefix ")) else {
+            continue;
+        };
+        if let Some(name) = rest.split(':').next() {
+            let name = name.trim();
+            if !name.is_empty() {
+                declared.push(name.to_string());
+            }
+        }
+    }
+
+    // Prefixes the query USES, skipping IRIs, strings, and the PREFIX lines.
+    let body: String = prefixed_query
+        .lines()
+        .skip_while(|l| {
+            let t = l.trim_start();
+            t.starts_with("PREFIX ") || t.starts_with("prefix ")
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    let mut used: Vec<String> = Vec::new();
+    let b: Vec<char> = body.chars().collect();
+    let mut i = 0usize;
+    while i < b.len() {
+        match b[i] {
+            // Skip a full IRI — its colons are not prefixes.
+            '<' => { while i < b.len() && b[i] != '>' { i += 1; } }
+            // Skip a literal.
+            '"' => { i += 1; while i < b.len() && b[i] != '"' { i += 1; } }
+            ch if ch.is_alphabetic() || ch == '_' => {
+                let start = i;
+                while i < b.len() && (b[i].is_alphanumeric() || b[i] == '_' || b[i] == '-') {
+                    i += 1;
+                }
+                // A prefixed name is name:local — a bare trailing colon is not.
+                if i < b.len() && b[i] == ':' {
+                    let after = b.get(i + 1).copied().unwrap_or(' ');
+                    if after.is_alphanumeric() || after == '_' {
+                        let name: String = b[start..i].iter().collect();
+                        if !used.contains(&name) {
+                            used.push(name);
+                        }
+                    }
+                }
+                continue;
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+
+    let unbound: Vec<String> = used
+        .into_iter()
+        .filter(|u| !declared.contains(u))
+        .collect();
+    if unbound.is_empty() {
+        return None;
+    }
+
+    declared.sort();
+    declared.dedup();
+    let names = unbound
+        .iter()
+        .map(|u| format!("{}:", u))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let available = declared
+        .iter()
+        .map(|d| format!("{}:", d))
+        .collect::<Vec<_>>()
+        .join(", ");
+    Some(format!(
+        "unknown prefix {} — nothing is bound to it in this repo.\n\
+         Fix, pick one: (a) add `PREFIX {}: <...>` to the query; (b) use the full \
+         IRI in <angle brackets>; (c) if it belongs to a kit you expected to have, \
+         run `git lex kit-update` — prefixes are bound from the ontologies actually \
+         installed under .lex/ontology/.\n\
+         Bound here: {}",
+        names,
+        unbound[0],
+        available
+    ))
+}
+
+/// The `PREFIX name: <ns>` binding for one installed kit, read from the kit's
+/// installed shapes file — the runtime source of truth, not a guess.
+///
+/// Falls back to the conventional namespace when a kit ships no declaration,
+/// so a kit that is installed but declares nothing still gets a usable prefix
+/// rather than silently none.
+fn kit_prefix_binding(root: &std::path::Path, spec: &str) -> Option<(String, String)> {
+    let (_, _, short) = resolve_kit_spec(spec);
+    let shapes_path = root
+        .join(".lex")
+        .join("ontology")
+        .join(&short)
+        .join(format!("{}-shapes.ttl", short));
+    if let Ok(ttl) = fs::read_to_string(&shapes_path) {
+        if let Some((pname, ns)) = extract_kit_prefix(&ttl, &short) {
+            return Some((format!("{}:", pname), format!("PREFIX {}: <{}>", pname, ns)));
+        }
+    }
+    Some((
+        format!("{}:", short),
+        format!("PREFIX {}: <{}>", short, conventional_kit_namespace(&short)),
+    ))
+}
+
 /// Auto-inject SPARQL prefixes into a query string. Adds standard prefixes
 /// (git-lex:, git2:, git:, md:, fm:, rdf:, rdfs:, owl:, xsd:) plus the
 /// kit prefix if one is configured.
@@ -689,33 +821,48 @@ pub fn add_prefixes_at(root: Option<&std::path::Path>, query: &str) -> String {
     // Read kit from repo.yml, then pull the kit's prefix+namespace from its
     // installed SHACL shapes file (the runtime source of truth). Shapes live
     // at .lex/ontology/{short}/{short}-shapes.ttl.
-    let kit_prefix = root.and_then(|r| {
-        let kit = RepoYml::load(r).domain_kit()?;
-        {
-            {
-                let (_, _, short) = resolve_kit_spec(&kit);
-                let r = r.to_path_buf();
-                let shapes_path = r
-                    .join(".lex")
-                    .join("ontology")
-                    .join(&short)
-                    .join(format!("{}-shapes.ttl", short));
-                if let Ok(ttl) = fs::read_to_string(&shapes_path) {
-                    if let Some((pname, ns)) = extract_kit_prefix(&ttl, &short) {
-                        return Some((
-                            format!("{}:", pname),
-                            format!("PREFIX {}: <{}>", pname, ns),
-                        ));
-                    }
+    // EVERY installed kit, not just the domain one (@selkie, 2026-08-27).
+    // Binding the domain kit alone meant that in lUX — a repo whose content is
+    // almost entirely copia documents, with copia installed as an OPTIONAL kit
+    // — the single most natural first query anyone writes, `?s a copia:Place`,
+    // failed to parse. The help text promises "common prefixes are injected
+    // automatically" and copia: is the most common prefix in that repo. Which
+    // kit slot a vocabulary occupies is bookkeeping; it has nothing to do with
+    // how likely someone is to type its prefix.
+    //
+    // The ONTOLOGY namespace is what gets bound, because that is what a
+    // prefixed name means here: `copia:Place` is the class. Instances live
+    // under a second namespace (.../copia/Place/airstream-salida) and are NOT
+    // given a prefix — that split is a known open question, not a thing to
+    // deepen by minting a second binding for it.
+    // Read what is INSTALLED, not what is bookkept. My first attempt at this
+    // walked repo.yml's domain kit plus its optional_kits list and did not fix
+    // @selkie's query at all: lUX's repo.yml names ONE kit and declares no
+    // optional_kits whatsoever, while .lex/ontology/ holds five installed
+    // vocabularies — copia, pool, ravel, soul, git-lex. The list and the disk
+    // disagree, and the disk is the thing the queries actually run against.
+    let mut kit_prefixes: Vec<(String, String)> = Vec::new();
+    if let Some(r) = root {
+        let ont_root = r.join(".lex").join("ontology");
+        let mut shorts: Vec<String> = Vec::new();
+        if let Ok(entries) = fs::read_dir(&ont_root) {
+            for e in entries.filter_map(|e| e.ok()) {
+                if !e.path().is_dir() { continue }
+                if let Some(short) = e.file_name().to_str() {
+                    shorts.push(short.to_string());
                 }
-                // Fallback: no installed declaration — conventional pattern.
-                return Some((
-                    format!("{}:", short),
-                    format!("PREFIX {}: <{}>", short, conventional_kit_namespace(&short)),
-                ));
             }
         }
-    });
+        // Stable order so the emitted prefix block does not churn between runs.
+        shorts.sort();
+        for short in shorts {
+            if let Some(binding) = kit_prefix_binding(r, &short) {
+                if !kit_prefixes.iter().any(|(name, _)| name == &binding.0) {
+                    kit_prefixes.push(binding);
+                }
+            }
+        }
+    }
 
     let mut defaults = vec![
         ("git:".to_string(), "PREFIX git: <https://repolex.ai/ontology/git-lex/git/>".to_string()),
@@ -728,9 +875,7 @@ pub fn add_prefixes_at(root: Option<&std::path::Path>, query: &str) -> String {
         ("owl:".to_string(), "PREFIX owl: <http://www.w3.org/2002/07/owl#>".to_string()),
         ("xsd:".to_string(), "PREFIX xsd: <http://www.w3.org/2001/XMLSchema#>".to_string()),
     ];
-    if let Some((short, full)) = kit_prefix {
-        defaults.push((short, full));
-    }
+    defaults.extend(kit_prefixes);
     let defaults = defaults;
     // FIXME(w4r3z, Day 38): prefix detection is naive substring match —
     // a query using a literal that happens to contain "git:" pulls in
@@ -1202,5 +1347,49 @@ mod store_layout_tests {
         assert!(open_store_read_only_at(&root).is_some());
         assert!(!legacy_store_path_at(&root).exists());
         fs::remove_dir_all(&root).ok();
+    }
+}
+
+#[cfg(test)]
+mod prefix_explanation_tests {
+    use super::*;
+
+    const DUMP: &str = "error at 11:35: expected one of Prefix not found, ['%'], ['.'], [':']";
+
+    /// The whole point: name the prefix, and say what IS bound.
+    #[test]
+    fn names_the_unbound_prefix_and_lists_what_is_bound() {
+        let q = "PREFIX soul: <https://repolex.ai/ontology/soul/>\nSELECT ?s WHERE { ?s a copia:Place }";
+        let msg = explain_unbound_prefix(q, DUMP).expect("an unbound prefix must be explained");
+        assert!(msg.contains("copia:"), "must name the offender:\n{msg}");
+        assert!(msg.contains("soul:"), "must list what is bound:\n{msg}");
+    }
+
+    /// A parse failure that is NOT an unbound prefix keeps the raw parser
+    /// message. A confident wrong explanation is worse than a noisy true one.
+    #[test]
+    fn other_parse_errors_are_not_explained() {
+        let q = "PREFIX soul: <https://repolex.ai/ontology/soul/>\nSELECT ?s WHERE { ?s a soul:Journal ";
+        assert!(explain_unbound_prefix(q, "expected one of \",\", \".\", \";\"").is_none());
+    }
+
+    /// Regression: the declared-prefix scan once used `?` on a non-PREFIX
+    /// line, which abandoned the whole explanation at the first line of the
+    /// query body — i.e. always. Every real query has a body.
+    #[test]
+    fn body_lines_do_not_abandon_the_scan() {
+        let q = "PREFIX soul: <https://repolex.ai/ontology/soul/>\nSELECT ?s\nWHERE { ?s a copia:Place }\nLIMIT 1";
+        let msg = explain_unbound_prefix(q, DUMP)
+            .expect("a multi-line body must still produce an explanation");
+        assert!(msg.contains("copia:"));
+    }
+
+    /// Colons inside full IRIs and literals are not prefixes.
+    #[test]
+    fn iris_and_literals_are_not_mistaken_for_prefixes() {
+        let q = "PREFIX soul: <https://repolex.ai/ontology/soul/>\n\
+                 SELECT ?s WHERE { ?s <https://example.org/a:b> \"note: not a prefix\" }";
+        assert!(explain_unbound_prefix(q, DUMP).is_none(),
+            "an IRI's scheme colon and a literal's colon must not be read as prefixes");
     }
 }

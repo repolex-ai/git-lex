@@ -20,8 +20,19 @@ pub(crate) fn run_query(store: &Store, query: &str, store_type: &str, json: bool
     let results = match git_lex::eval_query_union(store, &prefixed) {
         Ok(r) => r,
         Err(git_lex::W3cQueryError::Parse(e)) => {
+            // An unbound prefix gets a sentence instead of the parser's
+            // five-line unicode-class dump (@selkie, 2026-08-27). Everything
+            // else still gets the raw message — a wrong explanation would be
+            // worse than a noisy true one.
+            let friendly = git_lex::explain_unbound_prefix(&prefixed, &e);
             if json {
-                eprintln!("{}", serde_json::json!({"error": "parse", "message": e}));
+                eprintln!("{}", serde_json::json!({
+                    "error": "parse",
+                    "message": e,
+                    "explanation": friendly,
+                }));
+            } else if let Some(msg) = friendly {
+                eprintln!("{}", msg);
             } else {
                 eprintln!("SPARQL parse error: {}", e);
             }
