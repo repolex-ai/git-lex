@@ -389,6 +389,60 @@ fn generate_shapes_from_store(
         }
     }
 
+    // Query 4b: QUALIFIED cardinality — "at least/exactly N of this property's
+    // values are of class K". Standard OWL 2 (owl:onClass +
+    // owl:minQualifiedCardinality / owl:qualifiedCardinality), sitting on the
+    // same owl:Restriction node Query 4 already walks. Rob's build order via
+    // @tr1p, 2026-08-27: it replaces the relatedTo{Class}Id twins, every one of
+    // which had rdfs:range git-lex:Thing and therefore never constrained type
+    // at all — the class lived only in the property NAME.
+    //
+    // ROB'S DEFAULT, encoded here rather than special-cased: NO RESTRICTION =
+    // NO ENFORCEMENT. A class that declares nothing about relatedToId gets no
+    // shape emitted for it and anything may go in. Silence in the ontology is
+    // permission, not prohibition.
+    struct QualRestriction {
+        class_iri: String,
+        prop_iri: String,
+        on_class: String,
+        min: u32,
+        exact: bool,
+    }
+    let mut qualified: Vec<QualRestriction> = Vec::new();
+    {
+        let q = "PREFIX owl: <http://www.w3.org/2002/07/owl#>
+                 PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>
+                 SELECT ?class ?prop ?onClass ?min ?exactCard WHERE {
+                     ?class rdfs:subClassOf ?restriction .
+                     ?restriction a owl:Restriction ;
+                                  owl:onProperty ?prop ;
+                                  owl:onClass ?onClass .
+                     { ?restriction owl:minQualifiedCardinality ?min }
+                     UNION
+                     { ?restriction owl:qualifiedCardinality ?exactCard }
+                 }";
+        if let Ok(oxigraph::sparql::QueryResults::Solutions(sols)) = git_lex::eval_query(store, q) {
+            for s in sols.flatten() {
+                let iri_of = |k: &str| s.get(k).and_then(|t| match t {
+                    Term::NamedNode(n) => Some(n.as_str().to_string()),
+                    _ => None,
+                });
+                let num_of = |k: &str| s.get(k).and_then(|t| match t {
+                    Term::Literal(l) => l.value().parse::<u32>().ok(),
+                    _ => None,
+                });
+                let (Some(class_iri), Some(prop_iri), Some(on_class)) =
+                    (iri_of("class"), iri_of("prop"), iri_of("onClass")) else { continue };
+                let exact_card = num_of("exactCard");
+                let min = exact_card.or_else(|| num_of("min")).unwrap_or(0);
+                if min == 0 { continue }
+                qualified.push(QualRestriction {
+                    class_iri, prop_iri, on_class, min, exact: exact_card.is_some(),
+                });
+            }
+        }
+    }
+
     // Query 5: Find BOUNDED custom datatypes — `rdfs:Datatype` declared with
     // `owl:onDatatype` (the base type) plus `owl:withRestrictions` (an RDF list
     // of facet nodes, e.g. `[ xsd:minInclusive 1 ]`). This is the formally
@@ -488,14 +542,23 @@ fn generate_shapes_from_store(
             }
         }
 
-        if class_props.is_empty() {
+        // Qualified restrictions for this class OR any ancestor — a parent
+        // that declares "at least one Place" constrains its children too, the
+        // same inheritance Query 4's required-ness already follows.
+        let class_quals: Vec<&QualRestriction> = qualified.iter()
+            .filter(|q| q.class_iri == *class_iri || ancestors.contains(&q.class_iri))
+            .collect();
+
+        if class_props.is_empty() && class_quals.is_empty() {
             shacl.push_str(" .\n");
             continue;
         }
 
         for (i, prop) in class_props.iter().enumerate() {
             let prop_name = local_name(&prop.iri);
-            let is_last = i == class_props.len() - 1;
+            // The class no longer necessarily ends at the last PROPERTY —
+            // qualified blocks may follow it.
+            let is_last = i == class_props.len() - 1 && class_quals.is_empty();
             // A required-ness restriction can sit on the class OR on any
             // ancestor — an inherited property that a parent declares required
             // is required here too (#104).
@@ -614,6 +677,76 @@ generator learns it, or express the bound with a facet git-lex knows \
                 shacl.push_str("    ]");
             }
         }
+
+        // QUALIFIED BLOCKS. One sh:property per restriction, in the form
+        // proved by `probe_pattern_inside_qualified_value_shape`.
+        //
+        // The pattern is DERIVED from owl:onClass's local name — the author
+        // declares semantics ("at least one Place") and never writes a regex.
+        //
+        // WHY A PATTERN AND NOT sh:class: the save gate builds a fresh graph
+        // per DOCUMENT, so a referenced Thing's rdf:type is never present and
+        // sh:class would fail every document on every save (probed:
+        // `probe_qualified_value_shape_capability`). The pattern reads the
+        // class out of the IRI path instead and resolves nothing.
+        //
+        // THE FLIP CONDITION, named so the upgrade is an edit and not a
+        // rediscovery: the day validation builds ONE graph over MORE THAN ONE
+        // document, swap the sh:pattern line for `sh:class <onClass>`. That is
+        // strictly better — it checks what a thing IS rather than what its
+        // name looks like — and needs no ontology change.
+        //
+        // LOAD-BEARING DEPENDENCY (@tr1p's words, kept deliberately): this
+        // reads the CLASS OUT OF THE IRI PATH, sound only because instance
+        // IRIs are <namespace/Class/id> by the naming law Rob ruled
+        // 2026-07-16. It does NOT resolve the target node. If that law ever
+        // softens, this check silently weakens and nothing here will say so.
+        for (i, qr) in class_quals.iter().enumerate() {
+            let is_last = i == class_quals.len() - 1;
+            let on_local = local_name(&qr.on_class);
+            shacl.push_str(" ;\n    sh:property [\n");
+            match qr.prop_iri.strip_prefix(namespace) {
+                Some(local) => shacl.push_str(&format!("        sh:path {}:{} ;\n", prefix_name, local)),
+                None => shacl.push_str(&format!("        sh:path <{}> ;\n", qr.prop_iri)),
+            }
+            // NO sh:nodeKind here, deliberately. The literal hole is real —
+            // resolve.rs rule 7 keeps an UNRESOLVED reference as a string
+            // literal, and a bare pattern would match it and count a broken
+            // reference as satisfied — but it is ALREADY closed one shape up:
+            // relatedToId is an owl:ObjectProperty with rdfs:domain
+            // git-lex:Thing, so every Thing class already gets an unconditional
+            // `sh:nodeKind sh:IRI` property shape on this path. Rob's
+            // "must actually point at something" rule is shipped behaviour, not
+            // new work (verified against copia-shapes.ttl, 2026-08-27).
+            //
+            // Emitting it twice would be two sources for one fact. Instead the
+            // baseline is PINNED by `object_properties_always_get_nodekind_iri`
+            // — if it ever stops being emitted, that test fails loudly rather
+            // than this block quietly losing its guard.
+            shacl.push_str("        sh:qualifiedValueShape [ sh:pattern \"/");
+            shacl.push_str(&on_local);
+            shacl.push_str("/\" ] ;\n");
+            shacl.push_str(&format!("        sh:qualifiedMinCount {} ;\n", qr.min));
+            if qr.exact {
+                shacl.push_str(&format!("        sh:qualifiedMaxCount {} ;\n", qr.min));
+            }
+            let how_many = if qr.exact {
+                format!("exactly {}", qr.min)
+            } else if qr.min == 1 {
+                "at least one".to_string()
+            } else {
+                format!("at least {}", qr.min)
+            };
+            shacl.push_str(&format!(
+                "        sh:message \"{} must reference {} {} — <.../{}/&lt;id&gt;>.\" ;\n",
+                local_name(class_iri), how_many, on_local, on_local
+            ));
+            if is_last {
+                shacl.push_str("    ] .\n");
+            } else {
+                shacl.push_str("    ]");
+            }
+        }
     }
 
     Some(shacl)
@@ -697,6 +830,85 @@ t:lookTechnicalScore a owl:DatatypeProperty ;
         let store = crate::kit::load_ttl_str(ttl, "test").expect("ttl loads");
         generate_shapes_from_store(&store, "t", "https://repolex.ai/ontology/t/", "test")
             .expect("shapes generate")
+    }
+
+    /// Rob's build order via @tr1p, 2026-08-27: standard OWL 2 qualified
+    /// cardinality replaces the relatedTo{Class}Id twins. The author declares
+    /// SEMANTICS; the generator picks the enforceable form.
+    #[test]
+    fn qualified_cardinality_becomes_a_qualified_shape() {
+        let ttl = r#"
+@prefix owl: <http://www.w3.org/2002/07/owl#> .
+@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+@prefix t: <https://repolex.ai/ontology/t/> .
+@prefix gl: <https://repolex.ai/ontology/git-lex/> .
+
+t:Place a owl:Class .
+t:Being a owl:Class .
+
+# Mirrors reality: git-lex.ttl declares relatedToId as an ObjectProperty with
+# rdfs:domain git-lex:Thing, which is what produces Rob's ALWAYS-ENFORCED
+# baseline (sh:nodeKind sh:IRI) on every Thing class. The qualified shapes below
+# depend on that baseline for the broken-reference case, so the fixture has to
+# carry it or the test is checking a world we do not ship.
+t:Thing a owl:Class .
+gl:relatedToId a owl:ObjectProperty ; rdfs:domain t:Thing ; rdfs:range t:Thing .
+
+t:ScenarioTake a owl:Class ;
+    rdfs:subClassOf t:Thing ;
+    rdfs:subClassOf [ a owl:Restriction ;
+        owl:onProperty gl:relatedToId ; owl:onClass t:Place ;
+        owl:qualifiedCardinality 1 ] ;
+    rdfs:subClassOf [ a owl:Restriction ;
+        owl:onProperty gl:relatedToId ; owl:onClass t:Being ;
+        owl:minQualifiedCardinality 1 ] .
+
+t:takeName a owl:DatatypeProperty ; rdfs:domain t:ScenarioTake ; rdfs:range <http://www.w3.org/2001/XMLSchema#string> .
+"#;
+        let out = shapes_for(ttl);
+
+        // The pattern is DERIVED from owl:onClass — the author writes no regex.
+        assert!(out.contains(r#"sh:qualifiedValueShape [ sh:pattern "/Place/" ]"#),
+            "Place restriction must become a qualified pattern shape:\n{out}");
+        assert!(out.contains(r#"sh:qualifiedValueShape [ sh:pattern "/Being/" ]"#),
+            "Being restriction must become a qualified pattern shape:\n{out}");
+
+        // Exact cardinality gets a MAX too; min-only does not.
+        assert!(out.contains("sh:qualifiedMaxCount 1"),
+            "owl:qualifiedCardinality is EXACTLY n, so a max must be emitted:\n{out}");
+        assert_eq!(out.matches("sh:qualifiedMaxCount").count(), 1,
+            "owl:minQualifiedCardinality is a floor and must NOT gain a ceiling:\n{out}");
+
+        // THE LITERAL HOLE, closed one shape up rather than here. An unresolved
+        // reference stays a string literal (resolve.rs rule 7) and a bare
+        // pattern would match it — but relatedToId is an ObjectProperty on
+        // Thing, so every Thing class already carries an unconditional
+        // sh:nodeKind sh:IRI on this path. Rob's "must actually point at
+        // something" rule is shipped behaviour, and the qualified shapes lean
+        // on it. Asserted HERE so the qualified form cannot silently lose its
+        // guard if the baseline ever stops being emitted.
+        assert!(out.contains("sh:nodeKind sh:IRI"),
+            "a qualified pattern without sh:nodeKind counts a BROKEN reference as satisfied:\n{out}");
+
+        assert!(out.contains("must reference exactly 1 Place"), "message names the requirement:\n{out}");
+        assert!(out.contains("must reference at least one Being"), "min-1 reads naturally:\n{out}");
+    }
+
+    /// ROB'S DEFAULT, and it is the half that must not regress: silence in the
+    /// ontology is PERMISSION. A class that says nothing about relatedToId gets
+    /// no shape for it, and anything may go in.
+    #[test]
+    fn no_restriction_means_no_enforcement() {
+        let ttl = r#"
+@prefix owl: <http://www.w3.org/2002/07/owl#> .
+@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+@prefix t: <https://repolex.ai/ontology/t/> .
+t:Plain a owl:Class .
+t:plainName a owl:DatatypeProperty ; rdfs:domain t:Plain ; rdfs:range <http://www.w3.org/2001/XMLSchema#string> .
+"#;
+        let out = shapes_for(ttl);
+        assert!(!out.contains("sh:qualifiedValueShape"),
+            "a class declaring no restriction must get NO qualified shape:\n{out}");
     }
 
     #[test]
