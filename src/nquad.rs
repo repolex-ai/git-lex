@@ -1130,11 +1130,21 @@ pub(crate) fn emit_spo_line_nquads(
         return 0;
     }
 
-    // Hard-fail: [[wikilinks]] in frontmatter values corrupt the graph
+    // Hard-fail: [[wikilinks]] in frontmatter values corrupt the graph.
+    //
+    // The advice here used to say "write the repo-relative path (e.g.
+    // friend/selkie.md)" and that was actively wrong twice over (@m4rq,
+    // 2026-08-27): for a Thing-valued property the path form is rejected by
+    // the very next check, which tells you to use the angle-bracket address —
+    // so the two messages contradicted each other. And `friend/` is not even a
+    // real folder; class folders are capitalised and live under the kit's base
+    // (Soul/Friend/). It steered people to a value that could not work.
     if predicate != "linksTo" && (object.contains("[[") || object.contains("]]")) {
         if warn {
             eprintln!(
-                "error: {}: {} — wikilink syntax [[...]] is not allowed in frontmatter values. Write the repo-relative path (e.g. friend/selkie.md).",
+                "error: {}: {} — wikilink syntax [[...]] is not allowed in frontmatter \
+                 values. A frontmatter reference is a Thing ADDRESS: \
+                 <namespace/Class/identifier>, e.g. <soul/Note/my-note>.",
                 relpath_str, subject
             );
         }

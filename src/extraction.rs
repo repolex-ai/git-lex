@@ -317,10 +317,51 @@ pub(crate) fn frontmatter_to_turtle(
                                 kit_props.push((prop_name.to_string(), n.to_string()));
                             } else if let Some(b) = item.as_bool() {
                                 kit_props.push((prop_name.to_string(), b.to_string()));
+                            } else if item.is_sequence() {
+                                // `key: [[name]]` is VALID YAML — a list holding a
+                                // list — so it never reaches the wikilink guard,
+                                // which only ever sees strings. It fell through all
+                                // three arms above and vanished: the document saved,
+                                // exit 0, and the property simply was not in the
+                                // graph (@m4rq, 2026-08-27). Quoting it makes it a
+                                // string and the guard fires; leaving it bare was
+                                // silent.
+                                return Err(format!(
+                                    "{}: a nested list value. If you meant a wikilink, that is \
+                                     not wikilink syntax here — YAML reads `[[x]]` as a list \
+                                     inside a list. A frontmatter reference is a Thing address: \
+                                     <namespace/Class/identifier>.",
+                                    prop_name
+                                ));
+                            } else {
+                                return Err(format!(
+                                    "{}: a list item that is not text, a number, or true/false \
+                                     cannot be stored. Remove it or write it as text.",
+                                    prop_name
+                                ));
                             }
                         }
                     }
-                    _ => {}
+                    // Everything else is a shape the graph cannot hold. It used to
+                    // be discarded without a word — the same silence as the nested
+                    // list above, one level up.
+                    serde_yaml::Value::Mapping(_) => {
+                        return Err(format!(
+                            "{}: a nested block of keys. A frontmatter property holds text, a \
+                             number, true/false, or a list of those — not a structure. Flatten \
+                             it into separate keys.",
+                            prop_name
+                        ));
+                    }
+                    serde_yaml::Value::String(_) => {} // empty/whitespace — handled above
+                    serde_yaml::Value::Null => {}      // absent is absent, not an error
+                    _ => {
+                        return Err(format!(
+                            "{}: a value the graph cannot store. Write text, a number, \
+                             true/false, or a list of those.",
+                            prop_name
+                        ));
+                    }
                 }
             }
         }

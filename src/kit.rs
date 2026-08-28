@@ -630,6 +630,21 @@ pub(crate) fn fetch_kit_from_github(kit_spec: &str, target_dir: &std::path::Path
                                 requested_short, declared
                             );
                             eprintln!("       Fix: re-run with `--kit {}`.", declared);
+                            // Take the wrong bytes with us. Leaving
+                            // .lex/kit/<org>/git-lex-kit-solo/ on disk holding
+                            // SOUL content is the exact artifact this gate
+                            // exists to prevent, and someone reading the tree
+                            // after a failed init would reasonably conclude the
+                            // kit installed (@w3bl0rd spotted it in the
+                            // verification pass). A later init clears the whole
+                            // kit root anyway; that is a reason it is harmless,
+                            // not a reason to leave a lie on disk.
+                            if let Err(e) = fs::remove_dir_all(target_dir) {
+                                eprintln!(
+                                    "       (could not remove the partial install at {}: {} — delete it by hand)",
+                                    target_dir.display(), e
+                                );
+                            }
                             // Exit here rather than returning false: every
                             // caller's failure branch blames the network and
                             // tells you to check the repo exists. Both are
