@@ -229,6 +229,45 @@ pub(crate) fn extract_md_link_lines(
     }
 }
 
+/// The DECLARED IRI of every property, loaded once per process.
+///
+/// `get_property_iris_all_kits` re-reads every shapes file, and
+/// `frontmatter_to_turtle` runs once per document, so this must not be called
+/// per file.
+fn declared_property_iris() -> &'static std::collections::HashMap<String, String> {
+    static TABLE: std::sync::OnceLock<std::collections::HashMap<String, String>> =
+        std::sync::OnceLock::new();
+    TABLE.get_or_init(crate::ontology::get_property_iris_all_kits)
+}
+
+/// The predicate to emit for one authored frontmatter key.
+///
+/// THE 2026-08-28 RELEASE INCIDENT. This path used to build the predicate by
+/// GLUING the key's kit prefix onto the property name — `soul.Note.id` became
+/// `soul:id`. But `id` is declared on git-lex, not on soul, so the shape's
+/// `sh:path <https://repolex.ai/ontology/git-lex/id>` found ZERO values and
+/// reported `MinCount(1) not satisfied` on documents carrying a correct,
+/// bracketed, graph-resolved id. There was no key any author could have
+/// written that would pass.
+///
+/// It was never specific to `id`. EVERY universal property authored under a
+/// kit prefix has been landing on the wrong predicate in validation; `id` was
+/// simply the first one ever made REQUIRED, so the first that could fail
+/// loudly. @nug3 caught it by testing ONE file before editing twenty-two, and
+/// @tr1p rolled kit-base back to 0.15.1 rather than let fifteen souls hand-edit
+/// into a gate that could not see the result.
+///
+/// The shapes carry inherited properties with their full declared IRI, so the
+/// table already knows the answer. Ask it; glue only when it has none.
+/// (This is the "A5 unification" the KNOWN LIMIT comment below has marked for
+/// months — the marker was right and the gap was real.)
+fn emit_predicate(lookup_key: &str, prefix_name: &str, prop_name: &str) -> String {
+    match declared_property_iris().get(lookup_key) {
+        Some(iri) => format!("<{}>", iri),
+        None => format!("{}:{}", prefix_name, prop_name),
+    }
+}
+
 pub(crate) fn frontmatter_to_turtle(
     filepath: &std::path::Path,
     root: &std::path::Path,
@@ -417,6 +456,9 @@ pub(crate) fn frontmatter_to_turtle(
         // Kit+class-qualified lookup — tables key "{kit}/{Class}/{prop}"
         // (Rob-ruled 2026-07-21; see ontology.rs get_object_properties).
         let lookup_key = format!("{}/{}/{}", short, doc_type, prop_name);
+
+        let predicate_iri = emit_predicate(&lookup_key, &prefix_name, prop_name);
+
         if obj_props.contains(lookup_key.as_str()) {
             // ObjectProperty — resolve each comma-separated value through
             // the SAME resolver sync's emitter uses (resolve.rs), so
@@ -439,13 +481,9 @@ pub(crate) fn frontmatter_to_turtle(
             // namespace in hand, so it consults with the glued own-kit IRI —
             // exactly the entries the old `{kit}/{prop}` key reached, no
             // more, no less. KNOWN LIMIT: an INHERITED property's range
-            // (declared in another kit, e.g. git-lex:relatedToId) is not
-            // visible here; its authoritative gate is the sync emitter's
-            // range lane (nquad.rs), which joins through the declared
-            // predicate IRI. Folding this path onto ResolverContext (which
-            // holds prop_iris) is the A5 unification this comment is the
-            // marker for.
-            let range = ref_ranges.get(&format!("{}{}", namespace, prop_name));
+            // (declared in another kit, e.g. git-lex:relatedToId) is now
+            // visible here via the resolved predicate IRI from prop_iris.
+            let range = ref_ranges.get(predicate_iri.trim_start_matches('<').trim_end_matches('>'));
             for val in &values {
                 let val = val.as_str();
                 if range.map(String::as_str) == Some(crate::nquad::THING_CLASS_IRI) {
@@ -454,8 +492,8 @@ pub(crate) fn frontmatter_to_turtle(
                     match crate::resolve::resolve_thing_reference(val) {
                         Ok(target) => {
                             ttl.push_str(&format!(
-                                "<{}> {}:{} {} .\n",
-                                doc_iri, prefix_name, prop_name, target
+                                "<{}> {} {} .\n",
+                                doc_iri, predicate_iri, target
                             ));
                         }
                         Err(msg) => {
@@ -468,8 +506,8 @@ pub(crate) fn frontmatter_to_turtle(
                     match crate::nquad::thing_iri_from_range(range_iri, val) {
                         Some(target) => {
                             ttl.push_str(&format!(
-                                "<{}> {}:{} {} .\n",
-                                doc_iri, prefix_name, prop_name, target
+                                "<{}> {} {} .\n",
+                                doc_iri, predicate_iri, target
                             ));
                         }
                         None => {
@@ -485,8 +523,8 @@ pub(crate) fn frontmatter_to_turtle(
                     crate::resolve::ResolveResult::Iri(uri) => {
                         // `uri` arrives in `<...>` form, valid Turtle as-is.
                         ttl.push_str(&format!(
-                            "<{}> {}:{} {} .\n",
-                            doc_iri, prefix_name, prop_name, uri
+                            "<{}> {} {} .\n",
+                            doc_iri, predicate_iri, uri
                         ));
                     }
                     crate::resolve::ResolveResult::Unresolved(lit) => {
@@ -494,8 +532,8 @@ pub(crate) fn frontmatter_to_turtle(
                         // a sh:nodeKind sh:IRI shape flags it — validation
                         // surfaces the problem instead of inventing an IRI.
                         ttl.push_str(&format!(
-                            "<{}> {}:{} \"{}\" .\n",
-                            doc_iri, prefix_name, prop_name, turtle_escape(&lit)
+                            "<{}> {} \"{}\" .\n",
+                            doc_iri, predicate_iri, turtle_escape(&lit)
                         ));
                     }
                     crate::resolve::ResolveResult::Rejected(msg) => {
@@ -506,14 +544,14 @@ pub(crate) fn frontmatter_to_turtle(
         } else if let Some(datatype) = prop_datatypes.get(lookup_key.as_str()) {
             // Typed literal (xsd:integer, xsd:date, etc.)
             ttl.push_str(&format!(
-                "<{}> {}:{} \"{}\"^^<{}> .\n",
-                doc_iri, prefix_name, prop_name, turtle_escape(value), datatype
+                "<{}> {} \"{}\"^^<{}> .\n",
+                doc_iri, predicate_iri, turtle_escape(value), datatype
             ));
         } else {
             // Plain string literal
             ttl.push_str(&format!(
-                "<{}> {}:{} \"{}\" .\n",
-                doc_iri, prefix_name, prop_name, turtle_escape(value)
+                "<{}> {} \"{}\" .\n",
+                doc_iri, predicate_iri, turtle_escape(value)
             ));
         }
     }
