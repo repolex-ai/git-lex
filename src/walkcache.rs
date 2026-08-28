@@ -376,7 +376,21 @@ mod tests {
     /// immediately; removals never did.
     #[test]
     fn deleting_a_document_removes_its_fragment() {
-        let root = tmp_root("prune");
+        // Its own root, uniquified by clock as well as pid: the shared helper
+        // keys only on process id, and under the full suite this test collided
+        // with a sibling and died in create_dir_all. A test that passes alone
+        // and fails in the suite is not a flaky test, it is a shared-state bug
+        // in the fixture.
+        let root = std::env::temp_dir().join(format!(
+            "glx-walkcache-prune-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join(".lex").join("ontology").join("t")).unwrap();
         let ctx = context_hash(&root, &[root.join("a.md")]);
 
         // Run 1: two documents seen, two fragments written.
