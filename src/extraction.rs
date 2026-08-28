@@ -281,18 +281,38 @@ fn emit_predicate(lookup_key: &str, prefix_name: &str, prop_name: &str) -> Strin
             // documents in a class that is not declared a Thing would hit an
             // unfixable block with no clue why. One warning, once per key, is
             // the difference between a five-minute fix and an outage.
+            // DEPRECATED properties are skipped here: they already get their
+            // own note, and adding a second line about the same key would be
+            // pure noise on a stream three seats have already complained
+            // about. This warning is for keys nothing has explained yet.
+            static DEPRECATED: std::sync::OnceLock<std::collections::HashMap<String, Option<String>>> =
+                std::sync::OnceLock::new();
+            let deprecated = DEPRECATED
+                .get_or_init(crate::ontology::get_deprecated_properties_all_kits);
+            let kit_short = lookup_key.split('/').next().unwrap_or("");
+            let is_deprecated = deprecated.contains_key(&format!("{}/{}", kit_short, prop_name));
+
             static WARNED: std::sync::Mutex<Option<std::collections::HashSet<String>>> =
                 std::sync::Mutex::new(None);
-            if let Ok(mut guard) = WARNED.lock() {
-                let seen = guard.get_or_insert_with(std::collections::HashSet::new);
-                if seen.insert(lookup_key.to_string()) {
-                    eprintln!(
-                        "warning: the key `{}` is not declared for this document's class, so its \
-                         value is being saved under an invented name (`{}:{}`) that no query will \
-                         find. Usually this means the class is not declared as a Thing in its \
-                         ontology. Report it to the `{}` ontology owner; the value is safe on disk.",
-                        lookup_key, prefix_name, prop_name, prefix_name
-                    );
+            if !is_deprecated {
+                if let Ok(mut guard) = WARNED.lock() {
+                    let seen = guard.get_or_insert_with(std::collections::HashSet::new);
+                    if seen.insert(lookup_key.to_string()) {
+                        // State WHAT HAPPENED and do not assert WHY. The first
+                        // version of this message said "usually the class is not
+                        // declared as a Thing" — true for the case that prompted
+                        // it, and flatly wrong for every other key it fires on.
+                        // A diagnosis I cannot verify is the thing I spent this
+                        // whole night removing from other people's tools.
+                        eprintln!(
+                            "warning: the key `{}` is not declared for this document's class, so \
+                             its value saves under an invented name (`{}:{}`) that no query will \
+                             find. The value is safe on disk. Report it to the `{}` ontology \
+                             owner — either the key belongs on this class and is missing, or the \
+                             class does not declare the property's owner as a parent.",
+                            lookup_key, prefix_name, prop_name, prefix_name
+                        );
+                    }
                 }
             }
             format!("{}:{}", prefix_name, prop_name)
