@@ -326,8 +326,30 @@ pub(crate) fn emit_class_templates(kit_name: &str, root: &std::path::Path, creat
         // (#101). Same argument the type words made in #100: the template
         // gets read far more often than the ontology does.
         tmpl.push_str(&git_lex::multivalue_teaching_block(&short, type_name));
+        // ONE LINE PER EMITTED KEY, not per source property.
+        //
+        // FLEET-STOPPING, found by @th34 and @w4r3z-pool within minutes of the
+        // 2026-08-28 release: __ScenarioTake.md carried FIVE identical
+        // `copia.ScenarioTake.relatedToId` lines and __Shotlist.md two, so the
+        // duplicate-key gate rejected them — and they are kit-managed files a
+        // soul never wrote and is told not to edit. The gate is repo-wide, so a
+        // template for a class nobody uses blocked EVERY save in the repo,
+        // including the .id backfill the release had just ordered.
+        //
+        // The file violated the rule printed in its own header eight lines
+        // above the offence: "Write the key once."
+        //
+        // Several source properties now legitimately map onto one key —
+        // ScenarioTake's four deleted twins all collapse to relatedToId, and
+        // its four owl:onClass restrictions each produce their own sh:property
+        // on that same path. Both are correct upstream; emitting one template
+        // line each is not.
+        let mut emitted_keys: std::collections::HashSet<String> = std::collections::HashSet::new();
         for (prop_name, prop_type, _required, _comment) in properties {
             let key = format!("{}.{}.{}", short, type_name, prop_name);
+            if !emitted_keys.insert(key.clone()) {
+                continue;
+            }
             let hint = shacl_hints.get(&format!("{}:{}", prefix_name, prop_name));
             let comment = match hint {
                 Some(h) => format!(" # {}", h),
