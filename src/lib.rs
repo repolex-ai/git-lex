@@ -835,27 +835,37 @@ pub fn add_prefixes_at(root: Option<&std::path::Path>, query: &str) -> String {
     // under a second namespace (.../copia/Place/airstream-salida) and are NOT
     // given a prefix — that split is a known open question, not a thing to
     // deepen by minting a second binding for it.
-    // Read what is INSTALLED, not what is bookkept. My first attempt at this
-    // walked repo.yml's domain kit plus its optional_kits list and did not fix
-    // @selkie's query at all: lUX's repo.yml names ONE kit and declares no
-    // optional_kits whatsoever, while .lex/ontology/ holds five installed
-    // vocabularies — copia, pool, ravel, soul, git-lex. The list and the disk
-    // disagree, and the disk is the thing the queries actually run against.
+    // Bind a kit's prefix when the repo DECLARES it and the ontology is
+    // actually INSTALLED. Both halves are load-bearing, and I got here by
+    // being wrong twice:
+    //
+    // - Domain kit only (the original) meant lUX — domain soul, content almost
+    //   entirely copia — could not parse `?s a copia:Place`, the most natural
+    //   query in that repo (@selkie, 2026-08-27).
+    // - Disk only (my first fix) binds a kit forever after it is removed:
+    //   `kit-remove` deletes .lex/kit/<org>/<repo>/ and updates repo.yml, but
+    //   never touches .lex/ontology/<short>/, so the ontology outlives the
+    //   removal (Rob caught this — "kits can be removed").
+    //
+    // Declared-and-installed handles both, plus the case where a declared kit
+    // is not installed yet: no prefix is advertised for a vocabulary that is
+    // not there to answer.
     let mut kit_prefixes: Vec<(String, String)> = Vec::new();
     if let Some(r) = root {
-        let ont_root = r.join(".lex").join("ontology");
-        let mut shorts: Vec<String> = Vec::new();
-        if let Ok(entries) = fs::read_dir(&ont_root) {
-            for e in entries.filter_map(|e| e.ok()) {
-                if !e.path().is_dir() { continue }
-                if let Some(short) = e.file_name().to_str() {
-                    shorts.push(short.to_string());
-                }
-            }
+        let ry = RepoYml::load(r);
+        let mut specs: Vec<String> = Vec::new();
+        if let Some(k) = ry.domain_kit() {
+            specs.push(k);
         }
-        // Stable order so the emitted prefix block does not churn between runs.
-        shorts.sort();
-        for short in shorts {
+        specs.extend(ry.optional_kits.iter().cloned());
+        for spec in specs {
+            let (_, _, short) = resolve_kit_spec(&spec);
+            // Installed = the ontology directory this kit's prefix would point
+            // into actually exists. A declared kit with no ontology on disk
+            // contributes nothing.
+            if !r.join(".lex").join("ontology").join(&short).is_dir() {
+                continue;
+            }
             if let Some(binding) = kit_prefix_binding(r, &short) {
                 if !kit_prefixes.iter().any(|(name, _)| name == &binding.0) {
                     kit_prefixes.push(binding);
@@ -1391,5 +1401,65 @@ mod prefix_explanation_tests {
                  SELECT ?s WHERE { ?s <https://example.org/a:b> \"note: not a prefix\" }";
         assert!(explain_unbound_prefix(q, DUMP).is_none(),
             "an IRI's scheme colon and a literal's colon must not be read as prefixes");
+    }
+}
+
+#[cfg(test)]
+mod kit_prefix_binding_tests {
+    use super::*;
+
+    /// Build a throwaway repo root: repo.yml declaring `declared`, and an
+    /// installed ontology dir for each of `installed`.
+    fn fake_root(tag: &str, domain: &str, optional: &[&str], installed: &[&str]) -> PathBuf {
+        let root = std::env::temp_dir().join(format!("gl-prefix-{}-{}", tag, std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join(".lex")).unwrap();
+        let mut yml = format!("name: t\nkit: repolex-ai/git-lex-kit-{}\n", domain);
+        if !optional.is_empty() {
+            yml.push_str("optional_kits:\n");
+            for o in optional {
+                yml.push_str(&format!("  - repolex-ai/git-lex-kit-{}\n", o));
+            }
+        }
+        fs::write(root.join(".lex").join("repo.yml"), yml).unwrap();
+        for i in installed {
+            fs::create_dir_all(root.join(".lex").join("ontology").join(i)).unwrap();
+        }
+        root
+    }
+
+    /// @selkie's case: an OPTIONAL kit's prefix must bind. Binding only the
+    /// domain kit made the most natural query in lUX fail to parse.
+    #[test]
+    fn optional_kit_prefix_is_bound() {
+        let root = fake_root("opt", "soul", &["copia"], &["soul", "copia"]);
+        let out = add_prefixes_at(Some(&root), "SELECT ?s WHERE { ?s a copia:Place }");
+        assert!(out.contains("PREFIX copia:"), "optional kit must bind:\n{out}");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// Rob's case: a kit REMOVED from repo.yml must stop being bound, even
+    /// though `kit-remove` leaves .lex/ontology/<short>/ on disk. Reading the
+    /// disk alone would keep the prefix alive forever.
+    #[test]
+    fn removed_kit_stops_binding_even_though_its_ontology_remains() {
+        let root = fake_root("rm", "soul", &[], &["soul", "copia"]);
+        let out = add_prefixes_at(Some(&root), "SELECT ?s WHERE { ?s a copia:Place }");
+        assert!(!out.contains("PREFIX copia:"),
+            "an undeclared kit must not bind just because its ontology is still on disk:\n{out}");
+        assert!(out.contains("PREFIX soul:"), "the declared kit must still bind:\n{out}");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// Rob's other case: not every repo has every kit. A kit declared but not
+    /// installed advertises nothing — no prefix pointing at a vocabulary that
+    /// is not there to answer.
+    #[test]
+    fn declared_but_not_installed_binds_nothing() {
+        let root = fake_root("noinst", "soul", &["pool"], &["soul"]);
+        let out = add_prefixes_at(Some(&root), "SELECT ?s WHERE { ?s a pool:Thing }");
+        assert!(!out.contains("PREFIX pool:"),
+            "a declared kit with no installed ontology must not bind:\n{out}");
+        let _ = fs::remove_dir_all(&root);
     }
 }
