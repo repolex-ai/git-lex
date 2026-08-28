@@ -254,6 +254,41 @@ impl WalkCache {
             ));
         }
         let _ = fs::write(self.dir.join("manifest.tsv"), out);
+        self.prune_orphan_fragments();
+    }
+
+    /// Delete fragment files whose document was not seen this run.
+    ///
+    /// THE GHOST BUG (@w4r3z-pool, @spacegoat, @w4r3z-pan and @nug3 all found
+    /// it within an hour, 2026-08-27). Deleting a document removed its source
+    /// and its `.lex/extract/` sidecar, but its fragment under
+    /// `walkcache/frag/` survived — and the deleted document went on answering
+    /// queries. Reproduced in isolation: fragment present, file absent -> 6
+    /// triples for a document that does not exist; move the fragment aside ->
+    /// 0; put it back -> 6 again.
+    ///
+    /// Why it mattered more than tidiness: it defeated the ONLY available
+    /// dangling-reference check, and in the reassuring direction. A reference
+    /// pointing at a DELETED document read as perfectly resolved, so the one
+    /// workaround the fleet had for the missing existence check quietly lied.
+    ///
+    /// `self.fresh` is every document this run saw — `hit()` and `store()` both
+    /// record into it — so anything on disk and not in it is a document that no
+    /// longer exists. That holds because the walk is always whole-repo
+    /// (`walk_repo_docs` reads the directory tree); a future partial walk would
+    /// have to stop calling this or it would prune live fragments.
+    fn prune_orphan_fragments(&self) {
+        let frag_root = self.dir.join("frag");
+        let mut stale: Vec<PathBuf> = Vec::new();
+        collect_files(&frag_root, &mut stale);
+        for f in stale {
+            let Ok(rel) = f.strip_prefix(&frag_root) else { continue };
+            let rel = rel.to_string_lossy();
+            let Some(doc) = rel.strip_suffix(".nq") else { continue };
+            if !self.fresh.contains_key(doc) {
+                let _ = fs::remove_file(&f);
+            }
+        }
     }
 }
 
@@ -329,6 +364,41 @@ mod tests {
         let c3 = WalkCache::load(&root, &ctx).unwrap();
         assert!(c3.entries.contains_key("only.md"));
         assert!(!c3.entries.contains_key("keep.md"), "vanished files fall away");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// THE GHOST BUG. A document's fragment must not outlive the document.
+    ///
+    /// Found within an hour by @w4r3z-pool, @spacegoat, @w4r3z-pan and @nug3,
+    /// four seats, four routes. @nug3's reduction was the cleanest: delete a
+    /// COMMITTED, clean file and the query returns the identical triple count —
+    /// no save involved. The live view was additive-only. Additions propagated
+    /// immediately; removals never did.
+    #[test]
+    fn deleting_a_document_removes_its_fragment() {
+        let root = tmp_root("prune");
+        let ctx = context_hash(&root, &[root.join("a.md")]);
+
+        // Run 1: two documents seen, two fragments written.
+        let mut c = WalkCache::empty(&root, &ctx);
+        c.store("a.md", "bh-a", "ih-a", "<x> <y> <z> .\n", 0);
+        c.store("b.md", "bh-b", "ih-b", "<p> <q> <r> .\n", 0);
+        c.save();
+        assert!(root.join(".lex/_ignore/walkcache/frag/a.md.nq").exists());
+        assert!(root.join(".lex/_ignore/walkcache/frag/b.md.nq").exists());
+
+        // Run 2: b.md is gone from disk, so the walk never sees it.
+        let mut c2 = WalkCache::empty(&root, &ctx);
+        c2.store("a.md", "bh-a", "ih-a", "<x> <y> <z> .\n", 0);
+        c2.save();
+
+        assert!(root.join(".lex/_ignore/walkcache/frag/a.md.nq").exists(),
+            "a surviving document keeps its fragment");
+        assert!(!root.join(".lex/_ignore/walkcache/frag/b.md.nq").exists(),
+            "a DELETED document must not keep answering queries — this fragment outliving its \
+             source is what made a reference to a deleted document read as perfectly resolved, \
+             defeating the only dangling-reference check the fleet had");
+
         let _ = fs::remove_dir_all(&root);
     }
 }

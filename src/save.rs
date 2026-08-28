@@ -276,6 +276,22 @@ pub(crate) fn cmd_save(message: &str, dry_run: bool) {
             // of the save did not happen. @w3bl0rd carried four dead skills
             // for four months because the failures printed ABOVE this line
             // every single time.
+            // Author-actionable diagnostics get a COUNT below the success
+            // line. @w3bl0rd-web, 2026-08-27: they print above it, which is the
+            // same channel that hid four skill-sync failures on every save for
+            // nineteen days, because nobody reads upward from "Saved". This does
+            // not move or reshape those lines — it puts the number where the eye
+            // lands, and stays compatible with whatever shape the stream itself
+            // ends up with.
+            let author_warnings = crate::nquad::author_warning_count();
+            if author_warnings > 0 {
+                eprintln!(
+                    "...saved with {} warning(s) — see the warning:/note: lines above. \
+                     The commit landed; those values saved as plain ungoverned data.",
+                    author_warnings
+                );
+            }
+
             let harness_failed = crate::harness::claude::harness_failure_count();
             if harness_failed > 0 {
                 eprintln!(

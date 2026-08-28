@@ -85,6 +85,33 @@ pub(crate) fn nq_escape(s: &str) -> String {
 
 /// Percent-encode one character into `out` (the shared table for both
 /// encoders below).
+/// Author-actionable diagnostics emitted during this process's extraction.
+///
+/// @w3bl0rd-web, 2026-08-27: these print ABOVE the success line, which is the
+/// exact channel that hid four failed-to-sync-skill errors on every save in his
+/// repo for nineteen days — nobody reads upward from "Saved". A COUNT below the
+/// success line puts the number where the eye actually lands. Compatible with
+/// whatever Rob rules for the warning stream itself: this adds a summary, it
+/// does not move or reshape the lines.
+static AUTHOR_WARNINGS: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
+pub(crate) fn bump_author_warning() {
+    AUTHOR_WARNINGS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// How many author-actionable diagnostics this run produced. Read by `save`
+/// AFTER it reports the commit.
+pub(crate) fn author_warning_count() -> usize {
+    AUTHOR_WARNINGS.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// eprintln that also counts. Used for every `warning:`/`note:` addressed to
+/// the document's author.
+macro_rules! author_diag {
+    ($($a:tt)*) => {{ crate::nquad::bump_author_warning(); eprintln!($($a)*); }};
+}
+
 fn push_uri_encoded(c: char, out: &mut String) {
     match c {
         '%' => out.push_str("%25"),
@@ -455,7 +482,7 @@ pub(crate) fn derive_file_subjects(
         match parse_universal_id(&raw) {
             Ok((id_ns, id_class, _identifier, inner)) => {
                 if (id_ns.as_str(), id_class.as_str()) != (kit.as_str(), class.as_str()) && warn {
-                    eprintln!(
+                    author_diag!(
                         "note: {relpath_str}: the id `{raw}` declares `{id_ns}/{id_class}` while \
                          the file's keys say `{kit}.{class}` — the id is the identity authority \
                          and wins; align the keys (or the folder) when convenient."
@@ -474,7 +501,7 @@ pub(crate) fn derive_file_subjects(
             }
             Err(msg) => {
                 if warn {
-                    eprintln!(
+                    author_diag!(
                         "warning: {relpath_str}: `{universal_key}` — {msg} The per-class id \
                          (if present) anchors this file for now."
                     );
@@ -499,7 +526,7 @@ pub(crate) fn derive_file_subjects(
     let prop_key = format!("{}/{}/{}", kit, class, id_prop);
     if !declared_props.contains(&prop_key) && !obj_props.contains(&prop_key) {
         if warn {
-            eprintln!(
+            author_diag!(
                 "warning: {relpath_str}: the class `{kit}.{class}` has no `{id_prop}` \
                  key in its ontology, so documents of this class cannot get their own \
                  identity in the graph. You cannot fix this by editing this file — \
@@ -548,7 +575,7 @@ pub(crate) fn derive_file_subjects(
                 .file_stem()
                 .map(|s| s.to_string_lossy().to_string())
                 .unwrap_or_else(|| relpath_str.to_string());
-            eprintln!(
+            author_diag!(
                 "warning: {relpath_str}: this {kit}.{class} document has no id. Fix: \
                  add this line to the YAML block at the top of the file: \
                  {id_line_key}: \"{stem}\""
@@ -1193,7 +1220,7 @@ pub(crate) fn emit_spo_line_nquads(
                 if graph == format!("<{}>", crate::git::graph_uri("now"))
                     && !path_index.contains(&p)
                 {
-                    eprintln!(
+                    author_diag!(
                         "warning: {relpath_str}: link target {p} does not exist (yet) — forward link, or fix the path"
                     );
                 }
@@ -1240,7 +1267,7 @@ pub(crate) fn emit_spo_line_nquads(
                     Ok(canonical) => Some(canonical),
                     Err(msg) => {
                         if warn {
-                            eprintln!("warning: {relpath_str}: {msg}");
+                            author_diag!("warning: {relpath_str}: {msg}");
                         }
                         None
                     }
@@ -1410,7 +1437,7 @@ pub(crate) fn emit_spo_line_nquads(
                         if let Some(suggested) =
                             bare_kit_reference_suggestion(val, kit_namespaces, path_index)
                         {
-                            eprintln!(
+                            author_diag!(
                                 "note: {}: `{}` on `{}` has no angle brackets, so it \
                                  resolves as a repo-relative path to `{}` — an address \
                                  nothing in the graph describes. Did you mean `<{}>`?",
@@ -1479,7 +1506,7 @@ pub(crate) fn emit_spo_line_nquads(
                                 .as_ref()
                                 .map(|r| format!(" — replacement: `{}`", r))
                                 .unwrap_or_default();
-                            eprintln!(
+                            author_diag!(
                                 "note: {}: the key `{}.{}.{}` is deprecated (the \
                                  `{}` ontology retired it{}). The line still saves \
                                  and history replays; don't use it in new writing — \
@@ -1519,7 +1546,7 @@ pub(crate) fn emit_spo_line_nquads(
                                 })
                                 .collect::<Vec<_>>()
                                 .join(", ");
-                            eprintln!(
+                            author_diag!(
                                 "warning: {}: the key `{}.{}.{}` — `{}` exists in the \
                                  `{}` ontology, but on class {}, not on {}. Fix, pick \
                                  one: (a) this line belongs in a {} document — move it \
@@ -1594,7 +1621,7 @@ pub(crate) fn emit_spo_line_nquads(
                                     candidates.join(", ")
                                 )
                             };
-                            eprintln!(
+                            author_diag!(
                                 "warning: {}: the key `{}.{}.{}` does not exist in \
                                  the `{}` ontology. Fix, pick one: (a) the ontology \
                                  may use a different name for this{} — if one means \
@@ -1722,7 +1749,7 @@ pub(crate) fn load_ontology_graph(store: &oxigraph::store::Store) -> usize {
         Err(_) => return 0,
     };
     if let Err(e) = store.remove_named_graph(&ontology_graph) {
-        eprintln!("warning: failed to clear the repo-ontology graph before reload: {} — retired vocabulary may linger", e);
+        author_diag!("warning: failed to clear the repo-ontology graph before reload: {} — retired vocabulary may linger", e);
     }
     fn walk_ttl(dir: &std::path::Path, out: &mut Vec<PathBuf>) {
         if let Ok(entries) = fs::read_dir(dir) {
