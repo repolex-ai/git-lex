@@ -453,6 +453,20 @@ pub(crate) fn load_ttl_str(content: &str, label: &str) -> Result<Store, String> 
 
 // ─── install pipeline ──────────────────────────────────────────
 
+/// The `name:` a kit declares in its own kit.yml — the kit's statement of what
+/// it is, independent of the directory it happens to be sitting in.
+///
+/// Deliberately reads only a top-level `name:` line: a nested `name:` under
+/// some other key is not the kit's identity, and treating it as such would
+/// make the identity check itself a source of false refusals.
+pub(crate) fn declared_kit_name(yml: &str) -> Option<String> {
+    yml.lines()
+        .find(|l| !l.starts_with(char::is_whitespace) && l.trim_start().starts_with("name:"))
+        .and_then(|l| l.trim().strip_prefix("name:"))
+        .map(|v| v.trim().trim_matches('"').trim_matches('\'').to_string())
+        .filter(|v| !v.is_empty())
+}
+
 /// Display form for a commit id — first 8 chars, or the whole thing if it is
 /// somehow shorter. Display only: the full sha is what gets recorded, because
 /// a truncated id is an identity you cannot compare later.
@@ -568,6 +582,68 @@ pub(crate) fn fetch_kit_from_github(kit_spec: &str, target_dir: &std::path::Path
                 .unwrap_or(false);
             if !has_files {
                 return false;
+            }
+
+            // IDENTITY CHECK — the fetch succeeding does not mean you got the
+            // kit you asked for. GitHub serves renamed repos through a
+            // redirect, so `git lex init --kit solo` follows
+            // git-lex-kit-solo -> git-lex-kit-soul, lands SOUL bytes in a
+            // directory named ...-solo, prints "installed", and exits 0. The
+            // ontology then installs under its REAL short name (soul) while
+            // repo.yml permanently records the requested one (solo), so every
+            // type lookup hunts under `solo` and finds nothing: `create note`
+            // says "Unknown document type", `list` returns []. A brand-new
+            // repo, apparently installed, structurally empty.
+            //
+            // Found by @w3bl0rd 2026-08-27, with the control run that matters:
+            // a genuinely missing kit fails loudly and correctly. The redirect
+            // is the ONLY way to reach the quiet half-success.
+            //
+            // The check lives HERE, inside the fetch, rather than in any of
+            // the four call sites — a gate the callers could forget to call is
+            // a gate that will eventually not be called.
+            let (_, _, requested_short) = resolve_kit_spec(kit_spec);
+            match fs::read_to_string(target_dir.join("kit.yml")) {
+                Ok(yml) => {
+                    let declared = declared_kit_name(&yml);
+                    if let Some(declared) = declared {
+                        if declared != requested_short {
+                            eprintln!(
+                                "fatal: asked for kit '{}' and received kit '{}'.",
+                                requested_short, declared
+                            );
+                            eprintln!(
+                                "       https://github.com/{}/{} redirects to a repo that declares \
+                                 itself '{}' — almost certainly a rename.",
+                                org, repo, declared
+                            );
+                            eprintln!(
+                                "       Installing it would record '{}' while its ontology installs \
+                                 under '{}', and every document type would then be invisible.",
+                                requested_short, declared
+                            );
+                            eprintln!("       Fix: re-run with `--kit {}`.", declared);
+                            // Exit here rather than returning false: every
+                            // caller's failure branch blames the network and
+                            // tells you to check the repo exists. Both are
+                            // false here — the repo exists and the fetch
+                            // worked. A precise diagnosis followed by a wrong
+                            // one is the disease this check was written to
+                            // cure, so the precise one gets the last word.
+                            std::process::exit(1);
+                        }
+                    }
+                }
+                Err(_) => {
+                    // No kit.yml means identity cannot be confirmed. Say so
+                    // rather than passing silently — an unverifiable install
+                    // is exactly what this check exists to stop being quiet.
+                    eprintln!(
+                        "warning: kit '{}' ships no kit.yml, so it could not be confirmed as the kit \
+                         you asked for.",
+                        kit_spec
+                    );
+                }
             }
             true
         }
@@ -1576,5 +1652,26 @@ mod kit_version_receipt_tests {
         assert_eq!(short_sha("6da3a09612345678901234567890123456789012"), "6da3a096");
         assert_eq!(short_sha("abc"), "abc");
         assert_eq!(short_sha(""), "");
+    }
+
+    /// The redirect bug: GitHub serves a renamed kit repo through a redirect,
+    /// so the fetch succeeds and the bytes are a DIFFERENT kit than the one
+    /// asked for. kit.yml is the only thing in the payload that says what it
+    /// actually is (@w3bl0rd, 2026-08-27).
+    #[test]
+    fn kit_declares_its_own_name() {
+        assert_eq!(declared_kit_name("name: soul\ninstall folders: true\n").as_deref(), Some("soul"));
+        assert_eq!(declared_kit_name("# git-lex base kit\n\nname: base\n").as_deref(), Some("base"));
+        assert_eq!(declared_kit_name("name: \"soul\"\n").as_deref(), Some("soul"),
+            "a quoted name is the same name");
+
+        // No name, no claim — the caller warns rather than refusing, because
+        // an unverifiable kit is not the same as a wrong one.
+        assert_eq!(declared_kit_name("install folders: true\n"), None);
+        assert_eq!(declared_kit_name("name:\n"), None, "an empty name declares nothing");
+
+        // A nested name belongs to something else. Reading it as the kit's
+        // identity would turn this gate into a source of false refusals.
+        assert_eq!(declared_kit_name("init_variables:\n  name: agent_name\n"), None);
     }
 }
