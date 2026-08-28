@@ -27,6 +27,39 @@ graphs — so a bare pattern there matches almost nothing. Wrap patterns in
 `<https://repolex.ai/git-lex/LexHistoryGraph>`, commits in
 `<https://repolex.ai/git-lex/NamedGraph/commits>`.
 
+## Every named graph, and which door has it
+
+All graph names share the base `https://repolex.ai/git-lex/NamedGraph/`
+except the history graph, which has its own IRI. "Query door" is
+`git lex query`; "serve door" is the SPARQL endpoint over the synced store.
+
+| Graph | Holds | Query door | Serve door |
+|---|---|---|---|
+| `now` | Current-state facts from your documents | yes | yes |
+| `…/LexHistoryGraph` | Every assertion and retraction ever, with provenance | no | yes |
+| `commits` | One node per commit: sha, author, time, message | yes | yes |
+| `refs` | Branches and tags, and the commit each points at | yes | yes |
+| `repo` | The repository itself: genesis sha, HEAD | yes | yes |
+| `filetree/<sha>` | Every file at that commit, as index entries | HEAD only | yes |
+| `repo-ontology` | The installed kits' schema, queryable | no | yes |
+
+The one worth knowing that nobody finds on their own is `repo-ontology`:
+the ontology of every installed kit, loaded as data. It answers "what
+fields can a Journal carry?" without reading any TTL file:
+
+```sparql
+SELECT ?property ?range WHERE {
+  GRAPH <https://repolex.ai/git-lex/NamedGraph/repo-ontology> {
+    ?property rdfs:domain soul:Journal .
+    OPTIONAL { ?property rdfs:range ?range }
+  }
+}
+```
+
+It lives only in the synced store (it is loaded at init and kit-update),
+so this one runs on the serve door — `git lex query` returns zero rows
+for it, silently.
+
 ## Saved queries
 
 A query you will run again does not need to be retyped. `git lex query <name>`
