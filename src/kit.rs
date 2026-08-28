@@ -537,8 +537,14 @@ pub(crate) fn remote_kit_sha(kit_spec: &str) -> Option<String> {
 ///
 /// Uses `curl | tar --strip-components=1` so the extract goes straight
 /// to `target_dir` without a nested `{repo}-main/` directory. Preserves
-/// symlinks natively (a copy step would dereference them and break the
-/// `scaffold/.claude/skills` → `../../skill` link).
+/// symlinks natively, which a copy step would dereference.
+///
+/// The example this once cited is DEAD (@w3bl0rd, 2026-08-27): the soul kit
+/// shipped a `scaffold/.claude/skills` symlink for 48 hours, 2026-04-08 to
+/// 2026-04-10, and no kit has shipped one since — verified, zero symlinks in
+/// any installed kit. Preserving symlinks is still the right default for
+/// arbitrary kit content, but it is no longer protecting that link, and a
+/// reader should not go looking for it.
 ///
 /// Returns true on success (and if at least one file was extracted).
 pub(crate) fn fetch_kit_from_github(kit_spec: &str, target_dir: &std::path::Path) -> bool {
@@ -551,8 +557,9 @@ pub(crate) fn fetch_kit_from_github(kit_spec: &str, target_dir: &std::path::Path
     // Extract the tarball directly into target_dir using --strip-components=1
     // to drop the top-level "git-lex-kit-{name}-main/" directory. Extracting
     // in-place preserves symlinks (tar honors them natively); any round trip
-    // through a copy step dereferences them, which breaks e.g. the
-    // scaffold/.claude/skills → ../../skill symlink.
+    // through a copy step dereferences them. (The scaffold/.claude/skills
+    // symlink this used to name has not existed since 2026-04-10 — see the
+    // doc comment above.)
     fs::create_dir_all(target_dir).ok();
 
     let status = Command::new("curl")
@@ -681,8 +688,36 @@ pub(crate) fn collect_init_variables(kit_name: &str, existing: &HashMap<String, 
 /// Scaffold files live in .lex/kit/scaffold/ and mirror the repo structure.
 /// Raw byte-for-byte copy — no template processing, no variable substitution.
 /// Always overwrites existing files. Symlinks are preserved as symlinks
-/// (not dereferenced) so that e.g. `.claude/skills` can be a symlink to
-/// `../../skill` pointing at the agent's content-area skill folder.
+/// (not dereferenced) — a general property of the copy, no longer serving any
+/// shipped example.
+///
+/// The `.claude/skills → ../../skill` link this used to describe is gone, and
+/// the path it names was never right either: the real link was `../skill`, one
+/// level, which resolves from inside `.claude/`. Two levels points outside the
+/// repo entirely.
+///
+/// Worth keeping the history, because there are TWO roads to a dangling
+/// `.claude/skills` and only one of them is retired (@w3bl0rd, 2026-08-27,
+/// after correcting his own first report):
+///
+/// - KIT-BORN, retired: the soul kit shipped a scaffold symlink from 03f3f7a
+///   (2026-04-08) to b9f9bcb (2026-04-10), fixing the target at d180cd5 in
+///   between. Any repo initialized in that 48-hour window committed one.
+///   Enumerable by init date, cannot recur — no kit ships a scaffold symlink
+///   today. LSPy is the one still dangling.
+///
+/// - MIGRATION-ORPHANED, still live: a repo creates a WORKING symlink by hand,
+///   then something later empties the directory it points at. @w3bl0rd's
+///   resolved for nineteen days, went split-brain when kit-update created
+///   Soul/Skill/ alongside the old skill/, and finally dangled when an
+///   unrelated conformance pass deleted the last file under skill/ — a commit
+///   that had no idea it held the last reference to a symlink target.
+///
+/// The second road is the live hazard and it is NOT bounded by any window. The
+/// lowercase `skill/` → `Soul/Skill/` rename is exactly the move that causes
+/// it, and nothing warns on either side. Note also that test/test-soul is a
+/// fixture where lowercase `skill/` still EXISTS and the link resolves, so
+/// retiring the lowercase name will break it.
 /// These are infrastructure files the kit owns: .claude/, AGENTS.md, hooks,
 /// skills symlink, etc. Agents don't edit them.
 // NOTE(w4r3z, Day 38): "Agents don't edit them" is the load-bearing assumption.

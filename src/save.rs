@@ -271,6 +271,19 @@ pub(crate) fn cmd_save(message: &str, dry_run: bool) {
             // State change LAST: agents truncate output and keep the tail,
             // so the one line a caller must see survives `| tail -3`.
             println!("Saved in {}: {} [as {}]", root.display(), message, author);
+
+            // The commit is real, but it must not be the last word when part
+            // of the save did not happen. @w3bl0rd carried four dead skills
+            // for four months because the failures printed ABOVE this line
+            // every single time.
+            let harness_failed = crate::harness::claude::harness_failure_count();
+            if harness_failed > 0 {
+                eprintln!(
+                    "...but {} harness file(s) did NOT sync — see the harness: lines above. \
+                     The commit landed; the skills/subagents it should have installed did not.",
+                    harness_failed
+                );
+            }
         }
         _ => {
             // An agent that doesn't know the transaction failed will assume

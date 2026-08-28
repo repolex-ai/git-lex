@@ -33,6 +33,27 @@ use crate::kit::read_repo_yml_fields;
 /// Find a class directory (e.g., "Skill") under any namespace folder.
 /// Scans top-level directories for a matching subfolder.
 /// Returns the first match (e.g., Soul/Skill/).
+/// Sub-step failures recorded during this process's harness sync.
+///
+/// @w3bl0rd, twice, and he is right: `git lex save` printed four skill-sync
+/// failures and then "Saved" as its LAST line, every save, for four months.
+/// Nobody reads a warning that sits above a success message. The failures are
+/// advisory — the commit is real and refusing it would be worse — but the last
+/// thing on screen must not be an unqualified success when part of the
+/// operation did not happen.
+static HARNESS_FAILURES: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
+pub(crate) fn record_harness_failure(n: usize) {
+    HARNESS_FAILURES.fetch_add(n, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// How many harness sub-steps failed this run. Read by `save` AFTER it reports
+/// the commit, so the qualifier is the last word rather than the first.
+pub(crate) fn harness_failure_count() -> usize {
+    HARNESS_FAILURES.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 fn find_class_dir(root: &Path, class_name: &str) -> Option<PathBuf> {
     // Check root first (legacy flat layout)
     let flat = root.join(class_name);
@@ -85,6 +106,7 @@ fn sync_skills(root: &Path) {
     };
 
     let mut synced = 0;
+    let mut failed = 0;
     // Every eligible source stem, whether or not its transform succeeds —
     // a present-but-unreadable source must still protect its deployed dir
     // from the prune (a read blip is not a deletion).
@@ -114,17 +136,55 @@ fn sync_skills(root: &Path) {
         let claude_content = transform_skill(&content, name);
 
         let dest_dir = target_dir.join(name);
-        fs::create_dir_all(&dest_dir).ok();
+        // The real diagnosis usually dies HERE. `.ok()` swallowed it, so the
+        // only thing the user ever saw was fs::write's downstream "No such
+        // file or directory" — which names the skill and hides the cause.
+        if let Err(e) = fs::create_dir_all(&dest_dir) {
+            eprintln!("harness: cannot create {}: {}", dest_dir.display(), e);
+            failed += 1;
+            continue;
+        }
 
         let dest = dest_dir.join("SKILL.md");
         if let Err(e) = fs::write(&dest, &claude_content) {
             eprintln!("harness: failed to sync skill {}: {}", name, e);
+            failed += 1;
             continue;
         }
         synced += 1;
     }
 
-    if synced > 0 {
+    // ALWAYS report when anything failed — including, especially, when
+    // EVERYTHING failed. The old `if synced > 0` printed nothing in exactly
+    // that case, so a total wipeout was quieter than a partial one, and save
+    // went on to print "Saved" as its last word.
+    //
+    // @w3bl0rd, 2026-08-27: every soul skill in his repo was unavailable to
+    // Claude Code since April, and the diagnostic printed on EVERY save the
+    // whole time — four failure lines one line above a success message.
+    // Nobody reads a warning that sits above "Saved". A count does read:
+    // "synced 0 of 4" is a problem, four separate lines are noise.
+    let total = synced + failed;
+    if failed > 0 {
+        eprintln!(
+            "harness: synced {} of {} skill(s) to .claude/skills/ — {} FAILED.",
+            synced, total, failed
+        );
+        record_harness_failure(failed);
+        // The known cause, worth naming because it is invisible otherwise: a
+        // dangling symlink at the destination. `metadata` follows links and
+        // `symlink_metadata` does not, so this is exactly "a link pointing at
+        // nothing" and not "a directory that is missing".
+        if target_dir.symlink_metadata().is_ok() && target_dir.metadata().is_err() {
+            eprintln!(
+                "harness: {} is a symlink pointing at something that does not exist.",
+                target_dir.display()
+            );
+            eprintln!(
+                "harness: replace it with a real directory — until then NO skill reaches Claude Code."
+            );
+        }
+    } else if synced > 0 {
         println!("Claude: synced {} skill(s) to .claude/skills/", synced);
     }
 
@@ -155,6 +215,7 @@ fn sync_subagents(root: &Path) {
     };
 
     let mut synced = 0;
+    let mut failed = 0;
     let mut source_names: std::collections::HashSet<String> =
         std::collections::HashSet::new();
     for entry in entries.filter_map(|e| e.ok()) {
@@ -180,17 +241,41 @@ fn sync_subagents(root: &Path) {
 
         let claude_content = transform_subagent(&content, name);
 
-        fs::create_dir_all(&target_dir).ok();
+        // Same two silent discards the skill lane had, same cure — fixing one
+        // instance of a pattern and leaving its twin is how the pattern comes
+        // back wearing a different name.
+        if let Err(e) = fs::create_dir_all(&target_dir) {
+            eprintln!("harness: cannot create {}: {}", target_dir.display(), e);
+            failed += 1;
+            continue;
+        }
 
         let dest = target_dir.join(&fname);
         if let Err(e) = fs::write(&dest, &claude_content) {
             eprintln!("harness: failed to sync subagent {}: {}", name, e);
+            failed += 1;
             continue;
         }
         synced += 1;
     }
 
-    if synced > 0 {
+    let total = synced + failed;
+    if failed > 0 {
+        eprintln!(
+            "harness: synced {} of {} subagent(s) to .claude/agents/ — {} FAILED.",
+            synced, total, failed
+        );
+        record_harness_failure(failed);
+        if target_dir.symlink_metadata().is_ok() && target_dir.metadata().is_err() {
+            eprintln!(
+                "harness: {} is a symlink pointing at something that does not exist.",
+                target_dir.display()
+            );
+            eprintln!(
+                "harness: replace it with a real directory — until then NO subagent reaches Claude Code."
+            );
+        }
+    } else if synced > 0 {
         println!("Claude: synced {} subagent(s) to .claude/agents/", synced);
     }
 
