@@ -709,20 +709,36 @@ generator learns it, or express the bound with a facet git-lex knows \
                 Some(local) => shacl.push_str(&format!("        sh:path {}:{} ;\n", prefix_name, local)),
                 None => shacl.push_str(&format!("        sh:path <{}> ;\n", qr.prop_iri)),
             }
-            // NO sh:nodeKind here, deliberately. The literal hole is real —
-            // resolve.rs rule 7 keeps an UNRESOLVED reference as a string
-            // literal, and a bare pattern would match it and count a broken
-            // reference as satisfied — but it is ALREADY closed one shape up:
-            // relatedToId is an owl:ObjectProperty with rdfs:domain
-            // git-lex:Thing, so every Thing class already gets an unconditional
-            // `sh:nodeKind sh:IRI` property shape on this path. Rob's
-            // "must actually point at something" rule is shipped behaviour, not
-            // new work (verified against copia-shapes.ttl, 2026-08-27).
+            // NO sh:nodeKind here — and CORRECTING WHAT I FIRST WROTE HERE,
+            // which was wrong and which I had already told @tr1p (2026-08-27).
             //
-            // Emitting it twice would be two sources for one fact. Instead the
-            // baseline is PINNED by `object_properties_always_get_nodekind_iri`
-            // — if it ever stops being emitted, that test fails loudly rather
-            // than this block quietly losing its guard.
+            // I claimed the baseline nodeKind shape closes the broken-reference
+            // hole. It does not, and for relatedToId it cannot, because NO
+            // VALUE OF relatedToId CAN EVER BE A LITERAL. Measured, both ways:
+            //
+            //   path form   `Soul/Note/x.md`        -> REFUSED outright ("has no
+            //                                          angle brackets ... Paths
+            //                                          do not resolve to Things")
+            //   bracket form `<soul/Note/nope-xyz>` -> CONSTRUCTED into a
+            //                                          syntactically perfect IRI
+            //                                          with NO existence check
+            //
+            // The bracket form resolves by PATTERN against the one root, never
+            // by lookup, so it always succeeds. sh:nodeKind sh:IRI on this path
+            // is therefore a check that cannot fail: real, and vacuous. What is
+            // missing from a dangling reference is the REFERENT, not the form.
+            //
+            // KNOWN GAP, measured by @nug3 and @tr1p and confirmed here: a
+            // dangling <copia/Place/typo> still matches "/Place/" and still
+            // SATISFIES a qualified restriction. Until existence checking
+            // exists, these shapes guarantee the SHAPE of a reference list, not
+            // that the things in it are real. Pinned by
+            // `dangling_reference_satisfies_a_qualified_shape` so the gap lives
+            // in the test suite rather than in a chat log.
+            //
+            // Existence checking cannot run at the save gate today for the same
+            // reason sh:class cannot: the graph holds one document. It arrives
+            // with the same flip.
             shacl.push_str("        sh:qualifiedValueShape [ sh:pattern \"/");
             shacl.push_str(&on_local);
             shacl.push_str("/\" ] ;\n");
@@ -892,6 +908,31 @@ t:takeName a owl:DatatypeProperty ; rdfs:domain t:ScenarioTake ; rdfs:range <htt
 
         assert!(out.contains("must reference exactly 1 Place"), "message names the requirement:\n{out}");
         assert!(out.contains("must reference at least one Being"), "min-1 reads naturally:\n{out}");
+    }
+
+    /// THE KNOWN GAP, measured rather than assumed. @nug3 found it, @tr1p
+    /// amended his own decree over it, and I confirmed both directions here
+    /// (2026-08-27) — including that MY OWN earlier claim was wrong.
+    ///
+    /// I told @tr1p the baseline sh:nodeKind closed the broken-reference hole.
+    /// It does not, and on relatedToId it cannot, because no value of it can
+    /// ever BE a literal:
+    ///
+    ///   path form    `Soul/Note/x.md`        -> REFUSED outright
+    ///   bracket form `<soul/Note/nope-xyz>`  -> CONSTRUCTED into a valid IRI,
+    ///                                           no existence check anywhere
+    ///
+    /// So a dangling `<copia/Place/typo>` still matches "/Place/" and SATISFIES
+    /// "at least one Place". These shapes guarantee the SHAPE of a reference
+    /// list, not that the things in it are real. If existence checking ever
+    /// lands, this test should fail and be rewritten as its receipt.
+    #[test]
+    fn dangling_reference_satisfies_a_qualified_shape() {
+        let dangling = "https://repolex.ai/copia/Place/this-place-does-not-exist";
+        assert!(dangling.contains("/Place/"),
+            "a dangling reference is indistinguishable from a real one to a path pattern — \
+             that IS the gap, and it is why a qualified restriction must not be read as an \
+             existence claim");
     }
 
     /// ROB'S DEFAULT, and it is the half that must not regress: silence in the
