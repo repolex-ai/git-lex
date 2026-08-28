@@ -1,23 +1,11 @@
 # Kit Ontology Design
 
-*Current for kit-base 0.14.0 (2026-08-27). Only the 0.11 → 0.14 delta was checked
-against this page; the rest is not re-audited at this version.*
+*Last updated for git-lex v0.1.1 (2026-08-27)*
 
-*This number is hand-typed, and it read 0.11.0 for three minor versions with
-nothing anywhere objecting. To check it, read `owl:versionInfo` at the top of your
-own installed `.lex/kit/repolex-ai/git-lex-kit-base/ontology/git-lex/git-lex.ttl`
-— your own install, not a shared clone of the kit repo, which may sit on someone
-else's branch. A higher number there means this page is behind the ontology.*
+This guide describes how to define **document types** and ontologies for a `git-lex` kit. It covers ontology file paths, class definitions, identifier setup, enums, and reference properties.
 
-This guide is for kit builders defining **document types** — the vocabulary a
-kit gives its users. It covers where the ontology file lives, and the four
-building blocks that cover almost every kit: a class, its id, an enum, and a
-reference to another Thing. That's the whole basic toolkit. (An advanced guide
-— restrictions, subclassing, multi-kit layering — comes later.)
-
-The best worked example is the soul kit's ontology:
+The authoritative example of kit ontology configuration is the `soul` kit ontology:
 [`git-lex-kit-soul/ontology/soul/soul.ttl`](https://repolex.ai/ontology/soul/soul.ttl).
-Everything below is the pattern that file follows.
 
 ---
 

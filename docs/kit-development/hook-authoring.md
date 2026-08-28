@@ -1,15 +1,12 @@
 # Hook Authoring Guide
 
-*Last updated for git-lex v0.1.0 (2026-08-12)*
+*Last updated for git-lex v0.1.1 (2026-08-27)*
 
-> **Being broken out.** The core hook material (naming, registration,
-> `settings.json` vs `settings.local.json`, the local→kit development flow,
-> the reap rules) currently lives in the
-> [Kit authoring guide, section 3](kit-authoring.md#3-hooks). It will move
-> here during the post-rollout docs pass. What's below is new material that
-> starts on this page.
+This guide describes how to author custom lifecycle hooks for your `git-lex` kits. Custom hooks allow you to run automated validation, capture context, and trigger external logic during session lifecycle events.
 
-## Helper code: where hook logic beyond the `.sh` should live
+---
+
+## 1. Hook Logic Placement (Helper Code)
 
 Only `.sh` files register and fire (see
 [Kit authoring §3.3](kit-authoring.md#33-sh-only)). When a hook needs real

@@ -1,25 +1,8 @@
 # Ontology Guidelines
 
-*Current for kit-base 0.14.0 (2026-08-27). Only the 0.11 → 0.14 delta was checked
-against this page; the rest is not re-audited at this version.*
+*Last updated for git-lex v0.1.1 (2026-08-27)*
 
-*This number is hand-typed, and it read 0.11.0 for three minor versions with
-nothing anywhere objecting. To check it, read `owl:versionInfo` at the top of your
-own installed `.lex/kit/repolex-ai/git-lex-kit-base/ontology/git-lex/git-lex.ttl`
-— your own install, not a shared clone of the kit repo, which may sit on someone
-else's branch. A higher number there means this page is behind the ontology.*
-
-This page is the **naming and identifier standard** for every ontology in the
-git-lex ecosystem. [Kit ontology design](kit-ontology.md) shows you the
-mechanics — where the file goes, how to declare a class. This page is about
-the decisions that page can't make for you: what to *call* things, and how
-identity and references work so that every kit behaves the same way.
-
-These aren't style preferences. The tooling **derives behavior from names**
-(which file a `git lex create` makes, which node a reference resolves to,
-which property anchors a document's identity), so a name that breaks the
-pattern doesn't just read badly — it breaks resolution. It's a starter guide;
-it will grow. But everything on it is load-bearing today.
+This page defines the **naming and identifier standards** for ontologies in the `git-lex` ecosystem. While [Kit Ontology Design](kit-ontology.md) covers the raw syntax and structure, this document focuses on conventions: naming rules, identity resolution, and reference strategies to ensure interoperability across kits.
 
 ---
 

@@ -1,53 +1,59 @@
-# Moving, renaming, and deleting documents
+# Moving, Renaming, and Deleting Documents
 
-> **Partly settled.** Link healing and derived-state cleanup landed
-> 2026-08-14 and are described below as shipped behavior. The remaining
-> lifecycle rules land with the lifecycle spec.
+*Last updated for git-lex v0.1.1 (2026-08-27)*
 
-## The one fact that explains everything else
+This document outlines how `git-lex` handles file moves, renames, and deletions in your workspace while maintaining graph integrity.
 
-**The filename is not the identity.** A document's identity is its id field
-in the frontmatter (`soul.Note.noteId: "field-notes"`), which mints the
-persistent Thing the graph knows it by. The filename usually *matches* the
-id because `git lex create <type> <id>` fills both from the same argument —
-but they are independent: renaming the file does not change the object, and
-changing the id field creates a new object even if the file never moves.
+---
 
-## Two kinds of links, two different rules
+## 1. Identity vs. Filename
 
-- **Markdown links** in a document's body (`[text](/Soul/Pursuit/x.md)`)
-  point at *files by path*. If the target path stops existing, the link is
-  recorded as unresolved — visible, not lost.
-- **Frontmatter references** (`relatedToId` and friends) point at *Things by
-  identity*. They don't care where the target's file lives; they care that
-  the identity exists.
+> [!IMPORTANT]
+> **The filename is not the identity.** 
+> A document's semantic identity is defined solely by its ID field in the YAML frontmatter (e.g., `soul.Note.noteId: "field-notes"`). 
+> While the filename typically matches this ID by default (since `git lex create <type> <id>` scaffolds both from the same argument), they are independent:
+> * Renaming a file does not change the identity of the Thing it expresses.
+> * Modifying the ID field in the frontmatter creates a new semantic entity, even if the file itself remains in the same folder.
 
-## What to do today
+---
 
-- **Changing a document's identity:** edit the id field in place and save.
-  This is the clean path — the old identity's facts are properly retracted
-  into history and the new identity is asserted, in one commit.
-- **Renames and moves of files:** handled at save. `git lex save` reads
-  git's own rename detection and does two things in the same commit — it
-  rewrites every markdown link that pointed at the old path, in canonical
-  root-relative form, and it moves the file's derived sidecar rather than
-  regenerating it. You do not run anything extra.
+## 2. Two Types of Links, Two Resolution Rules
 
-  Two limits worth knowing. Only **inbound** links are rewritten — links
-  *pointing at* the moved file. A moved file's own `../`-relative outbound
-  links are left alone (root-relative links, the canonical form, survive any
-  move untouched). And frontmatter references are never rewritten: ids do not
-  follow filenames, deliberately.
-- **Deletes:** the derived sidecar for a deleted document is cleaned up at
-  save, and a sidecar whose source document has gone missing some other way
-  is swept the next time you save.
-- **Never touch `.lex/` by hand** — not to fix a rename, not for anything.
-  Save reconciles it for you; deleting files under `.lex/extract/` silently
-  drops documents from the graph.
+`git-lex` distinguishes between physical path references and semantic concept references:
 
-## History is never lost
+1. **Markdown Links (`[text](/Soul/Pursuit/x.md)`):** These links point at physical paths in the File Plane. If the target file is renamed or deleted, the link registers as unresolved but remains visible in the graph.
+2. **Frontmatter References (`relatedToId` / `id`):** These point to stable Things in the Thing Plane. They resolve based on identity and are completely unaffected by file relocations.
 
-When an identity changes or a document is deleted, its facts are *retracted*,
-not erased: the history graph keeps every assertion and retraction with the
-commit that caused it. You can always ask what was true, and when it stopped
-being true, through `git lex serve sparql`.
+---
+
+## 3. Best Practices for Document Lifecycle
+
+### Renaming and Moving Files
+When you rename or move a document file, `git lex save` automatically detects the operation through git's rename-tracking subsystem:
+* **Link Healing:** `git-lex` automatically rewrites all inbound markdown links pointing to the old path, converting them to canonical root-relative links pointing to the new path.
+* **Sidecar Migration:** The cached metadata extract (sidecar file) is relocated to match the new file path instead of being regenerated from scratch, keeping history intact.
+
+> [!WARNING]
+> * **Inbound Only:** Only links *pointing at* the moved file are rewritten. A relocated file's own relative outbound links (e.g., `../Note/x.md`) are not rewritten (though root-relative links will survive any relocation untouched).
+> * **Frontmatter Immunity:** Frontmatter reference properties are never modified during file moves because semantic identifiers do not follow physical filenames.
+
+### Changing a Semantic Identity
+To change the actual identifier of a concept, edit its ID field in the frontmatter and run `git lex save`. In a single commit, the old identity's assertions are retracted from the graph's active state, and the new identity's facts are asserted.
+
+### Deletions
+When a document is deleted:
+* Its corresponding metadata extract under `.lex/extract/` is cleaned up during the next `git lex save` invocation.
+* The facts associated with the deleted entity are retracted from the active graph.
+
+> [!CAUTION]
+> **Never modify the `.lex/` directory manually.**
+> Let `git lex save` handle all file reconciliations. Deleting files inside `.lex/extract/` manually will drop those documents from the graph, bypassing proper git history extraction.
+
+---
+
+## 4. Historical Retention
+
+When an identity changes or a document is deleted, its facts are **retracted**, not permanently deleted. 
+
+Because `git-lex` builds its store directly from git commits, the graph retains a complete audit trail of every assertion and retraction tied to the specific commit and author that introduced it. You can query the historical state of the graph at any commit using `git lex serve sparql`.
+
