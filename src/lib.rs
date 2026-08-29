@@ -798,13 +798,10 @@ fn kit_prefix_binding(root: &std::path::Path, spec: &str) -> Option<(String, Str
         .join(format!("{}-shapes.ttl", short));
     if let Ok(ttl) = fs::read_to_string(&shapes_path) {
         if let Some((pname, ns)) = extract_kit_prefix(&ttl, &short) {
-            return Some((format!("{}:", pname), format!("PREFIX {}: <{}>", pname, ns)));
+            return Some((format!("{}:", pname), ns));
         }
     }
-    Some((
-        format!("{}:", short),
-        format!("PREFIX {}: <{}>", short, conventional_kit_namespace(&short)),
-    ))
+    Some((format!("{}:", short), conventional_kit_namespace(&short)))
 }
 
 /// Auto-inject SPARQL prefixes into a query string. Adds standard prefixes
@@ -814,10 +811,11 @@ pub fn add_prefixes(query: &str) -> String {
     add_prefixes_at(find_git_root().as_deref(), query)
 }
 
-/// [`add_prefixes`] anchored to an EXPLICIT repo root instead of the process
-/// cwd — the form a multi-repo server (Syrinx) must use so each request gets
-/// the prefixes of the soul it landed on, never the server's own cwd.
-pub fn add_prefixes_at(root: Option<&std::path::Path>, query: &str) -> String {
+/// Every prefix binding this repo answers to, as raw (name-with-colon,
+/// namespace) pairs: the standard set first, then each declared-and-installed
+/// kit's binding. The ONE source both the query prefix injector and the
+/// export-index spine draw from, so they cannot drift.
+pub fn prefix_bindings_at(root: Option<&std::path::Path>) -> Vec<(String, String)> {
     // Read kit from repo.yml, then pull the kit's prefix+namespace from its
     // installed SHACL shapes file (the runtime source of truth). Shapes live
     // at .lex/ontology/{short}/{short}-shapes.ttl.
@@ -875,18 +873,28 @@ pub fn add_prefixes_at(root: Option<&std::path::Path>, query: &str) -> String {
     }
 
     let mut defaults = vec![
-        ("git:".to_string(), "PREFIX git: <https://repolex.ai/ontology/git-lex/git/>".to_string()),
-        ("git-lex:".to_string(), "PREFIX git-lex: <https://repolex.ai/ontology/git-lex/>".to_string()),
-        ("git2:".to_string(), "PREFIX git2: <https://repolex.ai/ontology/git-lex/git2/>".to_string()),
-        ("md:".to_string(), "PREFIX md: <https://repolex.ai/ontology/git-lex/md/>".to_string()),
-        ("fm:".to_string(), "PREFIX fm: <https://repolex.ai/ontology/git-lex/fm/>".to_string()),
-        ("rdf:".to_string(), "PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>".to_string()),
-        ("rdfs:".to_string(), "PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>".to_string()),
-        ("owl:".to_string(), "PREFIX owl: <http://www.w3.org/2002/07/owl#>".to_string()),
-        ("xsd:".to_string(), "PREFIX xsd: <http://www.w3.org/2001/XMLSchema#>".to_string()),
+        ("git:".to_string(), "https://repolex.ai/ontology/git-lex/git/".to_string()),
+        ("git-lex:".to_string(), "https://repolex.ai/ontology/git-lex/".to_string()),
+        ("git2:".to_string(), "https://repolex.ai/ontology/git-lex/git2/".to_string()),
+        ("md:".to_string(), "https://repolex.ai/ontology/git-lex/md/".to_string()),
+        ("fm:".to_string(), "https://repolex.ai/ontology/git-lex/fm/".to_string()),
+        ("rdf:".to_string(), "http://www.w3.org/1999/02/22-rdf-syntax-ns#".to_string()),
+        ("rdfs:".to_string(), "http://www.w3.org/2000/01/rdf-schema#".to_string()),
+        ("owl:".to_string(), "http://www.w3.org/2002/07/owl#".to_string()),
+        ("xsd:".to_string(), "http://www.w3.org/2001/XMLSchema#".to_string()),
     ];
     defaults.extend(kit_prefixes);
-    let defaults = defaults;
+    defaults
+}
+
+/// [`add_prefixes`] anchored to an EXPLICIT repo root instead of the process
+/// cwd — the form a multi-repo server (Syrinx) must use so each request gets
+/// the prefixes of the soul it landed on, never the server's own cwd.
+pub fn add_prefixes_at(root: Option<&std::path::Path>, query: &str) -> String {
+    let defaults: Vec<(String, String)> = prefix_bindings_at(root)
+        .into_iter()
+        .map(|(name, ns)| (name.clone(), format!("PREFIX {} <{}>", name, ns)))
+        .collect();
     // FIXME(w4r3z, Day 38): prefix detection is naive substring match —
     // a query using a literal that happens to contain "git:" pulls in
     // unwanted PREFIXes. Harmless (an unused PREFIX changes nothing) but

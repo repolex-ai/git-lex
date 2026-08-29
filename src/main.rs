@@ -31,6 +31,7 @@ mod create;
 mod save;
 mod query;
 mod walkcache;
+mod export_index;
 
 use crate::git::auto_commit_snapshot;
 
@@ -109,6 +110,19 @@ enum Commands {
     /// the working tree. Hand-authored `.lex/**/*.nq` files are read by
     /// `query`, not by sync.
     Sync,
+    /// Export the synced store as one compressed snapshot file an external
+    /// reader can load without git-lex — e.g. handing a soul's whole graph
+    /// to another model's context cache.
+    ///
+    /// Writes .lex/_ignore/cottas/<synced-commit>.cottas (COTTAS: a sorted,
+    /// ZSTD-compressed Parquet triple table; query it with DuckDB or
+    /// pycottas) plus manifest.json naming the current snapshot. A snapshot
+    /// that already matches the synced commit is a no-op. Requires the
+    /// cottas-rs binary: cargo install cottas-rs --locked
+    ExportIndex {
+        /// Snapshot format. The only format today: cottas
+        format: String,
+    },
     /// List all document classes defined across the repo's installed shapes
     ///
     /// Walks `.lex/ontology/` across every installed kit — so `list` sees
@@ -340,6 +354,7 @@ fn main() {
             }
         }
         Commands::Sync => sync::cmd_sync(),
+        Commands::ExportIndex { format } => export_index::cmd_export_index(&format),
     }
 }
 
