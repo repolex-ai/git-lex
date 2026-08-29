@@ -18,6 +18,29 @@ Common prefixes are injected automatically on both doors (`git-lex:`,
 `git2:`, `md:`, `fm:`, `rdf:`, `rdfs:`, `owl:`, `xsd:`, and your kit's —
 e.g. `soul:`).
 
+Two traps that produce zero rows with no error, both from real fleet
+reports (2026-08-29):
+
+- **Every repolex namespace ends in a slash, never a hash.** `git-lex/`,
+  `soul/`, `copia/` — a hand-typed `PREFIX gl: <…/git-lex#>` is
+  well-formed, matches nothing, and nothing warns you. Prefer the
+  injected prefixes over typing your own.
+- **The universal properties emit under `git-lex/`, not your kit.** A
+  frontmatter key is written `soul.Exploration.relatedToId`, but `id`,
+  `relatedToId`, `fileId` and the other universal properties are
+  git-lex vocabulary — query them as `git-lex:relatedToId`. Only
+  class-specific keys (`soulDay`, `explorationStatus`, …) live under
+  the kit's namespace. The key path does not name the emitted IRI.
+
+When a query returns zero rows and you suspect the IRI rather than the
+data, ask the graph what vocabulary it actually uses:
+
+```sparql
+SELECT DISTINCT ?p WHERE { ?s ?p ?o } ORDER BY ?p
+```
+
+One glance at that list settles both traps in seconds.
+
 One semantic difference to know: `git lex query` searches across all its
 graphs, so bare `?s ?p ?o` matches everything. The endpoint follows the
 W3C default strictly, and the synced store keeps its data in **named**
