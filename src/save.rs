@@ -628,6 +628,7 @@ fn stamp_dates_for_staged_changes() {
 
     let mut stamped = 0usize;
     let mut born = 0usize;
+    let mut kept = 0usize;
     for line in listing.lines() {
         let mut cols = line.split('\t');
         let Some(status) = cols.next() else { continue };
@@ -667,6 +668,21 @@ fn stamp_dates_for_staged_changes() {
         }
 
         let is_new = status.starts_with('A');
+
+        // BACKFILL WINDOW — TEMPORARY (Rob, 2026-08-29, confirmed direct
+        // after selkie's relay): repos are being backfilled with hand-set
+        // dateUpdated values, and the stamp would overwrite each one with
+        // "now" on the very save that lands it. So: when dateUpdated is
+        // the ONLY thing that changed in a document, keep the authored
+        // value. Any real edit riding along still stamps — the field
+        // stays machine-maintained everywhere else. REMOVE once the
+        // fleet is backfilled; until then this is the one sanctioned
+        // hole in "do not hand-edit".
+        if status.starts_with('M') && only_date_updated_changed(path, &content, &prefix) {
+            kept += 1;
+            continue;
+        }
+
         if let Some(new_content) = stamp_frontmatter_dates(&content, &prefix, &today, is_new) {
             if std::fs::write(path, &new_content).is_err() {
                 eprintln!("warning: could not stamp dateUpdated into {} — the \
@@ -691,6 +707,36 @@ fn stamp_dates_for_staged_changes() {
             println!("Dated: {} document(s) → dateUpdated {}", stamped, today);
         }
     }
+    if kept > 0 {
+        println!("Kept: {} document(s) — dateUpdated as authored (backfill window)", kept);
+    }
+}
+
+/// True when the staged edit to `path` touches nothing but its
+/// `<kit>.<Class>.dateUpdated:` line — HEAD and the working copy are
+/// identical once that line is dropped from both sides. Any read failure
+/// returns false: the normal stamp is the safe default, and a document
+/// with no HEAD version is new, which is not this case.
+fn only_date_updated_changed(path: &std::path::Path, content: &str, prefix: &str) -> bool {
+    let key = format!("{prefix}.dateUpdated:");
+    let Ok(head) = Command::new("git")
+        .arg("show")
+        .arg(format!("HEAD:{}", path.display()))
+        .output()
+    else {
+        return false;
+    };
+    if !head.status.success() {
+        return false;
+    }
+    let head = String::from_utf8_lossy(&head.stdout).to_string();
+    fn strip(s: &str, key: &str) -> String {
+        s.lines()
+            .filter(|l| !l.trim_start().starts_with(key))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+    strip(&head, &key) == strip(content, &key)
 }
 
 /// Today in the machine's local timezone, `YYYY-MM-DD` — same source init
