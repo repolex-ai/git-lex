@@ -17,6 +17,7 @@
 //! and Hermes against the same Skill/ source files.
 
 pub mod claude;
+pub mod gemini;
 
 use std::path::Path;
 
@@ -62,7 +63,8 @@ impl Substrate {
                     || root.join("hermes-config.yml").is_file()
             }
             Substrate::Gemini => {
-                root.join(".gemini").is_dir()
+                root.join(".agents").is_dir()
+                    || root.join(".gemini").is_dir()
                     || root.join(".antigravity").is_dir()
             }
         }
@@ -75,9 +77,7 @@ impl Substrate {
             Substrate::Hermes => {
                 eprintln!("harness: hermes adapter not yet implemented (Soul/Skill, Soul/Subagent untouched on the hermes side)");
             }
-            Substrate::Gemini => {
-                eprintln!("harness: gemini adapter not yet implemented");
-            }
+            Substrate::Gemini => gemini::sync_all(root),
         }
     }
 
