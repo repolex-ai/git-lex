@@ -11,6 +11,7 @@ page), and every subcommand answers `--help` too.
 | `git lex create <type> [id] [--json]` | Scaffold a new document of a kit type |
 | `git lex save ["msg"] [--dry-run]` | Stage, validate, extract, commit; `--dry-run` runs every gate, commits nothing |
 | `git lex sync` | Build/update the synced knowledge graph store from commits |
+| `git lex export-index cottas` | Snapshot the synced store as a COTTAS Parquet file (query with DuckDB/pycottas) plus a Tabular Prefix spine for an LLM context cache (e.g. Gemini) — see [Exporting the graph](export-index.md) |
 | `git lex query "SPARQL"\|<name> [--json]` | Query a fresh view of the working tree (does NOT read the synced store); a bare name runs the saved query `.lex/query/<name>.md` |
 | `git lex list [--json]` | List every document class the installed kits define |
 | `git lex kit-add <kit>` | Add an optional kit |

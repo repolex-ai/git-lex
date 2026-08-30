@@ -110,15 +110,17 @@ enum Commands {
     /// the working tree. Hand-authored `.lex/**/*.nq` files are read by
     /// `query`, not by sync.
     Sync,
-    /// Export the synced store as one compressed snapshot file an external
-    /// reader can load without git-lex — e.g. handing a soul's whole graph
-    /// to another model's context cache.
+    /// Snapshot the synced store as a semantic KV-cache for an LLM's context
+    /// cache (e.g. Gemini) — a plain-text triple table small enough to hold
+    /// a whole repo's graph resident for zero-latency recall.
     ///
-    /// Writes .lex/_ignore/cottas/<synced-commit>.cottas (COTTAS: a sorted,
-    /// ZSTD-compressed Parquet triple table; query it with DuckDB or
-    /// pycottas) plus manifest.json naming the current snapshot. A snapshot
-    /// that already matches the synced commit is a no-op. Requires the
-    /// cottas-rs binary: cargo install cottas-rs --locked
+    /// Writes .lex/_ignore/cottas/<synced-commit>.spine.md (the Tabular
+    /// Prefix spine: now + repo-ontology graphs, sorted for byte-identical
+    /// caching) and <synced-commit>.cottas (COTTAS: a sorted, ZSTD-compressed
+    /// Parquet triple table; query it with DuckDB or pycottas), plus
+    /// manifest.json naming the current snapshot. A snapshot that already
+    /// matches the synced commit is a no-op. Requires the cottas-rs binary:
+    /// cargo install cottas-rs --locked
     ExportIndex {
         /// Snapshot format. The only format today: cottas
         format: String,
