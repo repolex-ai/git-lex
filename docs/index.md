@@ -53,7 +53,7 @@ You have a repo and you want a graph out of it.
 * [Querying with SPARQL](using/queries.md) — Query your repository, inline or saved, with worked examples.
 * [History](using/history.md) — Query the graph as it stood at any commit.
 * [Serve & Visualize](using/serve-and-viz.md) — A local SPARQL endpoint and an interactive graph explorer.
-* [Exporting the graph](using/export-index.md) — Snapshot the synced store as a COTTAS file and an LLM-context-cache spine.
+* [Exporting the graph](using/export-spine.md) — Write the semantic index as one TSV spine for LLM context caches.
 * [Kits](using/kits.md) — Installing and updating the vocabulary packs that define document types.
 
 ### Kit development

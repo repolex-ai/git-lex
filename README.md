@@ -143,7 +143,7 @@ git lex query "PREFIX ks: <https://repolex.ai/ontology/kit/soul/>
 | `git lex query "SPARQL"` | Run a SPARQL query over a live view built from your working tree, so it always reflects current frontmatter (no `sync` needed). History lives in the synced store — query it via the SPARQL endpoint (`git lex serve sparql`; ready-made history query in [docs/queries.md](docs/queries.md)). `--json` for machine output. |
 | `git lex list` | List every document class the repo's installed kits define, each with its full namespace IRI (the prefix to query against). `--json` for machine output. |
 | `git lex sync` | Build/update the persistent store: walks new commits and appends each fact change as an assert/retract event tied to its commit (RDF 1.2 provenance), then refreshes the current-state view. Not required for `query`. |
-| `git lex export-index cottas` | Snapshot the synced store into `.lex/_ignore/cottas/`: a COTTAS Parquet file for DuckDB/pycottas, plus a Tabular Prefix spine sized for an LLM's context cache (e.g. Gemini). Requires `git lex sync` first and the `cottas-rs` binary. See [docs/using/export-index.md](docs/using/export-index.md). |
+| `git lex export-spine` | Write the semantic index as one TSV spine for LLM context caches |
 | `git lex kit-update [<kit>]` | Re-download + reinstall kits. Kit files always converge to the kit's version: a local file that differs is renamed `<file>.bak` and replaced. `SOUL.md` is never overwritten. |
 | `git lex kit-add <org/repo>` | Add an optional kit (the kit's `scope:` must be `optional`). Creates its folders + templates. |
 | `git lex kit-remove <org/repo>` | Remove an optional kit. Asks before deleting any content folders it owns. |
