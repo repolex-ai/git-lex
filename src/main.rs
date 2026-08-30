@@ -31,7 +31,7 @@ mod create;
 mod save;
 mod query;
 mod walkcache;
-mod export_index;
+mod export_spine;
 
 use crate::git::auto_commit_snapshot;
 
@@ -110,21 +110,17 @@ enum Commands {
     /// the working tree. Hand-authored `.lex/**/*.nq` files are read by
     /// `query`, not by sync.
     Sync,
-    /// Snapshot the synced store as a semantic KV-cache for an LLM's context
-    /// cache (e.g. Gemini) — a plain-text triple table small enough to hold
-    /// a whole repo's graph resident for zero-latency recall.
+    /// Write the repo's semantic index as one TSV file built for an LLM's
+    /// context cache (the neural KV-cache: hold a whole soul's graph
+    /// resident for zero-latency recall).
     ///
-    /// Writes .lex/_ignore/cottas/<synced-commit>.spine.md (the Tabular
-    /// Prefix spine: now + repo-ontology graphs, sorted for byte-identical
-    /// caching) and <synced-commit>.cottas (COTTAS: a sorted, ZSTD-compressed
-    /// Parquet triple table; query it with DuckDB or pycottas), plus
-    /// manifest.json naming the current snapshot. A snapshot that already
-    /// matches the synced commit is a no-op. Requires the cottas-rs binary:
-    /// cargo install cottas-rs --locked
-    ExportIndex {
-        /// Snapshot format. The only format today: cottas
-        format: String,
-    },
+    /// Writes .lex/_ignore/spine/<synced-commit>.spine.tsv — identity
+    /// header (# genesis_sha / # soul / # repo), @prefix lines, then
+    /// tab-separated ?s ?p ?o rows, sorted so unchanged content is
+    /// byte-identical. Every `git lex sync` also refreshes it; this
+    /// command exists for refreshing without a sync. Cache upload is NOT
+    /// git-lex's job: pythia is spawned after each write when installed.
+    ExportSpine,
     /// List all document classes defined across the repo's installed shapes
     ///
     /// Walks `.lex/ontology/` across every installed kit — so `list` sees
@@ -356,7 +352,7 @@ fn main() {
             }
         }
         Commands::Sync => sync::cmd_sync(),
-        Commands::ExportIndex { format } => export_index::cmd_export_index(&format),
+        Commands::ExportSpine => export_spine::cmd_export_spine(),
     }
 }
 
