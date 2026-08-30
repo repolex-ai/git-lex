@@ -18,7 +18,7 @@ kinds of things:
 |------------|-----------------------------|----------------------------------|------------|
 | Ontology   | `ontology/<kit>/`           | `.lex/ontology/<kit>/`           | The kit's vocabulary: classes, properties (`.ttl`). |
 | Content    | `content/`                  | repo root                        | Class folders, document templates, starter docs. |
-| Harness    | `harness/`                  | repo root (`.claude/…`, `AGENTS.md`, …) | Substrate wiring: hooks, skills, agent instructions. |
+| Harness    | `harness/`                  | repo root (`.claude/…`, `.agents/…`, `AGENTS.md`, …) | Substrate wiring: hooks, skills, agent instructions. See [Harness-Specific Kit Features](harness-specific-features.md). |
 | Www        | `www/`                      | `.lex/www/`                      | Static site assets (GitHub Pages). |
 | Reference  | `reference/`                | *ships, does not install*        | Material that must travel with the kit and stay current, but must never enter a repo's graph or root. |
 
