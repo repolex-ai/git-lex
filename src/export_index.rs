@@ -221,8 +221,16 @@ pub(crate) fn run_export(root: &Path, store: &Store, strict: bool) -> Result<(),
     }
 
     // ── Tabular Prefix spine (pure Rust, always written) ─────────────────
+    // Capture the OUTGOING spine first: the incremental delta below is the
+    // set-difference of consecutive generations, so the previous file is
+    // read before anything replaces or prunes it.
+    let prev_spine: Option<(String, String)> = previous_spine(&dir, &synced_sha);
+
     let tmp_spine = dir.join(format!("{synced_sha}.export-tmp.spine.md"));
-    let spine_rows = write_spine(root, store, &tmp_spine).map_err(|e| {
+    let (spine_header, spine_body) = build_spine_content(root, store)
+        .map_err(|e| format!("building the spine table failed: {e}"))?;
+    let spine_rows = spine_body.len() as u64;
+    write_spine_file(&tmp_spine, &spine_header, &spine_body).map_err(|e| {
         cleanup(&[&tmp_spine]);
         format!("writing the spine table failed: {e}")
     })?;
@@ -230,6 +238,44 @@ pub(crate) fn run_export(root: &Path, store: &Store, strict: bool) -> Result<(),
         cleanup(&[&tmp_spine]);
         format!("cannot move the spine into place: {e}")
     })?;
+
+    // ── Incremental delta (Rob, 2026-08-29): a small "what changed" file a
+    // consumer applies to its cached spine instead of re-ingesting the
+    // whole thing. Derived as the set-difference of the two FULL spines —
+    // one derivation path, so the delta can never drift from what a full
+    // re-ingest would see (selkie's correctness property, held by
+    // construction). No delta when there is no predecessor to diff against
+    // (first export, or the pocket was cleared): the manifest simply shows
+    // no chain and the consumer ingests the full spine.
+    if let Some((from_sha, old_text)) = &prev_spine {
+        let old_rows: Vec<String> = old_text
+            .lines()
+            .filter(|l| l.starts_with("| ") && !l.starts_with("| SUBJECT"))
+            .map(str::to_string)
+            .collect();
+        let (removed, added) = sorted_diff(&old_rows, &spine_body);
+        if !removed.is_empty() || !added.is_empty() {
+            let old_header: Vec<String> = old_text
+                .lines()
+                .filter(|l| l.starts_with('@'))
+                .map(str::to_string)
+                .collect();
+            let delta_path = dir.join(format!("{from_sha}-{synced_sha}.delta.md"));
+            if let Err(e) = write_delta_file(
+                &delta_path, from_sha, &synced_sha, &old_header, &spine_header, &removed, &added,
+            ) {
+                eprintln!("warning: could not write the delta file: {e} (full spine is intact)");
+            } else {
+                println!(
+                    "Delta:    {} (-{} +{} facts, {})",
+                    rel(root, &delta_path),
+                    removed.len(),
+                    added.len(),
+                    human_bytes(file_len(&delta_path)),
+                );
+            }
+        }
+    }
 
     // Retention, decided day one: ONE generation. Prune every snapshot
     // that is not the current sha — including a stale .cottas when the
@@ -248,6 +294,12 @@ pub(crate) fn run_export(root: &Path, store: &Store, strict: bool) -> Result<(),
             }
         }
     }
+
+    // Delta retention: the chain is kept until its total size exceeds the
+    // current full spine — past that point, replaying deltas costs a
+    // consumer more than re-ingesting the full file, so the oldest links
+    // stop earning their bytes and are dropped first.
+    prune_delta_chain(&dir, file_len(&spine_path));
 
     write_manifest(&dir, &synced_sha, &cottas_path, &spine_path);
 
@@ -307,14 +359,16 @@ fn dump_export_graphs(store: &Store, path: &Path) -> Result<(u64, u64), Box<dyn 
     Ok((written, skipped))
 }
 
-/// Write the Tabular Prefix spine: `@base` + `@prefix` lines for every
-/// binding actually used, then `| SUBJECT | PREDICATE | OBJECT |` rows,
-/// sorted. IRIs are shortened by longest-namespace match against the
-/// repo's own prefix bindings (the same set `git lex query` injects); an
-/// IRI under neither a binding nor the base stays in full `<angle>` form.
-fn write_spine(root: &Path, store: &Store, path: &Path) -> Result<u64, Box<dyn std::error::Error>> {
-    use std::io::Write;
-
+/// Build the Tabular Prefix spine as (header lines, sorted rows): `@base`
+/// + `@prefix` lines for every binding actually used, then
+/// `| SUBJECT | PREDICATE | OBJECT |` rows. IRIs are shortened by
+/// longest-namespace match against the repo's own prefix bindings (the
+/// same set `git lex query` injects); an IRI under neither a binding nor
+/// the base stays in full `<angle>` form.
+fn build_spine_content(
+    root: &Path,
+    store: &Store,
+) -> Result<(Vec<String>, Vec<String>), Box<dyn std::error::Error>> {
     // Longest namespace first, so the most specific binding wins (git2:
     // and md: nest inside git-lex:'s namespace).
     let mut bindings = git_lex::prefix_bindings_at(Some(root));
@@ -357,6 +411,19 @@ fn write_spine(root: &Path, store: &Store, path: &Path) -> Result<u64, Box<dyn s
         let g = GraphName::NamedNode(NamedNode::new(graph_uri(graph))?);
         for quad in store.quads_for_pattern(None, None, None, Some(g.as_ref())) {
             let quad = quad?;
+            // Blank-node rows are excluded — TWO reasons, both load-bearing.
+            // Stability: blank labels are minted fresh every time the
+            // ontology graph reloads, so semantically identical facts
+            // render as different strings — the first real delta was 780
+            // phantom changes of exactly this kind (2026-08-29). Value:
+            // these rows are OWL structural encoding (restriction shells,
+            // list links) that mean nothing without chasing the blank
+            // labels a context window can't chase. Named facts only.
+            if matches!(quad.subject, oxigraph::model::NamedOrBlankNode::BlankNode(_))
+                || matches!(quad.object, Term::BlankNode(_))
+            {
+                continue;
+            }
             let s = shorten(quad.subject.to_string());
             let p = shorten(quad.predicate.to_string());
             let o = match &quad.object {
@@ -369,23 +436,143 @@ fn write_spine(root: &Path, store: &Store, path: &Path) -> Result<u64, Box<dyn s
     rows.sort();
     rows.dedup();
 
-    let mut out = std::io::BufWriter::new(fs::File::create(path)?);
+    let mut header: Vec<String> = Vec::new();
     if base_used {
-        writeln!(out, "@base <{SPINE_BASE}>")?;
+        header.push(format!("@base <{SPINE_BASE}>"));
     }
     used.sort();
     for i in used {
         let (name, ns) = &bindings[i];
-        writeln!(out, "@prefix {name} <{ns}>")?;
+        header.push(format!("@prefix {name} <{ns}>"));
+    }
+    Ok((header, rows))
+}
+
+fn write_spine_file(
+    path: &Path,
+    header: &[String],
+    rows: &[String],
+) -> Result<(), Box<dyn std::error::Error>> {
+    use std::io::Write;
+    let mut out = std::io::BufWriter::new(fs::File::create(path)?);
+    for line in header {
+        writeln!(out, "{line}")?;
     }
     writeln!(out)?;
     writeln!(out, "| SUBJECT | PREDICATE | OBJECT |")?;
-    let n = rows.len() as u64;
     for row in rows {
         writeln!(out, "{row}")?;
     }
     out.flush()?;
-    Ok(n)
+    Ok(())
+}
+
+/// The one previous spine generation in the pocket, as (sha, full text) —
+/// the diff base for the incremental delta. Skips the file being written
+/// (same sha), temp files, and anything not shaped like `<sha>.spine.md`.
+fn previous_spine(dir: &Path, current_sha: &str) -> Option<(String, String)> {
+    let entries = fs::read_dir(dir).ok()?;
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let Some(sha) = name.strip_suffix(".spine.md") else { continue };
+        if sha == current_sha || sha.contains('.') || sha.contains('-') {
+            continue; // current, temp, or a delta-shaped name — not a base
+        }
+        if let Ok(text) = fs::read_to_string(entry.path()) {
+            return Some((sha.to_string(), text));
+        }
+    }
+    None
+}
+
+/// Set-difference of two SORTED, DEDUPED row lists: (removed, added) —
+/// rows only in `old`, rows only in `new`. One merge walk, exact.
+fn sorted_diff(old: &[String], new: &[String]) -> (Vec<String>, Vec<String>) {
+    let (mut removed, mut added) = (Vec::new(), Vec::new());
+    let (mut i, mut j) = (0usize, 0usize);
+    while i < old.len() && j < new.len() {
+        match old[i].cmp(&new[j]) {
+            std::cmp::Ordering::Equal => {
+                i += 1;
+                j += 1;
+            }
+            std::cmp::Ordering::Less => {
+                removed.push(old[i].clone());
+                i += 1;
+            }
+            std::cmp::Ordering::Greater => {
+                added.push(new[j].clone());
+                j += 1;
+            }
+        }
+    }
+    removed.extend(old[i..].iter().cloned());
+    added.extend(new[j..].iter().cloned());
+    (removed, added)
+}
+
+/// The delta file: `@delta from <sha> to <sha>`, the union of both
+/// generations' prefix headers (rows from each side were shortened under
+/// their own bindings), then a removed section and an added section.
+/// Applying it to the `from` spine's rows — delete the removed strings,
+/// insert the added ones — reproduces the `to` spine's rows exactly.
+fn write_delta_file(
+    path: &Path,
+    from_sha: &str,
+    to_sha: &str,
+    old_header: &[String],
+    new_header: &[String],
+    removed: &[String],
+    added: &[String],
+) -> Result<(), Box<dyn std::error::Error>> {
+    use std::io::Write;
+    let mut out = std::io::BufWriter::new(fs::File::create(path)?);
+    writeln!(out, "@delta from {from_sha} to {to_sha}")?;
+    let mut seen: Vec<&String> = Vec::new();
+    for line in old_header.iter().chain(new_header.iter()) {
+        if !seen.contains(&line) {
+            seen.push(line);
+            writeln!(out, "{line}")?;
+        }
+    }
+    writeln!(out)?;
+    writeln!(out, "## removed ({})", removed.len())?;
+    writeln!(out, "| SUBJECT | PREDICATE | OBJECT |")?;
+    for row in removed {
+        writeln!(out, "{row}")?;
+    }
+    writeln!(out)?;
+    writeln!(out, "## added ({})", added.len())?;
+    writeln!(out, "| SUBJECT | PREDICATE | OBJECT |")?;
+    for row in added {
+        writeln!(out, "{row}")?;
+    }
+    out.flush()?;
+    Ok(())
+}
+
+/// Drop the oldest delta links while the chain's total bytes exceed the
+/// current full spine's — past that point a full re-ingest is cheaper
+/// than replaying, so old links no longer earn their keep.
+fn prune_delta_chain(dir: &Path, spine_bytes: u64) {
+    let Ok(entries) = fs::read_dir(dir) else { return };
+    let mut deltas: Vec<(std::time::SystemTime, PathBuf, u64)> = entries
+        .flatten()
+        .filter(|e| e.file_name().to_string_lossy().ends_with(".delta.md"))
+        .filter_map(|e| {
+            let meta = e.metadata().ok()?;
+            Some((meta.modified().ok()?, e.path(), meta.len()))
+        })
+        .collect();
+    deltas.sort_by_key(|(t, _, _)| *t);
+    let mut total: u64 = deltas.iter().map(|(_, _, b)| b).sum();
+    for (_, path, bytes) in &deltas {
+        if total <= spine_bytes {
+            break;
+        }
+        let _ = fs::remove_file(path);
+        total -= bytes;
+    }
 }
 
 /// Objects need two extra touches beyond IRI shortening: a typed literal's
@@ -458,7 +645,39 @@ fn write_manifest(dir: &Path, sha: &str, cottas: &Path, spine: &Path) {
         body.push_str(&format!("  \"bytes\": {},\n", file_len(cottas)));
     }
     body.push_str(&format!("  \"spine\": \"{sha}.spine.md\",\n"));
-    body.push_str(&format!("  \"spine_bytes\": {}\n}}\n", file_len(spine)));
+    body.push_str(&format!("  \"spine_bytes\": {},\n", file_len(spine)));
+
+    // The delta chain, oldest first: each entry a change-file a consumer
+    // can apply to its cached spine instead of re-ingesting the full one.
+    // A gap in the chain (or an empty list) means: ingest the full spine.
+    let mut deltas: Vec<(std::time::SystemTime, String, u64)> = fs::read_dir(dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|e| {
+            let name = e.file_name().to_string_lossy().into_owned();
+            if !name.ends_with(".delta.md") {
+                return None;
+            }
+            let meta = e.metadata().ok()?;
+            Some((meta.modified().ok()?, name, meta.len()))
+        })
+        .collect();
+    deltas.sort_by_key(|(t, _, _)| *t);
+    body.push_str("  \"deltas\": [");
+    for (i, (_, name, bytes)) in deltas.iter().enumerate() {
+        let (from, to) = name
+            .strip_suffix(".delta.md")
+            .and_then(|s| s.split_once('-'))
+            .unwrap_or(("", ""));
+        if i > 0 {
+            body.push(',');
+        }
+        body.push_str(&format!(
+            "\n    {{\"from\": \"{from}\", \"to\": \"{to}\", \"file\": \"{name}\", \"bytes\": {bytes}}}"
+        ));
+    }
+    body.push_str(if deltas.is_empty() { "]\n}\n" } else { "\n  ]\n}\n" });
 
     let tmp = dir.join("manifest.json.tmp");
     let path = dir.join("manifest.json");
@@ -565,14 +784,40 @@ mod tests {
         fs::create_dir_all(&dir).unwrap();
         let p1 = dir.join("one.spine.md");
         let p2 = dir.join("two.spine.md");
-        // root: no repo needed — prefix_bindings_at(None-root) still yields
-        // the standard set; pass the temp dir (no .lex there, kit list empty).
-        let n1 = write_spine(&dir, &store, &p1).unwrap();
-        let n2 = write_spine(&dir, &store, &p2).unwrap();
-        assert_eq!(n1, 3);
-        assert_eq!(n1, n2);
+        // root: no repo needed — the temp dir has no .lex, so the binding
+        // set is just the standard prefixes.
+        let (h1, r1) = build_spine_content(&dir, &store).unwrap();
+        let (h2, r2) = build_spine_content(&dir, &store).unwrap();
+        write_spine_file(&p1, &h1, &r1).unwrap();
+        write_spine_file(&p2, &h2, &r2).unwrap();
+        assert_eq!(r1.len(), 3);
         assert_eq!(fs::read(&p1).unwrap(), fs::read(&p2).unwrap(), "spine bytes must be identical");
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// The incremental delta's whole contract: applying (remove `removed`,
+    /// insert `added`) to the old row set reproduces the new row set
+    /// EXACTLY. Because the delta is computed as the set-difference of the
+    /// two full spines, this holds by construction — this test is the
+    /// tripwire against anyone recomputing the delta some other way.
+    #[test]
+    fn delta_reconstructs_new_rows_from_old() {
+        let old: Vec<String> = ["| a | p | 1 |", "| b | p | 2 |", "| c | p | 3 |"]
+            .iter().map(|s| s.to_string()).collect();
+        let new: Vec<String> = ["| b | p | 2 |", "| b | p | 9 |", "| c | p | 3 |", "| d | p | 4 |"]
+            .iter().map(|s| s.to_string()).collect();
+        let (removed, added) = sorted_diff(&old, &new);
+        assert_eq!(removed, vec!["| a | p | 1 |".to_string()]);
+        assert_eq!(added, vec!["| b | p | 9 |".to_string(), "| d | p | 4 |".to_string()]);
+        // reconstruct
+        let mut rebuilt: Vec<String> =
+            old.iter().filter(|r| !removed.contains(r)).cloned().collect();
+        rebuilt.extend(added.iter().cloned());
+        rebuilt.sort();
+        assert_eq!(rebuilt, new);
+        // unchanged content → empty delta, both directions
+        let (r2, a2) = sorted_diff(&new, &new);
+        assert!(r2.is_empty() && a2.is_empty());
     }
 
     /// The export dumps ONLY the semantic graphs — a quad in the commits
