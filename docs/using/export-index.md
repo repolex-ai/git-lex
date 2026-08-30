@@ -47,10 +47,15 @@ the snapshot after HEAD would put a fresh-looking name on stale content.
   consumer can cache-key on the file's hash and skip re-uploading when
   nothing changed.
 
-- **`<synced-commit>.cottas`** — the same graph as a COTTAS file (Columnar
-  Triple Table Storage, from the ISWC 2026 paper): one Apache Parquet file
-  with `s` / `p` / `o` / `g` columns, sorted and ZSTD-compressed. This one is
-  for machine tools, not model context — see below.
+- **`<synced-commit>.cottas`** — the same two graphs as a COTTAS file
+  (Columnar Triple Table Storage, from the ISWC 2026 paper): one Apache
+  Parquet file with `s` / `p` / `o` / `g` columns, sorted and
+  ZSTD-compressed. This one is for machine tools, not model context — see
+  below. Both artifacts cover the same content: `now` + `repo-ontology`,
+  nothing else. (The first release dumped every graph into the `.cottas`,
+  which cost minutes and a 209MB intermediate on a large repo; scoping it
+  to the semantic graphs is what makes the per-sync refresh below
+  affordable.)
 
 - **`manifest.json`** — names the current snapshot: `commit`, `file`,
   `spine`, `quads`, `bytes`, `spine_bytes`. A consumer that wants to know
@@ -65,6 +70,23 @@ Already current: .lex/_ignore/cottas/a1b2c3d4....cottas + a1b2c3d4....spine.md (
 
 Old snapshots are pruned automatically — the command keeps exactly one
 generation, so the pocket doesn't accumulate a file per sync forever.
+
+## It refreshes itself at sync
+
+Once a repo has run `git lex export-index cottas` once, every
+`git lex sync` refreshes the snapshot as its last step — the pocket
+directory existing is the opt-in marker. A repo that never exported pays
+nothing. On the sync path the rules soften so a cache problem can never
+fail a sync: any export error demotes to a warning, and a missing
+`cottas-rs` binary skips only the `.cottas` file — the spine and manifest
+(pure Rust) still refresh. The explicit command keeps the hard failure:
+typing `export-index cottas` asks for the `.cottas` by name.
+
+There is deliberately **no incremental path**: every refresh is a full
+regeneration from the store. An incremental snapshot that can drift from a
+full one would drift silently — nothing downstream can tell a correct
+snapshot from a subtly wrong one — so drift is designed away by having one
+code path, and a CI test pins the writer's byte-determinism.
 
 ## The machine path: DuckDB and pycottas
 
@@ -110,24 +132,17 @@ SELECT * FROM parquet_scan([
   cargo install cottas-rs --locked
   ```
 
-  It's a slow build (it's compiling DuckDB), but it's one time. Today a
-  missing binary blocks the whole command, spine included — the check runs
-  before anything is written.
+  It's a slow build (it's compiling DuckDB), but it's one time. The
+  explicit command fails hard without it; the automatic refresh at sync
+  instead skips just the `.cottas` (with a warning) and still refreshes
+  the spine and manifest.
 
-- **RDF 1.2 triple terms are excluded from the `.cottas` file, on purpose.**
-  git-lex's history graph stores its provenance (which commit asserted or
-  retracted each fact) as RDF 1.2 triple terms — an annotation wrapped
-  around a triple. A COTTAS file, like any plain triple table, has nowhere
-  to put one; the shape doesn't exist in RDF 1.1. So those quads are
-  dropped from the dump, and the command tells you exactly how many:
-
-  ```
-  Excluded: 214 history annotation quad(s) — RDF 1.2 triple terms, which a COTTAS triple table cannot hold
-  ```
-
-  This is documented, expected behavior, not data loss you need to chase
-  down. The spine never had them in the first place — it only ever covers
-  `now` and `repo-ontology`.
+- **History, commits, and the file tree are not in the export — by scope,
+  not by accident.** Both artifacts cover `now` + `repo-ontology` only.
+  The history graph's provenance also lives in RDF 1.2 triple terms, a
+  shape a plain triple table cannot hold at all. If a triple term ever
+  appears inside the export graphs it is excluded and counted out loud —
+  never silently.
 
 - **Staleness is your job to check, by polling `manifest.json`.** Nothing
   re-runs this command for you when you sync again. A long-lived consumer

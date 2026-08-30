@@ -58,6 +58,10 @@ pub(crate) fn cmd_sync() {
             &head_sha[..8.min(head_sha.len())],
             elapsed.as_secs_f64() * 1000.0
         );
+        // Converge the index snapshot even on the fast path: a no-op when
+        // current, and it heals a snapshot that was skipped on an earlier
+        // sync (e.g. cottas-rs was missing then and is installed now).
+        crate::export_index::refresh_after_sync(&root, &store);
         return;
     }
 
@@ -120,6 +124,12 @@ These are in your WORKING FILES, not history — fix the listed files and the wa
     );
     println!("  git2 layer: {} quads; extracted: {} now-view facts", git_count, fm_count);
     println!("Store: {}", store_path().unwrap().display());
+
+    // Index snapshot refresh (opt-in: only in a repo that has run
+    // `git lex export-index cottas` once). Kept AFTER the sync report —
+    // sync's own success is already printed, and any failure here demotes
+    // to a warning, so a stale cache can never fail or mask a sync.
+    crate::export_index::refresh_after_sync(&root, &store);
 }
 
 fn gate_default_branch(root: &std::path::Path) {
