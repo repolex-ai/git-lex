@@ -42,6 +42,53 @@ fn find_class_dir(root: &Path, class_name: &str) -> Option<PathBuf> {
     None
 }
 
+/// Set up Antigravity / Gemini substrate: copy hooks, rules, and configurations
+/// shipped by installed kits under `.lex/kit/*/*/harness/.agents/`.
+pub fn setup_substrate_gemini(root: &Path, _agent_name: &str) {
+    let agents_dir = root.join(".agents");
+    let hooks_dir = agents_dir.join("hooks");
+    let rules_dir = agents_dir.join("rules");
+    let _ = fs::create_dir_all(&hooks_dir);
+    let _ = fs::create_dir_all(&rules_dir);
+
+    let lex_kit = root.join(".lex").join("kit");
+    if let Ok(entries) = fs::read_dir(&lex_kit) {
+        for org_entry in entries.flatten() {
+            if let Ok(kit_entries) = fs::read_dir(org_entry.path()) {
+                for kit_entry in kit_entries.flatten() {
+                    let kit_agents = kit_entry.path().join("harness").join(".agents");
+                    if !kit_agents.exists() {
+                        continue;
+                    }
+                    // Copy hooks.json if present
+                    let src_hooks_json = kit_agents.join("hooks.json");
+                    if src_hooks_json.is_file() {
+                        let dst_hooks_json = agents_dir.join("hooks.json");
+                        let _ = fs::copy(&src_hooks_json, &dst_hooks_json);
+                    }
+                    // Copy hooks scripts
+                    let src_hooks = kit_agents.join("hooks");
+                    if let Ok(hook_files) = fs::read_dir(&src_hooks) {
+                        for hf in hook_files.flatten() {
+                            let dst = hooks_dir.join(hf.file_name());
+                            let _ = fs::copy(hf.path(), dst);
+                        }
+                    }
+                    // Copy rules
+                    let src_rules = kit_agents.join("rules");
+                    if let Ok(rule_files) = fs::read_dir(&src_rules) {
+                        for rf in rule_files.flatten() {
+                            let dst = rules_dir.join(rf.file_name());
+                            let _ = fs::copy(rf.path(), dst);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    println!("Gemini: reconciled .agents/ customization tree");
+}
+
 /// Sync all soul documents into Antigravity's `.agents/` directory structure.
 pub fn sync_all(root: &Path) {
     sync_skills(root);

@@ -177,10 +177,9 @@ pub fn run_substrate_setup(root: &Path, agent_name: Option<&str>) {
     for substrate in active_substrates(root) {
         match substrate {
             Substrate::Claude => claude::setup_substrate_claude(root, &name),
-            Substrate::Hermes | Substrate::Gemini => {
+            Substrate::Gemini => gemini::setup_substrate_gemini(root, &name),
+            Substrate::Hermes => {
                 // Per-substrate identity injection not yet implemented.
-                // The substrate's sync adapter will surface what shape it
-                // needs (see harness/<substrate>.rs).
             }
         }
     }
