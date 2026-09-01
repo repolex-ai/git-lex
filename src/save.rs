@@ -595,10 +595,23 @@ pub(crate) fn hook_pre_commit() {
 ///
 /// Order of precedence:
 /// 1. Explicit `SUBSTRATE` environment variable (e.g. `gemini-3.7-flash`, `claude-opus-5`)
-/// 2. Active runtime process/environment markers (`ANTIGRAVITY_AGENT`, `CLAUDE_CODE_SESSION_ID`)
-/// 3. Declared / detected active substrates from repo config / disk markers
+/// 2. Specific model env vars (`ANTIGRAVITY_MODEL`, `GEMINI_MODEL`, `CLAUDE_MODEL`)
+/// 3. Active runtime process/environment markers (`ANTIGRAVITY_AGENT`, `CLAUDE_CODE_SESSION_ID`)
+/// 4. Declared / detected active substrates from repo config / disk markers
 pub fn detect_runtime_substrate(root: &std::path::Path) -> Option<String> {
     if let Ok(val) = std::env::var("SUBSTRATE") {
+        let trimmed = val.trim();
+        if !trimmed.is_empty() {
+            return Some(trimmed.to_string());
+        }
+    }
+    if let Ok(val) = std::env::var("ANTIGRAVITY_MODEL").or_else(|_| std::env::var("GEMINI_MODEL")) {
+        let trimmed = val.trim();
+        if !trimmed.is_empty() {
+            return Some(trimmed.to_string());
+        }
+    }
+    if let Ok(val) = std::env::var("CLAUDE_MODEL") {
         let trimmed = val.trim();
         if !trimmed.is_empty() {
             return Some(trimmed.to_string());
@@ -607,18 +620,20 @@ pub fn detect_runtime_substrate(root: &std::path::Path) -> Option<String> {
     if std::env::var("ANTIGRAVITY_AGENT").is_ok()
         || std::env::var("ANTIGRAVITY_CONVERSATION_ID").is_ok()
     {
-        return Some("gemini".to_string());
+        return Some("gemini-3.7-flash".to_string());
     }
     if std::env::var("CLAUDE_CODE_SESSION_ID").is_ok()
         || std::env::var("CLAUDE_PROJECT_DIR").is_ok()
     {
-        return Some("claude".to_string());
+        return Some("claude-opus-5".to_string());
     }
     let subs = crate::harness::active_substrates(root);
-    if subs.len() == 1 {
-        Some(subs[0].as_str().to_string())
-    } else if !subs.is_empty() {
-        Some(subs[0].as_str().to_string())
+    if !subs.is_empty() {
+        match subs[0] {
+            crate::harness::Substrate::Gemini => Some("gemini-3.7-flash".to_string()),
+            crate::harness::Substrate::Claude => Some("claude-opus-5".to_string()),
+            crate::harness::Substrate::Hermes => Some("hermes".to_string()),
+        }
     } else {
         None
     }
