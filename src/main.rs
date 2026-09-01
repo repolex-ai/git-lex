@@ -357,6 +357,16 @@ fn main() {
 
     let cli = Cli::parse();
 
+    // Machine registry: any run inside an initialized repo records that repo's
+    // path and the current time in ~/.lex/repos.json, so a repo browser can
+    // list this machine's git-lex repos by recency. Bookkeeping only — silent,
+    // and never a reason for a command to fail.
+    if let Some(root) = find_git_root() {
+        if root.join(".lex").is_dir() {
+            git_lex::registry_touch(&root);
+        }
+    }
+
     match cli.command {
         Commands::Init { directory, kit } => init::cmd_init(directory, kit),
         Commands::Create { doctype, instance_id, list, json } => create::cmd_create(doctype.as_deref(), instance_id.as_deref(), list, json),

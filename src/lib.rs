@@ -543,85 +543,161 @@ pub fn extract_kit_prefix(content: &str, short: &str) -> Option<(String, String)
     fallback
 }
 
-// ─── Machine-level registry (~/.lex/repos) ───────��─────────────
+// ─── Machine-level registry (~/.lex/repos.json) ────────────────
 
-/// Path to the machine-level registry file: `~/.lex/repos`.
-/// One absolute path per line, each pointing to a git-lex repo on this machine.
+/// Path to the machine-level registry: `~/.lex/repos.json`.
+///
+/// One JSON object — `{"repos": [{"path": …, "last_used": …}]}`. EVERY git-lex
+/// run inside an initialized repo stamps that repo's entry with the current
+/// time, so a repo browser can list this machine's git-lex repos by recency
+/// without scanning the disk. `last_used` is null for a path carried over from
+/// the line-based registry that came before, which recorded `init` only and
+/// kept no time.
+///
+/// Liveness is NOT this file's job. An entry is never dropped because the repo
+/// was deleted or moved — a reader checks that `<path>/.lex` still exists and
+/// skips what doesn't (Rob's call, 2026-09-01). The file records use; the disk
+/// is the authority on what is still there.
 fn registry_path() -> Option<PathBuf> {
     // HOME on macOS/Linux, USERPROFILE on Windows
+    std::env::var("HOME")
+        .or_else(|_| std::env::var("USERPROFILE"))
+        .ok()
+        .map(|h| PathBuf::from(h).join(".lex").join("repos.json"))
+}
+
+/// The registry that came before: `~/.lex/repos`, one absolute path per line,
+/// written at `init` and read by nothing. Its paths are folded into repos.json
+/// on the first write, and only then is it deleted.
+fn legacy_registry_path() -> Option<PathBuf> {
     std::env::var("HOME")
         .or_else(|_| std::env::var("USERPROFILE"))
         .ok()
         .map(|h| PathBuf::from(h).join(".lex").join("repos"))
 }
 
-/// Register a repo path in `~/.lex/repos`. Idempotent — won't add duplicates.
-/// Creates `~/.lex/` if it doesn't exist.
-pub fn registry_add(repo_path: &std::path::Path) {
-    let reg = match registry_path() {
-        Some(p) => p,
-        None => return,
-    };
-    fs::create_dir_all(reg.parent().unwrap()).ok();
+/// Now, ISO-8601 with the machine's UTC offset (`2026-09-01T14:02:11-07:00`) —
+/// the same shape and the same never-guess contract as the save-time stamps.
+/// No usable `date` means no timestamp; the path is still recorded.
+fn registry_now() -> Option<String> {
+    let out = Command::new("date").args(["-Iseconds"]).output().ok()?;
+    let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if s.len() >= 19 && s.as_bytes().get(10) == Some(&b'T') { Some(s) } else { None }
+}
 
-    let canonical = match repo_path.canonicalize() {
+/// Absolute path for the registry, resolved through symlinks when it can be.
+fn registry_key(repo_path: &std::path::Path) -> String {
+    match repo_path.canonicalize() {
         Ok(p) => p.to_string_lossy().to_string(),
         Err(_) => repo_path.to_string_lossy().to_string(),
-    };
+    }
+}
 
-    // Read existing entries, check for duplicates
-    let existing = fs::read_to_string(&reg).unwrap_or_default();
-    for line in existing.lines() {
-        if line.trim() == canonical {
-            return; // already registered
+fn entry_path(entry: &serde_json::Value) -> Option<&str> {
+    entry.get("path").and_then(|p| p.as_str())
+}
+
+/// Read, edit, write the registry's `repos` array.
+///
+/// Read-modify-write on the whole document, so keys git-lex knows nothing
+/// about — a browser's own state, saved beside ours — survive our writes. The
+/// new file is written to a temporary name and renamed into place, so a reader
+/// never catches a half-written registry.
+fn registry_update(edit: impl FnOnce(&mut Vec<serde_json::Value>)) -> Result<(), String> {
+    let reg = registry_path().ok_or_else(|| "no home directory".to_string())?;
+    let dir = reg.parent().expect("registry path always has a parent");
+    fs::create_dir_all(dir).map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
+
+    let mut doc: serde_json::Value = fs::read_to_string(&reg)
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .filter(|v: &serde_json::Value| v.is_object())
+        .unwrap_or_else(|| serde_json::json!({}));
+
+    let mut repos: Vec<serde_json::Value> = doc
+        .get("repos")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+
+    // One-time fold of the line-based registry: its paths join the list with
+    // no time, because none was ever recorded for them.
+    let legacy = legacy_registry_path().filter(|p| p.exists());
+    if let Some(lp) = &legacy {
+        if let Ok(text) = fs::read_to_string(lp) {
+            for line in text.lines() {
+                let path = line.trim();
+                if path.is_empty() || repos.iter().any(|e| entry_path(e) == Some(path)) {
+                    continue;
+                }
+                repos.push(serde_json::json!({ "path": path, "last_used": null }));
+            }
         }
     }
 
-    // Append
-    let mut file = fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&reg)
-        .expect("failed to open ~/.lex/repos");
-    use std::io::Write;
-    // A failed registry write warns (review #55): a missing entry means
-    // multi-repo serve silently doesn't see this repo.
-    if let Err(e) = writeln!(file, "{}", canonical) {
+    edit(&mut repos);
+    repos.sort_by(|a, b| entry_path(a).unwrap_or("").cmp(entry_path(b).unwrap_or("")));
+    doc["repos"] = serde_json::Value::Array(repos);
+
+    let body = serde_json::to_string_pretty(&doc).map_err(|e| e.to_string())? + "\n";
+    let tmp = reg.with_extension("json.tmp");
+    fs::write(&tmp, body).map_err(|e| e.to_string())?;
+    fs::rename(&tmp, &reg).map_err(|e| e.to_string())?;
+
+    // The old file goes only once its contents are safely in the new one.
+    if let Some(lp) = legacy {
+        fs::remove_file(lp).ok();
+    }
+    Ok(())
+}
+
+/// Record `repo_path` in the registry with the current time, adding it if it
+/// is not there yet.
+fn registry_put(repo_path: &std::path::Path) -> Result<(), String> {
+    let canonical = registry_key(repo_path);
+    let now = registry_now();
+    registry_update(move |repos| {
+        if let Some(entry) = repos.iter_mut().find(|e| entry_path(e) == Some(canonical.as_str())) {
+            // No clock, no write: an old-but-real time beats a null.
+            if let Some(t) = now {
+                entry["last_used"] = serde_json::Value::String(t);
+            }
+            return;
+        }
+        repos.push(serde_json::json!({ "path": canonical, "last_used": now }));
+    })
+}
+
+/// Stamp this repo as used, now. Called on EVERY git-lex run inside an
+/// initialized repo, which is why it is silent on failure: ambient bookkeeping
+/// must never put a warning between the user and the command they ran.
+pub fn registry_touch(repo_path: &std::path::Path) {
+    let _ = registry_put(repo_path);
+}
+
+/// Register a repo at `init`. Same write as `registry_touch`, but a failure
+/// here is worth saying out loud: this is the moment the repo was supposed to
+/// join the list.
+pub fn registry_add(repo_path: &std::path::Path) {
+    if let Err(e) = registry_put(repo_path) {
         eprintln!(
-            "warning: could not register {} in ~/.lex/repos ({e}) — \
-             multi-repo serve will not see this repo until it is added",
-            canonical
+            "warning: {} was not added to ~/.lex/repos.json ({e}) — a repo \
+             browser will not list it until the next git-lex command runs here",
+            registry_key(repo_path)
         );
     }
 }
 
-/// Remove a repo path from `~/.lex/repos`. No-op if not found.
+/// Drop a repo from the registry. No-op if it isn't there.
 pub fn registry_remove(repo_path: &std::path::Path) {
-    let reg = match registry_path() {
-        Some(p) => p,
-        None => return,
-    };
-
-    let canonical = match repo_path.canonicalize() {
-        Ok(p) => p.to_string_lossy().to_string(),
-        Err(_) => repo_path.to_string_lossy().to_string(),
-    };
-
-    let existing = match fs::read_to_string(&reg) {
-        Ok(s) => s,
-        Err(_) => return,
-    };
-
-    let filtered: Vec<&str> = existing.lines()
-        .filter(|l| l.trim() != canonical)
-        .collect();
-    // A failed rewrite warns (review #55): a stale entry means multi-repo
-    // serve keeps trying a repo that no longer wants to be served.
-    if let Err(e) = fs::write(&reg, filtered.join("\n") + "\n") {
+    let canonical = registry_key(repo_path);
+    let target = canonical.clone();
+    if let Err(e) = registry_update(move |repos| {
+        repos.retain(|entry| entry_path(entry) != Some(target.as_str()));
+    }) {
         eprintln!(
-            "warning: could not update ~/.lex/repos ({e}) — the stale entry for \
-             {} remains; edit the file by hand to drop it",
-            canonical
+            "warning: ~/.lex/repos.json was not updated ({e}) — the entry for \
+             {canonical} is still listed; edit that file by hand to drop it"
         );
     }
 }
