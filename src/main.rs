@@ -32,6 +32,8 @@ mod save;
 mod query;
 mod walkcache;
 mod export_spine;
+mod voice;
+mod session;
 
 use crate::git::auto_commit_snapshot;
 
@@ -206,7 +208,20 @@ enum Commands {
     /// Temporary command: it exists to confirm store rebuilds during the
     /// v1 migration and will be removed in a later release.
     Verify,
-
+    /// Attach or read sovereign voice reflections on the commit tree (git notes on refs/notes/soul/voice)
+    Voice {
+        /// Message to attach to HEAD
+        message: Option<String>,
+        /// List recent voice notes across git history
+        #[arg(long)]
+        list: bool,
+    },
+    /// Inspect active session attestation, genesis SHA, and substrate provenance
+    Session {
+        /// Emit as JSON
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 
@@ -353,6 +368,8 @@ fn main() {
         }
         Commands::Sync => sync::cmd_sync(),
         Commands::ExportSpine => export_spine::cmd_export_spine(),
+        Commands::Voice { message, list } => voice::cmd_voice(message.as_deref(), list),
+        Commands::Session { json } => session::cmd_session(json),
     }
 }
 

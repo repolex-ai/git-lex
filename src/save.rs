@@ -60,7 +60,24 @@ fn resolve_agent_identity(root: &std::path::Path) -> Option<(String, String)> {
     //    the env schema live in one file, so the schema can't drift apart
     //    across an unrelated module boundary again — the .env retirement
     //    already proved this block's location migrates).
-    harness::claude::read_identity_env(&root)
+    if let Some(id) = harness::claude::read_identity_env(&root) {
+        return Some(id);
+    }
+
+    // 4. Fallback for generic / non-soul repos: read user's git config.
+    if !soul_md::soul_kit_installed(root) {
+        if let Ok(repo) = git2::Repository::open(root) {
+            if let Ok(sig) = repo.signature() {
+                if let (Some(name), Some(email)) = (sig.name(), sig.email()) {
+                    if !name.is_empty() && !email.is_empty() {
+                        return Some((name.to_string(), email.to_string()));
+                    }
+                }
+            }
+        }
+    }
+
+    None
 }
 
 pub(crate) fn cmd_save(message: &str, dry_run: bool) {

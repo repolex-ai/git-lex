@@ -47,6 +47,14 @@ impl Substrate {
         }
     }
 
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Substrate::Claude => "claude",
+            Substrate::Hermes => "hermes",
+            Substrate::Gemini => "gemini",
+        }
+    }
+
     /// On-disk presence check. Substrate-specific files/dirs at the repo
     /// root that signal this substrate is in use in this repo. Used by
     /// `auto_detect`. Not by itself authoritative — `repo.yml`'s
@@ -133,8 +141,12 @@ pub fn active_substrates(root: &Path) -> Vec<Substrate> {
     if !detected.is_empty() {
         return detected;
     }
-    // Back-compat: every pre-multi-substrate repo was Claude.
-    vec![Substrate::Claude]
+    if crate::soul_md::soul_kit_installed(root) {
+        // Back-compat: every pre-multi-substrate soul repo was Claude.
+        vec![Substrate::Claude]
+    } else {
+        vec![]
+    }
 }
 
 /// Run every active substrate's sync adapter. Called from `git lex save`
@@ -254,11 +266,23 @@ mod tests {
     }
 
     #[test]
-    fn active_substrates_falls_back_to_claude_when_nothing_present() {
+    fn active_substrates_falls_back_to_claude_when_soul_kit_present() {
         let root = unique_tmp_root();
-        // No .lex/repo.yml, no on-disk markers. Should fall back to Claude
-        // for back-compat with every pre-multi-substrate repo.
+        std::fs::create_dir_all(root.join(".lex")).unwrap();
+        std::fs::write(
+            root.join(".lex").join("repo.yml"),
+            "name: test\nkit: repolex-ai/git-lex-kit-soul\n",
+        ).unwrap();
+        // Soul repo with no substrates declared falls back to Claude for back-compat
         assert_eq!(active_substrates(&root), vec![Substrate::Claude]);
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn active_substrates_empty_when_generic_repo() {
+        let root = unique_tmp_root();
+        // Vanilla repo with no markers has no active substrates
+        assert_eq!(active_substrates(&root), Vec::<Substrate>::new());
         std::fs::remove_dir_all(&root).ok();
     }
 

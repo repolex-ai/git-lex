@@ -43,6 +43,21 @@ pub(crate) fn genesis_sha() -> Option<String> {
         .or_else(sha_from_git)
 }
 
+/// The repository's current HEAD commit SHA, if any.
+pub(crate) fn head_commit_sha() -> Option<String> {
+    let out = Command::new("git")
+        .args(["rev-parse", "HEAD"])
+        .output()
+        .ok()?;
+    if out.status.success() {
+        let sha = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        if !sha.is_empty() {
+            return Some(sha);
+        }
+    }
+    None
+}
+
 /// Ensure repo.yml carries `genesis_sha: <sha>` — writing textually to
 /// preserve comments/ordering (the RepoYml struct is read-side only).
 /// Three cases: canonical key present → no-op; legacy `first_commit:` line

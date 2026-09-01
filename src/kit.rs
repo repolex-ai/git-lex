@@ -1038,7 +1038,9 @@ pub(crate) fn sweep_kit_latest_files(root: &Path) -> Vec<String> {
 /// kit version put in place, the agent never decides; the ruling's `.bak`
 /// backup half was superseded 2026-08-08 — git history is the backup).
 fn is_never_overwrite(dest: &Path) -> bool {
-    dest.file_name().map(|n| n == "SOUL.md").unwrap_or(false)
+    dest.file_name()
+        .map(|n| n == "SOUL.md" || n == "FOUNDATION.md")
+        .unwrap_or(false)
 }
 
 /// Install a kit's files into the repo, safe for `kit-update` against a live
