@@ -74,9 +74,9 @@ fn resolve_doctype_across_kits(
     // domain, then optionals (alphabetical).
     let installed = kit_cmds::collect_kits_for_update(root, None);
 
-    // Detect kit-prefixed form: `innerworld/place`. The kit-short is the
+    // Detect kit-prefixed form: `innerworld/place` or `copia.place`. The kit-short is the
     // last segment of the kit spec (innerworld in repolex-ai/git-lex-kit-innerworld).
-    let (kit_filter, class_part) = match doctype.split_once('/') {
+    let (kit_filter, class_part) = match doctype.split_once('/').or_else(|| doctype.split_once('.')) {
         Some((k, c)) => (Some(k.to_lowercase()), c.to_string()),
         None => (None, doctype.to_string()),
     };
@@ -115,7 +115,7 @@ fn resolve_doctype_across_kits(
             let hints: Vec<String> = matches.iter()
                 .map(|(spec, name, _)| {
                     let (_, _, short) = resolve_kit_spec(spec);
-                    format!("`{}/{}`", short, name.to_lowercase())
+                    format!("`{}/{}` (or `{}.{}`)", short, name.to_lowercase(), short, name.to_lowercase())
                 })
                 .collect();
             Err(DoctypeError::Ambiguous {
@@ -138,7 +138,17 @@ enum DoctypeError {
     },
 }
 
-pub(crate) fn cmd_create(doctype: &str, instance_id: Option<&str>, json: bool) {
+pub(crate) fn cmd_create(
+    doctype: Option<&str>,
+    instance_id: Option<&str>,
+    list: bool,
+    json: bool,
+) {
+    if list || doctype.is_none() {
+        cmd_list(json);
+        return;
+    }
+    let doctype = doctype.unwrap();
     // Emit an error in the right format, then exit. Used for all failure
     // paths so --json consumers don't have to parse human text.
     let fail = |code: &str, msg: String| -> ! {

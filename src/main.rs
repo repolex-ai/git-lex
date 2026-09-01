@@ -135,10 +135,13 @@ enum Commands {
     },
     /// Create a new document from the kit ontology
     Create {
-        /// Class name (e.g., journal, task, message)
-        doctype: String,
+        /// Class name (e.g., journal, place, copia.note, soul/note)
+        doctype: Option<String>,
         /// Instance ID — becomes the filename and classId value (e.g., "day-1")
         instance_id: Option<String>,
+        /// List all creatable document classes across installed kits
+        #[arg(long)]
+        list: bool,
         /// Emit a JSON summary on stdout instead of a human banner.
         /// Fields: ok, path, uri, class, id.
         #[arg(long)]
@@ -356,7 +359,7 @@ fn main() {
 
     match cli.command {
         Commands::Init { directory, kit } => init::cmd_init(directory, kit),
-        Commands::Create { doctype, instance_id, json } => create::cmd_create(&doctype, instance_id.as_deref(), json),
+        Commands::Create { doctype, instance_id, list, json } => create::cmd_create(doctype.as_deref(), instance_id.as_deref(), list, json),
         Commands::List { json } => create::cmd_list(json),
         Commands::Save { message, dry_run } => save::cmd_save(&message, dry_run),
         Commands::Query { query, json } => query::cmd_query(query, json),
