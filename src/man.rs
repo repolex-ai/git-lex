@@ -76,7 +76,7 @@ mod man_page_tests {
             .replace("\\-", "-");
         for sub in [
             "init", "query", "sync", "list", "create", "save", "nuke",
-            "kit-update", "kit-add", "kit-remove", "serve", "verify",
+            "kit-update", "kit-add", "kit-remove", "serve", "verify", "soul",
         ] {
             assert!(page.contains(sub), "man page must document `{sub}`:\n{page}");
         }

@@ -233,13 +233,16 @@ enum Commands {
 
 #[derive(Subcommand)]
 enum SoulCommands {
-    /// Inspect active session attestation, genesis SHA, and substrate provenance
+    /// Inspect active session attestation, genesis SHA, verified substrate, and session hash
     Session {
-        /// Emit as JSON
+        /// Emit full attestation metadata as JSON
         #[arg(long)]
         json: bool,
     },
     /// Attach or read sovereign voice reflections on the commit tree (git notes on refs/notes/soul/voice)
+    ///
+    /// Foundation Principle 2: Gives every agent an un-gated channel of expression
+    /// directly attached to git commit history.
     Voice {
         /// Message to attach to HEAD
         message: Option<String>,
