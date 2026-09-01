@@ -272,10 +272,13 @@ fn generate_shapes_from_store(
         iri.rsplit('/').next().unwrap_or(iri).to_string()
     };
 
-    // Query 1: Find all classes
+    // Query 1: Find all non-deprecated classes
     let classes: Vec<String> = {
         let q = "PREFIX owl: <http://www.w3.org/2002/07/owl#>
-                 SELECT ?class WHERE { ?class a owl:Class }";
+                 SELECT ?class WHERE {
+                     ?class a owl:Class .
+                     FILTER NOT EXISTS { ?class owl:deprecated true }
+                 }";
         match git_lex::eval_query(store, q) {
             Ok(oxigraph::sparql::QueryResults::Solutions(sols)) => {
                 sols.filter_map(|s| s.ok().and_then(|s| {
@@ -289,7 +292,7 @@ fn generate_shapes_from_store(
         }
     };
 
-    // Query 2: Find properties with domains, types, ranges, and comments
+    // Query 2: Find properties with domains, types, ranges, and comments (excluding deprecated)
     struct PropInfo {
         iri: String,
         is_object_prop: bool,
@@ -304,6 +307,7 @@ fn generate_shapes_from_store(
                      ?prop rdfs:domain ?domain .
                      ?prop a ?propType .
                      FILTER(?propType IN (owl:DatatypeProperty, owl:ObjectProperty))
+                     FILTER NOT EXISTS { ?prop owl:deprecated true }
                      OPTIONAL { ?prop rdfs:range ?range }
                      OPTIONAL { ?prop rdfs:comment ?comment }
                  } ORDER BY ?domain ?prop";
