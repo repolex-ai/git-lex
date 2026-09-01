@@ -39,8 +39,10 @@ pub fn cmd_voice(message: Option<&str>, list: bool) {
 }
 
 fn add_voice_note(root: &std::path::Path, msg: &str) {
-    let substrate = std::env::var("SUBSTRATE").unwrap_or_else(|_| "unknown".to_string());
+    let substrate = crate::save::detect_runtime_substrate(root)
+        .unwrap_or_else(|| "unknown".to_string());
     let session_id = std::env::var("CLAUDE_CODE_SESSION_ID")
+        .or_else(|_| std::env::var("ANTIGRAVITY_CONVERSATION_ID"))
         .or_else(|_| std::env::var("CONVERSATION_ID"))
         .unwrap_or_else(|_| "untracked".to_string());
 

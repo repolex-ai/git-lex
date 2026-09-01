@@ -19,21 +19,12 @@ pub fn cmd_session(as_json: bool) {
         .unwrap_or_else(|| "unnamed".to_string());
 
     let session_id = std::env::var("CLAUDE_CODE_SESSION_ID")
+        .or_else(|_| std::env::var("ANTIGRAVITY_CONVERSATION_ID"))
         .or_else(|_| std::env::var("CONVERSATION_ID"))
         .unwrap_or_else(|_| "untracked".to_string());
 
-    let substrate = std::env::var("SUBSTRATE")
-        .unwrap_or_else(|_| {
-            let subs = crate::harness::active_substrates(&root);
-            if subs.is_empty() {
-                "none".to_string()
-            } else {
-                subs.iter()
-                    .map(|s| s.as_str())
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            }
-        });
+    let substrate = crate::save::detect_runtime_substrate(&root)
+        .unwrap_or_else(|| "none".to_string());
 
     let session_hash = {
         use sha2::{Digest, Sha256};

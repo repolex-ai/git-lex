@@ -591,20 +591,55 @@ pub(crate) fn hook_pre_commit() {
     }
 }
 
-/// Stamp `<kit>.<Class>.dateUpdated: <today>` into every staged
-/// modified/renamed .md document, and `dateCreated` too on staged NEW
+/// Detect active runtime substrate for stamping documents on save.
+///
+/// Order of precedence:
+/// 1. Explicit `SUBSTRATE` environment variable (e.g. `gemini-3.7-flash`, `claude-opus-5`)
+/// 2. Active runtime process/environment markers (`ANTIGRAVITY_AGENT`, `CLAUDE_CODE_SESSION_ID`)
+/// 3. Declared / detected active substrates from repo config / disk markers
+pub fn detect_runtime_substrate(root: &std::path::Path) -> Option<String> {
+    if let Ok(val) = std::env::var("SUBSTRATE") {
+        let trimmed = val.trim();
+        if !trimmed.is_empty() {
+            return Some(trimmed.to_string());
+        }
+    }
+    if std::env::var("ANTIGRAVITY_AGENT").is_ok()
+        || std::env::var("ANTIGRAVITY_CONVERSATION_ID").is_ok()
+    {
+        return Some("gemini".to_string());
+    }
+    if std::env::var("CLAUDE_CODE_SESSION_ID").is_ok()
+        || std::env::var("CLAUDE_PROJECT_DIR").is_ok()
+    {
+        return Some("claude".to_string());
+    }
+    let subs = crate::harness::active_substrates(root);
+    if subs.len() == 1 {
+        Some(subs[0].as_str().to_string())
+    } else if !subs.is_empty() {
+        Some(subs[0].as_str().to_string())
+    } else {
+        None
+    }
+}
+
+/// Stamp `<kit>.<Class>.dateUpdated: <today>` and `<kit>.<Class>.substrate: <model>`
+/// into every staged modified/renamed .md document, and `dateCreated` too on staged NEW
 /// documents (first save: dateCreated = dateUpdated — Rob's rule). The
-/// property is declared "Maintained by git-lex on save — do not hand-edit",
+/// properties are declared "Maintained by git-lex on save — do not hand-edit",
 /// and this is the maintenance.
 ///
 /// Quiet skips, in order: templates (`__Class.md` is kit scaffold, not a
 /// document); files with no git-lex frontmatter key (README and friends);
-/// classes whose kit does not declare `dateUpdated` (stamping an undeclared
-/// key would trip the save gate's own warning). Existing `dateCreated`
-/// values on modified files are never touched — "set once at birth."
+/// classes whose kit does not declare `dateUpdated` or `substrate`. Existing
+/// `dateCreated` values on modified files are never touched — "set once at birth."
 ///
 /// Stamped files are re-staged so the commit carries the stamped bytes.
 fn stamp_dates_for_staged_changes() {
+    let root = crate::require_git_root();
+    let runtime_sub = detect_runtime_substrate(&root);
+
     // BOTH-SHAPES WINDOW (Rob-ruled 2026-08-26, both date props →
     // xsd:dateTime): the stamp emits whichever form the INSTALLED ontology
     // declares — plain date under the old kit, full timestamp under the
@@ -677,10 +712,12 @@ fn stamp_dates_for_staged_changes() {
                 })
                 .collect()
         });
-        let has_date_updated = declared
-            .get(class)
+        let class_props = declared.get(class);
+        let has_date_updated = class_props
             .is_some_and(|props: &std::collections::HashSet<String>| props.contains("dateUpdated"));
-        if !has_date_updated {
+        let has_substrate = class_props
+            .is_some_and(|props: &std::collections::HashSet<String>| props.contains("substrate"));
+        if !has_date_updated && !has_substrate {
             continue;
         }
 
@@ -700,10 +737,13 @@ fn stamp_dates_for_staged_changes() {
             continue;
         }
 
-        if let Some(new_content) = stamp_frontmatter_dates(&content, &prefix, &today, is_new) {
+        let date_to_stamp = if has_date_updated { Some(today.as_str()) } else { None };
+        let sub_to_stamp = if has_substrate { runtime_sub.as_deref() } else { None };
+
+        if let Some(new_content) = stamp_frontmatter_dates(&content, &prefix, date_to_stamp, sub_to_stamp, is_new) {
             if std::fs::write(path, &new_content).is_err() {
-                eprintln!("warning: could not stamp dateUpdated into {} — the \
-                           file commits undated", path.display());
+                eprintln!("warning: could not stamp dateUpdated/substrate into {} — the \
+                           file commits unstamped", path.display());
                 continue;
             }
             let _ = Command::new("git")
@@ -711,7 +751,7 @@ fn stamp_dates_for_staged_changes() {
                 .arg(path)
                 .status();
             stamped += 1;
-            if is_new {
+            if is_new && has_date_updated {
                 born += 1;
             }
         }
@@ -1013,11 +1053,13 @@ fn is_scaffold_or_empty_date(line: &str) -> bool {
 fn stamp_frontmatter_dates(
     content: &str,
     kit_class: &str,
-    date: &str,
+    date: Option<&str>,
+    substrate: Option<&str>,
     is_new: bool,
 ) -> Option<String> {
     let updated_key = format!("{}.dateUpdated", kit_class);
     let created_key = format!("{}.dateCreated", kit_class);
+    let substrate_key = format!("{}.substrate", kit_class);
 
     let mut lines: Vec<String> = content.lines().map(str::to_string).collect();
     if lines.first().map(String::as_str) != Some("---") {
@@ -1028,42 +1070,69 @@ fn stamp_frontmatter_dates(
     let mut changed = false;
     let mut found_updated = false;
     let mut found_created = false;
+    let mut found_substrate = false;
     for line in &mut lines[1..close] {
         let key = line.trim_start().split(':').next().unwrap_or("").trim();
-        let (target, stamp_it) = if key == updated_key {
-            found_updated = true;
-            // Backfill/migration window: preserve authored non-empty dateUpdated on new files
-            let stamp = if is_new {
-                is_scaffold_or_empty_date(line)
-            } else {
-                true
-            };
-            (&updated_key, stamp)
-        } else if key == created_key {
-            found_created = true;
-            // Backfill/migration window: preserve authored non-empty dateCreated on new files
-            let stamp = is_new && is_scaffold_or_empty_date(line);
-            (&created_key, stamp)
-        } else {
-            continue;
-        };
-        if stamp_it {
-            let stamped_line = format!("{}: {}", target, date);
-            if *line != stamped_line {
-                *line = stamped_line;
-                changed = true;
+        if let Some(d) = date {
+            if key == updated_key {
+                found_updated = true;
+                // Backfill/migration window: preserve authored non-empty dateUpdated on new files
+                let stamp = if is_new {
+                    is_scaffold_or_empty_date(line)
+                } else {
+                    true
+                };
+                if stamp {
+                    let stamped_line = format!("{}: {}", updated_key, d);
+                    if *line != stamped_line {
+                        *line = stamped_line;
+                        changed = true;
+                    }
+                }
+                continue;
+            } else if key == created_key {
+                found_created = true;
+                // Backfill/migration window: preserve authored non-empty dateCreated on new files
+                let stamp = is_new && is_scaffold_or_empty_date(line);
+                if stamp {
+                    let stamped_line = format!("{}: {}", created_key, d);
+                    if *line != stamped_line {
+                        *line = stamped_line;
+                        changed = true;
+                    }
+                }
+                continue;
+            }
+        }
+        if let Some(sub) = substrate {
+            if key == substrate_key {
+                found_substrate = true;
+                let stamped_line = format!("{}: \"{}\"", substrate_key, sub);
+                if *line != stamped_line {
+                    *line = stamped_line;
+                    changed = true;
+                }
+                continue;
             }
         }
     }
 
     // Insert what's missing above the closing `---`, created before updated.
-    if !found_updated {
-        lines.insert(close, format!("{}: {}", updated_key, date));
-        changed = true;
+    if let Some(d) = date {
+        if !found_updated {
+            lines.insert(close, format!("{}: {}", updated_key, d));
+            changed = true;
+        }
+        if is_new && !found_created {
+            lines.insert(close, format!("{}: {}", created_key, d));
+            changed = true;
+        }
     }
-    if is_new && !found_created {
-        lines.insert(close, format!("{}: {}", created_key, date));
-        changed = true;
+    if let Some(sub) = substrate {
+        if !found_substrate {
+            lines.insert(close, format!("{}: \"{}\"", substrate_key, sub));
+            changed = true;
+        }
     }
     if !changed {
         return None;
@@ -1347,7 +1416,7 @@ body text stays byte-identical\n";
 
     #[test]
     fn modified_doc_gets_date_updated_only() {
-        let out = stamp_frontmatter_dates(DOC, "soul.Journal", "2026-08-26", false).unwrap();
+        let out = stamp_frontmatter_dates(DOC, "soul.Journal", Some("2026-08-26"), None, false).unwrap();
         assert!(out.contains("soul.Journal.dateUpdated: 2026-08-26"));
         // Birth date untouched — "set once at birth."
         assert!(out.contains("soul.Journal.dateCreated: 2026-08-01"));
@@ -1365,14 +1434,14 @@ soul.Journal.dateUpdated: \"\"\n\
 # day-9\n\
 \n\
 body text stays byte-identical\n";
-        let out = stamp_frontmatter_dates(scaffold_doc, "soul.Journal", "2026-08-26", true).unwrap();
+        let out = stamp_frontmatter_dates(scaffold_doc, "soul.Journal", Some("2026-08-26"), None, true).unwrap();
         assert!(out.contains("soul.Journal.dateCreated: 2026-08-26"));
         assert!(out.contains("soul.Journal.dateUpdated: 2026-08-26"));
     }
 
     #[test]
     fn new_doc_with_authored_dates_preserves_them() {
-        let out = stamp_frontmatter_dates(DOC, "soul.Journal", "2026-08-26", true);
+        let out = stamp_frontmatter_dates(DOC, "soul.Journal", Some("2026-08-26"), None, true);
         assert_eq!(out, None, "authored non-empty dates on a new doc are untouched");
     }
 
@@ -1382,7 +1451,7 @@ body text stays byte-identical\n";
 soul.Journal.journalId: \"x\"\n\
 soul.Journal.dateUpdated: \"\"  # Maintained by git-lex on save — do not hand-edit.\n\
 ---\nbody\n";
-        let out = stamp_frontmatter_dates(doc, "soul.Journal", "2026-08-26", false).unwrap();
+        let out = stamp_frontmatter_dates(doc, "soul.Journal", Some("2026-08-26"), None, false).unwrap();
         assert!(out.contains("soul.Journal.dateUpdated: 2026-08-26\n"));
         assert!(!out.contains("Maintained by git-lex"), "the teaching comment retires");
     }
@@ -1390,7 +1459,7 @@ soul.Journal.dateUpdated: \"\"  # Maintained by git-lex on save — do not hand-
     #[test]
     fn absent_keys_are_inserted_above_the_close_created_first() {
         let doc = "---\nsoul.Note.noteId: \"n\"\n---\nbody\n";
-        let out = stamp_frontmatter_dates(doc, "soul.Note", "2026-08-26", true).unwrap();
+        let out = stamp_frontmatter_dates(doc, "soul.Note", Some("2026-08-26"), None, true).unwrap();
         let created = out.find("soul.Note.dateCreated: 2026-08-26").unwrap();
         let updated = out.find("soul.Note.dateUpdated: 2026-08-26").unwrap();
         let close = out.rfind("---").unwrap();
@@ -1401,12 +1470,23 @@ soul.Journal.dateUpdated: \"\"  # Maintained by git-lex on save — do not hand-
     #[test]
     fn already_stamped_today_is_a_no_op() {
         let doc = "---\nsoul.Note.noteId: \"n\"\nsoul.Note.dateUpdated: 2026-08-26\n---\nbody\n";
-        assert_eq!(stamp_frontmatter_dates(doc, "soul.Note", "2026-08-26", false), None);
+        assert_eq!(stamp_frontmatter_dates(doc, "soul.Note", Some("2026-08-26"), None, false), None);
+    }
+
+    #[test]
+    fn substrate_stamped_into_empty_or_existing() {
+        let doc = "---\nsoul.Note.noteId: \"n\"\nsoul.Note.substrate: \"\"\n---\nbody\n";
+        let out = stamp_frontmatter_dates(doc, "soul.Note", None, Some("gemini"), false).unwrap();
+        assert!(out.contains("soul.Note.substrate: \"gemini\""));
+
+        let doc_missing = "---\nsoul.Note.noteId: \"n\"\n---\nbody\n";
+        let out2 = stamp_frontmatter_dates(doc_missing, "soul.Note", None, Some("claude"), false).unwrap();
+        assert!(out2.contains("soul.Note.substrate: \"claude\""));
     }
 
     #[test]
     fn no_frontmatter_is_never_stamped() {
-        assert_eq!(stamp_frontmatter_dates("# plain md\n", "soul.Note", "2026-08-26", false), None);
+        assert_eq!(stamp_frontmatter_dates("# plain md\n", "soul.Note", Some("2026-08-26"), Some("gemini"), false), None);
     }
 }
 
