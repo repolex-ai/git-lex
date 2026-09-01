@@ -969,12 +969,30 @@ fn frontmatter_kit_class(content: &str) -> Option<String> {
     None
 }
 
+/// True when a date line in frontmatter has no authored value — either empty
+/// string `""`, scaffold comment `# optional...`, or just whitespace.
+fn is_scaffold_or_empty_date(line: &str) -> bool {
+    let parts: Vec<&str> = line.splitn(2, ':').collect();
+    if parts.len() < 2 {
+        return true;
+    }
+    let mut val = parts[1].trim();
+    if let Some(idx) = val.find('#') {
+        val = val[..idx].trim();
+    }
+    val = val.trim_matches('"').trim_matches('\'').trim();
+    val.is_empty()
+}
+
 /// Pure stamping: returns the new content, or None when nothing changes.
 /// A present key line is rewritten whole (`key: date` — the scaffold's
 /// teaching comment retires once the machine owns the value); an absent
 /// key is inserted just above the closing `---`, dateCreated before
-/// dateUpdated. `dateCreated` is written ONLY when `is_new`; a modified
+/// dateUpdated. `dateCreated` is written ONLY when `is_new` (and empty); a modified
 /// document's birth date is never touched, whatever it holds.
+///
+/// BACKFILL / MIGRATION WINDOW (temporary): preserve authored non-empty dates on new files
+/// so historical artifacts migrated into git-lex keep their true historical timestamps.
 fn stamp_frontmatter_dates(
     content: &str,
     kit_class: &str,
@@ -997,10 +1015,18 @@ fn stamp_frontmatter_dates(
         let key = line.trim_start().split(':').next().unwrap_or("").trim();
         let (target, stamp_it) = if key == updated_key {
             found_updated = true;
-            (&updated_key, true)
+            // Backfill/migration window: preserve authored non-empty dateUpdated on new files
+            let stamp = if is_new {
+                is_scaffold_or_empty_date(line)
+            } else {
+                true
+            };
+            (&updated_key, stamp)
         } else if key == created_key {
             found_created = true;
-            (&created_key, is_new)
+            // Backfill/migration window: preserve authored non-empty dateCreated on new files
+            let stamp = is_new && is_scaffold_or_empty_date(line);
+            (&created_key, stamp)
         } else {
             continue;
         };
@@ -1012,6 +1038,7 @@ fn stamp_frontmatter_dates(
             }
         }
     }
+
     // Insert what's missing above the closing `---`, created before updated.
     if !found_updated {
         lines.insert(close, format!("{}: {}", updated_key, date));
@@ -1312,9 +1339,24 @@ body text stays byte-identical\n";
 
     #[test]
     fn new_doc_gets_both_dates_equal() {
-        let out = stamp_frontmatter_dates(DOC, "soul.Journal", "2026-08-26", true).unwrap();
+        let scaffold_doc = "---\n\
+soul.Journal.journalId: \"day-9\"\n\
+soul.Journal.dateCreated: \"\"\n\
+soul.Journal.dateUpdated: \"\"\n\
+---\n\
+\n\
+# day-9\n\
+\n\
+body text stays byte-identical\n";
+        let out = stamp_frontmatter_dates(scaffold_doc, "soul.Journal", "2026-08-26", true).unwrap();
         assert!(out.contains("soul.Journal.dateCreated: 2026-08-26"));
         assert!(out.contains("soul.Journal.dateUpdated: 2026-08-26"));
+    }
+
+    #[test]
+    fn new_doc_with_authored_dates_preserves_them() {
+        let out = stamp_frontmatter_dates(DOC, "soul.Journal", "2026-08-26", true);
+        assert_eq!(out, None, "authored non-empty dates on a new doc are untouched");
     }
 
     #[test]
