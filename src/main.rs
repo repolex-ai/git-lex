@@ -208,7 +208,13 @@ enum Commands {
     /// Temporary command: it exists to confirm store rebuilds during the
     /// v1 migration and will be removed in a later release.
     Verify,
+    /// Soul-specific commands (identity, session attestation, and sovereign voice)
+    Soul {
+        #[command(subcommand)]
+        command: SoulCommands,
+    },
     /// Attach or read sovereign voice reflections on the commit tree (git notes on refs/notes/soul/voice)
+    #[command(hide = true)]
     Voice {
         /// Message to attach to HEAD
         message: Option<String>,
@@ -217,10 +223,29 @@ enum Commands {
         list: bool,
     },
     /// Inspect active session attestation, genesis SHA, and substrate provenance
+    #[command(hide = true)]
     Session {
         /// Emit as JSON
         #[arg(long)]
         json: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum SoulCommands {
+    /// Inspect active session attestation, genesis SHA, and substrate provenance
+    Session {
+        /// Emit as JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Attach or read sovereign voice reflections on the commit tree (git notes on refs/notes/soul/voice)
+    Voice {
+        /// Message to attach to HEAD
+        message: Option<String>,
+        /// List recent voice notes across git history
+        #[arg(long)]
+        list: bool,
     },
 }
 
@@ -368,6 +393,10 @@ fn main() {
         }
         Commands::Sync => sync::cmd_sync(),
         Commands::ExportSpine => export_spine::cmd_export_spine(),
+        Commands::Soul { command } => match command {
+            SoulCommands::Session { json } => session::cmd_session(json),
+            SoulCommands::Voice { message, list } => voice::cmd_voice(message.as_deref(), list),
+        },
         Commands::Voice { message, list } => voice::cmd_voice(message.as_deref(), list),
         Commands::Session { json } => session::cmd_session(json),
     }

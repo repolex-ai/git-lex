@@ -17,6 +17,11 @@ pub const VOICE_NOTES_REF: &str = "refs/notes/soul/voice";
 pub fn cmd_voice(message: Option<&str>, list: bool) {
     let root = require_git_root();
 
+    if !crate::soul_md::soul_kit_installed(&root) {
+        eprintln!("fatal: `git lex soul voice` is a soul-specific feature — this repository is not a soul repo.");
+        std::process::exit(1);
+    }
+
     if list {
         if let Err(e) = list_voice_notes(&root) {
             eprintln!("fatal: {e}");

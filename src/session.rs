@@ -6,7 +6,11 @@ use crate::soul_md::soul_kit_installed;
 
 pub fn cmd_session(as_json: bool) {
     let root = require_git_root();
-    let is_soul = soul_kit_installed(&root);
+    if !soul_kit_installed(&root) {
+        eprintln!("fatal: `git lex soul session` is a soul-specific feature — this repository is not a soul repo.");
+        std::process::exit(1);
+    }
+    let is_soul = true;
 
     let genesis_sha = crate::git::genesis_sha().unwrap_or_else(|| "none".to_string());
     let current_head = crate::git::head_commit_sha().unwrap_or_else(|| "none".to_string());
