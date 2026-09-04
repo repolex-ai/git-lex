@@ -22,6 +22,11 @@ path = "src/bin/git-lex-serve.rs"
 clap = { version = "4", features = ["derive", "wrap_help"] }
 clap_mangen = "0.2"
 oxigraph = { version = "0.5.6", features = ["rdf-12"] }
+# Named only to implement oxigraph's ServiceHandler for SERVICE <pan:> (the
+# trait's signature uses these crates' types and oxigraph does not re-export
+# them). Pinned to what oxigraph itself resolves — see Cargo.lock.
+spargebra = "=0.4.6"
+oxiri = "=0.2.11"
 git2 = { version = "0.20", default-features = false, features = ["vendored-openssl"] }
 serde_yaml = "0.9"
 sha2 = "0.10"

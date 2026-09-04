@@ -116,6 +116,104 @@ pub fn open_store_read_only_at(root: &std::path::Path) -> Option<Store> {
     None
 }
 
+// ── Pan: the soul's media graph, reachable from any query as SERVICE <pan:> ──
+//
+// pand (repolex-ai/pan) writes a soul's media graph at `.pan/_ignore/oxigraph`
+// (pocket law). git-lex READS it directly — one writer, many readers, the
+// arrangement Pool ran against git-lex's own store for months (Rob,
+// 2026-09-03: not re-raised). One SPARQL query cannot span two oxigraph
+// stores, so the media graph is exposed the standard way: a SPARQL 1.1
+// federated `SERVICE` clause whose endpoint is the pan namespace IRI —
+//
+//     SELECT ?img ?caption WHERE {
+//       SERVICE <pan:> { ?img a pan:Image ; pan:caption ?caption }
+//     }
+//
+// handled IN PROCESS (no HTTP, no copy): the sub-pattern is evaluated against
+// the pan store opened read-only for that call, so it sees the latest commit
+// and never blocks pand. The `pan:` prefix binds when git-lex-kit-pan is
+// installed (the kit is what tells git-lex the vocabulary); the full IRI
+// works regardless. No `.pan` store → the SERVICE is simply not registered
+// and a query naming it gets oxigraph's "unsupported service" error.
+
+/// The IRI a query names to reach the soul's media graph: `SERVICE <pan:>`.
+pub const PAN_SERVICE_IRI: &str = "https://repolex.ai/ontology/pan/";
+
+/// Where pand keeps a soul's media graph (pocket law).
+pub fn pan_store_path_at(root: &std::path::Path) -> PathBuf {
+    root.join(".pan").join("_ignore").join("oxigraph")
+}
+
+/// Evaluates `SERVICE <pan:>` sub-patterns against the soul's media graph.
+struct PanService {
+    path: PathBuf,
+}
+
+#[derive(Debug)]
+struct PanServiceError(String);
+
+impl std::fmt::Display for PanServiceError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "pan service: {}", self.0)
+    }
+}
+
+impl std::error::Error for PanServiceError {}
+
+impl oxigraph::sparql::ServiceHandler for PanService {
+    type Error = PanServiceError;
+
+    fn handle(
+        &self,
+        pattern: &spargebra::algebra::GraphPattern,
+        base_iri: Option<&oxiri::Iri<String>>,
+    ) -> Result<oxigraph::sparql::QuerySolutionIter<'static>, Self::Error> {
+        // The sub-pattern back to SPARQL text (spargebra prints real syntax),
+        // then a normal evaluation on a fresh read-only snapshot of the pan
+        // store. Results are collected so the iterator owns them and the
+        // store handle can close.
+        let query = spargebra::Query::Select {
+            dataset: None,
+            pattern: pattern.clone(),
+            base_iri: base_iri.cloned(),
+        }
+        .to_string();
+        let store = Store::open_read_only(&self.path)
+            .map_err(|e| PanServiceError(format!("open {}: {e}", self.path.display())))?;
+        let results = oxigraph::sparql::SparqlEvaluator::new()
+            .parse_query(&query)
+            .map_err(|e| PanServiceError(format!("parse: {e}")))?
+            .on_store(&store)
+            .execute()
+            .map_err(|e| PanServiceError(format!("eval: {e}")))?;
+        match results {
+            oxigraph::sparql::QueryResults::Solutions(sols) => {
+                let variables: std::sync::Arc<[oxigraph::sparql::Variable]> = sols.variables().to_vec().into();
+                let mut owned = Vec::new();
+                for s in sols {
+                    owned.push(s.map_err(|e| PanServiceError(format!("read: {e}")))?);
+                }
+                Ok(oxigraph::sparql::QuerySolutionIter::new(variables, owned.into_iter().map(Ok)))
+            }
+            _ => Err(PanServiceError("SERVICE sub-pattern did not yield solutions".into())),
+        }
+    }
+}
+
+/// A `SparqlEvaluator` with the soul's media graph attached as
+/// `SERVICE <pan:>` when the repo has one. Every git-lex query path builds its
+/// evaluator here so the media graph is reachable from all of them.
+pub fn evaluator_at(root: Option<&std::path::Path>) -> oxigraph::sparql::SparqlEvaluator {
+    let ev = oxigraph::sparql::SparqlEvaluator::new();
+    match root.map(pan_store_path_at).filter(|p| p.is_dir()) {
+        Some(path) => ev.with_service_handler(
+            oxigraph::model::NamedNode::new(PAN_SERVICE_IRI).expect("pan service IRI"),
+            PanService { path },
+        ),
+        None => ev,
+    }
+}
+
 /// The domain kit spec from `.lex/repo.yml` (None if unset or "none").
 pub fn get_kit() -> Option<String> {
     RepoYml::load(&find_git_root()?).domain_kit()
@@ -146,7 +244,17 @@ pub fn eval_query_union<'a>(
     store: &'a Store,
     q: &str,
 ) -> Result<oxigraph::sparql::QueryResults<'a>, W3cQueryError> {
-    let mut parsed = oxigraph::sparql::SparqlEvaluator::new()
+    eval_query_union_at(find_git_root().as_deref(), store, q)
+}
+
+/// [`eval_query_union`] anchored to an explicit repo root — the root is what
+/// makes the soul's media graph reachable as `SERVICE <pan:>`.
+pub fn eval_query_union_at<'a>(
+    root: Option<&std::path::Path>,
+    store: &'a Store,
+    q: &str,
+) -> Result<oxigraph::sparql::QueryResults<'a>, W3cQueryError> {
+    let mut parsed = evaluator_at(root)
         .parse_query(q)
         .map_err(|e| W3cQueryError::Parse(e.to_string()))?;
     parsed.dataset_mut().set_default_graph_as_union();
@@ -1096,7 +1204,7 @@ pub fn w3c_query_at(
     query: &str,
 ) -> Result<W3cQueryOutcome, W3cQueryError> {
     let prefixed = add_prefixes_at(root, query);
-    let results = oxigraph::sparql::SparqlEvaluator::new()
+    let results = evaluator_at(root)
         .parse_query(&prefixed)
         .map_err(|e| W3cQueryError::Parse(e.to_string()))?
         .on_store(store)

@@ -17,7 +17,8 @@ pub(crate) fn run_query(store: &Store, query: &str, store_type: &str, json: bool
     // Shared parse/execute with the deliberate union-default-graph
     // semantics (review #8): this surface explores the whole store. The
     // parse-vs-eval error identity survives for the JSON error object.
-    let results = match git_lex::eval_query_union(store, &prefixed) {
+    let root = git_lex::find_git_root();
+    let results = match git_lex::eval_query_union_at(root.as_deref(), store, &prefixed) {
         Ok(r) => r,
         Err(git_lex::W3cQueryError::Parse(e)) => {
             // An unbound prefix gets a sentence instead of the parser's
