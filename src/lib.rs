@@ -776,6 +776,34 @@ fn registry_put(repo_path: &std::path::Path) -> Result<(), String> {
     })
 }
 
+/// The repos this machine knows, most recently used first: every registry
+/// entry whose `<path>/.lex` still exists on disk. The one read API over
+/// `~/.lex/repos.json`, so a router (Syrinx) or a browser lists this machine's
+/// git-lex repos without parsing the file itself — and never resurrects the
+/// line-based file this replaced. Liveness is decided by the disk, per the
+/// registry's own rule: an entry whose `.lex` is gone is skipped, not deleted.
+pub fn registry_repos() -> Vec<PathBuf> {
+    let Some(reg) = registry_path() else { return Vec::new() };
+    let Ok(text) = fs::read_to_string(&reg) else { return Vec::new() };
+    let Ok(doc) = serde_json::from_str::<serde_json::Value>(&text) else { return Vec::new() };
+    let mut entries: Vec<(String, Option<String>)> = doc
+        .get("repos")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|e| entry_path(e).map(|p| (p.to_string(), e.get("last_used").and_then(|t| t.as_str()).map(String::from))))
+                .collect()
+        })
+        .unwrap_or_default();
+    // Most recent first; never-timed entries (folded from the old file) last.
+    entries.sort_by(|a, b| b.1.cmp(&a.1));
+    entries
+        .into_iter()
+        .map(|(p, _)| PathBuf::from(p))
+        .filter(|p| p.join(".lex").is_dir())
+        .collect()
+}
+
 /// Stamp this repo as used, now. Called on EVERY git-lex run inside an
 /// initialized repo, which is why it is silent on failure: ambient bookkeeping
 /// must never put a warning between the user and the command they ran.
