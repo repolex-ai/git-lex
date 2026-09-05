@@ -116,7 +116,7 @@ pub fn open_store_read_only_at(root: &std::path::Path) -> Option<Store> {
     None
 }
 
-// ── Pan: the soul's media graph, reachable from any query as SERVICE <pan:> ──
+// ── Pan: the soul's media graph, reachable from any query as SERVICE pan: ──
 //
 // pand (repolex-ai/pan) writes a soul's media graph at `.pan/_ignore/oxigraph`
 // (pocket law). git-lex READS it directly — one writer, many readers, the
@@ -126,7 +126,7 @@ pub fn open_store_read_only_at(root: &std::path::Path) -> Option<Store> {
 // federated `SERVICE` clause whose endpoint is the pan namespace IRI —
 //
 //     SELECT ?img ?caption WHERE {
-//       SERVICE <pan:> { ?img a pan:Image ; pan:caption ?caption }
+//       SERVICE pan: { ?img a pan:Image ; pan:caption ?caption }
 //     }
 //
 // handled IN PROCESS (no HTTP, no copy): the sub-pattern is evaluated against
@@ -136,7 +136,7 @@ pub fn open_store_read_only_at(root: &std::path::Path) -> Option<Store> {
 // works regardless. No `.pan` store → the SERVICE is simply not registered
 // and a query naming it gets oxigraph's "unsupported service" error.
 
-/// The IRI a query names to reach the soul's media graph: `SERVICE <pan:>`.
+/// The IRI a query names to reach the soul's media graph: `SERVICE pan:`.
 pub const PAN_SERVICE_IRI: &str = "https://repolex.ai/ontology/pan/";
 
 /// Where pand keeps a soul's media graph (pocket law).
@@ -144,7 +144,7 @@ pub fn pan_store_path_at(root: &std::path::Path) -> PathBuf {
     root.join(".pan").join("_ignore").join("oxigraph")
 }
 
-/// Evaluates `SERVICE <pan:>` sub-patterns against the soul's media graph.
+/// Evaluates `SERVICE pan:` sub-patterns against the soul's media graph.
 struct PanService {
     path: PathBuf,
 }
@@ -201,7 +201,7 @@ impl oxigraph::sparql::ServiceHandler for PanService {
 }
 
 /// A `SparqlEvaluator` with the soul's media graph attached as
-/// `SERVICE <pan:>` when the repo has one. Every git-lex query path builds its
+/// `SERVICE pan:` when the repo has one. Every git-lex query path builds its
 /// evaluator here so the media graph is reachable from all of them.
 pub fn evaluator_at(root: Option<&std::path::Path>) -> oxigraph::sparql::SparqlEvaluator {
     let ev = oxigraph::sparql::SparqlEvaluator::new();
@@ -248,7 +248,7 @@ pub fn eval_query_union<'a>(
 }
 
 /// [`eval_query_union`] anchored to an explicit repo root — the root is what
-/// makes the soul's media graph reachable as `SERVICE <pan:>`.
+/// makes the soul's media graph reachable as `SERVICE pan:`.
 pub fn eval_query_union_at<'a>(
     root: Option<&std::path::Path>,
     store: &'a Store,
