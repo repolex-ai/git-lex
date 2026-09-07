@@ -625,7 +625,10 @@ pub fn detect_runtime_substrate(root: &std::path::Path) -> Option<String> {
     if std::env::var("CLAUDE_CODE_SESSION_ID").is_ok()
         || std::env::var("CLAUDE_PROJECT_DIR").is_ok()
     {
-        return Some(claude_session_model().unwrap_or_else(|| "claude-opus-5".to_string()));
+        return Some(claude_session_model().unwrap_or_else(|| {
+            eprintln!("warning: could not read the Claude session log; stamping substrate as claude-opus-5");
+            "claude-opus-5".to_string()
+        }));
     }
     let subs = crate::harness::active_substrates(root);
     if !subs.is_empty() {
@@ -658,28 +661,34 @@ fn claude_session_model() -> Option<String> {
         .filter_map(|e| e.ok())
         .map(|e| e.path().join(format!("{session_id}.jsonl")))
         .find(|p| p.is_file())?;
-    // Session logs run to 100+ MB; the last assistant turn is always near
-    // the end, so read only the tail. A tail cut mid-line leaves one
-    // unparsable fragment at the top, which the per-line parse skips.
+    // Session logs run to 500+ MB; the last assistant turn is always near
+    // the end, so read only the tail. Escalate the window if a burst of
+    // large tool results pushed the last turn further back. A tail cut
+    // mid-line leaves one unparsable fragment at the top, which the
+    // per-line parse skips.
     use std::io::{Read, Seek, SeekFrom};
-    const TAIL: u64 = 256 * 1024;
     let mut f = std::fs::File::open(&log).ok()?;
     let len = f.metadata().ok()?.len();
-    f.seek(SeekFrom::Start(len.saturating_sub(TAIL))).ok()?;
-    let mut buf = Vec::with_capacity(TAIL as usize);
-    f.read_to_end(&mut buf).ok()?;
-    let text = String::from_utf8_lossy(&buf);
-    let mut last: Option<String> = None;
-    for line in text.lines() {
-        if let Ok(v) = serde_json::from_str::<serde_json::Value>(line) {
-            if let Some(m) = v.get("message").and_then(|m| m.get("model")).and_then(|m| m.as_str()) {
-                if !m.is_empty() && m != "<synthetic>" {
-                    last = Some(m.to_string());
+    for window in [256u64 * 1024, 4 * 1024 * 1024, 32 * 1024 * 1024] {
+        f.seek(SeekFrom::Start(len.saturating_sub(window))).ok()?;
+        let mut buf = Vec::with_capacity(window.min(len) as usize);
+        f.read_to_end(&mut buf).ok()?;
+        let text = String::from_utf8_lossy(&buf);
+        let mut last: Option<String> = None;
+        for line in text.lines() {
+            if let Ok(v) = serde_json::from_str::<serde_json::Value>(line) {
+                if let Some(m) = v.get("message").and_then(|m| m.get("model")).and_then(|m| m.as_str()) {
+                    if !m.is_empty() && m != "<synthetic>" {
+                        last = Some(m.to_string());
+                    }
                 }
             }
         }
+        if last.is_some() || window >= len {
+            return last;
+        }
     }
-    last
+    None
 }
 
 /// Stamp `<kit>.<Class>.dateUpdated: <today>` and `<kit>.<Class>.substrate: <model>`
