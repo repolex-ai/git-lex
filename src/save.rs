@@ -658,7 +658,17 @@ fn claude_session_model() -> Option<String> {
         .filter_map(|e| e.ok())
         .map(|e| e.path().join(format!("{session_id}.jsonl")))
         .find(|p| p.is_file())?;
-    let text = std::fs::read_to_string(&log).ok()?;
+    // Session logs run to 100+ MB; the last assistant turn is always near
+    // the end, so read only the tail. A tail cut mid-line leaves one
+    // unparsable fragment at the top, which the per-line parse skips.
+    use std::io::{Read, Seek, SeekFrom};
+    const TAIL: u64 = 256 * 1024;
+    let mut f = std::fs::File::open(&log).ok()?;
+    let len = f.metadata().ok()?.len();
+    f.seek(SeekFrom::Start(len.saturating_sub(TAIL))).ok()?;
+    let mut buf = Vec::with_capacity(TAIL as usize);
+    f.read_to_end(&mut buf).ok()?;
+    let text = String::from_utf8_lossy(&buf);
     let mut last: Option<String> = None;
     for line in text.lines() {
         if let Ok(v) = serde_json::from_str::<serde_json::Value>(line) {
@@ -1609,21 +1619,26 @@ mod date_converge_tests {
 mod substrate_detect_tests {
     use super::*;
 
-    /// Precedence is unchanged: an explicit SUBSTRATE beats the session log,
-    /// and with no Claude session at all the historical name still comes back.
-    #[test]
-    fn claude_session_model_is_none_without_session_id() {
-        let saved = std::env::var("CLAUDE_CODE_SESSION_ID").ok();
-        unsafe { std::env::remove_var("CLAUDE_CODE_SESSION_ID") };
-        assert_eq!(claude_session_model(), None);
-        if let Some(v) = saved { unsafe { std::env::set_var("CLAUDE_CODE_SESSION_ID", v) } }
-    }
+    /// One test, one env mutation sequence, under a lock: cargo runs tests on
+    /// parallel threads and process env is shared, so separate tests that
+    /// set/remove CLAUDE_CODE_SESSION_ID would race each other.
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     #[test]
-    fn claude_session_model_rejects_path_shaped_ids() {
+    fn claude_session_model_guards_env_and_path_shaped_ids() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let saved = std::env::var("CLAUDE_CODE_SESSION_ID").ok();
+
+        // No session id at all → None, so the caller falls back.
+        unsafe { std::env::remove_var("CLAUDE_CODE_SESSION_ID") };
+        assert_eq!(claude_session_model(), None);
+
+        // A path-shaped id must never reach the filesystem.
         unsafe { std::env::set_var("CLAUDE_CODE_SESSION_ID", "../etc/passwd") };
         assert_eq!(claude_session_model(), None);
+        unsafe { std::env::set_var("CLAUDE_CODE_SESSION_ID", "a/b") };
+        assert_eq!(claude_session_model(), None);
+
         match saved {
             Some(v) => unsafe { std::env::set_var("CLAUDE_CODE_SESSION_ID", v) },
             None => unsafe { std::env::remove_var("CLAUDE_CODE_SESSION_ID") },
