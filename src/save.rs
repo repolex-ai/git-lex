@@ -625,7 +625,7 @@ pub fn detect_runtime_substrate(root: &std::path::Path) -> Option<String> {
     if std::env::var("CLAUDE_CODE_SESSION_ID").is_ok()
         || std::env::var("CLAUDE_PROJECT_DIR").is_ok()
     {
-        return Some("claude-opus-5".to_string());
+        return Some(claude_session_model().unwrap_or_else(|| "claude-opus-5".to_string()));
     }
     let subs = crate::harness::active_substrates(root);
     if !subs.is_empty() {
@@ -637,6 +637,39 @@ pub fn detect_runtime_substrate(root: &std::path::Path) -> Option<String> {
     } else {
         None
     }
+}
+
+/// Read the exact model id of the running Claude Code session.
+///
+/// Claude Code exports no model env var, but it logs every assistant turn to
+/// `~/.claude/projects/<project-slug>/<CLAUDE_CODE_SESSION_ID>.jsonl` with a
+/// `"model":"<id>"` field. The last one seen is the model that is saving now.
+/// Returns `None` when the id or the log is missing, so the caller can fall
+/// back to the historical hardcoded name and nothing changes shape.
+fn claude_session_model() -> Option<String> {
+    let session_id = std::env::var("CLAUDE_CODE_SESSION_ID").ok()?;
+    if session_id.is_empty() || session_id.contains('/') || session_id.contains("..") {
+        return None;
+    }
+    let home = std::env::var("HOME").ok()?;
+    let projects = std::path::Path::new(&home).join(".claude").join("projects");
+    let log = std::fs::read_dir(&projects)
+        .ok()?
+        .filter_map(|e| e.ok())
+        .map(|e| e.path().join(format!("{session_id}.jsonl")))
+        .find(|p| p.is_file())?;
+    let text = std::fs::read_to_string(&log).ok()?;
+    let mut last: Option<String> = None;
+    for line in text.lines() {
+        if let Ok(v) = serde_json::from_str::<serde_json::Value>(line) {
+            if let Some(m) = v.get("message").and_then(|m| m.get("model")).and_then(|m| m.as_str()) {
+                if !m.is_empty() && m != "<synthetic>" {
+                    last = Some(m.to_string());
+                }
+            }
+        }
+    }
+    last
 }
 
 /// Stamp `<kit>.<Class>.dateUpdated: <today>` and `<kit>.<Class>.substrate: <model>`
@@ -1569,5 +1602,31 @@ mod date_converge_tests {
         let d = doc("2026-04-04", "2026-08-25");
         let out = upgrade_plain_dates(&d, "soul.Note", None, Some("2026-08-26T01:00:00-07:00")).unwrap();
         assert!(out.ends_with("---\nbody\n"));
+    }
+}
+
+#[cfg(test)]
+mod substrate_detect_tests {
+    use super::*;
+
+    /// Precedence is unchanged: an explicit SUBSTRATE beats the session log,
+    /// and with no Claude session at all the historical name still comes back.
+    #[test]
+    fn claude_session_model_is_none_without_session_id() {
+        let saved = std::env::var("CLAUDE_CODE_SESSION_ID").ok();
+        unsafe { std::env::remove_var("CLAUDE_CODE_SESSION_ID") };
+        assert_eq!(claude_session_model(), None);
+        if let Some(v) = saved { unsafe { std::env::set_var("CLAUDE_CODE_SESSION_ID", v) } }
+    }
+
+    #[test]
+    fn claude_session_model_rejects_path_shaped_ids() {
+        let saved = std::env::var("CLAUDE_CODE_SESSION_ID").ok();
+        unsafe { std::env::set_var("CLAUDE_CODE_SESSION_ID", "../etc/passwd") };
+        assert_eq!(claude_session_model(), None);
+        match saved {
+            Some(v) => unsafe { std::env::set_var("CLAUDE_CODE_SESSION_ID", v) },
+            None => unsafe { std::env::remove_var("CLAUDE_CODE_SESSION_ID") },
+        }
     }
 }
