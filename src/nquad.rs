@@ -440,12 +440,10 @@ pub(crate) fn derive_file_subjects(
         if segments.len() != 3 {
             continue;
         }
-        if let Ok(canonical) =
-            crate::ontology::resolve_class_segment(segments[0], segments[1], relpath_str, warn)
-        {
-            anchor = Some((segments[0].to_string(), canonical));
-            break;
-        }
+        let canonical =
+            crate::ontology::resolve_class_segment(segments[0], segments[1], relpath_str, warn);
+        anchor = Some((segments[0].to_string(), canonical));
+        break;
     }
     let Some((kit, class)) = anchor else {
         return FileSubjects { file_uri, thing_uri: None, thing_key: None };
@@ -1253,25 +1251,15 @@ pub(crate) fn emit_spo_line_nquads(
 
             // Emit rdf:type from class segment (once per class).
             //
-            // B1 fix (Day 38): validate the class segment against the kit's
-            // declared classes (the graph path is the one users query, so a
-            // phantom type here is what makes `?m a soul:Memory` return 0).
-            // `resolve_class_segment` returns the canonical class name on an
-            // exact or case-only-mismatch hit (warning on the latter), and an
-            // Err on a real typo. On the graph path we DON'T panic mid-sync —
-            // we warn loudly and SKIP the type emission, so we never write the
-            // phantom `a soul:memory`. The doc's properties still emit; only
-            // the bad type is withheld until the frontmatter is fixed.
-            let canonical_class: Option<String> =
-                match crate::ontology::resolve_class_segment(kit_name, class_seg, relpath_str, warn) {
-                    Ok(canonical) => Some(canonical),
-                    Err(msg) => {
-                        if warn {
-                            author_diag!("warning: {relpath_str}: {msg}");
-                        }
-                        None
-                    }
-                };
+            // B1 fix (Day 38): the graph path is the one users query, so a
+            // phantom type here is what makes `?m a soul:Memory` return 0.
+            // `resolve_class_segment` folds a case slip onto the canonical
+            // name (warning on the way) and otherwise hands back the class the
+            // line names. It never withholds a type: a class the ontology has
+            // not heard of is still the class this document was written under,
+            // and dropping its type is what erased retired classes wholesale.
+            let canonical_class =
+                crate::ontology::resolve_class_segment(kit_name, class_seg, relpath_str, warn);
             // The kit's namespace comes from its installed TTL declaration
             // (get_kit_namespaces_all_kits); the conventional pattern is only
             // the no-declaration fallback. This is what lets a kit's
@@ -1287,12 +1275,13 @@ pub(crate) fn emit_spo_line_nquads(
             // no fact is dropped; the type lands on the same subject, which
             // preserves today's queryability for the unmigrated corpus and
             // relocates Thing-ward per file as ids get authored).
-            let line_subject: &str = match (&subjects.thing_uri, &subjects.thing_key, &canonical_class) {
-                (Some(t), Some((ak, ac)), Some(c)) if ak == kit_name && ac == c => t,
+            let line_subject: &str = match (&subjects.thing_uri, &subjects.thing_key) {
+                (Some(t), Some((ak, ac))) if ak == kit_name && *ac == canonical_class => t,
                 _ => &subjects.file_uri,
             };
 
-            if let Some(canonical) = &canonical_class {
+            {
+                let canonical = &canonical_class;
                 let type_key = format!("{}.{}", kit_name, canonical);
                 if emitted_types.insert(type_key) {
                     let type_uri = format!("<{}{}>", kit_ns, canonical);
@@ -1310,9 +1299,7 @@ pub(crate) fn emit_spo_line_nquads(
             // bare-name lookup let any installed kit's same-named property
             // rewrite the behavior (copia:source, a lineage ObjectProperty,
             // was comma-splitting soul:source prose citations).
-            let lookup_key = canonical_class
-                .as_ref()
-                .map(|c| format!("{}/{}/{}", kit_name, c, prop_seg));
+            let lookup_key = format!("{}/{}/{}", kit_name, canonical_class, prop_seg);
 
             // Domain-open lookup (#82): a property declared with no
             // rdfs:domain is on NO class's shape by construction, so the
@@ -1337,9 +1324,8 @@ pub(crate) fn emit_spo_line_nquads(
             // those are precisely the undeclared keys the save-time warning
             // already reports, and inventing a different IRI for them here
             // would change what unmigrated corpora replay to.
-            let kit_predicate = lookup_key
-                .as_ref()
-                .and_then(|k| prop_iris.get(k))
+            let kit_predicate = prop_iris
+                .get(&lookup_key)
                 .map(|iri| format!("<{}>", iri))
                 .or_else(|| domain_open.map(|d| format!("<{}>", d.iri)))
                 .unwrap_or_else(|| format!("<{}{}>", kit_ns, prop_seg));
@@ -1347,7 +1333,7 @@ pub(crate) fn emit_spo_line_nquads(
             // Check if this is an ObjectProperty (from ontology) → resolve as IRI.
             // Domain-open ObjectProperties (soul:relatedTo) qualify too: the
             // declaration says reference, the absent domain says on-any-class.
-            if lookup_key.as_ref().is_some_and(|k| obj_props.contains(k))
+            if obj_props.contains(&lookup_key)
                 || domain_open.is_some_and(|d| d.is_object)
             {
                 // Law 6 (identity model): a DECLARED RANGE makes the
@@ -1478,7 +1464,8 @@ pub(crate) fn emit_spo_line_nquads(
                 // is declared somewhere in THIS kit but not on this class's
                 // shape — it still emits (as a plain literal), and the drift
                 // is surfaced so the shape or the frontmatter gets fixed.
-                if let Some(key) = &lookup_key {
+                {
+                    let key = &lookup_key;
                     // Membership test against the DECLARED set — datatype-
                     // unconditional. Testing prop_datatypes here false-warned
                     // every xsd:string property in every kit (the shapes
@@ -1522,7 +1509,7 @@ pub(crate) fn emit_spo_line_nquads(
                         {
                         let kit_scope = format!("{}/", kit_name);
                         let prop_tail = format!("/{}", prop_seg);
-                        let class_for_msg = canonical_class.as_deref().unwrap_or(class_seg);
+                        let class_for_msg = canonical_class.as_str();
                         let owners: std::collections::BTreeSet<String> = obj_props
                             .iter()
                             .chain(declared_props.iter())
@@ -1530,22 +1517,8 @@ pub(crate) fn emit_spo_line_nquads(
                             .filter_map(|k| k.split('/').nth(1).map(str::to_string))
                             .collect();
                         if !owners.is_empty() {
-                            // #85: owners that are deprecated classes get
-                            // tagged — "exists on class Texture" read as
-                            // Texture being live vocabulary, and it isn't.
-                            let dep_classes =
-                                crate::ontology::get_deprecated_classes(kit_name);
-                            let owner_list = owners
-                                .into_iter()
-                                .map(|c| match dep_classes.get(&c) {
-                                    Some(Some(succ)) => {
-                                        format!("{c} (deprecated → {succ})")
-                                    }
-                                    Some(None) => format!("{c} (deprecated)"),
-                                    None => c,
-                                })
-                                .collect::<Vec<_>>()
-                                .join(", ");
+                            let owner_list =
+                                owners.into_iter().collect::<Vec<_>>().join(", ");
                             author_diag!(
                                 "warning: {}: the key `{}.{}.{}` — `{}` exists in the \
                                  `{}` ontology, but on class {}, not on {}. Fix, pick \
@@ -1641,9 +1614,8 @@ pub(crate) fn emit_spo_line_nquads(
                 // DatatypeProperty: typed literal if ontology specifies a non-string range.
                 // Domain-open datatype props carry their range in the ontology
                 // record directly — the shapes-derived table can't see them (#82).
-                if let Some(datatype) = lookup_key
-                    .as_ref()
-                    .and_then(|k| prop_datatypes.get(k))
+                if let Some(datatype) = prop_datatypes
+                    .get(&lookup_key)
                     .or_else(|| domain_open.and_then(|d| d.datatype.as_ref()))
                 {
                     out.push_str(&format!(
