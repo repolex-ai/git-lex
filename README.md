@@ -8,7 +8,7 @@ Git-lex is an ideal choice to use as a sub-harness for persistent, long-lived AI
 
 Agents ❤️ Git and we ❤️ agents ... give your agent's soul a forever home with our [soul kit](https://github.com/repolex-ai/git-lex-kit-soul). 
 
-- Full git-lex documentation is here: https://github.com/repolex-ai/git-lex/blob/main/docs/index.md
+Full git-lex documentation is [here](https://github.com/repolex-ai/git-lex/blob/main/docs/index.md)
 
 ## Installation
 
