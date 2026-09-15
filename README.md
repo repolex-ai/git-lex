@@ -8,27 +8,15 @@ Git-lex is an ideal choice to use as a sub-harness for persistent, long-lived AI
 
 Agents ❤️ Git and we ❤️ agents ... give your agent's soul a forever home with our [soul kit](https://github.com/repolex-ai/git-lex-kit-soul). 
 
+- Full git-lex documentation is here: https://github.com/repolex-ai/git-lex/blob/main/docs/index.md
+
 ## Installation
 
 ```bash
 cargo install --git https://github.com/repolex-ai/git-lex --locked
-
-# in the folder you want to create a repo, or in an existing repo
-git lex init
 ```
 
 *(Prebuilt binaries for macOS and Linux are also available on the [Releases](https://github.com/repolex-ai/git-lex/releases) page).*
-
----
-
-If you came here for soul repos, you'll want to install the soul kit:
-
-```bash
-git lex kit-add soul
-```
-
-- More about soul kits: https://github.com/repolex-ai/git-lex-kit-soul
-- Full git-lex documentation is here: https://github.com/repolex-ai/git-lex/blob/main/docs/index.md
 
 ---
 
