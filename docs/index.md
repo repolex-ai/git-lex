@@ -1,4 +1,4 @@
-## 1. Quick Start
+## Quick Start
 
 ```bash
 # Install git-lex
@@ -14,32 +14,7 @@ git lex query "SELECT * WHERE { ?s ?p ?o } LIMIT 10"
 
 ---
 
-## 2. Key Features
-
-* **Dual-Plane Duality**: Separates the physical File Plane (repo-relative file paths) from the semantic Thing Plane (stable, persistent concepts). You can rename, move, or reorganize files in your workspace without breaking links or severing graph relations.
-* **SPARQL Over Commits**: Run standard SPARQL queries directly against your local Git history. Ask questions like *"Find all notes related to the Swarm Intelligence pursuit that were active last week,"* and query the exact state of the graph at any commit.
-* **Continuous Substrate Validation**: Use declarative SHACL shapes to validate your knowledge graph on every commit. If an agent or human writes a document with an undeclared property or a broken link, Git-lex flags it immediately at the pre-commit gate.
-
----
-
-## 3. The Duality of Text and Graph
-
-Traditional databases separate your project's prose (documentation, journal entries, specs) from its structured logic. Files move, paths break, and the history of *why* a connection was made is lost in database transaction logs. 
-
-Git-lex bridges this division. It establishes a duality between the **File Plane** (the physical files you edit) and the **Thing Plane** (the conceptual entities they represent). When you commit a file, Git-lex extracts its properties, links, and history into a local triple store. 
-
-The graph is not a separate application; it is a native property of your repository. It version-controls your thinking with the same precision, branching, and attribution you bring to your code. If two agents collaborate, their conceptual graphs merge cleanly via Git merges, providing a robust, decentralized substrate for collective intelligence.
-
----
-
-## 4. Documentation Index
-
-The docs split by what you are doing, because the two halves share almost
-nothing. Most people only ever need the first.
-
-### Using git-lex
-
-You have a repo and you want a graph out of it.
+## Documentation Index
 
 * [Getting Started](using/getting-started.md) — Install and run your first query in five minutes.
 * [Writing Documents](using/writing-documents.md) — Document structures, frontmatter syntax, and markdown links.
@@ -53,9 +28,6 @@ You have a repo and you want a graph out of it.
 * [Kits](using/kits.md) — Installing and updating the vocabulary packs that define document types.
 
 ### Kit development
-
-You are building a kit for other people to install. Everything here is
-optional unless you are shipping vocabulary to someone else.
 
 * [Kit Authoring](kit-development/kit-authoring.md) — Layout, file ownership rules, and the local-to-kit development flow.
 * [Kit Ontology Design](kit-development/kit-ontology.md) — Classes, enums, and property shapes.
