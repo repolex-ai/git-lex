@@ -42,9 +42,9 @@ Whether you are creating a persistent cognitive memory store for an autonomous a
 
 ## Features
 
+- **Git is the Database**: No background daemons, servers, or external databases to keep running. Your repository is the database, and the graph is derived directly from your committed files and working tree. Does not alter Git usage in any way. 
 - **Fast Performance**: Written in Rust and backed by embedded Oxigraph. Git-lex is blazingly fast—many queries run in sub-12ms, making agent tool-call loops and interactive CLI querying virtually instantaneous.
 - **Built for Agents from the Ground Up**: Simple, agent-friendly command-line tooling and interfaces your agents will love. Clean CLI commands, `--json` output flags for reliable machine parsing, pre-commit validation gates that prevent hallucinated schema drift, and `export-spine` to export compact semantic indexes tailored for LLM context caches.
-- **Git is the Database**: No background daemons, servers, or external databases to keep running. Your repository is the database, and the graph is derived directly from your committed files and working tree.
 - **Markdown-First Authoring**: Write natural Markdown notes and link them using standard markdown syntax. Lightweight YAML frontmatter defines typed properties that extract into graph statements automatically.
 - **Standard SPARQL 1.2 Querying**: Query your entire graph with SPARQL over working-tree files (`git lex query`) or explore past revisions with the embedded Oxigraph store.
 - **SHACL Pre-Commit Validation**: Prevent broken links, missing fields, and typos before they reach history. The `git lex save` command validates your documents against declarative SHACL shapes at commit time, catching errors early.
