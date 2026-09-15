@@ -53,18 +53,6 @@ Whether you are creating a persistent cognitive memory store for an autonomous a
 
 ---
 
-## Quick Start
-
-```bash
-mkdir my-graph && cd my-graph && git init
-git lex init                     # initialize .lex/ in the repo
-git lex create Memory "first"    # scaffold a typed document
-git lex save "my first memory"   # extract + SHACL-validate + commit
-git lex query "SELECT * WHERE { ?s ?p ?o } LIMIT 10"
-```
-
----
-
 ## License
 
 [Unlicense](LICENSE) — public domain.

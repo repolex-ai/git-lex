@@ -1,28 +1,24 @@
-# git-lex
-
-*Last updated for git-lex v0.1.1 (2026-08-27)*
-
-> **A versioned, queryable knowledge graph that lives inside your git repository.**
-
-git-lex is a tool for building decentralized knowledge graphs out of plain text files. By writing standard Markdown documents with a small amount of structured frontmatter, you establish a semantic graph of Things and Files. Because it rides on git commits, the graph inherits a complete historical record: not just what is currently true, but when it became true, and how it evolved over time.
-
----
-
 ## 1. Quick Start
 
-### Easiest Install (via Cargo)
 ```bash
-cargo install --git https://github.com/repolex-ai/git-lex
-git lex init
+# Install git-lex
+cargo install --git https://github.com/repolex-ai/git-lex --locked
+
+# In an existing Git repo, or create a new one:
+mkdir my-graph && cd my-graph && git init
+git lex init                     # initialize .lex/ in the repo
+git lex create Memory "first"    # scaffold a typed document
+git lex save "my first memory"   # extract + SHACL-validate + commit
+git lex query "SELECT * WHERE { ?s ?p ?o } LIMIT 10"
 ```
 
 ---
 
 ## 2. Key Features
 
-* **Dual-Plane Duality**: It separates the physical File Plane (repo-relative file paths) from the semantic Thing Plane (stable, persistent concepts). You can rename, move, or reorganize files in your workspace without breaking links or severing graph relations.
-* **SPARQL Over Commits**: Run standard SPARQL queries directly against your local git history. Ask questions like *"Find all notes related to the Swarm Intelligence pursuit that were active last week,"* and query the exact state of the graph at any commit.
-* **Continuous Substrate Validation**: Use declarative SHACL shapes to validate your knowledge graph on every commit. If an agent or human writes a document with an undeclared property or a broken link, `git-lex` flags it immediately at the pre-commit gate.
+* **Dual-Plane Duality**: Separates the physical File Plane (repo-relative file paths) from the semantic Thing Plane (stable, persistent concepts). You can rename, move, or reorganize files in your workspace without breaking links or severing graph relations.
+* **SPARQL Over Commits**: Run standard SPARQL queries directly against your local Git history. Ask questions like *"Find all notes related to the Swarm Intelligence pursuit that were active last week,"* and query the exact state of the graph at any commit.
+* **Continuous Substrate Validation**: Use declarative SHACL shapes to validate your knowledge graph on every commit. If an agent or human writes a document with an undeclared property or a broken link, Git-lex flags it immediately at the pre-commit gate.
 
 ---
 
@@ -30,9 +26,9 @@ git lex init
 
 Traditional databases separate your project's prose (documentation, journal entries, specs) from its structured logic. Files move, paths break, and the history of *why* a connection was made is lost in database transaction logs. 
 
-git-lex bridges this division. It establishes a duality between the **File Plane** (the physical files you edit) and the **Thing Plane** (the conceptual entities they represent). When you commit a file, git-lex extracts its properties, links, and history into a local triple store. 
+Git-lex bridges this division. It establishes a duality between the **File Plane** (the physical files you edit) and the **Thing Plane** (the conceptual entities they represent). When you commit a file, Git-lex extracts its properties, links, and history into a local triple store. 
 
-The graph is not a separate application; it is a native property of your repository. It version-controls your thinking with the same precision, branching, and attribution you bring to your code. If two agents collaborate, their conceptual graphs merge cleanly via git merges, providing a robust, decentralized substrate for collective intelligence.
+The graph is not a separate application; it is a native property of your repository. It version-controls your thinking with the same precision, branching, and attribution you bring to your code. If two agents collaborate, their conceptual graphs merge cleanly via Git merges, providing a robust, decentralized substrate for collective intelligence.
 
 ---
 
