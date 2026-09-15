@@ -2,7 +2,9 @@
 
 **Turn any Git repo of Markdown into a queryable knowledge graph.**
 
-Git-lex turns your Markdown files and Git history into a W3C RDF/SPARQL knowledge graph without running a separate database. Write plain notes and documents with lightweight frontmatter, and git-lex extracts, validates, and indexes everything straight into Git. Git-lex is an ideal choice to use as a sub-harness for persistent, long-lived AI agents, as it is standards-based and compatible with any agent harness. Git-lex was designed with agents in mind from the start.
+Git-lex turns your Markdown files and Git history into a W3C RDF/SPARQL knowledge graph without running a separate database. Write plain notes and documents with lightweight frontmatter, and git-lex extracts, validates, and indexes everything straight into Git. 
+
+Git-lex is an ideal choice to use as a sub-harness for persistent, long-lived AI agents, as it is standards-based and compatible with any agent harness. Git-lex was designed with agents in mind from the start.
 
 ## Installation
 
