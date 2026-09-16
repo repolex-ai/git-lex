@@ -1488,14 +1488,19 @@ copia:NocturneActivity a owl:Class ;
     }
 
     #[test]
-    fn type_label_parses_real_kit_copia_multiword() {
-        // Receipt for the NocturneActivity case — multi-word labels
-        // survive the round-trip through the real ontology file.
-        let path = std::path::PathBuf::from("/Users/rob/repos/repolex-ai/git-lex-kit-copia/ontology/copia/copia.ttl");
-        let Ok(content) = fs::read_to_string(&path) else { return };
-        assert_eq!(parse_class_type_label(&content, "copia", "Place"), "Place");
-        assert_eq!(parse_class_type_label(&content, "copia", "NocturneActivity"), "Nocturne Activity");
-        assert_eq!(parse_class_type_label(&content, "copia", "NocturneFeed"), "Nocturne Feed");
+    fn type_label_keeps_multiword_labels() {
+        // Multi-word labels survive the round-trip. Inline fixture, not a
+        // live kit file: kits delete classes, and a test that reads one
+        // breaks on every such release.
+        const TTL: &str = r#"@prefix owl: <http://www.w3.org/2002/07/owl#> .
+@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+@prefix copia: <https://repolex.ai/ontology/copia/> .
+copia: a owl:Ontology .
+copia:Place a owl:Class ; rdfs:label "Place" .
+copia:CameraAngle a owl:Class ; rdfs:label "Camera Angle" .
+"#;
+        assert_eq!(parse_class_type_label(TTL, "copia", "Place"), "Place");
+        assert_eq!(parse_class_type_label(TTL, "copia", "CameraAngle"), "Camera Angle");
     }
 
     #[test]
