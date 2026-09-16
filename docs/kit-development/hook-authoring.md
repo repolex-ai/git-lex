@@ -1,20 +1,17 @@
 # Hook Authoring Guide
 
-*Last updated for git-lex v0.1.1 (2026-08-27)*
-
 This guide describes how to author custom lifecycle hooks for your `git-lex` kits. Custom hooks allow you to run automated validation, capture context, and trigger external logic during session lifecycle events.
 
 ---
 
-## 1. Hook Logic Placement (Helper Code)
+## Hook Logic Placement (Helper Code)
 
 Only `.sh` files register and fire (see
-[Kit authoring §3.3](kit-authoring.md#33-sh-only)). When a hook needs real
+[Kit Authoring](kit-authoring.md#sh-only)). When a hook needs real
 logic — Python, an app's internals — the question is where that logic lives.
 
 **Preferred: the logic lives in the application package, and the `.sh` calls
-the app's blessed entrypoint.** Illustrative shape (no shipped kit hook uses
-this yet):
+the app's blessed entrypoint.** Illustrative shape:
 
 ```bash
 #!/bin/bash
@@ -33,9 +30,9 @@ Why this is the preferred shape:
   silently drifting from the app it belongs to.
 
 **If a loose helper file must ship anyway** (no app package to call), the
-convention is: same stem as the hook it serves, `.py` extension. This shape
-ships today: copia's `PostToolUse-copia-read-seen.sh` calls
-`PostToolUse-copia-read-seen.py`, sitting next to it in `.claude/hooks/`.
+convention is: same stem as the hook it serves, `.py` extension. For example,
+`PostToolUse-copia-read-seen.sh` calls `PostToolUse-copia-read-seen.py`,
+sitting next to it in `.claude/hooks/`.
 The shared stem makes the pairing obvious from `ls` and keeps the helper
 covered by the same mental namespace as its hook. The `.sh` pipes the hook
 payload to the `.py` on stdin and passes the program as a *file path* (not a
@@ -49,15 +46,15 @@ crash), so a `hook-common.sh` cannot live in that directory. This is why the
 opt-out guard block is duplicated verbatim into every kit hook instead of
 being sourced from a shared script.
 
-## Worked end-to-end example
+## Worked End-to-End Example
 
 One real hook, followed start to finish.
 
-### The hook: `SessionEnd-soul-save.sh`
+### The Hook: `SessionEnd-soul-save.sh`
 
 Shipped by the soul kit. Purpose: when a Claude Code session ends, commit the
 session's final bytes with `git lex save` so they land in the same-session
-commit. The real file is ~80 lines; the skeleton:
+commit. The skeleton:
 
 ```bash
 #!/bin/bash
@@ -88,15 +85,15 @@ Things every hook script should copy from it:
   interrupt the user's session. Only fail loudly on purpose.
 - **`$CLAUDE_PROJECT_DIR`** is the repo root; never assume cwd.
 
-### Where it lives in the kit
+### Where It Lives in the Kit
 
 ```
 git-lex-kit-soul/harness/.claude/hooks/SessionEnd-soul-save.sh
 ```
 
-### What kit-update writes to `settings.json`
+### What kit-update Writes to `settings.json`
 
-Generated automatically — never hand-written. From a live soul repo:
+Generated automatically — never hand-written:
 
 ```json
 {
@@ -109,16 +106,15 @@ Generated automatically — never hand-written. From a live soul repo:
 }
 ```
 
-### The `settings.local.json` stage (development phase)
+### The `settings.local.json` Stage (Development Phase)
 
 Before promotion, the same hook would be named `SessionEnd-local-save.sh` and
 hand-registered in `settings.local.json`. That whole flow — the `-local-`
 protection, the registration JSON, the promotion steps — is documented in
-[Kit authoring §3.5](kit-authoring.md#35-the-hook-development-flow).
+[Kit Authoring](kit-authoring.md#the-hook-development-flow).
 
-### With an app-package helper
+### With an App-Package Helper
 
-No kit hook ships the app-package shim shape yet. The closest real specimen
-is the sibling-`.py` fallback: copia's `PostToolUse-copia-read-seen.sh` +
-`.py` pair (see the helper-code section above). This walk-through gets
-written when the first app-package hook ships.
+When logic is encapsulated in an application package, the hook shell script acts
+as a minimal shim dispatching to the package entrypoint, keeping hook definitions
+clean and business logic testable.

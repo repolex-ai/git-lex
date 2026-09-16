@@ -1,8 +1,6 @@
 # Serve & Visualize
 
-*Last updated for git-lex v0.1.1 (2026-08-27)*
-
-`git-lex` provides two distinct local services to query, explore, and visualize your knowledge graph. Both servers run via the companion binary `git-lex-serve`:
+Git-lex provides two distinct local services to query, explore, and visualize your knowledge graph. Both servers run via the companion binary `git-lex-serve`:
 
 ```bash
 git lex serve viz      # Interactive graph visualizer UI (default port: 7878)
@@ -16,7 +14,7 @@ Both services read from the **synced store**. You must run `git lex sync` to pop
 
 ---
 
-## 1. The Interactive Visualizer (`serve viz`)
+## The Interactive Visualizer (`serve viz`)
 
 The visualization interface provides a user-friendly graphical exploration of your repository:
 * **Interactive Graph Network:** Vertices represent Things (conceptual nodes) and Files, and edges display relationship predicates (e.g., `linksTo`, `relatedToId`, `fileId`).
@@ -25,7 +23,7 @@ The visualization interface provides a user-friendly graphical exploration of yo
 
 ---
 
-## 2. The SPARQL Endpoint & HTTP API (`serve sparql`)
+## The SPARQL Endpoint & HTTP API (`serve sparql`)
 
 The SPARQL server exposes a W3C-compliant endpoint alongside several utility paths:
 
@@ -50,4 +48,3 @@ curl -X POST http://127.0.0.1:7880/sparql \
 
 > [!IMPORTANT]
 > Keep in mind the architectural split: `git lex query` queries the **active working tree** (uncommitted edits included). Conversely, `git lex serve` endpoints read from the **synced store** (committed history). For historical query recipes, see the [Querying Documentation](queries.md).
-

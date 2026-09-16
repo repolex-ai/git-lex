@@ -1,14 +1,12 @@
 # Harness-Specific Kit Features & Multi-Substrate Integration
 
-*Last updated for git-lex v0.1.1 (2026-08-30)*
-
 A central design principle of `git-lex` is that **soul content is the single source of truth**, while **agent harness directories are ephemeral, derived targets**. 
 
 When you author a skill (`Soul/Skill/journal.md`), an identity note, or a lifecycle hook in a kit, you author it once. `git-lex` then projects that content into the exact directory structures, frontmatter dialects, and hook formats required by each active agent harness.
 
 ---
 
-## 1. Substrate Selection & Auto-Detection
+## Substrate Selection & Auto-Detection
 
 A soul repository can run against one or multiple agent substrates simultaneously. Substrates are resolved on every `git lex save`, `git lex sync`, and `git lex kit-update` in order of precedence:
 
@@ -27,7 +25,7 @@ A soul repository can run against one or multiple agent substrates simultaneousl
 
 ---
 
-## 2. "Doing It the Claude Way" (`.claude/`)
+## Claude Integration (`.claude/`)
 
 Claude Code organizes extensions around tool configurations, command shims, and shell hooks:
 
@@ -35,74 +33,74 @@ Claude Code organizes extensions around tool configurations, command shims, and 
 * **Source:** `Soul/Skill/{name}.md`
 * **Target:** `.claude/skills/{name}/SKILL.md`
 * **Frontmatter Translation:**
-  ```yaml
-  ---
-  name: journal
-  description: Write or read your daily journal entry.
-  user-invocable: true
-  allowed-tools: Bash, FileRead
-  argument-hint: "<command>"
-  ---
-  ```
+   ```yaml
+   ---
+   name: journal
+   description: Write or read your daily journal entry.
+   user-invocable: true
+   allowed-tools: Bash, FileRead
+   argument-hint: "<command>"
+   ---
+   ```
 
 ### Lifecycle Hooks
 * **Location:** `.claude/hooks/<Event>-<name>.sh`
 * **Manifest:** Registered into `.claude/settings.json` under `"hooks": { ... }`.
 * **Standard Events:**
-  * `UserPromptSubmit`: Fires before Claude processes the user's turn. Used for neural memory recall (`UserPromptSubmit-soul-recall.py`).
+  * `UserPromptSubmit`: Fires before Claude processes the turn. Used for memory recall (`UserPromptSubmit-soul-recall.py`).
   * `SessionEnd`: Fires when the session terminates. Used for `git lex save` auto-commit.
   * `PreCompact`: Fires before context compaction. Used for memory consolidation.
 
 ---
 
-## 3. "Doing It the AGY (Antigravity) Way" (`.agents/`)
+## Antigravity Integration (`.agents/`)
 
-Google Antigravity (AGY) uses a declarative, progressive-disclosure architecture designed to minimize context window bloat:
+Google Antigravity uses a declarative, progressive-disclosure architecture designed to minimize context window bloat:
 
 ### Skills Layout & Progressive Disclosure
 * **Source:** `Soul/Skill/{name}.md`
 * **Target:** `.agents/skills/{name}/SKILL.md`
 * **Frontmatter Translation:**
-  ```yaml
-  ---
-  name: journal
-  description: Write or read your daily journal entry.
-  ---
-  ```
-* **How AGY Runs Skills:** AGY indexes skill names and descriptions into the system prompt's `<skills>` block. The agent progressively loads the full skill body via `view_file` only when invoked.
+   ```yaml
+   ---
+   name: journal
+   description: Write or read your daily journal entry.
+   ---
+   ```
+* **How Antigravity Runs Skills:** Skills are indexed by name and description into the system prompt's `<skills>` block. The agent progressively loads the full skill body via `view_file` only when invoked.
 
 ### Lifecycle Hooks (`.agents/hooks.json`)
 * **Location:** `.agents/hooks.json`
 * **Format:** Structured JSON mapping event names to handler arrays:
-  ```json
-  {
-    "soul-recall": {
-      "PreInvocation": [
-        {
-          "type": "command",
-          "command": "python3 .agents/hooks/PreInvocation-soul-recall.py",
-          "timeout": 5
-        }
-      ]
-    },
-    "soul-save": {
-      "Stop": [
-        {
-          "type": "command",
-          "command": "git lex save 'Session auto-save' && git lex sync",
-          "timeout": 15
-        }
-      ]
-    }
-  }
-  ```
+   ```json
+   {
+     "soul-recall": {
+       "PreInvocation": [
+         {
+           "type": "command",
+           "command": "python3 .agents/hooks/PreInvocation-soul-recall.py",
+           "timeout": 5
+         }
+       ]
+     },
+     "soul-save": {
+       "Stop": [
+         {
+           "type": "command",
+           "command": "git lex save 'Session auto-save' && git lex sync",
+           "timeout": 15
+         }
+       ]
+     }
+   }
+   ```
 * **Supported Events:**
   * `PreInvocation`: Equivalent to `UserPromptSubmit`.
   * `Stop`: Equivalent to `SessionEnd`.
   * `PreToolUse` / `PostToolUse`: Run commands before/after specific tool execution.
 
 ### Targeted Rules (`.agents/rules/*.md`)
-In addition to the global `AGENTS.md` loaded at startup, AGY supports scoped rules triggered by file paths:
+In addition to the global `AGENTS.md` loaded at startup, Antigravity supports scoped rules triggered by file paths:
 ```yaml
 ---
 trigger:
@@ -113,7 +111,7 @@ trigger:
 
 ---
 
-## 4. "Doing It the Hermes / Codex Way" (`.hermes/`)
+## Hermes and Codex Integration (`.hermes/`)
 
 For Hermes and OpenAI Codex-based harnesses:
 * **Configuration:** `hermes-config.yaml` or `.hermes/config.json`.
@@ -122,7 +120,7 @@ For Hermes and OpenAI Codex-based harnesses:
 
 ---
 
-## 5. Structuring a Kit for Multi-Harness Deployment
+## Structuring a Kit for Multi-Harness Deployment
 
 When building a kit that ships harness integrations (like `git-lex-kit-soul`), structure your kit's `harness/` directory like this:
 
@@ -144,7 +142,7 @@ my-kit/
     └── __Skill.md
 ```
 
-### Convergence Behavior:
+### Convergence Behavior
 1. When a user runs `git lex kit-update`, `git-lex` inspects the repo's active substrates.
 2. It copies only the relevant harness trees (`harness/.claude/` $\rightarrow$ `.claude/`, `harness/.agents/` $\rightarrow$ `.agents/`).
 3. Every `git lex save` automatically transforms `Soul/Skill/*.md` into the active harness formats and prunes stale deployed files.

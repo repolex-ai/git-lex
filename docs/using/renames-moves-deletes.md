@@ -1,12 +1,10 @@
 # Moving, Renaming, and Deleting Documents
 
-*Last updated for git-lex v0.1.1 (2026-08-27)*
-
 This document outlines how `git-lex` handles file moves, renames, and deletions in your workspace while maintaining graph integrity.
 
 ---
 
-## 1. Identity vs. Filename
+## Identity vs. Filename
 
 > [!IMPORTANT]
 > **The filename is not the identity.** 
@@ -17,20 +15,20 @@ This document outlines how `git-lex` handles file moves, renames, and deletions 
 
 ---
 
-## 2. Two Types of Links, Two Resolution Rules
+## Two Types of Links, Two Resolution Rules
 
-`git-lex` distinguishes between physical path references and semantic concept references:
+Git-lex distinguishes between physical path references and semantic concept references:
 
 1. **Markdown Links (`[text](/Soul/Pursuit/x.md)`):** These links point at physical paths in the File Plane. If the target file is renamed or deleted, the link registers as unresolved but remains visible in the graph.
 2. **Frontmatter References (`relatedToId` / `id`):** These point to stable Things in the Thing Plane. They resolve based on identity and are completely unaffected by file relocations.
 
 ---
 
-## 3. Best Practices for Document Lifecycle
+## Best Practices for Document Lifecycle
 
 ### Renaming and Moving Files
-When you rename or move a document file, `git lex save` automatically detects the operation through git's rename-tracking subsystem:
-* **Link Healing:** `git-lex` automatically rewrites all inbound markdown links pointing to the old path, converting them to canonical root-relative links pointing to the new path.
+When you rename or move a document file, `git lex save` automatically detects the operation through Git's rename-tracking subsystem:
+* **Link Healing:** Git-lex automatically rewrites all inbound Markdown links pointing to the old path, converting them to canonical root-relative links pointing to the new path.
 * **Sidecar Migration:** The cached metadata extract (sidecar file) is relocated to match the new file path instead of being regenerated from scratch, keeping history intact.
 
 > [!WARNING]
@@ -47,13 +45,12 @@ When a document is deleted:
 
 > [!CAUTION]
 > **Never modify the `.lex/` directory manually.**
-> Let `git lex save` handle all file reconciliations. Deleting files inside `.lex/extract/` manually will drop those documents from the graph, bypassing proper git history extraction.
+> Let `git lex save` handle all file reconciliations. Deleting files inside `.lex/extract/` manually will drop those documents from the graph, bypassing proper Git history extraction.
 
 ---
 
-## 4. Historical Retention
+## Historical Retention
 
 When an identity changes or a document is deleted, its facts are **retracted**, not permanently deleted. 
 
-Because `git-lex` builds its store directly from git commits, the graph retains a complete audit trail of every assertion and retraction tied to the specific commit and author that introduced it. You can query the historical state of the graph at any commit using `git lex serve sparql`.
-
+Because `git-lex` builds its store directly from Git commits, the graph retains a complete audit trail of every assertion and retraction tied to the specific commit and author that introduced it. You can query the historical state of the graph at any commit using `git lex serve sparql`.

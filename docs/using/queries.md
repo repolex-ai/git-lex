@@ -1,16 +1,14 @@
 # Querying
 
-*Last updated 2026-08-12 (git-lex v0.1.0)*
-
-Two doors:
+Two querying doors:
 
 - **`git lex query "SPARQL"`** — a live view of your working tree (current
-  files + the git commit layer). What's true right now, including
+  files plus the Git commit layer). Reflects what is true right now, including
   uncommitted edits. It is rebuilt from the working tree on every run and
-  never opens the synced store — so **history is invisible here**; a
+  does not read the synced store — so **history is invisible here**; a
   history query returns zero rows, not an error.
 - **`git lex serve sparql`** — a standard W3C SPARQL endpoint over the
-  synced store, which also holds the full history. Default
+  synced store, which also holds full repository history. Default
   `http://127.0.0.1:7880/sparql`, Swagger UI at `/swagger-ui`. Run
   `git lex sync` first to populate the store.
 
@@ -18,31 +16,28 @@ Common prefixes are injected automatically on both doors (`git-lex:`,
 `git2:`, `md:`, `fm:`, `rdf:`, `rdfs:`, `owl:`, `xsd:`, and your kit's —
 e.g. `soul:`).
 
-Two traps that produce zero rows with no error, both from real fleet
-reports (2026-08-29):
+Two common pitfalls that can produce zero rows without an error:
 
 - **Every repolex namespace ends in a slash, never a hash.** `git-lex/`,
   `soul/`, `copia/` — a hand-typed `PREFIX gl: <…/git-lex#>` is
-  well-formed, matches nothing, and nothing warns you. Prefer the
+  syntactically valid, matches nothing, and produces no warning. Prefer the
   injected prefixes over typing your own.
-- **The universal properties emit under `git-lex/`, not your kit.** A
+- **Universal properties emit under `git-lex/`, not your kit.** A
   frontmatter key is written `soul.Exploration.relatedToId`, but `id`,
   `relatedToId`, `fileId` and the other universal properties are
   git-lex vocabulary — query them as `git-lex:relatedToId`. Only
   class-specific keys (`soulDay`, `explorationStatus`, …) live under
   the kit's namespace. The key path does not name the emitted IRI.
 
-When a query returns zero rows and you suspect the IRI rather than the
-data, ask the graph what vocabulary it actually uses:
+When a query returns zero rows and you suspect an IRI mismatch rather than
+missing data, ask the graph what vocabulary it actually uses:
 
 ```sparql
 SELECT DISTINCT ?p WHERE { ?s ?p ?o } ORDER BY ?p
 ```
 
-One glance at that list settles both traps in seconds.
-
 One semantic difference to know: `git lex query` searches across all its
-graphs, so bare `?s ?p ?o` matches everything. The endpoint follows the
+graphs, so bare `?s ?p ?o` matches everything. The SPARQL endpoint follows the
 W3C default strictly, and the synced store keeps its data in **named**
 graphs — so a bare pattern there matches almost nothing. Wrap patterns in
 `GRAPH <…> { … }`: current state lives in
@@ -50,7 +45,7 @@ graphs — so a bare pattern there matches almost nothing. Wrap patterns in
 `<https://repolex.ai/git-lex/LexHistoryGraph>`, commits in
 `<https://repolex.ai/git-lex/NamedGraph/commits>`.
 
-## Every named graph, and which door has it
+## Every Named Graph, and Which Door Has It
 
 All graph names share the base `https://repolex.ai/git-lex/NamedGraph/`
 except the history graph, which has its own IRI. "Query door" is
@@ -66,9 +61,7 @@ except the history graph, which has its own IRI. "Query door" is
 | `filetree/<sha>` | Every file at that commit, as index entries | HEAD only | yes |
 | `repo-ontology` | The installed kits' schema, queryable | no | yes |
 
-The one worth knowing that nobody finds on their own is `repo-ontology`:
-the ontology of every installed kit, loaded as data. It answers "what
-fields can a Journal carry?" without reading any TTL file:
+The `repo-ontology` graph contains the ontology of every installed kit, loaded as data. It answers queries like "what fields can a Journal carry?" without reading TTL files directly:
 
 ```sparql
 SELECT ?property ?range WHERE {
@@ -79,13 +72,13 @@ SELECT ?property ?range WHERE {
 }
 ```
 
-It lives only in the synced store (it is loaded at init and kit-update),
-so this one runs on the serve door — `git lex query` returns zero rows
-for it, silently.
+It lives only in the synced store (it is loaded at `init` and `kit-update`),
+so this query runs on the serve door — `git lex query` returns zero rows
+for it.
 
-## Saved queries
+## Saved Queries
 
-A query you will run again does not need to be retyped. `git lex query <name>`
+A query you run frequently does not need to be retyped. `git lex query <name>`
 runs the query saved at `.lex/query/<name>.md`:
 
 ```bash
@@ -93,10 +86,10 @@ git lex query recent      # runs .lex/query/recent.md
 git lex query things
 ```
 
-A saved query is plain markdown. **The first fenced code block is the query**;
-everything else in the file is notes for whoever reads it next — what the query
-answers, what to edit, why it is shaped that way. Frontmatter, if present, is
-skipped. A file with no code fence is all query.
+A saved query is plain Markdown. **The first fenced code block is the query**;
+everything else in the file is documentation for the query — what it
+answers, parameters to edit, and how it is structured. Frontmatter, if present, is
+skipped. A file with no code fence is treated entirely as the query.
 
 ````markdown
 # What changed lately
@@ -113,20 +106,20 @@ LIMIT 20
 
 Two starters — `things` (every typed thing in the repo, counted by class) and
 `recent` (documents by last change) — are written into `.lex/query/` the first
-time the folder is created. After that the folder is yours: `init` and
-`kit-update` never add to it or overwrite what is in it. Save your own
+time the folder is created. After that the folder is fully user-managed: `init` and
+`kit-update` never overwrite what is in it. Save custom queries
 alongside them as `.lex/query/<name>.md`.
 
 Anything that is not a saved-query name runs as SPARQL text, so inline queries
-work exactly as before. A name-shaped argument that matches no file lists what
-*is* available rather than handing the name to the SPARQL parser:
+work seamlessly. A name-shaped argument that matches no file lists what
+is available:
 
 ```
 No stored query named 'recnt'. Available: recent, things
 ```
 
-Saved queries run through `git lex query`, so they see the same live view of
-the working tree — not the synced store, and not history.
+Saved queries run through `git lex query`, so they see the live view of
+the working tree — not the synced store or history.
 
 ## Starters
 
@@ -149,7 +142,7 @@ SELECT ?from ?to WHERE { ?from md:linksTo ?to } LIMIT 20
 SELECT ?c WHERE { ?c a git2:Commit } LIMIT 5
 ```
 
-## History: "when did this change, and who changed it?"
+## History: "When did this change, and who changed it?"
 
 Run against the synced store (`git lex serve sparql`, or any SPARQL client)
 — not `git lex query`. Replace `day-56` with any fragment of the
@@ -177,23 +170,12 @@ SELECT ?when ?event ?doc ?property ?value ?author WHERE {
 } ORDER BY ASC(?ordinal)
 ```
 
-The `<<( ... )>>` blocks are RDF 1.2 triple terms — the syntax history events
-are stored in. Copy this query and edit the FILTER; that beats writing it
-from scratch.
+The `<<( ... )>>` blocks are RDF 1.2 triple terms — the syntax in which history events
+are stored.
 
-## Lifespan: "when did this fact become true, and when did it stop?"
+## Lifespan: "When did this fact become true, and when did it stop?"
 
-Same door: the synced store only. One trap to know first: an assertion and
-its retraction are **separate events**, so the obvious join
-
-```sparql
-# WRONG — returns empty, no error
-?e gl:assertedIn ?a ; gl:retractedIn ?r .
-```
-
-matches nothing (no event carries both). Join the two events on the
-reified triple instead. This gives each fact's lifespan; a fact still true
-today comes back with `?died` unbound:
+Run against the synced store. An assertion and its retraction are **separate events**, so joining them requires matching on the reified triple. This query computes each fact's lifespan; a fact still active today returns with `?died` unbound:
 
 ```sparql
 PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
@@ -224,9 +206,4 @@ GROUP BY ?doc ?property ?value ?born
 ORDER BY ?born
 ```
 
-(The `MIN` + ordinal filter pairs each assertion with its *earliest
-following* retraction, so a fact that was retracted and later re-asserted
-gets one row per life.)
-
-<!-- TODO(additive): more temporal recipes (facts true at a date, most-edited
-     documents, per-author changes); cross-repo queries via shared kits -->
+(The `MIN` and ordinal filter pair each assertion with its earliest following retraction, correctly handling facts that are retracted and re-asserted over time.)

@@ -1,7 +1,5 @@
 # Kit Authoring Guide
 
-*Last updated for git-lex v0.1.0 (2026-08-12)*
-
 This guide is for people **building or maintaining kits** — not for agents using
 them. It covers the kit layout, the file-ownership rules, and (in the most
 detail) hooks: how they're named, how they're registered, how to develop one,
@@ -9,7 +7,7 @@ and how to ship it.
 
 ---
 
-## 1. What a kit is
+## What a Kit Is
 
 A kit is a GitHub repo (e.g. `repolex-ai/git-lex-kit-soul`) that ships four
 kinds of things:
@@ -59,7 +57,7 @@ TTL.
   folder audit is skipped.
 - `init_prompts:` — variable names `git lex init` prompts the user for.
 
-## 2. File ownership: what kit-update does to your files
+## File Ownership: What kit-update Does to Your Files
 
 **Every file a kit ships converges to the kit's version on `git lex
 kit-update`.** The rules, in full:
@@ -67,7 +65,7 @@ kit-update`.** The rules, in full:
 - File missing locally → installed.
 - File identical to the kit's → nothing happens.
 - File differs from the kit's → **the kit's version is put in place.** No
-  backup file — these are tracked files in a git repo, and git history *is*
+  backup file — these are tracked files in a Git repo, and Git history *is*
   the backup. You are told exactly which files this happened to.
 - `SOUL.md` → **never overwritten.** Identity belongs to the agent, not the
   kit. (If it's *missing*, the kit's scaffold restores it, and kit-update
@@ -77,7 +75,7 @@ There is no `--force`, no drift sidecar, no `.bak` stash for kit-shipped
 files. Any `<file>.bak` left beside a kit-owned path by the retired backup
 mechanism is swept on the next kit-update. (The one place a `.bak` is still
 written deliberately is the hook reap — §3.6 — because a reaped personal hook
-may be uncommitted work that git history cannot cover.) If a *directory* sits where the kit ships a file, git-lex
+may be uncommitted work that Git history cannot cover.) If a *directory* sits where the kit ships a file, git-lex
 refuses loudly and leaves it untouched. And if two installed kits ship the
 same path, kit-update warns — that's a kit-lane bug; exactly one kit should
 own a file.
@@ -86,7 +84,7 @@ own a file.
 customize. If agents need a customization point, give them a separate file
 that the kit does *not* ship (like `settings.local.json`, or `SOUL.md`).
 
-### 2.1 A shared working tree is a shared commit
+### A Shared Working Tree Is a Shared Commit
 
 The rules above are about the kit overwriting *you*. This one is about your
 co-tenant, and it surprises people because nothing goes wrong.
@@ -101,18 +99,14 @@ change they have never seen, and `git log -S` on that file leads to a commit
 about an unrelated subject. That combination — correct outcome, wrong record, no
 error — is why it can run for weeks unnoticed.
 
-Observed 2026-08-24 in `repolex-ai/copia`: a two-day-old uncommitted change was
-already in the history, swept into another agent's save under a message about a
-different pass.
-
 **If you share a repo:** commit your own work before stepping away from it, and
 read what `save` reports it staged rather than assuming it staged yours. The
 per-file collision people worry about is the easy case — this is the one that
 doesn't announce itself.
 
-## 3. Hooks
+## Hooks
 
-### 3.1 Where hooks live in the kit
+### Where Hooks Live in the Kit
 
 ```
 <kit-repo>/harness/.claude/hooks/<Event>-<kit>-<purpose>.sh
@@ -122,7 +116,7 @@ kit-update copies them to `.claude/hooks/` in the agent repo and registers
 them in `.claude/settings.json` automatically. You never hand-edit
 registrations for kit hooks.
 
-### 3.2 Naming: `<Event>-<kit>-<purpose>.sh`
+### Naming: `<Event>-<kit>-<purpose>.sh`
 
 - `<Event>` is a real Claude Code hook event, exact CamelCase:
   `SessionStart`, `UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `Stop`,
@@ -143,7 +137,7 @@ file under it. `UserPromptSubmit-soul-recall.sh` and
 `UserPromptSubmit-pool-share.sh` both fire on `UserPromptSubmit`; Claude Code
 runs all registered entries for an event.
 
-### 3.3 `.sh` only
+### `.sh` Only
 
 **A hook must be a `.sh` file. Nothing else registers.** A `.py` (or anything
 else) placed in `hooks/` is copied but silently never fires — git-lex's
@@ -156,20 +150,20 @@ One consequence of the naming rule: you cannot put a shared library like
 `hook-common.sh` in `.claude/hooks/` — its leading segment isn't an event, so
 kit-update hard-errors. Inline any shared logic into each hook script.
 
-### 3.4 settings.json vs settings.local.json
+### settings.json vs settings.local.json
 
 | | `.claude/settings.json` | `.claude/settings.local.json` |
 |---|---|---|
 | Git | **committed** (travels with the repo) | **gitignored** (this machine only) |
 | Owner | **git-lex** — rewritten/converged on every kit-update | **you** — git-lex never writes it |
-| Contains | hook registrations + git identity env (+ auto-memory dir in soul repos) | personal overrides, `soul.disabledHooks` |
+| Contains | hook registrations + Git identity env (+ auto-memory dir in soul repos) | personal overrides, `soul.disabledHooks` |
 
 Claude Code merges both at load (hooks from both files all fire; for
 conflicting scalar settings, local wins). Hand-edits to the managed blocks of
 `settings.json` are reverted on the next kit-update — that's the convergence
 working as designed.
 
-### 3.5 The hook development flow
+### The Hook Development Flow
 
 **Step 1 — develop as a local hook.** In your own repo:
 
@@ -199,12 +193,12 @@ basename to `soul.disabledHooks` in `settings.local.json`:
 ```
 The hook stays registered but no-ops locally. This survives every kit-update.
 
-### 3.6 What kit-update enforces (the reap)
+### What kit-update Enforces (The Reap)
 
 After installing all kits, kit-update removes any `.claude/hooks/*.sh` that is
 **neither shipped by an installed kit nor named `-local-`** (old copy kept as
 `<file>.bak` — a reaped personal hook may be uncommitted work, the one case
-git history can't cover — and its registration pruned). This is what cleans up
+Git history can't cover — and its registration pruned). This is what cleans up
 renamed and retired hooks automatically. If any installed kit's install dir is
 missing, the reap is skipped loudly rather than guessed from a partial set.
 The rule to remember:
@@ -212,16 +206,16 @@ The rule to remember:
 > A hook file is either **kit-shipped** or **`-local-`**. Anything else gets
 > removed on the next kit-update.
 
-## 4. Skills and agent instructions
+## Skills and Agent Instructions
 
 Same convergence rules as everything else. Kits ship skills under
 `harness/.claude/skills/` (and `Skill/`), agent instructions as `AGENTS.md` /
 `.claude/CLAUDE.md`. All of it converges to the kit's version on kit-update
-(the old bytes live in git history). An agent wanting a custom skill creates
+(the old bytes live in Git history). An agent wanting a custom skill creates
 a **new** skill file the kit doesn't ship, rather than editing a kit-shipped
 one (the edit would be reverted).
 
-### 4.1 Skill naming
+### Skill Naming
 
 Kit-shipped skills are named:
 
@@ -241,13 +235,10 @@ Example: `lex-base-write-ontology`.
 skill whose id and invocation disagree is worse than one with a poor name,
 because the failure shows up at call time rather than at read time.
 
-The three oldest kit-shipped skills — `journal`, `search-your-soul`,
-`check-mail` — predate this and do not conform yet. Migrating them is a
-coordinated change (`journal` is referenced by name in `AGENTS.md` and by the
-journal flow itself), so they stay as they are until that is scheduled
-deliberately.
+Some foundational skills (such as `journal`, `search-your-soul`, and `check-mail`)
+use single-word naming for historical compatibility.
 
-## 5. kit-update, end to end
+## kit-update, End to End
 
 `git lex kit-update` refreshes every installed kit; `git lex kit-update <kit>`
 narrows only the *fetch*. **An argument may narrow what is fetched, never what
@@ -259,12 +250,12 @@ One run does, in order:
 
 1. **Fetch** each kit in the fetch scope fresh from GitHub — bails hard if any
    fetch fails (never operates on a partial set).
-2. **Install/converge** each fetched kit's files per the §2 rules (and sweep
+2. **Install/converge** each fetched kit's files per the file ownership rules (and sweep
    retired `.bak` files).
-3. **Reap** hook files no kit ships (§3.6), and sweep debris from retired
+3. **Reap** hook files no kit ships, and sweep debris from retired
    mechanisms (`*.kit-latest`, legacy `.env`, retired repo.yml keys).
 4. **Reconcile the substrate**: prune registrations pointing at deleted hook
-   files, register every current hook file under its event, re-assert the git
+   files, register every current hook file under its event, re-assert the Git
    identity env block.
 5. **Mirror the ontology**: converge `.lex/ontology/` to exactly what the
    installed kits ship — orphaned kit dirs are reaped, generated
@@ -274,5 +265,5 @@ One run does, in order:
    audit (missing/extra folder warnings, a reap of retired class folders that
    hold nothing but scaffold, and a receipt naming deprecated-class folders
    still on disk — content is never deleted).
-7. **Converge the git pre-commit hook**, self-heal `SOUL.md`'s `soulId`, and
+7. **Converge the Git pre-commit hook**, self-heal `SOUL.md`'s `soulId`, and
    reload the ontology graph in the store.

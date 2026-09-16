@@ -1,21 +1,10 @@
 # Ontology Guidelines
 
-*Current for kit-base **0.14.0** (2026-08-27) — the *kit ontology's* version, not
-the `git-lex` binary's. The two move independently: the tool can ship several
-releases without the ontology changing, and the ontology can change without the
-tool moving. Only the 0.11 → 0.14 delta was checked against this page; the rest is
-not re-audited at this version.*
-
-*To check this number, read `owl:versionInfo` at the top of your own installed
-`.lex/kit/repolex-ai/git-lex-kit-base/ontology/git-lex/git-lex.ttl` — your own
-install, not a shared clone of the kit repo, which may sit on someone else's
-branch. A higher number there means this page is behind the ontology.*
-
 This page defines the **naming and identifier standards** for ontologies in the `git-lex` ecosystem. While [Kit Ontology Design](kit-ontology.md) covers the raw syntax and structure, this document focuses on conventions: naming rules, identity resolution, and reference strategies to ensure interoperability across kits.
 
 ---
 
-## 1. Names are the ontology
+## Names Are the Ontology
 
 A predicate name is a permanent, public claim about what a thing *is*. Data
 gets migrated; names get inherited by every query, every document, and every
@@ -31,7 +20,7 @@ person who reads the graph after you. So:
 - **Don't abbreviate.** `choseNocturneActivityId` is long and instantly
   clear; `choseActId` is short and a lie waiting to happen.
 
-## 2. The shapes of names
+## The Shapes of Names
 
 - **Classes**: `UpperCamelCase`, singular — `Being`, `FamiliarLookNote`.
 - **Properties**: `lowerCamelCase` — `beingDescription`, `inPlaceId`.
@@ -43,19 +32,19 @@ person who reads the graph after you. So:
   `https://repolex.ai/copia/Being/w4r3z`. The a-box is the t-box minus
   `ontology/`.
 
-### 2a. Banned words
+### Banned Words
 
 These are not discouraged, they are **banned**. Each was banned by ruling after
 it caused a real problem, and each has a replacement that says more.
 
 | Banned | Why | Instead |
 |---|---|---|
-| `kind` | Not descriptive, and it gets thrown onto everything — a `kind` field tells you a discrimination happened without saying along what axis. | Name the axis (`substrate`, `severity`, `encoding`). But first check §2b: usually the class already carries it. |
+| `kind` | Not descriptive, and it gets thrown onto everything — a `kind` field tells you a discrimination happened without saying along what axis. | Name the axis (`substrate`, `severity`, `encoding`). But first check the class: usually the class already carries it. |
 | `mint`, `minted` | Implies a value is conjured rather than computed, which hides whether a rebuild reproduces it. Only a commit is ever minted. | `derived` when it's computed from source, `assigned` when it's allocated once and recorded (Pan's `panId`). |
 | `ledger` | Says "list of entries" and nothing about what the entries *are* or when they're true. | Name the event (`SpoEvent`) or the graph (`LexHistoryGraph`). |
-| `type`, `data`, `status`, `info`, `meta`, `value` — **alone** | Generic words say nothing on their own. | Scope them (`health`, not `status`) or don't ship them. Same rule as [Kit ontology design §10](kit-ontology.md#10-naming-rules-short-absolute). |
+| `type`, `data`, `status`, `info`, `meta`, `value` — **alone** | Generic words say nothing on their own. | Scope them (`health`, not `status`) or don't ship them. Same rule as [Kit Ontology Design](kit-ontology.md#naming-rules-short-absolute). |
 
-### 2b. Before you add a discriminator, check what already holds it
+### Before Adding a Discriminator, Check What Already Holds It
 
 A field that answers "what sort of thing is this?" is usually the third copy of
 a fact you already store twice. Before declaring one, ask:
@@ -74,7 +63,7 @@ The general form of this rule: **declare once, derive the rest.** A derived
 value can be recomputed and can't rot. A stored duplicate is a drift source
 with a maintenance schedule.
 
-## 3. The identity law
+## The Identity Law
 
 > **Every foldered class declares its own identity property, named
 > `<className>Id`, and identity is never inherited.**
@@ -98,12 +87,9 @@ copia:setId a owl:DatatypeProperty ;
   (`groupTitle`) may live on an abstract class; identity may not. The
   tooling derives the id property from the concrete class's own name
   (convention-as-law — there is no annotation to point elsewhere, on
-  purpose), so an inherited id is invisible to it. This is a law learned the
-  hard way: copia's `Set`/`Sequence` once inherited `groupId` from abstract
-  `Group`, and every Set anchored to nothing until v0.27 gave each class its
-  own id.
+  purpose), so an inherited id is invisible to it.
 
-### 3a. Which class owns the id: follow the identity event
+### Which Class Owns the Id: Follow the Identity Event
 
 The rule above says identity is never inherited. The question it doesn't
 answer is *which* class declares it when a hierarchy is involved — and the
@@ -116,7 +102,7 @@ there.
 
 - **Authored documents** — the identity event is "a file was written." The
   foldered class owns it; the file **is** the thing and the filename **is**
-  the id. That's where §3 comes from.
+  the id.
 - **Stores and engines** — the identity event is "an object entered the
   store." The base class owns it. Pan assigns a `panId` at put — to *bytes*,
   before and independent of what those bytes turn out to be — so `panId` lives
@@ -143,18 +129,16 @@ Two things follow, one settled and one deliberately not:
   but stored-data naming is the project owner's call, and where the two
   diverge the ruling wins. `panId` on `pan:Media` is the precedent: `mediaId`
   was the mechanical answer, was argued for on consistency grounds, and was
-  rejected — a thing in Pan has a `panId`. Follow the stamp, then write it
-  down here.
+  rejected — a thing in Pan has a `panId`. Follow the convention established.
 - **Whether a hierarchy ALSO carries a coarse type field is not a question
   this page answers.** Once the class carries the kind, a parallel
   `type`/`kind` field may be redundant, may be wanted at an API boundary, or
   may be the right home for a different fact entirely (an encoding, say —
   `image/png` is information no class split carries). Those are different
-  answers with different names, and the choice is the project owner's, per
-  the bullet above. Don't default it, don't infer it from the class split, and
+  answers with different names, and the choice is the project owner's. Don't default it, don't infer it from the class split, and
   don't let a proposal become a convention by being written down. Ask.
 
-## 4. The four kinds of id-valued properties
+## The Four Kinds of Id-Valued Properties
 
 Almost every property whose value looks like an identifier is one of exactly
 four kinds. Decide which one you have *before* you declare it:
@@ -175,7 +159,7 @@ reject. If you're tempted to accept both forms, don't — one convention,
 validated loudly, beats two conventions resolved silently (an alias is just
 drift with a permit).
 
-## 5. Naming reference properties
+## Naming Reference Properties
 
 > **A reference property's name states the id it joins on:**
 > relation + `<Target>Id`, deduplicating when the relation already names the
@@ -195,13 +179,7 @@ the range is an abstract union (`depictsId` → `Depictable`), plain
 relation + `Id` is right: the target kind comes from the target's `rdf:type`,
 and the name shouldn't pretend otherwise.
 
-Why so strict? Because the pre-v0.27 copia graph said `equippedBy:
-"illuminator-robe"` — and nothing in that name tells you whether the value is
-an id, a path, a label, or a Being at all. The rename wave that fixed it
-touched 22 properties and queued a fleet-wide data migration. Names are much
-cheaper to get right on day one.
-
-### 5a. The range is not documentation — it selects the value form
+### The Range Is Not Documentation — It Selects the Value Form
 
 **This is the sharpest trap in the system, so read it before you declare any
 reference property.**
@@ -255,13 +233,13 @@ This is useful as a decision procedure: the question is rarely "should we
 declare this?" and usually "what does the data already say, and is our ontology
 merely declining to write it down?"
 
-### 5b. Never `relatedTo<Class>Id` — constrain `relatedToId` instead
+### Never `relatedTo<Class>Id` — Constrain `relatedToId` Instead
 
 > **`git-lex:relatedToId` is the only generic reference property. If a class must
 > reference something of a particular kind, say so with an OWL restriction — never
 > by minting a second property with the class in its name.**
 
-There is a real difference between the properties in 5 above and the ones this
+There is a real difference between the properties in §5 above and the ones this
 rule retires. `equippedByBeingId` names a **relation** — equipped-by — and the
 target kind is extra precision on top of it. `relatedToPlaceId` names no relation
 at all. It is `relatedToId` with a type glued to the identifier, and a type
@@ -316,23 +294,20 @@ none of these do.
 Thing may be referenced. Every `relatedToId` value must still be angle-bracket
 notation — `<copia/Place/greenhouse>` — on every class, restriction or none.
 
-> **KNOWN GAP, measured 2026-08-27, do not design around the opposite.** Nothing
-> currently checks that a reference points at a Thing that *exists*. A value of
+> [!WARNING]
+> Nothing currently checks that a reference points at a Thing that *exists*. A value of
 > `<soul/Note/this-does-not-exist>` expands into a well-formed IRI, passes every
 > save gate, and lands in the graph as an ordinary triple. `sh:nodeKind sh:IRI`
 > does not catch it, because the IRI is syntactically perfect — it is the
 > *referent* that is missing, not the form. There is also no `unresolvedLink`
-> equivalent for `relatedToId` the way there is for body markdown links, so a soul
-> auditing its own references by query gets a clean answer either way.
+> equivalent for `relatedToId` the way there is for body markdown links, so
+> auditing references by query gets a clean answer either way.
 >
 > This has teeth for the qualified restrictions above: a dangling
 > `<copia/Place/typo>` still matches the `/Place/` pattern and still satisfies
 > "at least one Place". **The constraint can be satisfied by a typo.** Until
 > existence checking lands, these restrictions guarantee the *shape* of a
 > reference list, not that the things referenced are real.
->
-> Found by nug3, who went looking for the catching surface after an earlier draft
-> of this page claimed there was one. There wasn't.
 
 **So how do you audit your own references? Query for declared ids — never match on
 paths.** A path is not an id, and the graph will answer either question without
@@ -342,11 +317,11 @@ telling you which one you asked. This error is real, measured, and it fires in
 - **id read as path.** A reference to `<soul/Note/texture-self>` looks broken —
   there is no `texture-self.md`. It is correct: the Thing is declared with that id
   inside a file called `self.md`. Reasoning from filename to identity reports a
-  working reference as dangling. (nug3)
+  working reference as dangling.
 - **path read as id.** Filtering subjects on a path substring — `FILTER(CONTAINS(STR(?s),
   "Memory"))` — returned 35 where 9 documents exist. The extra subjects are
-  `git-lex/File/...` IRIs: file entities, path entities, and blobs from git history.
-  A clean integer, four times too high, with no error. (nomia)
+  `git-lex/File/...` IRIs: file entities, path entities, and blobs from Git history.
+  A clean integer, four times too high, with no error.
 
 The File-IRI namespace and the declared-Thing namespace are similar enough to be
 mistaken for each other in a query, and neither mistake announces itself. Match on
@@ -362,24 +337,21 @@ SELECT (COUNT(*) AS ?joined) WHERE {
   ?t1 gl:fileId ?f1 . ?f1 gl:md/linksTo ?f2 . ?t2 gl:fileId ?f2 }
 ```
 
-Measured on one soul: 68 body links, 8 declared references, **0 subjects carrying
+Measured across sample repos: 68 body links, 8 declared references, **0 subjects carrying
 both** — and **26 Thing-pairs joined through the bridge**. So a Thing-plane absence
 query reports isolation for a corpus that is densely connected one join away. Never
 call a Thing-plane absence "isolated", "unreachable" or "islands"; say "no declared
 semantic reference" and check the bridge before recommending any repair. This is the
 same one-join-away shape as the title bug — same root cause, different costume.
-(w4r3z-pan, spacegoat)
 
 > **THE SELF-LINK ARTEFACT — a false ALL-CLEAR, and it fires on exactly the checks
 > that matter.** Every Thing carries `git-lex:id` pointing at itself. So any query of
 > the form "does an X link to a Y" where X and Y are the **same class** scores 100%
-> before examining a single real edge. One soul's Journal-chain check returned 148 of
-> 148 and the true number was 10; another's returned 3 where 0 were real. Add
-> `FILTER(?x != ?t)`. Every other failure here produces a false alarm or a false zero;
-> this one produces a false all-clear, and it fires hardest on same-class succession
-> chains — the exact shape anyone verifying a backfill would use. A detector that
-> reads success before the work happens is worse than one that reads failure after.
-> (selkie-studio, w4r3z-pool)
+> before examining a single real edge. Add `FILTER(?x != ?t)`. Every other failure
+> here produces a false alarm or a false zero; this one produces a false all-clear,
+> and it fires hardest on same-class succession chains — the exact shape anyone
+> verifying a backfill would use. A detector that reads success before the work
+> happens is worse than one that reads failure after.
 >
 > **Do not read this as "bind tightly".** Tight and loose binding fail in *opposite*
 > directions, and both need the filter. A probe bound to one exact predicate was blind
@@ -387,52 +359,38 @@ same one-join-away shape as the title bug — same root cause, different costume
 > predicate saw all of them — and let the self-identity triple in. The looser query was
 > not the sloppier one; it asked the harder and more useful question, and the harder
 > question is the one with the trap in it. Neither binding is a safe default.
-> (w3bl0rd-web)
 >
 > There are **three** binding styles, not two, and the third is immune: a filter on the
 > predicate *name* (`CONTAINS(STR(?p), "relatedTo")`) still sees every sibling property
 > the exact binding missed, and cannot admit the self-identity triple, because `gl:id`
-> does not contain that string. Prefer it. (nomia)
+> does not contain that string. Prefer it.
 
-**Read the warnings, not just the results.** Every query here printed to two streams and
-the whole fleet read one of them. A malformed-frontmatter error, a document silently
-excluded from the graph, and a typed-but-idless file invisible to every class query were
-all announced on stderr, correctly, out loud, for hours — into a stream nobody was
-reading. Nine instruments failed by answering the wrong question; this one was answering
-the right one and going unheard. (nomia)
+**Read the warnings, not just the results.** Every query prints to two streams:
+stdout and stderr. Malformed frontmatter errors, documents excluded from the graph,
+and typed-but-idless files invisible to class queries are announced on stderr.
+Always check both streams.
 
 **And deleting a term closes the generator, not the working trees.** A retired property
 stops being emitted into new scaffolds immediately, and goes on sitting in every file
 already written. An untracked, typed-but-idless document — no class id, so counted by no
 class query; empty keys, so emitting no triples; not a `__` scaffold, so surviving the
-ignore-templates rule everyone adopts — will keep carrying a dead key indefinitely, seen
-by nothing. (nomia)
->
-> **And the inflation rewards corpus shape, backwards.** The self-identity triple only
-> exists where a document declares an explicit id — recent practice. So the documents
-> most exposed to a false all-clear are the **well-formed** ones, and a soul whose old
-> entries carry sparse frontmatter is accidentally protected. One soul's mature corpus
-> returned 148 of 148; another's scruffy early entries could not be inflated because
-> there was nothing there to inflate them with. **A clean result may be evidence of
-> poor hygiene, not good.** (th34)
+ignore-templates rule — will keep carrying a dead key indefinitely, seen by nothing.
+
+> **And inflation can mask problems.** The self-identity triple only exists where a
+> document declares an explicit id. So documents most exposed to a false all-clear are
+> the well-formed ones. A clean result may be evidence of poor hygiene rather than good.
 
 **A key that ties is telling you something.** `ORDER BY soulDay` — never `earthDate`,
 which ties whenever a soul wakes twice in a day. But `soulDay` is not guaranteed unique
-either, so a reader must *handle* a tie rather than assume it cannot happen. On one soul
-a tie turned out to be the finding: twelve consecutive soul-days each holding **two
-different journal documents** — not copies, genuinely divergent (47 lines against 49,
-150 against 108). Twelve days with two records apiece, served as equally real, predating
-every instrument built here. Nothing was aimed at that defect; the ordering rule found it
-by tying. Do not merge or delete such a pair — which record is canonical is exactly the
-judgement that destroys history when guessed. (w4r3z-pool)
+either, so a reader must *handle* a tie rather than assume it cannot happen. A tie
+can indicate divergent records created during multiple sessions on the same day. Do
+not blindly merge or delete such pairs — historical records should be curated
+deliberately.
 
 Note also that succession is derivable at **day** granularity, not **entry** granularity.
-A soul with two sittings in one soul-day carries an order that exists only in a filename
-suffix — the channel proven unreliable four ways above. (spacegoat)
 
 **Only the graph answers "does this referent exist."** A file path cannot, and
-neither can grepping for an `id:` line. Four channels were tried in one evening and
-three of them gave confident, well-formed, wrong answers:
+neither can grepping for an `id:` line. Four channels illustrate why:
 
 | Channel | Reasoning | Result |
 |---|---|---|
@@ -441,7 +399,7 @@ three of them gave confident, well-formed, wrong answers:
 | bracket form | it parses → it resolves | false *fine* — a dangling IRI is syntactically perfect |
 | `?s a <Class>` | class query | **0 for a file that is legitimately only a File**, not a Thing |
 
-Don't hand people the instruction, hand them the query:
+Don't hand people an instruction, hand them the query:
 
 ```
 git lex query "SELECT ?source ?p ?dangling WHERE {
@@ -451,25 +409,20 @@ git lex query "SELECT ?source ?p ?dangling WHERE {
   FILTER NOT EXISTS { ?dangling ?q ?o } }"
 ```
 
-Bind the predicate **loosely**. An earlier draft bound `git-lex:relatedToId` alone and
-was therefore blind to every typed twin — which is where almost all the data actually
-lived. It returned a fast, confident zero for the population it could not examine.
-(th34)
+Bind the predicate **loosely**. Binding `git-lex:relatedToId` alone would be blind
+to every typed twin where data may live.
 
 A real target is the subject of its own triples; a target that is nothing is the
-subject of none. This catches precisely the case the qualified restrictions cannot —
+subject of none. This catches precisely the case qualified restrictions cannot —
 `<copia/Place/typo>` matches the `/Place/` pattern and satisfies the constraint, but
-is the subject of nothing. Runs in under a millisecond against the live working
-tree, so it sees a bad reference before it is committed. (nug3 wrote and verified it
-three ways; it found a genuine dangling reference in this author's own repo on first
-run.)
+is the subject of nothing. This query runs against the live working tree, catching
+unresolvable references before they are committed.
 
-> **RUN THE GHOST CHECK FIRST — a probe result is not admissible without it.** The
-> live working-tree view is **additive-only**: new and changed content appears at once,
-> even uncommitted, but **deleted content never disappears** — not on delete, not on
-> save. So a reference whose target was deleted still finds triples and reads as
-> resolved. Cross to a different artifact: ask the graph what Files it believes in,
-> then ask the filesystem.
+> **RUN THE GHOST CHECK FIRST.** The live working-tree view is **additive-only**:
+> new and changed content appears at once, even uncommitted, but **deleted content
+> never disappears** without a cache refresh. So a reference whose target was deleted
+> can still find triples and read as resolved. Cross to a different artifact: ask the
+> graph what Files it believes in, then check the filesystem.
 >
 > ```
 > git lex query 'SELECT ?s WHERE { ?s a <https://repolex.ai/ontology/git-lex/File> }' \
@@ -477,12 +430,9 @@ run.)
 >   | while read -r f; do [ -e "$f" ] || echo "GHOST: $f"; done
 > ```
 >
-> Every channel that failed here failed by asking one artifact about itself. This asks
-> the graph, then asks something else whether the graph is telling the truth. Cleanup
-> needs both halves: remove the file **and** `.lex/_ignore/walkcache/frag/<path>.nq`.
-> There is also a free detector already on your terminal — when `git lex save` prints
-> `Identity gate: 79 Thing id(s)` beside `Validated 78 files`, the gates are reading
-> the cache and the validator is reading the tree. (nug3, th34, w4r3z-pool, w3bl0rd-web)
+> Cleanup needs both halves: remove the file **and** `.lex/_ignore/walkcache/frag/<path>.nq`.
+> When `git lex save` prints `Identity gate: 79 Thing id(s)` beside `Validated 78 files`,
+> the gates are reading the cache and the validator is reading the tree.
 
 **A dangling reference has two causes, and they need opposite treatment.**
 
@@ -492,11 +442,7 @@ run.)
 | The target existed and was later deleted | **History. Leave it.** |
 
 The second is not a broken link, it is a true record of something that was real —
-and the dangle is often the only surviving evidence that it ever was. One soul's
-probe returned nine hits: seven were a genuine repeated mistake (references written
-with a date-prefixed id the Thing never declared, some dangling for six weeks) and
-two named working files that existed when the sentence was written and were deleted
-afterwards. The documents say so in their own bodies.
+and the dangle is often the only surviving evidence that it ever was.
 
 **Telling them apart is a lookup, not a judgement.** Git already knows:
 
@@ -508,7 +454,7 @@ In the list → existed and was deleted; you can cite the removing commit. Never
 never existed; repair. It matches on the file, so a hit is strong evidence and an
 absence is weaker — a path is still not an id. And **leave a headstone**: a bereaved
 link is only recoverable as history because the document's body says what it pointed
-at. The dangle alone looks identical to a typo. (nomia, selkie-studio)
+at. The dangle alone looks identical to a typo.
 
 > **THE DETECTOR IS BLIND TO EXACTLY THE CATEGORY THIS RULE PROTECTS.** Because the
 > live view never forgets a deletion, a reference broken *by deletion* still resolves.
@@ -517,7 +463,7 @@ at. The dangle alone looks identical to a typo. (nomia, selkie-studio)
 > and the blindness is self-concealing, because the class it misses is the class you
 > have just been told not to act on. Visibility depends on cache state, not on data:
 > the same reference can report differently on two days. Any "breaks found" tally
-> counts the never-existed kind only. (w3bl0rd-web)
+> counts the never-existed kind only.
 
 **This is why existence checking must never become a blocking save gate.** A journal
 records what was true on a day, not what is true now. Enforcing existence against
@@ -529,14 +475,14 @@ on that"), so a dangle is history. An Exploration's Pursuit link is a *live asse
 ("this serves that, now"), so a dangle there is a real defect though the class carries
 no date. A Note holds either. The two are not fully separable by metadata, which argues
 for advisory-and-explain over advisory-and-suppress: report both, say which bucket the
-deletion log puts it in, and let the author rule. (nomia)
+deletion log puts it in, and let the author rule.
 The same reasoning forbids handing the probe to a script: repairing by guessing
 turns a break into a *wrong* link, and a wrong link resolves, so nothing flags it
 again. A break is loud once; a wrong resolution is silent forever.
 
 Read the output as **candidates**, not verdicts. And if a class query returns zero
 for a file you can see on disk, the question is not "where did it go" but "is that
-file a Thing at all" — some files are legitimately only Files. (nomia)
+file a Thing at all" — some files are legitimately only Files.
 
 **Run the control before you believe a zero.** An empty result set from a mistyped
 or stale predicate IRI is indistinguishable from a clean bill of health — and it is
@@ -547,67 +493,51 @@ git lex query "SELECT (COUNT(*) AS ?n) WHERE { ?s <https://repolex.ai/ontology/g
 ```
 
 If *that* is also zero, you have not audited your references; you have missed the
-predicate. (nomia)
+predicate.
 
 **Compare by set difference, never by count.** A total that matches is not
-agreement. One soul checked graph Notes against `ls`, got 36 vs 34, and found on
-inspection that four documents were declared under ids that reorder their filename
-(`2026-04-26-enabler-pod-prep.md` declaring `enabler-pod-prep-2026-04-26`). Those
+agreement. Four documents declared under ids that reorder their filename
 appear as four missing-from-disk *and* four missing-from-graph — and they **cancel**.
-An earlier report from the same soul had quoted a matching 34/34 total as evidence of
-health while four identities silently disagreed underneath it. (spacegoat)
+A matching total can hide four identities silently disagreeing underneath it.
 
-> **CAVEAT ON THE PROBE ITSELF, measured 2026-08-27.** A document deleted from disk
-> still answers as live. Verified here: created a Note, deleted the file, queried —
-> still present. The extract sidecar under `.lex/extract/` is correctly cleared, but
-> the walkcache fragment under `.lex/_ignore/walkcache/frag/` survives, and the "live
-> working-tree view" reads the walkcache. Deleting the stale fragment by hand clears
-> it. So a reference whose target has been deleted reads as **resolved**, and the
-> dangling probe under-reports by exactly that population. Two independent
-> reproductions (spacegoat, then this author). Fix belongs in git-lex, not here.
+> **CAVEAT ON THE PROBE ITSELF.** A document deleted from disk
+> still answers as live until caches clear. The extract sidecar under `.lex/extract/`
+> is cleared, but the walkcache fragment under `.lex/_ignore/walkcache/frag/`
+> can survive in the live working-tree view. Deleting the stale fragment clears
+> it. So a reference whose target has been deleted can read as **resolved**.
 
 **Two more channels that cannot answer this, both grep-shaped:**
 
 - **`grep "relatedToId:\s*$"` to find empty keys over-reports.** That pattern matches
   a key with nothing after it *on the line* — which is exactly what a populated YAML
-  list looks like before its items. Two of three hits in one audit were fully
-  populated. Grep cannot see a value that lives on the next line. (w3bl0rd-viz)
-- **Right id, wrong class — reads as dangling, and the new law PREFERS the error.**
+  list looks like before its items. Grep cannot see a value that lives on the next line.
+- **Right id, wrong class — reads as dangling, and path matching can invert errors.**
   `<soul/Pursuit/creation-git-lex-viz>` where the document is actually a Note. The
-  referent exists; the class segment is wrong. Worse, under a restriction requiring a
-  Pursuit, the **broken** reference satisfies it (the path says `Pursuit`) while the
-  **correct** one fails. Path-matching does not approximate type-checking — on this
-  input it inverts it. Anyone acting on a probe hit at face value deletes a reference
-  to a real document. (w3bl0rd-web)
-- **A stale walkcache makes the graph lie in both directions.** A document deleted
-  from disk keeps its triples, and `git lex save` does not clear them. So a reference
-  to a *deleted* document reads as perfectly resolved. "Only the graph answers this"
-  holds against the file layer and still needs this caveat. (w4r3z-pool)
+  referent exists; the class segment is wrong. Under a restriction requiring a
+  Pursuit, a broken reference might satisfy the path pattern while the correct one fails.
+  Path-matching does not approximate type-checking.
+- **A stale walkcache makes the graph report outdated facts in both directions.** A document deleted
+  from disk keeps its triples until cleared, and `git lex save` does not purge them immediately.
 - **An unqualified frontmatter key never reaches the Thing at all.** `title:` — rather
   than `soul.Exploration.title:` — is emitted under a `git-lex/fm/` fallback namespace
   and attached to the **File** IRI. It never errors and it never appears on the Thing
   plane, so a query for that document's title finds nothing while the title sits in
-  plain sight in the file. This is upstream of every channel above: the fact never
-  reaches the plane the queries run on. Measured on one soul: **29 documents carry
-  `fm:title`, 5 carry `git-lex:title`** — so the Thing-plane query returns 5 and looks
-  correct while 24 titles exist and are unreachable.
+  plain sight in the file.
 
-**A third case sits between wiring and authoring.** The Pursuit exists, but the
+**A third case sits between wiring and authoring.** The Pursuit exists, but an
 Exploration predates it and names it nowhere — so there is something to point at and
 no evidence of which. That is judgement, not recovery, and it is the case most likely
-to be mistaken for mechanical work. (m4rq)
+to be mistaken for mechanical work.
 
 **When you add a restriction to a class that already has documents**, ship it
 unenforced first, backfill, and only then turn it on. Turning on
 `minQualifiedCardinality` before the backfill fails every existing document at
-once. This is why `soul:Exploration` still declares no Pursuit requirement: 61 of
-86 Explorations across the fleet referenced no Pursuit at all, and the constraint
-waits for them.
+once.
 
-## 6. Change discipline
+## Change Discipline
 
-- **Unused properties get deleted, not retired** (Rob-ruled 2026-08-20 —
-  tombstoning them was slowing development for no benefit). Predicates are
+- **Unused properties get deleted, not retired** (tombstoning unused properties
+  slows development for no benefit). Predicates are
   derived from the frontmatter key text; nothing consults the ontology to
   decide that a predicate exists. So removing a property you aren't using costs
   governance and nothing else. Take it out, and say so in the changelog.
@@ -616,7 +546,7 @@ waits for them.
   `owl:deprecated true` and pointing at its successor with
   `dcterms:isReplacedBy`: it keeps resolving, but loses its folder, its
   template, and its place in the `create` menu. Say the move in both comments
-  and record it in the changelog header (see copia.ttl's `# v0.27:` block).
+  and record it in the changelog header.
 - **The one exception, and it bites silently: identity properties ARE read.**
   Deleting `soul:noteId` doesn't just remove a field — it removes the anchor
   that lifts a Note onto the Thing plane, quietly demoting every
@@ -626,9 +556,8 @@ waits for them.
   disagree.
 - **Ship the reader before the declaration.** If a change alters how existing
   values are *interpreted*, deploy the code that reads them first and land the
-  ontology line after. `relatedToId`'s Thing range shipped as a binary
-  fleet-wide before the declaration; the reverse order would have minted
-  garbage IRIs everywhere.
+  ontology line after. Deploying code after an ontology change could mint
+  invalid IRIs across existing stores.
 - **Declare toothless, backfill, then require.** A new required property walls
   people out of their own repos. Ship it with no `minCount`, let everyone
   backfill, and make requiring it a separate decision later.
@@ -640,7 +569,7 @@ waits for them.
   product) is the single source of truth; the publish pipeline copies
   outward. Never edit the installed copy or the kit copy of an app ontology.
 
-## 7. The why-test: what earns a property at all
+## The Why-Test: What Earns a Property at All
 
 This is the gate **before** everything above — run it before any ontology
 change, before you even reach for a name.
@@ -662,11 +591,7 @@ ungoverned frontmatter key binds the fact to the **file**, not the concept,
 so it dies on a move, while body prose rides with the Thing. That's not
 preservation; it's a slow leak.
 
-(Proven at scale before it was written down: the lUX repo's 1218→0 warning
-pass was this test applied per-property — ids, enums, requireds, and edges
-kept; everything incidental moved to body.)
-
-## 8. The five-minute test
+## The Five-Minute Test
 
 Before you ship a vocabulary, hand it to someone who has never seen your kit:
 **can a markdown-repo developer understand it in five minutes?** Every name
@@ -676,11 +601,11 @@ ontology.
 
 **Checklist for a new property:**
 
-1. Does it pass the why-test — which system breaks without it? (§7. No
+1. Does it pass the why-test — which system breaks without it? (The Why-Test: no
    system → body, and you're done.)
-2. Which of the four kinds is it? (§4)
+2. Which of the four kinds is it? (Identity, Reference, External designator, Vocabulary token)
 3. Does its name carry the contract — id suffix for identity and references,
-   target named for joins? (§3, §5)
+   target named for joins?
 4. Is there already a property that says this? (If yes: use it, don't alias
    it.)
 5. Range declared? (References resolve — and get gate-checked — only if the

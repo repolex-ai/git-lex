@@ -1,12 +1,10 @@
 # Files and Things
 
-*Last updated for git-lex v0.1.1 (2026-08-27)*
-
-`git-lex` tracks two distinct categories of identity. Understanding the distinction between them clarifies where metadata facts reside and how they behave when files are moved or renamed.
+Git-lex tracks two distinct categories of identity. Understanding the distinction between them clarifies where metadata facts reside and how they behave when files are moved or renamed.
 
 ---
 
-## 1. The File Plane: Physical Addresses
+## The File Plane: Physical Addresses
 
 Every physical file in the repository corresponds to a **File** node in the knowledge graph. Its identifier is its repo-relative workspace path:
 
@@ -17,7 +15,7 @@ Soul/Journal/day-7.md  →  git-lex/File/Soul/Journal/day-7.md
 Because the path serves as the identifier, a File node represents a physical location rather than a persistent concept. If you rename the file, the old address is deleted from the current state, and a new address node is created.
 
 File-plane metadata includes:
-* Raw links extracted from your markdown prose (`linksTo` edges)
+* Raw links extracted from your Markdown prose (`linksTo` edges)
 * Incidental, untyped frontmatter properties
 * Git commit metadata (author, timestamps)
 
@@ -25,7 +23,7 @@ You do not need to manually configure File identities; every file in the reposit
 
 ---
 
-## 2. The Thing Plane: Semantic Lifetimes
+## The Thing Plane: Semantic Lifetimes
 
 A **Thing** represents the conceptual entity that a document expresses, independent of the file itself. A Thing's identifier (IRI) is compiled from its namespace, class, and a stable identifier, completely decoupled from any file system path:
 
@@ -39,11 +37,11 @@ When a document has a Thing identity, its structured properties (such as `soul.J
 
 ---
 
-## 3. Why Thing-Plane Metadata Survives File Operations
+## Why Thing-Plane Metadata Survives File Operations
 
-Because a Thing's IRI contains no path information, renaming or moving its source markdown file cannot alter its identity. 
+Because a Thing's IRI contains no path information, renaming or moving its source Markdown file cannot alter its identity. 
 
-The link between the two planes is a single derived edge: **`fileId`** ("the File currently expressing this Thing"). `git-lex` asserts this link during the save process and automatically updates it whenever a file is moved:
+The link between the two planes is a single derived edge: **`fileId`** ("the File currently expressing this Thing"). Git-lex asserts this link during the save process and automatically updates it whenever a file is moved:
 
 ```
 soul/Journal/day-7  --fileId-->  git-lex/File/Soul/Journal/day-7.md
@@ -53,7 +51,7 @@ If you rename `day-7.md` to `archive-day-7.md`, the old `fileId` edge is retract
 
 ---
 
-## 4. How a Document Resolves Its Thing Identity
+## How a Document Resolves Its Thing Identity
 
 To establish a Thing identity for a document, declare its class-specific ID in the YAML frontmatter. This property is always the camel-cased class name appended with `Id` (e.g., `noteId` for a `Note`, `journalId` for a `Journal`):
 
@@ -73,7 +71,7 @@ This field explicitly states the Thing URI that the document represents. The cla
 
 ---
 
-## 5. What Happens Without a Thing ID?
+## What Happens Without a Thing ID?
 
 If a classed document does not define an ID, no Thing node is minted. Its properties are bound to its File node instead. This means they are tied to its physical path and will not survive file renames. 
 
@@ -90,7 +88,7 @@ soul.Note.noteId: "graph-thoughts"
 
 ---
 
-## 6. The Nine Universal Properties
+## The Nine Universal Properties
 
 Every document class in the `git-lex` ecosystem inherits a set of universal properties from the base `git-lex:Thing` class. When writing these in your frontmatter, always use your document's specific class namespace (e.g., `soul.Note.title`, not `git-lex.Thing.title`):
 
@@ -117,8 +115,7 @@ These properties serve separate roles:
 Both properties are parsed as XML schema `xsd:dateTime` values representing a precise timestamp rather than a plain calendar date (`YYYY-MM-DD`). 
 * You should not edit these values manually.
 * `git lex save` automatically stamps `dateUpdated` on every commit, and initializes `dateCreated` if it is the document's first save.
-* If a document is moved or migrated from an external location, the `dateCreated` property preserves its original creation timestamp, which would otherwise be lost in git history.
+* If a document is moved or migrated from an external location, the `dateCreated` property preserves its original creation timestamp, which would otherwise be lost in Git history.
 
 #### Cross-Namespace References
 The `<namespace/Class/identifier>` form in `id` and `relatedToId` allows documents to reference objects defined in entirely different kits without requiring compile-time coordination. The namespace resolution is driven dynamically by the referenced value.
-

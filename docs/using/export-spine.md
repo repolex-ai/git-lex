@@ -1,24 +1,22 @@
-# Exporting the graph: `git lex export-spine`
+# Exporting the Graph: `git lex export-spine`
 
-*Last updated for git-lex v0.1.0 (2026-08-29)*
-
-`git lex export-spine` writes your repo's semantic index as one plain-text
+`git lex export-spine` writes your repository's semantic index as one plain-text
 TSV file — the **spine** — built for loading into an LLM's context cache.
 Every `git lex sync` refreshes it automatically; the command exists for
-refreshing without a sync.
+refreshing without a full sync.
 
-## Why this exists: a neural KV-cache
+## Why This Exists: A Neural KV-Cache
 
-Feed a repo's whole graph into an LLM's context cache. Gemini's explicit
-context caching can hold an entire file resident across many calls at a
+Feed a repository's complete graph into an LLM's context cache. LLM context
+caching can hold an entire file resident across many calls at a
 steep per-token discount, with effectively zero added latency to recall
-anything in it. If that resident file is your repo's semantic graph —
+anything in it. If that resident file is your repository's semantic graph —
 every document, every fact, every link — the model has instant, exact
-recall over everything you know. One real number: a 152-document soul
-repo comes out to ~5,300 facts in ~520 KB — roughly 130,000 tokens,
-comfortably inside a 1M-token window.
+recall over everything you know. For example, a 150-document soul
+repository comes out to ~5,300 facts in ~520 KB — roughly 130,000 tokens,
+comfortably inside modern context windows.
 
-## The file
+## The File
 
 `.lex/_ignore/spine/<synced-commit>.spine.tsv` — named by the commit the
 **store** is synced to (deliberately not `HEAD`: committing without
@@ -35,45 +33,36 @@ syncing must not put a fresh name on stale content). Layout:
 <soul/Note/kira>	git-lex:title	"Kira"
 ```
 
-- **Identity header**: which soul this file IS — so a cache holding many
-  souls' spines can attribute every fact, and `# repo` + a `fileId` row
+- **Identity header**: Identifies which entity this file represents — so a cache holding many
+  spines can attribute every fact, and `# repo` + a `fileId` row
   reconstructs a real path on disk.
-- **Prefix lines**: only the prefixes actually used. Instance IRIs are
-  relativized against `@base` (`<copia/Being/w4r3z>`), the standard
-  Turtle rule, no invented prefixes.
-- **Rows**: tab-separated, no pipes, no padding — shaped like W3C SPARQL
-  1.1 TSV results, native to `cut`/`awk`/SQLite import, and ~8% smaller
-  than a pipe table. One fact per line; a literal containing a raw tab
-  gets it escaped.
-- **Sorted**: unchanged content produces a byte-identical file, so a
-  consumer can cache-key on the file hash.
+- **Prefix lines**: Only the prefixes actually used. Instance IRIs are
+  relativized against `@base` (`<copia/Being/w4r3z>`), following standard
+  Turtle rules without invented prefixes.
+- **Rows**: Tab-separated, shaped like W3C SPARQL
+  1.1 TSV results, native to standard text processing and database imports. One fact per line.
+- **Sorted**: Unchanged content produces a byte-identical file, allowing
+  consumers to cache on the file hash.
 
 Scope is the `now` graph (current state of every document's facts) plus
 `repo-ontology` (the vocabulary that explains them). Commit history, the
-file tree, and other plumbing are excluded on purpose — low meaning per
-token, and the history graph alone outgrows any context window at fleet
-scale. Blank-node rows (OWL structural shells with unstable labels) and
-RDF 1.2 annotation terms are excluded too.
+file tree, and raw plumbing are excluded to maximize meaning per
+token. Blank-node rows and RDF 1.2 annotation terms are excluded as well.
 
-`manifest.json` beside it names the current file (`commit`, `spine`,
-`spine_bytes`). Other tools may add their own keys (a cache manager
-records its cache id here); git-lex rewrites only the keys it owns.
+A `manifest.json` file beside it tracks the current file (`commit`, `spine`,
+`spine_bytes`). Other tools may add custom keys (such as an external cache manager);
+git-lex rewrites only the keys it owns.
 
-## The cloud handoff
+## The Cloud Handoff
 
-git-lex never talks to any cloud. After each spine write it spawns
+Git-lex never talks to external cloud services directly. After each spine write, it can invoke
 `pythia cache update` (detached, repo root as working directory) **if** a
-`pythia` binary is on PATH — pythia owns the context-cache upload and
-records its cache id in `manifest.json`. No pythia installed means the
-step is silently skipped; the spine is still on disk for any consumer.
+`pythia` binary is on `PATH`. If not installed, the step is silently skipped;
+the spine remains available on disk for any consumer.
 
-## Pitfalls
+## Pitfalls & Guidelines
 
 - **The store has to be synced first.** This command reads the synced
-  store, not the working tree. No store, or no synced commits → it fails
-  loudly and tells you to run `git lex sync`.
+  store, not the working tree. Run `git lex sync` before exporting.
 - **One generation is kept.** Each export prunes older spine files after
-  the new one is in place; the manifest always names the current one.
-- **`.lex/_ignore/cottas/` is gone on purpose.** An earlier format (a
-  Parquet triple table) lived there; it was retired 2026-08-29 and the
-  directory is cleaned up automatically on the next sync.
+  the new one is written; the manifest always names the current file.

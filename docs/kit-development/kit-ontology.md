@@ -1,16 +1,5 @@
 # Kit Ontology Design
 
-*Current for kit-base **0.14.0** (2026-08-27) — the *kit ontology's* version, not
-the `git-lex` binary's. The two move independently: the tool can ship several
-releases without the ontology changing, and the ontology can change without the
-tool moving. Only the 0.11 → 0.14 delta was checked against this page; the rest is
-not re-audited at this version.*
-
-*To check this number, read `owl:versionInfo` at the top of your own installed
-`.lex/kit/repolex-ai/git-lex-kit-base/ontology/git-lex/git-lex.ttl` — your own
-install, not a shared clone of the kit repo, which may sit on someone else's
-branch. A higher number there means this page is behind the ontology.*
-
 This guide describes how to define **document types** and ontologies for a `git-lex` kit. It covers ontology file paths, class definitions, identifier setup, enums, and reference properties.
 
 The authoritative example of kit ontology configuration is the `soul` kit ontology:
@@ -18,7 +7,7 @@ The authoritative example of kit ontology configuration is the `soul` kit ontolo
 
 ---
 
-## 1. Where the ontology file goes
+## Where the Ontology File Goes
 
 ```
 <kit-repo>/ontology/<name>/<name>.ttl
@@ -41,7 +30,7 @@ you edit.
 On `git lex kit-update`, the ontology installs to `.lex/ontology/<name>/` in
 every repo that has the kit.
 
-## 2. The skeleton
+## The Skeleton
 
 Every ontology file starts the same way — prefixes, then a header naming the
 ontology itself:
@@ -62,7 +51,7 @@ ontology itself:
 Bump `owl:versionInfo` when you change the file. SHACL validation shapes are
 generated from this file — you never write shapes by hand.
 
-## 3. Making a class
+## Making a Class
 
 A class is a document type. Declaring one:
 
@@ -115,7 +104,7 @@ real required structure gets the headings with one line under each. If you're
 writing paragraphs you're writing a manual, and a manual belongs somewhere this
 can point at.
 
-## 4. The id property (required on every class)
+## The Id Property (Required on Every Class)
 
 Every class declares an id property, named `<class>Id`:
 
@@ -133,7 +122,7 @@ garden:plantId a owl:DatatypeProperty ;
   `https://repolex.ai/garden/Plant/back-porch-fern`. Files can move; the id
   (and therefore the address) doesn't.
 
-## 5. Simple properties
+## Simple Properties
 
 A property is declared once, with the class it belongs to (`rdfs:domain`) and
 the kind of value it holds (`rdfs:range`):
@@ -149,7 +138,7 @@ garden:wateredOn a owl:DatatypeProperty ;
 Common ranges: `xsd:string`, `xsd:integer`, `xsd:date`, `xsd:dateTime`,
 `xsd:boolean`, `xsd:anyURI`.
 
-## 6. Enums (a fixed set of allowed values)
+## Enums (A Fixed Set of Allowed Values)
 
 When a property should only accept certain values, declare the value set as a
 datatype, then point the property's range at it:
@@ -183,7 +172,7 @@ git-lex translates: `xsd:minInclusive`, `xsd:maxInclusive`, `xsd:minExclusive`,
 facet prints a warning that the bound is **not** enforced — declared bounds are
 never silently dropped.
 
-## 7. Pointing at another Thing
+## Pointing at Another Thing
 
 A reference property holds the **target's id**, and its name says so — end the
 name with `Id`.
@@ -285,7 +274,7 @@ the ontology. A bare string field that secretly holds a reference is the one
 pattern that's outlawed — if it points at something, declare it so the graph
 and the validator can follow it.
 
-## 8. What it looks like from the user's side
+## What It Looks Like from the User's Side
 
 The ontology above gives an agent this authoring experience:
 
@@ -309,7 +298,7 @@ the closest declared keys suggested) and its value saves as plain ungoverned
 data; a bare key (`title:`) stays free. Multiple values for one key are a YAML
 list (`- value` per line) — a repeated key is rejected at save.
 
-## 9. Graph-only kits (no authored documents)
+## Graph-Only Kits (No Authored Documents)
 
 Some kits have no markdown at all — their instances are written by an engine
 into the store (ravel's conversation Turns are the canonical example). Three
@@ -332,7 +321,7 @@ things change, and only three:
 
 Everything else — the skeleton, enums, comments, publishing — is identical.
 
-## 10. Naming rules (short, absolute)
+## Naming Rules (Short, Absolute)
 
 1. **The name is the definition.** If the name needs a paragraph to explain,
    it's the wrong name.
@@ -344,7 +333,7 @@ Everything else — the skeleton, enums, comments, publishing — is identical.
    document needs it — never because it "feels right." Unused fields don't
    stay neutral; they rot into confusion.
 
-## 11. Publishing
+## Publishing
 
 When the ontology changes: commit in the source repo, then run the publish
 flow (`subtexture/tools/ontology-publish` from the source repo root). It

@@ -1,11 +1,11 @@
-# Engine runtime directories and the `_ignore/` pocket
+# Engine Runtime Directories and the `_ignore/` Pocket
 
 Every tool in the stack keeps its per-repo state in one visible dotdir at
 the repo root — `.lex/`, `.pool/`, `.copia/`, `.horae/`, `.ravel/`,
 `.pan/`. This page is the layout law for those directories and the
 `.gitignore` block git-lex manages for them.
 
-## The law, in one sentence
+## The Law, in One Sentence
 
 **In any tool's dotdir, `_ignore/` is machine-local; everything else is
 committed.**
@@ -13,15 +13,15 @@ committed.**
 - **`<dotdir>/_ignore/`** is the machine-local pocket: graph stores,
   indexes, caches, queues, transcript mirrors — anything rebuildable or
   relocatable that would bloat or break the shared record. It is
-  gitignored and never committed.
+  ignored by Git and never committed.
 - **Everything else in the dotdir is committable**: config, extraction
   sidecars, anything that belongs in the shared record. If it sits outside
-  `_ignore/`, git sees it — deliberately.
+  `_ignore/`, Git sees it — deliberately.
 
-The name states its git status, and the underscore sorts it to the top of
+The name states its Git status, and the underscore sorts it to the top of
 the dotdir so it reads as "special" in any file browser.
 
-## The managed `.gitignore` block
+## The Managed `.gitignore` Block
 
 `git lex init` and `git lex kit-update` maintain a sentinel-wrapped block
 in the repo's root `.gitignore`:
@@ -53,9 +53,9 @@ Two entry shapes appear, and the difference is transitional:
 An engine's entry converges from whole-dir to pocket form automatically,
 gated on that engine's known pre-law paths being gone from outside the
 pocket — the engine's own data migration is the trigger, so the flip can
-never expose a not-yet-moved store to git.
+never expose a not-yet-moved store to Git.
 
-## If you are building an engine
+## If You Are Building an Engine
 
 1. Put machine-local state under `<yourdotdir>/_ignore/` from day one.
 2. Put committable files (config, shared-record artifacts) directly in the
@@ -65,7 +65,7 @@ never expose a not-yet-moved store to git.
    with machine-local state outside the pocket gets a whole-dir entry
    until its owner confirms the migration.
 
-## Already committed something you shouldn't have?
+## Already Committed Something You Shouldn't Have?
 
 git-lex reports tracked files that fall under the managed entries but
 **never** untracks them for you — removing things from the index is your
@@ -75,7 +75,4 @@ deliberate act:
 git rm --cached -r .horae/
 ```
 
-The files stay on disk; only git stops tracking them.
-
-*The stack-wide ruling behind this page: Rob, 2026-08-05 (dotdir `_ignore/`
-pocket law).*
+The files stay on disk; only Git stops tracking them.
