@@ -98,7 +98,7 @@ Documents by their last change, newest first.
 
 ```sparql
 SELECT ?doc ?date
-WHERE { ?doc <https://repolex.ai/ontology/git-lex/dateUpdated> ?date }
+WHERE { ?doc <https://repolex.ai/ontology/git-lex/updatedDate> ?date }
 ORDER BY DESC(?date)
 LIMIT 20
 ```

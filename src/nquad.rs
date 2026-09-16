@@ -1301,6 +1301,21 @@ pub(crate) fn emit_spo_line_nquads(
             // was comma-splitting soul:source prose citations).
             let lookup_key = format!("{}/{}/{}", kit_name, canonical_class, prop_seg);
 
+            // kit-base 0.18 BOTH-SHAPES WINDOW (goodlux, 2026-09-16): the date
+            // universals were renamed createdDate/updatedDate. A document
+            // still on the old key lands on the NEW predicate when the class
+            // declares it. Save-time extraction prints the rename warning;
+            // this emitter replays history and stays quiet. Remove with the
+            // window (the release after kit-base 0.18 reaches every soul).
+            let (prop_seg, lookup_key): (&str, String) = match prop_seg {
+                "dateCreated" | "dateUpdated" if !prop_iris.contains_key(&lookup_key) => {
+                    let renamed = if prop_seg == "dateCreated" { "createdDate" } else { "updatedDate" };
+                    let renamed_key = format!("{}/{}/{}", kit_name, canonical_class, renamed);
+                    if prop_iris.contains_key(&renamed_key) { (renamed, renamed_key) } else { (prop_seg, lookup_key) }
+                }
+                _ => (prop_seg, lookup_key),
+            };
+
             // Domain-open lookup (#82): a property declared with no
             // rdfs:domain is on NO class's shape by construction, so the
             // class-qualified tables above can never hold it. Its key

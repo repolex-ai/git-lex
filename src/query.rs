@@ -396,11 +396,11 @@ pub(crate) fn scaffold_default_queries(root: &std::path::Path) {
             "recent",
             "# What changed lately\n\n\
              Documents by their last change, newest first. The date is\n\
-             maintained by git-lex at commit time (dateUpdated) — documents\n\
+             maintained by git-lex at commit time (updatedDate) — documents\n\
              that predate the stamping appear once they are next saved.\n\n\
              ```sparql\n\
              SELECT ?doc ?date\n\
-             WHERE { ?doc <https://repolex.ai/ontology/git-lex/dateUpdated> ?date }\n\
+             WHERE { ?doc <https://repolex.ai/ontology/git-lex/updatedDate> ?date }\n\
              ORDER BY DESC(?date)\n\
              LIMIT 20\n\
              ```\n",

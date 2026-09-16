@@ -100,8 +100,8 @@ Every document class in the `git-lex` ecosystem inherits a set of universal prop
 | `abstract` | String | An automatically generated summary. May be overwritten by background agents. (Single-valued) |
 | `cue` | String | Structural triggers specifying *when* an agent should consult this document. (Multi-valued list) |
 | `relatedToId` | URI / Reference | A link pointing to another Thing in any namespace (e.g., `<copia/Texture/deep-water>`). (Multi-valued list) |
-| `dateCreated` | DateTime | An immutable ISO 8601 timestamp generated on first save. |
-| `dateUpdated` | DateTime | An ISO 8601 timestamp rewritten on every save to log the last update. |
+| `createdDate` | DateTime | An immutable ISO 8601 timestamp generated on first save. |
+| `updatedDate` | DateTime | An ISO 8601 timestamp rewritten on every save to log the last update. |
 | `substrate` | String | The model name or substrate that performed the last save (e.g., `gemini-3.5-flash`). |
 
 ### Key Property Behaviors
@@ -111,11 +111,11 @@ These properties serve separate roles:
 * `description` is authored by humans or primary agents as a static, authoritative summary.
 * `abstract` is designated as scratch space for machine-derived summaries. Automation tools are permitted to overwrite the `abstract` field, so other systems should treat it as transient and avoid relying on its persistence.
 
-#### Timestamps (`dateCreated` and `dateUpdated`)
+#### Timestamps (`createdDate` and `updatedDate`)
 Both properties are parsed as XML schema `xsd:dateTime` values representing a precise timestamp rather than a plain calendar date (`YYYY-MM-DD`). 
 * You should not edit these values manually.
-* `git lex save` automatically stamps `dateUpdated` on every commit, and initializes `dateCreated` if it is the document's first save.
-* If a document is moved or migrated from an external location, the `dateCreated` property preserves its original creation timestamp, which would otherwise be lost in Git history.
+* `git lex save` automatically stamps `updatedDate` on every commit, and initializes `createdDate` if it is the document's first save.
+* If a document is moved or migrated from an external location, the `createdDate` property preserves its original creation timestamp, which would otherwise be lost in Git history.
 
 #### Cross-Namespace References
 The `<namespace/Class/identifier>` form in `id` and `relatedToId` allows documents to reference objects defined in entirely different kits without requiring compile-time coordination. The namespace resolution is driven dynamically by the referenced value.

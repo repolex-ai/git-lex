@@ -551,7 +551,7 @@ pub(crate) fn cmd_validate() -> bool {
 /// extraction, markdown link extraction, stages artifacts, then SHACL
 /// validates. Exits non-zero if anything fails.
 pub(crate) fn hook_pre_commit() {
-    // Phase 0: machine-maintained dates (git-lex:dateUpdated, Rob-ruled
+    // Phase 0: machine-maintained dates (git-lex:updatedDate, Rob-ruled
     // 2026-08-26). BEFORE extraction, so the stamped value reaches the
     // sidecar and both land in the same commit. Lives in the hook, not in
     // cmd_save, so `git lex save` and a plain `git commit` behave
@@ -691,16 +691,17 @@ fn claude_session_model() -> Option<String> {
     None
 }
 
-/// Stamp `<kit>.<Class>.dateUpdated: <today>` and `<kit>.<Class>.substrate: <model>`
-/// into every staged modified/renamed .md document, and `dateCreated` too on staged NEW
-/// documents (first save: dateCreated = dateUpdated — Rob's rule). The
+/// Stamp `<kit>.<Class>.updatedDate: <today>` and `<kit>.<Class>.substrate: <model>`
+/// into every staged modified/renamed .md document, and `createdDate` too on staged NEW
+/// documents (first save: createdDate = updatedDate — Rob's rule). The
 /// properties are declared "Maintained by git-lex on save — do not hand-edit",
 /// and this is the maintenance.
 ///
 /// Quiet skips, in order: templates (`__Class.md` is kit scaffold, not a
 /// document); files with no git-lex frontmatter key (README and friends);
-/// classes whose kit does not declare `dateUpdated` or `substrate`. Existing
-/// `dateCreated` values on modified files are never touched — "set once at birth."
+/// classes whose kit does not declare `updatedDate` (or, during the 0.18
+/// window, `dateUpdated`) or `substrate`. Existing `createdDate` values on
+/// modified files are never touched — "set once at birth."
 ///
 /// Stamped files are re-staged so the commit carries the stamped bytes.
 fn stamp_dates_for_staged_changes() {
@@ -780,13 +781,20 @@ fn stamp_dates_for_staged_changes() {
                 .collect()
         });
         let class_props = declared.get(class);
-        let has_date_updated = class_props
-            .is_some_and(|props: &std::collections::HashSet<String>| props.contains("dateUpdated"));
+        // v0.18 RENAME, BOTH-SHAPES WINDOW (goodlux, 2026-09-16): the date
+        // universals are createdDate/updatedDate. The stamp writes whichever
+        // spelling the INSTALLED ontology declares for this class, so a repo
+        // that has not run kit-update keeps its old keys and never receives a
+        // key its own shapes call undeclared. Same mechanism as the
+        // date→dateTime window above. REMOVE the old-spelling arm (and
+        // `DateKeys::OLD`) in the release after kit-base 0.18 reaches every soul.
+        let keys = class_props.and_then(DateKeys::declared_in);
         let has_substrate = class_props
             .is_some_and(|props: &std::collections::HashSet<String>| props.contains("substrate"));
-        if !has_date_updated && !has_substrate {
+        if keys.is_none() && !has_substrate {
             continue;
         }
+        let has_date_updated = keys.is_some();
 
         let is_new = status.starts_with('A');
 
@@ -806,11 +814,18 @@ fn stamp_dates_for_staged_changes() {
 
         let date_to_stamp = if has_date_updated { Some(today.as_str()) } else { None };
         let sub_to_stamp = if has_substrate { runtime_sub.as_deref() } else { None };
+        let keys = keys.unwrap_or(DateKeys::NEW);
 
-        if let Some(new_content) = stamp_frontmatter_dates(&content, &prefix, date_to_stamp, sub_to_stamp, is_new) {
+        if let Some(new_content) = stamp_frontmatter_dates(&content, &prefix, date_to_stamp, sub_to_stamp, is_new, keys) {
+            // The window's one visible act: an old-spelling key that the
+            // stamp rewrote under the declared name is announced, so the
+            // author sees the rename happen rather than discovering it in a diff.
+            for (old_key, new_key) in keys.renames_applied(&prefix, &content, &new_content) {
+                eprintln!("note: {}: `{}` is now `{}`; the key was renamed on this save", path.display(), old_key, new_key);
+            }
             if std::fs::write(path, &new_content).is_err() {
-                eprintln!("warning: could not stamp dateUpdated/substrate into {} — the \
-                           file commits unstamped", path.display());
+                eprintln!("warning: could not stamp {}/substrate into {} — the \
+                           file commits unstamped", keys.updated, path.display());
                 continue;
             }
             let _ = Command::new("git")
@@ -825,14 +840,64 @@ fn stamp_dates_for_staged_changes() {
     }
     if stamped > 0 {
         if born > 0 {
-            println!("Dated: {} document(s) → dateUpdated {} ({} new → dateCreated too)",
+            println!("Dated: {} document(s) → updatedDate {} ({} new → createdDate too)",
                 stamped, today, born);
         } else {
-            println!("Dated: {} document(s) → dateUpdated {}", stamped, today);
+            println!("Dated: {} document(s) → updatedDate {}", stamped, today);
         }
     }
     if kept > 0 {
-        println!("Kept: {} document(s) — dateUpdated as authored (backfill window)", kept);
+        println!("Kept: {} document(s) — updatedDate as authored (backfill window)", kept);
+    }
+}
+
+/// The two machine-maintained date keys, in whichever spelling a class
+/// declares. kit-base 0.18 (goodlux, 2026-09-16) renamed the universals
+/// dateCreated/dateUpdated to createdDate/updatedDate; `OLD` exists only
+/// for the both-shapes window and goes when the fleet is on 0.18.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct DateKeys {
+    created: &'static str,
+    updated: &'static str,
+}
+
+impl DateKeys {
+    const NEW: DateKeys = DateKeys { created: "createdDate", updated: "updatedDate" };
+    const OLD: DateKeys = DateKeys { created: "dateCreated", updated: "dateUpdated" };
+
+    /// The spelling the class declares; the new one wins when both are
+    /// present (a kit mid-transition). None when the class declares neither.
+    fn declared_in(props: &std::collections::HashSet<String>) -> Option<DateKeys> {
+        if props.contains(Self::NEW.updated) {
+            Some(Self::NEW)
+        } else if props.contains(Self::OLD.updated) {
+            Some(Self::OLD)
+        } else {
+            None
+        }
+    }
+
+    /// The other spelling of the same role, so a reader can accept a key
+    /// written under the previous name.
+    fn other(self) -> DateKeys {
+        if self == Self::NEW { Self::OLD } else { Self::NEW }
+    }
+
+    /// `(old full key, new full key)` for every role whose old-spelling line
+    /// was present before the stamp and absent after it.
+    fn renames_applied(self, kit_class: &str, before: &str, after: &str) -> Vec<(String, String)> {
+        let other = self.other();
+        let mut out = Vec::new();
+        for (from, to) in [(other.created, self.created), (other.updated, self.updated)] {
+            let old_key = format!("{kit_class}.{from}:");
+            let new_key = format!("{kit_class}.{to}:");
+            let had = before.lines().any(|l| l.trim_start().starts_with(&old_key));
+            let has = after.lines().any(|l| l.trim_start().starts_with(&old_key));
+            if had && !has {
+                out.push((old_key.trim_end_matches(':').to_string(), new_key.trim_end_matches(':').to_string()));
+            }
+        }
+        out
     }
 }
 
@@ -842,7 +907,9 @@ fn stamp_dates_for_staged_changes() {
 /// returns false: the normal stamp is the safe default, and a document
 /// with no HEAD version is new, which is not this case.
 fn only_date_updated_changed(path: &std::path::Path, content: &str, prefix: &str) -> bool {
-    let key = format!("{prefix}.dateUpdated:");
+    // Both spellings of the key are ignored, so a rename-only edit during
+    // the window also counts as "nothing but the date changed".
+    let keys = [format!("{prefix}.{}:", DateKeys::NEW.updated), format!("{prefix}.{}:", DateKeys::OLD.updated)];
     let Ok(head) = Command::new("git")
         .arg("show")
         .arg(format!("HEAD:{}", path.display()))
@@ -854,13 +921,13 @@ fn only_date_updated_changed(path: &std::path::Path, content: &str, prefix: &str
         return false;
     }
     let head = String::from_utf8_lossy(&head.stdout).to_string();
-    fn strip(s: &str, key: &str) -> String {
+    fn strip(s: &str, keys: &[String]) -> String {
         s.lines()
-            .filter(|l| !l.trim_start().starts_with(key))
+            .filter(|l| !keys.iter().any(|k| l.trim_start().starts_with(k.as_str())))
             .collect::<Vec<_>>()
             .join("\n")
     }
-    strip(&head, &key) == strip(content, &key)
+    strip(&head, &keys) == strip(content, &keys)
 }
 
 /// Today in the machine's local timezone, `YYYY-MM-DD` — same source init
@@ -891,12 +958,17 @@ fn installed_dates_are_datetime() -> bool {
     let path = root.join(".lex").join("ontology").join("git-lex").join("git-lex.ttl");
     let Ok(content) = std::fs::read_to_string(&path) else { return false };
     let Ok(store) = crate::kit::load_ttl_str(&content, "git-lex ontology") else { return false };
+    // Either spelling of the universal (kit-base 0.18 renamed it); the
+    // question here is only whether the range is dateTime.
     matches!(
         git_lex::eval_query(
             &store,
-            "ASK { <https://repolex.ai/ontology/git-lex/dateUpdated> \
-                   <http://www.w3.org/2000/01/rdf-schema#range> \
-                   <http://www.w3.org/2001/XMLSchema#dateTime> }",
+            "ASK { { <https://repolex.ai/ontology/git-lex/updatedDate> \
+                     <http://www.w3.org/2000/01/rdf-schema#range> \
+                     <http://www.w3.org/2001/XMLSchema#dateTime> } UNION \
+                   { <https://repolex.ai/ontology/git-lex/dateUpdated> \
+                     <http://www.w3.org/2000/01/rdf-schema#range> \
+                     <http://www.w3.org/2001/XMLSchema#dateTime> } }",
         ),
         Ok(oxigraph::sparql::QueryResults::Boolean(true))
     )
@@ -982,9 +1054,11 @@ fn git_file_time(rel: &str, first: bool) -> Option<String> {
 /// Does the frontmatter hold a PLAIN-DATE value (10 chars, no `T`) on
 /// either machine-maintained date key?
 fn has_plain_date_value(content: &str, kit_class: &str) -> bool {
-    for key in [format!("{}.dateCreated", kit_class), format!("{}.dateUpdated", kit_class)] {
-        if plain_date_line_value(content, &key).is_some() {
-            return true;
+    for k in [DateKeys::NEW, DateKeys::OLD] {
+        for key in [format!("{}.{}", kit_class, k.created), format!("{}.{}", kit_class, k.updated)] {
+            if plain_date_line_value(content, &key).is_some() {
+                return true;
+            }
         }
     }
     false
@@ -1020,8 +1094,18 @@ fn upgrade_plain_dates(
     first_ts: Option<&str>,
     last_ts: Option<&str>,
 ) -> Option<String> {
-    let created_key = format!("{}.dateCreated", kit_class);
-    let updated_key = format!("{}.dateUpdated", kit_class);
+    // The converge rewrites VALUES only and leaves the key spelling alone;
+    // the stamp renames keys. Whichever spelling the document carries is
+    // the one upgraded here.
+    let keys = if plain_date_line_value(content, &format!("{}.{}", kit_class, DateKeys::OLD.created)).is_some()
+        || plain_date_line_value(content, &format!("{}.{}", kit_class, DateKeys::OLD.updated)).is_some()
+    {
+        DateKeys::OLD
+    } else {
+        DateKeys::NEW
+    };
+    let created_key = format!("{}.{}", kit_class, keys.created);
+    let updated_key = format!("{}.{}", kit_class, keys.updated);
     let created_val = plain_date_line_value(content, &created_key);
     let updated_val = plain_date_line_value(content, &updated_key);
     let created_new = created_val.as_deref().map(|day| {
@@ -1093,6 +1177,12 @@ fn frontmatter_kit_class(content: &str) -> Option<String> {
     None
 }
 
+/// Everything after the first `:` of a frontmatter line, so a key can be
+/// renamed while its value (and any trailing comment) stays byte-identical.
+fn line_value_part(line: &str) -> &str {
+    line.split_once(':').map(|(_, v)| v).unwrap_or("")
+}
+
 /// True when a date line in frontmatter has no authored value — either empty
 /// string `""`, scaffold comment `# optional...`, or just whitespace.
 fn is_scaffold_or_empty_date(line: &str) -> bool {
@@ -1111,8 +1201,8 @@ fn is_scaffold_or_empty_date(line: &str) -> bool {
 /// Pure stamping: returns the new content, or None when nothing changes.
 /// A present key line is rewritten whole (`key: date` — the scaffold's
 /// teaching comment retires once the machine owns the value); an absent
-/// key is inserted just above the closing `---`, dateCreated before
-/// dateUpdated. `dateCreated` is written ONLY when `is_new` (and empty); a modified
+/// key is inserted just above the closing `---`, createdDate before
+/// updatedDate. `createdDate` is written ONLY when `is_new` (and empty); a modified
 /// document's birth date is never touched, whatever it holds.
 ///
 /// BACKFILL / MIGRATION WINDOW (temporary): preserve authored non-empty dates on new files
@@ -1123,9 +1213,15 @@ fn stamp_frontmatter_dates(
     date: Option<&str>,
     substrate: Option<&str>,
     is_new: bool,
+    keys: DateKeys,
 ) -> Option<String> {
-    let updated_key = format!("{}.dateUpdated", kit_class);
-    let created_key = format!("{}.dateCreated", kit_class);
+    let updated_key = format!("{}.{}", kit_class, keys.updated);
+    let created_key = format!("{}.{}", kit_class, keys.created);
+    // The previous spelling of each key (both-shapes window): a line under
+    // it is treated as the same role and rewritten under `keys`.
+    let other = keys.other();
+    let old_updated_key = format!("{}.{}", kit_class, other.updated);
+    let old_created_key = format!("{}.{}", kit_class, other.created);
     let substrate_key = format!("{}.substrate", kit_class);
 
     let mut lines: Vec<String> = content.lines().map(str::to_string).collect();
@@ -1141,9 +1237,9 @@ fn stamp_frontmatter_dates(
     for line in &mut lines[1..close] {
         let key = line.trim_start().split(':').next().unwrap_or("").trim();
         if let Some(d) = date {
-            if key == updated_key {
+            if key == updated_key || key == old_updated_key {
                 found_updated = true;
-                // Backfill/migration window: preserve authored non-empty dateUpdated on new files
+                // Backfill/migration window: preserve authored non-empty updatedDate on new files
                 let stamp = if is_new {
                     is_scaffold_or_empty_date(line)
                 } else {
@@ -1155,11 +1251,15 @@ fn stamp_frontmatter_dates(
                         *line = stamped_line;
                         changed = true;
                     }
+                } else if key == old_updated_key {
+                    // Value kept, key renamed to the declared spelling.
+                    *line = format!("{}:{}", updated_key, line_value_part(line));
+                    changed = true;
                 }
                 continue;
-            } else if key == created_key {
+            } else if key == created_key || key == old_created_key {
                 found_created = true;
-                // Backfill/migration window: preserve authored non-empty dateCreated on new files
+                // Backfill/migration window: preserve authored non-empty createdDate on new files
                 let stamp = is_new && is_scaffold_or_empty_date(line);
                 if stamp {
                     let stamped_line = format!("{}: {}", created_key, d);
@@ -1167,6 +1267,10 @@ fn stamp_frontmatter_dates(
                         *line = stamped_line;
                         changed = true;
                     }
+                } else if key == old_created_key {
+                    // Birth date never touched; only the key spelling moves.
+                    *line = format!("{}:{}", created_key, line_value_part(line));
+                    changed = true;
                 }
                 continue;
             }
@@ -1460,14 +1564,14 @@ pub(crate) fn cmd_extract() {
 
 #[cfg(test)]
 mod date_stamp_tests {
-    use super::{frontmatter_kit_class, stamp_frontmatter_dates};
+    use super::{frontmatter_kit_class, stamp_frontmatter_dates, DateKeys};
 
     const DOC: &str = "---\n\
 type: Journal\n\
 # a teaching comment line\n\
 soul.Journal.journalId: \"day-9\"\n\
-soul.Journal.dateCreated: 2026-08-01\n\
-soul.Journal.dateUpdated: 2026-08-01\n\
+soul.Journal.createdDate: 2026-08-01\n\
+soul.Journal.updatedDate: 2026-08-01\n\
 ---\n\
 \n\
 # day-9\n\
@@ -1483,10 +1587,10 @@ body text stays byte-identical\n";
 
     #[test]
     fn modified_doc_gets_date_updated_only() {
-        let out = stamp_frontmatter_dates(DOC, "soul.Journal", Some("2026-08-26"), None, false).unwrap();
-        assert!(out.contains("soul.Journal.dateUpdated: 2026-08-26"));
+        let out = stamp_frontmatter_dates(DOC, "soul.Journal", Some("2026-08-26"), None, false, DateKeys::NEW).unwrap();
+        assert!(out.contains("soul.Journal.updatedDate: 2026-08-26"));
         // Birth date untouched — "set once at birth."
-        assert!(out.contains("soul.Journal.dateCreated: 2026-08-01"));
+        assert!(out.contains("soul.Journal.createdDate: 2026-08-01"));
         assert!(out.ends_with("body text stays byte-identical\n"));
     }
 
@@ -1494,21 +1598,21 @@ body text stays byte-identical\n";
     fn new_doc_gets_both_dates_equal() {
         let scaffold_doc = "---\n\
 soul.Journal.journalId: \"day-9\"\n\
-soul.Journal.dateCreated: \"\"\n\
-soul.Journal.dateUpdated: \"\"\n\
+soul.Journal.createdDate: \"\"\n\
+soul.Journal.updatedDate: \"\"\n\
 ---\n\
 \n\
 # day-9\n\
 \n\
 body text stays byte-identical\n";
-        let out = stamp_frontmatter_dates(scaffold_doc, "soul.Journal", Some("2026-08-26"), None, true).unwrap();
-        assert!(out.contains("soul.Journal.dateCreated: 2026-08-26"));
-        assert!(out.contains("soul.Journal.dateUpdated: 2026-08-26"));
+        let out = stamp_frontmatter_dates(scaffold_doc, "soul.Journal", Some("2026-08-26"), None, true, DateKeys::NEW).unwrap();
+        assert!(out.contains("soul.Journal.createdDate: 2026-08-26"));
+        assert!(out.contains("soul.Journal.updatedDate: 2026-08-26"));
     }
 
     #[test]
     fn new_doc_with_authored_dates_preserves_them() {
-        let out = stamp_frontmatter_dates(DOC, "soul.Journal", Some("2026-08-26"), None, true);
+        let out = stamp_frontmatter_dates(DOC, "soul.Journal", Some("2026-08-26"), None, true, DateKeys::NEW);
         assert_eq!(out, None, "authored non-empty dates on a new doc are untouched");
     }
 
@@ -1516,19 +1620,19 @@ body text stays byte-identical\n";
     fn scaffolded_empty_value_with_comment_is_rewritten_whole() {
         let doc = "---\n\
 soul.Journal.journalId: \"x\"\n\
-soul.Journal.dateUpdated: \"\"  # Maintained by git-lex on save — do not hand-edit.\n\
+soul.Journal.updatedDate: \"\"  # Maintained by git-lex on save — do not hand-edit.\n\
 ---\nbody\n";
-        let out = stamp_frontmatter_dates(doc, "soul.Journal", Some("2026-08-26"), None, false).unwrap();
-        assert!(out.contains("soul.Journal.dateUpdated: 2026-08-26\n"));
+        let out = stamp_frontmatter_dates(doc, "soul.Journal", Some("2026-08-26"), None, false, DateKeys::NEW).unwrap();
+        assert!(out.contains("soul.Journal.updatedDate: 2026-08-26\n"));
         assert!(!out.contains("Maintained by git-lex"), "the teaching comment retires");
     }
 
     #[test]
     fn absent_keys_are_inserted_above_the_close_created_first() {
         let doc = "---\nsoul.Note.noteId: \"n\"\n---\nbody\n";
-        let out = stamp_frontmatter_dates(doc, "soul.Note", Some("2026-08-26"), None, true).unwrap();
-        let created = out.find("soul.Note.dateCreated: 2026-08-26").unwrap();
-        let updated = out.find("soul.Note.dateUpdated: 2026-08-26").unwrap();
+        let out = stamp_frontmatter_dates(doc, "soul.Note", Some("2026-08-26"), None, true, DateKeys::NEW).unwrap();
+        let created = out.find("soul.Note.createdDate: 2026-08-26").unwrap();
+        let updated = out.find("soul.Note.updatedDate: 2026-08-26").unwrap();
         let close = out.rfind("---").unwrap();
         assert!(created < updated && updated < close);
         assert!(out.ends_with("---\nbody\n"));
@@ -1536,24 +1640,59 @@ soul.Journal.dateUpdated: \"\"  # Maintained by git-lex on save — do not hand-
 
     #[test]
     fn already_stamped_today_is_a_no_op() {
-        let doc = "---\nsoul.Note.noteId: \"n\"\nsoul.Note.dateUpdated: 2026-08-26\n---\nbody\n";
-        assert_eq!(stamp_frontmatter_dates(doc, "soul.Note", Some("2026-08-26"), None, false), None);
+        let doc = "---\nsoul.Note.noteId: \"n\"\nsoul.Note.updatedDate: 2026-08-26\n---\nbody\n";
+        assert_eq!(stamp_frontmatter_dates(doc, "soul.Note", Some("2026-08-26"), None, false, DateKeys::NEW), None);
     }
 
     #[test]
     fn substrate_stamped_into_empty_or_existing() {
         let doc = "---\nsoul.Note.noteId: \"n\"\nsoul.Note.substrate: \"\"\n---\nbody\n";
-        let out = stamp_frontmatter_dates(doc, "soul.Note", None, Some("gemini"), false).unwrap();
+        let out = stamp_frontmatter_dates(doc, "soul.Note", None, Some("gemini"), false, DateKeys::NEW).unwrap();
         assert!(out.contains("soul.Note.substrate: \"gemini\""));
 
         let doc_missing = "---\nsoul.Note.noteId: \"n\"\n---\nbody\n";
-        let out2 = stamp_frontmatter_dates(doc_missing, "soul.Note", None, Some("claude"), false).unwrap();
+        let out2 = stamp_frontmatter_dates(doc_missing, "soul.Note", None, Some("claude"), false, DateKeys::NEW).unwrap();
         assert!(out2.contains("soul.Note.substrate: \"claude\""));
+    }
+
+    /// kit-base 0.18 window: a document still carrying the old spelling gets
+    /// its keys renamed on the stamp — the updated line takes today's value,
+    /// the created line keeps its value byte for byte.
+    #[test]
+    fn old_spelling_is_renamed_on_stamp_and_birth_value_kept() {
+        let doc = "---\nsoul.Note.noteId: \"n\"\nsoul.Note.dateCreated: 2026-08-02T09:14:33-07:00\nsoul.Note.dateUpdated: 2026-08-25\n---\nbody\n";
+        let out = stamp_frontmatter_dates(doc, "soul.Note", Some("2026-09-16"), None, false, DateKeys::NEW).unwrap();
+        assert!(out.contains("soul.Note.createdDate: 2026-08-02T09:14:33-07:00"), "{out}");
+        assert!(out.contains("soul.Note.updatedDate: 2026-09-16"), "{out}");
+        assert!(!out.contains("dateCreated") && !out.contains("dateUpdated"), "{out}");
+        let renames = DateKeys::NEW.renames_applied("soul.Note", doc, &out);
+        assert_eq!(renames.len(), 2, "{renames:?}");
+        assert!(renames.iter().any(|(o, n)| o == "soul.Note.dateCreated" && n == "soul.Note.createdDate"));
+    }
+
+    /// A repo whose installed kit still declares the OLD spelling keeps
+    /// writing it — no key its own shapes would call undeclared.
+    #[test]
+    fn old_kit_keeps_old_spelling() {
+        let doc = "---\nsoul.Note.noteId: \"n\"\n---\nbody\n";
+        let out = stamp_frontmatter_dates(doc, "soul.Note", Some("2026-09-16"), None, true, DateKeys::OLD).unwrap();
+        assert!(out.contains("soul.Note.dateCreated: 2026-09-16") && out.contains("soul.Note.dateUpdated: 2026-09-16"), "{out}");
+        assert!(!out.contains("createdDate"));
+    }
+
+    #[test]
+    fn declared_spelling_prefers_new() {
+        let both: std::collections::HashSet<String> = ["updatedDate", "dateUpdated", "substrate"].iter().map(|s| s.to_string()).collect();
+        assert_eq!(DateKeys::declared_in(&both), Some(DateKeys::NEW));
+        let old: std::collections::HashSet<String> = ["dateUpdated"].iter().map(|s| s.to_string()).collect();
+        assert_eq!(DateKeys::declared_in(&old), Some(DateKeys::OLD));
+        let none: std::collections::HashSet<String> = ["substrate"].iter().map(|s| s.to_string()).collect();
+        assert_eq!(DateKeys::declared_in(&none), None);
     }
 
     #[test]
     fn no_frontmatter_is_never_stamped() {
-        assert_eq!(stamp_frontmatter_dates("# plain md\n", "soul.Note", Some("2026-08-26"), Some("gemini"), false), None);
+        assert_eq!(stamp_frontmatter_dates("# plain md\n", "soul.Note", Some("2026-08-26"), Some("gemini"), false, DateKeys::NEW), None);
     }
 }
 
@@ -1563,7 +1702,7 @@ mod date_converge_tests {
 
     fn doc(created: &str, updated: &str) -> String {
         format!(
-            "---\nsoul.Note.noteId: \"n\"\nsoul.Note.dateCreated: {created}\nsoul.Note.dateUpdated: {updated}\n---\nbody\n"
+            "---\nsoul.Note.noteId: \"n\"\nsoul.Note.createdDate: {created}\nsoul.Note.updatedDate: {updated}\n---\nbody\n"
         )
     }
 
@@ -1575,8 +1714,8 @@ mod date_converge_tests {
             Some("2026-08-02T09:14:33-07:00"),
             Some("2026-08-25T21:03:12-07:00"),
         ).unwrap();
-        assert!(out.contains("soul.Note.dateCreated: 2026-08-02T09:14:33-07:00"));
-        assert!(out.contains("soul.Note.dateUpdated: 2026-08-25T21:03:12-07:00"));
+        assert!(out.contains("soul.Note.createdDate: 2026-08-02T09:14:33-07:00"));
+        assert!(out.contains("soul.Note.updatedDate: 2026-08-25T21:03:12-07:00"));
     }
 
     /// tr1p's receipt (kit-base 0.13.0 changelog): a memory WRITTEN
@@ -1591,7 +1730,7 @@ mod date_converge_tests {
             Some("2026-08-02T09:14:33-07:00"),
             Some("2026-08-25T21:03:12-07:00"),
         ).unwrap();
-        assert!(out.contains("soul.Note.dateCreated: 2026-04-04T00:00:00"),
+        assert!(out.contains("soul.Note.createdDate: 2026-04-04T00:00:00"),
             "authored day must survive:\n{out}");
         assert!(!out.contains("2026-08-02"), "migration day must NOT replace the birth:\n{out}");
     }
@@ -1611,9 +1750,19 @@ mod date_converge_tests {
         let d = doc("2026-04-04", "2026-08-25");
         let out = upgrade_plain_dates(&d, "soul.Note", None, None).unwrap();
         // created still upgrades (day-preserving needs no git evidence)…
-        assert!(out.contains("soul.Note.dateCreated: 2026-04-04T00:00:00"));
+        assert!(out.contains("soul.Note.createdDate: 2026-04-04T00:00:00"));
         // …but updated has no honest instant without git — old value stays.
-        assert!(out.contains("soul.Note.dateUpdated: 2026-08-25\n"));
+        assert!(out.contains("soul.Note.updatedDate: 2026-08-25\n"));
+    }
+
+    /// Documents still on the old key spelling converge their values too;
+    /// the converge never renames keys (the stamp does).
+    #[test]
+    fn old_spelling_values_upgrade_in_place() {
+        let d = "---\nsoul.Note.noteId: \"n\"\nsoul.Note.dateCreated: 2026-08-02\nsoul.Note.dateUpdated: 2026-08-25\n---\nbody\n";
+        let out = upgrade_plain_dates(d, "soul.Note", Some("2026-08-02T09:14:33-07:00"), Some("2026-08-25T21:03:12-07:00")).unwrap();
+        assert!(out.contains("soul.Note.dateCreated: 2026-08-02T09:14:33-07:00"), "{out}");
+        assert!(out.contains("soul.Note.dateUpdated: 2026-08-25T21:03:12-07:00"), "{out}");
     }
 
     #[test]

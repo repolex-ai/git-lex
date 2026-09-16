@@ -240,6 +240,37 @@ fn declared_property_iris() -> &'static std::collections::HashMap<String, String
     TABLE.get_or_init(crate::ontology::get_property_iris_all_kits)
 }
 
+/// kit-base 0.18 renamed git-lex:dateCreated/dateUpdated to
+/// createdDate/updatedDate. When a document still carries the old key and the
+/// class declares the new one, answer the new name and warn once per file
+/// with the exact line to write. The old name comes back untouched in every
+/// other case, so nothing else changes. TRANSITIONAL — remove with the window.
+pub(crate) fn renamed_date_key<'a>(short: &str, class: &str, prop_name: &'a str, filepath: &std::path::Path) -> &'a str {
+    let new_name = match prop_name {
+        "dateCreated" => "createdDate",
+        "dateUpdated" => "updatedDate",
+        _ => return prop_name,
+    };
+    let table = declared_property_iris();
+    let old_declared = table.contains_key(&format!("{short}/{class}/{prop_name}"));
+    let new_declared = table.contains_key(&format!("{short}/{class}/{new_name}"));
+    if old_declared || !new_declared {
+        return prop_name;
+    }
+    static WARNED: std::sync::Mutex<Option<std::collections::HashSet<String>>> = std::sync::Mutex::new(None);
+    if let Ok(mut guard) = WARNED.lock() {
+        let seen = guard.get_or_insert_with(std::collections::HashSet::new);
+        let tag = format!("{}#{}", filepath.display(), prop_name);
+        if seen.insert(tag) {
+            eprintln!(
+                "warning: {}: `{short}.{class}.{prop_name}` is now `{short}.{class}.{new_name}`; rename the key (the value is read under the new name meanwhile)",
+                filepath.display()
+            );
+        }
+    }
+    new_name
+}
+
 /// The predicate to emit for one authored frontmatter key.
 ///
 /// THE 2026-08-28 RELEASE INCIDENT. This path used to build the predicate by
@@ -499,6 +530,13 @@ pub(crate) fn frontmatter_to_turtle(
 
     // Add properties
     for (prop_name, value) in &kit_props {
+        // kit-base 0.18 BOTH-SHAPES WINDOW (goodlux, 2026-09-16): the date
+        // universals were renamed createdDate/updatedDate. A document still
+        // carrying the old key lands on the NEW predicate when the class
+        // declares it, with one warning naming the exact line to write.
+        // Never silent: the warning is the point. Remove in the release
+        // after kit-base 0.18 reaches every soul.
+        let prop_name: &str = renamed_date_key(&short, &doc_type, prop_name, filepath);
         // Kit+class-qualified lookup — tables key "{kit}/{Class}/{prop}"
         // (Rob-ruled 2026-07-21; see ontology.rs get_object_properties).
         let lookup_key = format!("{}/{}/{}", short, doc_type, prop_name);
