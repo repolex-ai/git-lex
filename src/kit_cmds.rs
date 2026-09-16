@@ -67,15 +67,11 @@ fn regenerate_kit_artifacts(kit_name: &str, root: &std::path::Path, create_folde
     if let Some(ref base) = folder_base {
         let declared_all: std::collections::HashSet<String> =
             kit_types.iter().map(|(name, _)| name.clone()).collect();
-        // The folder contract is `git-lex:foldered AND NOT owl:deprecated`
-        // (#74) — the SAME shared predicate emit_class_templates applies
-        // (ontology::class_gets_folder; the two gates once computed it
-        // separately and could drift). Unfoldered classes are graph-only by
-        // design, and a deprecated class keeps resolving (history replays)
-        // but must not demand its folder back: creating one would invite
-        // new writing into retired vocabulary. Auditing "every known class"
-        // instead printed phantom missing-folder lines fleet-wide after the
-        // soul 0.9.x deprecation appendix.
+        // The folder contract is `git-lex:foldered` (#74) — the SAME shared
+        // predicate emit_class_templates applies (ontology::class_gets_folder;
+        // the two gates once computed it separately and could drift).
+        // Unfoldered classes are graph-only by design. Auditing "every known
+        // class" instead printed phantom missing-folder lines fleet-wide.
         let expected: std::collections::HashSet<String> = declared_all
             .iter()
             .filter(|n| ontology::class_gets_folder(kit_name, n))
@@ -93,9 +89,9 @@ fn regenerate_kit_artifacts(kit_name: &str, root: &std::path::Path, create_folde
         if let Ok(entries) = fs::read_dir(&base_dir) {
             for entry in entries.filter_map(|e| e.ok()) {
                 let name = entry.file_name().to_string_lossy().to_string();
-                // Extra = a folder no declared class explains. A folder for
-                // a deprecated or unfoldered class is NOT extra — it's legal
-                // residue awaiting owner-paced evacuation, or the owner's
+                // Extra = a folder no declared class explains — including
+                // the folder of a class the kit has since retired. A folder
+                // for an unfoldered class is NOT extra: that is the owner's
                 // choice to keep foldering a graph-only class.
                 if entry.path().is_dir() && !declared_all.contains(&name) {
                     extra.push(name);
@@ -115,7 +111,14 @@ fn regenerate_kit_artifacts(kit_name: &str, root: &std::path::Path, create_folde
             let mut kept = Vec::new();
             for name in extra {
                 let dir = base_dir.join(&name);
+                // Never reap through a symlink. These repos carry live
+                // symlinked trees that can look like scaffold from the
+                // outside (the w3blord `skill/` near-miss), and a retired
+                // class's folder now reaches this path where a deprecated
+                // one never did — so the guard belongs on the deletion, not
+                // on a separate report.
                 if !declared.contains(&dir)
+                    && !tree_has_symlink(&dir)
                     && folder_is_scaffold_only(&dir, &name)
                     && fs::remove_dir_all(&dir).is_ok()
                 {
@@ -133,72 +136,6 @@ fn regenerate_kit_artifacts(kit_name: &str, root: &std::path::Path, create_folde
             println!("  Folders: {}/{} match ontology ✓", expected.len(), expected.len());
         }
 
-        // Residue receipt (tr1p's ask, Rob-approved 2026-08-08): name the
-        // deprecated-class folders still on disk, so retired residue stops
-        // being detectable only by a human reading the repo — quiet reads
-        // as clean. Informational ONLY: no deletion, no prompt (content
-        // evacuation is the owner's, at the owner's pace).
-        //
-        // Three safety constraints, per the w3blord `skill/` near-miss (a
-        // repo-root lowercase dir full of live symlinked skill packages
-        // that LOOKED like residue): the candidate set is EXACTLY the
-        // `owl:deprecated` class names declared in the loaded ontology,
-        // matched exact-case — never "looks like a class folder"; only
-        // `<folder_base>/<Name>/` is eligible — the filesystem knows
-        // nothing, only the ontology knows which names are dead; and a
-        // candidate that is (or contains) a SYMLINK is never DESCRIBED —
-        // these repos carry live symlinked infrastructure, and a walker
-        // that doesn't check will eventually be confidently wrong about
-        // someone's working setup. The skip itself is COUNTED, though
-        // (tr1p's refinement): silence about the content, but not silence
-        // about the existence of doubt — an unnamed blind spot becomes a
-        // surprise later, and the owner's eyes stay the fallback detector
-        // exactly where the tool has chosen not to look.
-        let deprecated = ontology::get_deprecated_classes(kit_name);
-        let mut residue: Vec<String> = Vec::new();
-        let mut skipped_symlink = 0usize;
-        // BTreeMap iteration → stable alphabetical order in the receipt.
-        for (name, replaced_by) in deprecated.iter().collect::<std::collections::BTreeMap<_, _>>() {
-            let dir = base_dir.join(name);
-            // symlink_metadata first: is_dir() would FOLLOW a symlink.
-            let Ok(meta) = fs::symlink_metadata(&dir) else { continue };
-            if meta.file_type().is_symlink() || (meta.is_dir() && tree_has_symlink(&dir)) {
-                skipped_symlink += 1;
-                continue;
-            }
-            if !meta.is_dir() {
-                continue; // a plain file where a folder would be — not a folder
-            }
-            residue.push(match replaced_by {
-                Some(r) => format!("{} (replaced by {})", name, r),
-                None => name.clone(),
-            });
-        }
-        if !residue.is_empty() {
-            let skip_note = if skipped_symlink > 0 {
-                format!(
-                    " ({} candidate(s) skipped: symlink inside — the tool asserts \
-                     nothing about symlinked trees; check those by eye)",
-                    skipped_symlink
-                )
-            } else {
-                String::new()
-            };
-            println!(
-                "  Retired-class folders present: {} — deprecated classes; their \
-                 content awaits your evacuation, at your pace (git-lex never \
-                 deletes content folders).{}",
-                residue.join(", "),
-                skip_note
-            );
-        } else if skipped_symlink > 0 {
-            println!(
-                "  Retired-class folder check: {} candidate(s) skipped (symlink \
-                 inside) — the tool asserts nothing about symlinked trees; check \
-                 those by eye if you expect residue.",
-                skipped_symlink
-            );
-        }
     }
 
     if templates_updated > 0 {

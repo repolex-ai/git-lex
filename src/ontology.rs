@@ -560,28 +560,35 @@ pub(crate) fn get_kit_types(kit: &str) -> Vec<(String, Vec<(String, String, bool
 /// THIS, so there is one rule, anchored to the ontology the code already
 /// parses (`get_kit_types`).
 ///
+/// INFALLIBLE by design. It answers "what class does this line name?", which
+/// is a question about the line, not about the ontology. Every caller either
+/// reads recorded data (the emitters, the history walk) or is about to write
+/// it, and in both cases the class segment is the record. Casing is the one
+/// thing worth correcting, because a case slip means the author and the
+/// ontology meant the same class.
+///
 /// Returns:
-/// - `Ok(canonical)` on an exact, case-correct hit (the common path).
-/// - `Ok(canonical)` on a case-ONLY mismatch, after emitting a warning to
-///   stderr — we recover to the real class name rather than emit a phantom
-///   type, but we tell the author so they fix the frontmatter.
-/// - `Err(message)` when the segment matches no class in the kit (a real
-///   typo, not just casing) — fail loud, per the soft-release bar. The
-///   message lists the kit's known classes so the fix is obvious.
+/// - the segment as given on an exact, case-correct hit (the common path).
+/// - the canonical name on a case-ONLY mismatch, warning when `warn` — we
+///   recover to the real class name rather than emit a phantom type, but we
+///   tell the author so they fix the frontmatter.
+/// - the segment as given when the kit declares no such class, warning when
+///   `warn`. A typo, an uninstalled kit and a retired class are
+///   indistinguishable from here, and only the author can tell them apart —
+///   so this teaches and keeps the fact rather than silently dropping it.
 ///
 /// When the kit declares no classes at all (`get_kit_types` empty — e.g. a
-/// kit with only properties, or shapes not yet generated), validation is
-/// skipped and the segment passes through unchanged, preserving prior
-/// behavior for kits this check can't speak to.
+/// kit with only properties, or shapes not yet generated), the segment
+/// passes through with no warning: there is nothing to compare it to.
 pub(crate) fn resolve_class_segment(
     kit: &str,
     class_seg: &str,
     context: &str,
     warn: bool,
-) -> Result<String, String> {
+) -> String {
     let classes: Vec<String> = get_kit_types(kit).into_iter().map(|(name, _)| name).collect();
     match resolve_class_against(&classes, class_seg) {
-        ClassMatch::Exact(name) | ClassMatch::PassThrough(name) => Ok(name),
+        ClassMatch::Exact(name) | ClassMatch::PassThrough(name) => name,
         ClassMatch::CaseOnly { canonical, given } => {
             // Recover to the canonical name, but warn loudly so the author
             // corrects the frontmatter (and so this never silently masks a
@@ -597,26 +604,31 @@ pub(crate) fn resolve_class_segment(
                      (capitalization matters). Auto-corrected for this run only."
                 );
             }
-            Ok(canonical)
+            canonical
         }
         ClassMatch::NoMatch => {
-            // The class menu is a SUGGESTION surface, so deprecated classes
-            // are excluded (#85): they stay declared so history replays, but
-            // they are not destinations for new writing — printed untagged,
-            // three seats read appendix entries as live vocabulary in one
-            // night and one nearly migrated data INTO them.
-            let deprecated = get_deprecated_classes(kit);
-            let live: Vec<&String> =
-                classes.iter().filter(|c| !deprecated.contains_key(*c)).collect();
-            Err(format!(
-                "`{class_seg}` is not a live class in kit `{kit}` (live classes: {}). \
-                 Fix, pick one: (a) this document really is one of the live classes \
-                 — edit its keys to use that class name; (b) its class belongs to a kit \
-                 that is not installed in this repo — leave the file as-is and report it \
-                 to the kit owner. Until fixed, this document's facts are skipped, \
-                 not lost.",
-                live.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", ")
-            ))
+            // The class the line RECORDS is the class the line gets. The
+            // installed ontology says what may be written today; it does not
+            // get to rewrite what was written before. A class the kit has
+            // retired, or one from a kit this repo does not install, still
+            // names the type its documents were authored under, so it passes
+            // through verbatim and its facts land on the Thing plane like any
+            // other. Refusing here is what used to erase a retired class's
+            // whole history at rebuild, and what forced kits to keep dead
+            // classes declared to buy replay back.
+            if warn {
+                eprintln!(
+                    "warning: {context}: the key prefix `{kit}.{class_seg}.` names a \
+                     class the `{kit}` ontology does not declare (declared: {}). The \
+                     facts still save and still replay under `{class_seg}`. Fix, pick \
+                     one: (a) it is a typo — edit the keys to the class you meant; \
+                     (b) the class belongs to a kit this repo does not install — leave \
+                     the file alone and install the kit; (c) the kit retired the class \
+                     — migrate the document when you next edit it.",
+                    classes.join(", ")
+                );
+            }
+            class_seg.to_string()
         }
     }
 }
@@ -679,16 +691,13 @@ pub(crate) fn get_class_foldered(kit: &str, class_name: &str) -> bool {
 
 /// THE folder-contract predicate (#74; tr1p field-notes §2j): a class gets
 /// a folder — and templates emitted into it — iff it is `git-lex:foldered
-/// true` AND NOT `owl:deprecated`. The folder audit, the template emitter,
-/// init's folder scaffolding, and the cross-kit folder registry all
-/// dispatch through THIS function. Two of them once computed the predicate
-/// separately and agreed only because the kit author's habit never left
-/// `foldered` on a deprecated class — the first tired-author slip would
-/// have silently rebuilt retired folders on every seat at kit-update.
-/// Habits drift; a shared predicate can't.
+/// true`. The folder audit, the template emitter, init's folder scaffolding,
+/// and the cross-kit folder registry all dispatch through THIS function, so
+/// they cannot drift apart. A class a kit has retired is simply gone from the
+/// TTL, taking its `foldered` flag with it, so nothing extra is needed to
+/// stop rebuilding its folder.
 pub(crate) fn class_gets_folder(kit: &str, class_name: &str) -> bool {
     get_class_foldered(kit, class_name)
-        && !get_deprecated_classes(kit).contains_key(class_name)
 }
 
 /// Look up the display type label for a class — used at `git lex create` time to
@@ -973,66 +982,6 @@ fn parse_deprecated_properties(content: &str, short: &str) -> Vec<(String, Optio
                 _ => None,
             };
             out.push((prop.to_string(), replaced));
-        }
-    }
-    out
-}
-
-/// Class local-names this kit declares with `owl:deprecated true`. The
-/// folder audit consults this (#74): a deprecated class keeps resolving —
-/// that's what lets its history replay — but it must NOT demand a folder;
-/// creating one would invite new writing into retired vocabulary. Fleet
-/// receipt 2026-08-08: after the soul 0.9.x deprecation appendix, every
-/// repo's kit-update printed phantom missing-folder lines for the
-/// deprecated classes.
-pub(crate) fn get_deprecated_classes(
-    kit: &str,
-) -> std::collections::HashMap<String, Option<String>> {
-    let Some(root) = find_git_root() else { return Default::default() };
-    let (_, _, short) = resolve_kit_spec(kit);
-    let path = root
-        .join(".lex")
-        .join("ontology")
-        .join(&short)
-        .join(format!("{}.ttl", short));
-    let Ok(content) = fs::read_to_string(&path) else { return Default::default() };
-    parse_deprecated_classes(&content, &short)
-}
-
-/// Pure parser for `owl:deprecated true` classes in one kit TTL. Returns
-/// class local-name → optional successor (dcterms:isReplacedBy, shortened
-/// to the local name when in the kit's own namespace). Classes outside the
-/// kit's namespace are skipped.
-fn parse_deprecated_classes(
-    content: &str,
-    short: &str,
-) -> std::collections::HashMap<String, Option<String>> {
-    let kit_ns = kit_namespace_of(content, short);
-    let store = match crate::kit::load_ttl_str(content, &format!("{} ontology", short)) {
-        Ok(s) => s,
-        Err(e) => {
-            eprintln!("warning: {} — deprecated classes unreadable", e);
-            return Default::default();
-        }
-    };
-    let q = "SELECT ?c ?r WHERE { \
-             ?c <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://www.w3.org/2002/07/owl#Class> . \
-             ?c <http://www.w3.org/2002/07/owl#deprecated> true . \
-             OPTIONAL { ?c <http://purl.org/dc/terms/isReplacedBy> ?r } }";
-    let mut out = std::collections::HashMap::new();
-    if let Ok(oxigraph::sparql::QueryResults::Solutions(sols)) = git_lex::eval_query(&store, q) {
-        for s in sols.flatten() {
-            let Some(Term::NamedNode(c)) = s.get("c") else { continue };
-            let Some(name) = c.as_str().strip_prefix(kit_ns.as_str()) else { continue };
-            if name.is_empty() {
-                continue;
-            }
-            let replaced = match s.get("r") {
-                Some(Term::NamedNode(r)) => Some(shorten_successor(r.as_str(), &kit_ns)),
-                Some(Term::Literal(l)) => Some(l.value().to_string()),
-                _ => None,
-            };
-            out.insert(name.to_string(), replaced);
         }
     }
     out
@@ -1534,34 +1483,8 @@ copia:NocturneActivity a owl:Class ;
         let path = std::path::PathBuf::from("/Users/rob/repos/repolex-ai/git-lex-kit-soul/ontology/soul/soul.ttl");
         let Ok(content) = fs::read_to_string(&path) else { return };
         assert_eq!(parse_class_type_label(&content, "soul", "Memory"), "Memory");
-        // Decision deprecated at soul 0.9.0 (isReplacedBy soul:Note) — the
-        // label honestly says so; deprecate-never-delete keeps the stanza.
-        assert_eq!(
-            parse_class_type_label(&content, "soul", "Decision"),
-            "Decision (deprecated)"
-        );
         assert_eq!(parse_class_type_label(&content, "soul", "Note"), "Note");
         assert_eq!(parse_class_type_label(&content, "soul", "Journal"), "Journal");
-    }
-
-    #[test]
-    fn deprecated_classes_parse_real_kit_soul() {
-        // Receipt check against the live kit-soul ontology: the 0.9.x
-        // appendix re-declared retired classes with owl:deprecated true
-        // (deprecate-never-delete). The folder audit (#74) keys off this —
-        // deprecated classes must not demand folders.
-        let path = std::path::PathBuf::from("/Users/rob/repos/repolex-ai/git-lex-kit-soul/ontology/soul/soul.ttl");
-        let Ok(content) = fs::read_to_string(&path) else { return };
-        let dep = parse_deprecated_classes(&content, "soul");
-        assert!(dep.contains_key("Decision"), "Decision deprecated at 0.9.0: {dep:?}");
-        assert_eq!(
-            dep.get("Decision"),
-            Some(&Some("Note".to_string())),
-            "Decision's isReplacedBy names its successor: {dep:?}"
-        );
-        assert!(dep.contains_key("Friend"), "Friend deprecated at 0.9.1: {dep:?}");
-        assert!(!dep.contains_key("Note"), "Note is live vocabulary: {dep:?}");
-        assert!(!dep.contains_key("Journal"), "Journal is live vocabulary: {dep:?}");
     }
 
     #[test]
@@ -1627,6 +1550,28 @@ copia:NocturneActivity a owl:Class ;
     fn class_segment_real_typo_is_no_match() {
         let classes = vec!["Memory".to_string(), "Journal".to_string()];
         assert_eq!(resolve_class_against(&classes, "Memmory"), ClassMatch::NoMatch);
+    }
+
+    #[test]
+    fn undeclared_class_keeps_its_name() {
+        // The decision NoMatch feeds: a class the installed ontology does
+        // not declare — a kit that retired it, a kit that is not installed,
+        // or a typo — still names the class its documents were written
+        // under. resolve_class_segment hands it back verbatim so the type
+        // and the Thing-plane facts replay. Losing this is what erased a
+        // retired class's entire history at rebuild, and what made kits
+        // keep dead classes declared to buy replay back.
+        let classes = vec!["Note".to_string(), "Journal".to_string()];
+        assert_eq!(resolve_class_against(&classes, "Friend"), ClassMatch::NoMatch);
+        // Casing still wins where the ontology can speak to it, so a case
+        // slip never reaches the graph as a second, phantom class.
+        assert_eq!(
+            resolve_class_against(&classes, "journal"),
+            ClassMatch::CaseOnly {
+                canonical: "Journal".to_string(),
+                given: "journal".to_string()
+            }
+        );
     }
 
     #[test]

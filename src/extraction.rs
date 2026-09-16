@@ -355,30 +355,24 @@ pub(crate) fn frontmatter_to_turtle(
                 let class_seg = segments[0];
                 let prop_name = segments[1];
 
-                // Infer doc type from class segment, validated against the
-                // ontology (B1 fix, Day 38). This path used to capitalize the
-                // first letter as a GUESS (`soul.cameraangle` → `Cameraangle`,
-                // not the real `CameraAngle`), while nquad.rs passed the segment
-                // through verbatim — the two emitters disagreed, and the graph
-                // path's phantom `a soul:memory` made `?m a soul:Memory` miss.
-                // Now BOTH call `resolve_class_segment`, the single rule anchored
-                // to the kit's declared classes: exact/case-only hit → canonical
-                // name (warn on case-only), real typo → Err. On Err this doc has
-                // a bad class prefix; we warn and emit nothing for it (return
-                // None) rather than stamp a phantom type.
+                // Infer doc type from class segment (B1 fix, Day 38). This
+                // path used to capitalize the first letter as a GUESS
+                // (`soul.cameraangle` → `Cameraangle`, not the real
+                // `CameraAngle`), while nquad.rs passed the segment through
+                // verbatim — the two emitters disagreed, and the graph path's
+                // phantom `a soul:memory` made `?m a soul:Memory` miss. Both
+                // call `resolve_class_segment` now, so there is one casing
+                // rule. It always yields a class name: extraction runs at
+                // save, where a warning reaches the author who can act, and a
+                // document is never dropped for naming a class the installed
+                // ontology happens not to declare.
                 if doc_type.is_none() {
-                    match crate::ontology::resolve_class_segment(
+                    doc_type = Some(crate::ontology::resolve_class_segment(
                         kit,
                         class_seg,
                         &filepath.display().to_string(),
                         true, // extraction runs at save — the author can act
-                    ) {
-                        Ok(canonical) => doc_type = Some(canonical),
-                        Err(msg) => {
-                            eprintln!("warning: {}: {msg}", filepath.display());
-                            return Ok(None);
-                        }
-                    }
+                    ));
                 }
 
                 // Handle all YAML value types. Sequences produce one

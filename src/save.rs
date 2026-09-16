@@ -625,7 +625,10 @@ pub fn detect_runtime_substrate(root: &std::path::Path) -> Option<String> {
     if std::env::var("CLAUDE_CODE_SESSION_ID").is_ok()
         || std::env::var("CLAUDE_PROJECT_DIR").is_ok()
     {
-        return Some("claude-opus-5".to_string());
+        return Some(claude_session_model().unwrap_or_else(|| {
+            eprintln!("warning: could not read the Claude session log; stamping substrate as claude-opus-5");
+            "claude-opus-5".to_string()
+        }));
     }
     let subs = crate::harness::active_substrates(root);
     if !subs.is_empty() {
@@ -637,6 +640,55 @@ pub fn detect_runtime_substrate(root: &std::path::Path) -> Option<String> {
     } else {
         None
     }
+}
+
+/// Read the exact model id of the running Claude Code session.
+///
+/// Claude Code exports no model env var, but it logs every assistant turn to
+/// `~/.claude/projects/<project-slug>/<CLAUDE_CODE_SESSION_ID>.jsonl` with a
+/// `"model":"<id>"` field. The last one seen is the model that is saving now.
+/// Returns `None` when the id or the log is missing, so the caller can fall
+/// back to the historical hardcoded name and nothing changes shape.
+fn claude_session_model() -> Option<String> {
+    let session_id = std::env::var("CLAUDE_CODE_SESSION_ID").ok()?;
+    if session_id.is_empty() || session_id.contains('/') || session_id.contains("..") {
+        return None;
+    }
+    let home = std::env::var("HOME").ok()?;
+    let projects = std::path::Path::new(&home).join(".claude").join("projects");
+    let log = std::fs::read_dir(&projects)
+        .ok()?
+        .filter_map(|e| e.ok())
+        .map(|e| e.path().join(format!("{session_id}.jsonl")))
+        .find(|p| p.is_file())?;
+    // Session logs run to 500+ MB; the last assistant turn is always near
+    // the end, so read only the tail. Escalate the window if a burst of
+    // large tool results pushed the last turn further back. A tail cut
+    // mid-line leaves one unparsable fragment at the top, which the
+    // per-line parse skips.
+    use std::io::{Read, Seek, SeekFrom};
+    let mut f = std::fs::File::open(&log).ok()?;
+    let len = f.metadata().ok()?.len();
+    for window in [256u64 * 1024, 4 * 1024 * 1024, 32 * 1024 * 1024] {
+        f.seek(SeekFrom::Start(len.saturating_sub(window))).ok()?;
+        let mut buf = Vec::with_capacity(window.min(len) as usize);
+        f.read_to_end(&mut buf).ok()?;
+        let text = String::from_utf8_lossy(&buf);
+        let mut last: Option<String> = None;
+        for line in text.lines() {
+            if let Ok(v) = serde_json::from_str::<serde_json::Value>(line) {
+                if let Some(m) = v.get("message").and_then(|m| m.get("model")).and_then(|m| m.as_str()) {
+                    if !m.is_empty() && m != "<synthetic>" {
+                        last = Some(m.to_string());
+                    }
+                }
+            }
+        }
+        if last.is_some() || window >= len {
+            return last;
+        }
+    }
+    None
 }
 
 /// Stamp `<kit>.<Class>.dateUpdated: <today>` and `<kit>.<Class>.substrate: <model>`
@@ -1569,5 +1621,36 @@ mod date_converge_tests {
         let d = doc("2026-04-04", "2026-08-25");
         let out = upgrade_plain_dates(&d, "soul.Note", None, Some("2026-08-26T01:00:00-07:00")).unwrap();
         assert!(out.ends_with("---\nbody\n"));
+    }
+}
+
+#[cfg(test)]
+mod substrate_detect_tests {
+    use super::*;
+
+    /// One test, one env mutation sequence, under a lock: cargo runs tests on
+    /// parallel threads and process env is shared, so separate tests that
+    /// set/remove CLAUDE_CODE_SESSION_ID would race each other.
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[test]
+    fn claude_session_model_guards_env_and_path_shaped_ids() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let saved = std::env::var("CLAUDE_CODE_SESSION_ID").ok();
+
+        // No session id at all → None, so the caller falls back.
+        unsafe { std::env::remove_var("CLAUDE_CODE_SESSION_ID") };
+        assert_eq!(claude_session_model(), None);
+
+        // A path-shaped id must never reach the filesystem.
+        unsafe { std::env::set_var("CLAUDE_CODE_SESSION_ID", "../etc/passwd") };
+        assert_eq!(claude_session_model(), None);
+        unsafe { std::env::set_var("CLAUDE_CODE_SESSION_ID", "a/b") };
+        assert_eq!(claude_session_model(), None);
+
+        match saved {
+            Some(v) => unsafe { std::env::set_var("CLAUDE_CODE_SESSION_ID", v) },
+            None => unsafe { std::env::remove_var("CLAUDE_CODE_SESSION_ID") },
+        }
     }
 }
