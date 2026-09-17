@@ -42,9 +42,17 @@ pub(crate) fn parse_shacl_hints(shapes_ttl: &str, short: &str) -> HashMap<String
         }
     };
 
+    // A path is one IRI, or an alternative path over the spellings of one
+    // property (owl:equivalentProperty, see generate_shapes_from_store).
+    // Every spelling gets the hint, so a template teaches the field whichever
+    // key the author's kit declares for it.
     let q = "PREFIX sh: <http://www.w3.org/ns/shacl#>
+             PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
              SELECT ?prop ?path ?nodeKind ?minCount ?inList ?datatype ?minIncl ?maxIncl WHERE {
-                 ?prop sh:path ?path .
+                 ?prop sh:path ?pathNode .
+                 OPTIONAL { ?pathNode sh:alternativePath/rdf:rest*/rdf:first ?alt }
+                 BIND(COALESCE(?alt, ?pathNode) AS ?path)
+                 FILTER(isIRI(?path))
                  OPTIONAL { ?prop sh:nodeKind ?nodeKind }
                  OPTIONAL { ?prop sh:minCount ?minCount }
                  OPTIONAL { ?prop sh:in ?inList }
@@ -503,6 +511,81 @@ fn generate_shapes_from_store(
         }
     }
 
+    // Query 6: owl:equivalentProperty — ONE property under several spellings.
+    //
+    // subtexture.ttl requires exactly one subtexture:id on every Thing and
+    // bridges git-lex:id to it; pan.ttl declares pan:id equivalent to both and
+    // writes pan:id (goodlux, 2026-09-17: Pan writes pan: everywhere). Until
+    // now the generator matched owl:onProperty LITERALLY, so a node carrying
+    // the equivalent spelling failed the inherited "exactly one id" rule, and
+    // kit authors worked around the tool by copying every restriction under
+    // the parent's spelling (pan.ttl 0.3.6 changelog records it). The
+    // workaround belongs nowhere; the tool follows the bridge.
+    //
+    // The closure is symmetric and transitive and may be declared in ANY
+    // loaded vocabulary (the store holds every installed kit's ontology).
+    let equivalents: HashMap<String, Vec<String>> = {
+        let q = "PREFIX owl: <http://www.w3.org/2002/07/owl#>
+                 SELECT ?a ?b WHERE { ?a owl:equivalentProperty ?b . FILTER(isIRI(?a) && isIRI(?b)) }";
+        let mut adjacent: HashMap<String, Vec<String>> = HashMap::new();
+        if let Ok(oxigraph::sparql::QueryResults::Solutions(sols)) = git_lex::eval_query(store, q) {
+            for s in sols.flatten() {
+                let (Some(Term::NamedNode(a)), Some(Term::NamedNode(b))) = (s.get("a"), s.get("b")) else { continue };
+                let (a, b) = (a.as_str().to_string(), b.as_str().to_string());
+                if a == b { continue }
+                adjacent.entry(a.clone()).or_default().push(b.clone());
+                adjacent.entry(b).or_default().push(a);
+            }
+        }
+        let mut closure: HashMap<String, Vec<String>> = HashMap::new();
+        for start in adjacent.keys() {
+            let mut seen: HashSet<String> = HashSet::new();
+            let mut frontier = vec![start.clone()];
+            while let Some(cur) = frontier.pop() {
+                if !seen.insert(cur.clone()) { continue }
+                for next in adjacent.get(&cur).into_iter().flatten() {
+                    frontier.push(next.clone());
+                }
+            }
+            let mut members: Vec<String> = seen.into_iter().collect();
+            members.sort();
+            closure.insert(start.clone(), members);
+        }
+        closure
+    };
+    // Every spelling of `iri`, the given one FIRST and the rest sorted. The
+    // first member is what the readers of a shape treat as the property's
+    // written IRI (ontology.rs), so the spelling a class declares for itself
+    // — pan:id on pan:Node — stays the one its documents and graph carry.
+    let spellings = |iri: &str| -> Vec<String> {
+        let mut out = vec![iri.to_string()];
+        if let Some(members) = equivalents.get(iri) {
+            out.extend(members.iter().filter(|m| m.as_str() != iri).cloned());
+        }
+        out
+    };
+    let is_spelling_of = |iri: &str, other: &str| -> bool {
+        iri == other || equivalents.get(iri).is_some_and(|m| m.iter().any(|x| x == other))
+    };
+    // `sh:path` for a property: plain when it has one spelling, a standard
+    // SHACL alternative path over every spelling when it has several, so
+    // min/max counts are evaluated over the union.
+    let fmt_iri = |iri: &str| -> String {
+        match iri.strip_prefix(namespace) {
+            Some(local) => format!("{}:{}", prefix_name, local),
+            None => format!("<{}>", iri),
+        }
+    };
+    let path_line = |iri: &str| -> String {
+        let members = spellings(iri);
+        if members.len() == 1 {
+            format!("        sh:path {} ;\n", fmt_iri(iri))
+        } else {
+            let list: Vec<String> = members.iter().map(|m| fmt_iri(m)).collect();
+            format!("        sh:path [ sh:alternativePath ( {} ) ] ;\n", list.join(" "))
+        }
+    };
+
     // Build the SHACL Turtle output
     let mut shacl = String::new();
     shacl.push_str("@prefix sh:    <http://www.w3.org/ns/shacl#> .\n");
@@ -534,13 +617,20 @@ fn generate_shapes_from_store(
         // Own properties first, then inherited, so the generated shape reads
         // in the order the author thinks in. A child re-declaring a parent's
         // property wins, because its own domain already placed it.
+        //
+        // One shape per PROPERTY, not per spelling: pan:id (own), git-lex:id
+        // and subtexture:id (inherited) are one property under Query 6, and
+        // the first spelling seen — the class's own — represents it.
         let ancestors = ancestor_chain(store, class_iri);
-        let mut class_props: Vec<&PropInfo> = properties.iter()
-            .filter(|p| p.domain == *class_iri)
-            .collect();
+        let mut class_props: Vec<&PropInfo> = Vec::new();
+        for p in properties.iter().filter(|p| p.domain == *class_iri) {
+            if !class_props.iter().any(|existing| is_spelling_of(&existing.iri, &p.iri)) {
+                class_props.push(p);
+            }
+        }
         for ancestor in &ancestors {
             for p in properties.iter().filter(|p| p.domain == *ancestor) {
-                if !class_props.iter().any(|existing| existing.iri == p.iri) {
+                if !class_props.iter().any(|existing| is_spelling_of(&existing.iri, &p.iri)) {
                     class_props.push(p);
                 }
             }
@@ -566,37 +656,52 @@ fn generate_shapes_from_store(
             // A required-ness restriction can sit on the class OR on any
             // ancestor — an inherited property that a parent declares required
             // is required here too (#104).
-            let is_required = required_props.contains(&(class_iri.clone(), prop.iri.clone()))
-                || ancestors.iter().any(|a| required_props.contains(&(a.clone(), prop.iri.clone())));
+            // A restriction under ANY spelling of the property counts: the
+            // "exactly one subtexture:id" on subtexture:Thing requires pan:id
+            // on pan:Node.
+            let members = spellings(&prop.iri);
+            let is_required = members.iter().any(|m| {
+                required_props.contains(&(class_iri.clone(), m.clone()))
+                    || ancestors.iter().any(|a| required_props.contains(&(a.clone(), m.clone())))
+            });
+            // Type and range come from whichever spelling declares them: the
+            // class's own spelling first, then the others in closure order.
+            let declared_range = if !prop.range.is_empty() {
+                prop.range.clone()
+            } else {
+                members.iter()
+                    .find_map(|m| properties.iter().find(|q| q.iri == *m && !q.range.is_empty()))
+                    .map(|q| q.range.clone())
+                    .unwrap_or_default()
+            };
+            let is_object_prop = prop.is_object_prop
+                || members.iter().any(|m| properties.iter().any(|q| q.iri == *m && q.is_object_prop));
 
             shacl.push_str(" ;\n    sh:property [\n");
             // An INHERITED property usually lives in another kit's namespace
             // (git-lex:title on a soul class), where the local prefix would
             // name a different IRI entirely. Full bracketed IRI in that case —
             // always valid Turtle, and parse_shacl_hints already handles the
-            // bracketed form.
-            match prop.iri.strip_prefix(namespace) {
-                Some(local) => shacl.push_str(&format!("        sh:path {}:{} ;\n", prefix_name, local)),
-                None => shacl.push_str(&format!("        sh:path <{}> ;\n", prop.iri)),
-            }
+            // bracketed form. Several spellings become one alternative path.
+            shacl.push_str(&path_line(&prop.iri));
 
             if !prop.comment.is_empty() {
                 let escaped = prop.comment.replace('\\', "\\\\").replace('"', "\\\"");
                 shacl.push_str(&format!("        rdfs:comment \"{}\" ;\n", escaped));
             }
 
-            if prop.is_object_prop {
+            if is_object_prop {
                 shacl.push_str("        sh:nodeKind sh:IRI ;\n");
                 let msg = format!("{} must be an IRI reference.", prop_name);
                 shacl.push_str(&format!("        sh:message \"{}\" ;\n", msg));
-            } else if let Some(values) = enum_values.get(&prop.range) {
+            } else if let Some(values) = enum_values.get(&declared_range) {
                 let quoted: Vec<String> = values.iter().map(|v| format!("\"{}\"", v)).collect();
                 shacl.push_str(&format!("        sh:in ( {} ) ;\n", quoted.join(" ")));
                 let msg = format!("{} must be {}.",
                     prop_name,
                     values.iter().map(|v| format!("'{}'", v)).collect::<Vec<_>>().join(", "));
                 shacl.push_str(&format!("        sh:message \"{}\" ;\n", msg));
-            } else if let Some(bounded) = bounded_datatypes.get(&prop.range) {
+            } else if let Some(bounded) = bounded_datatypes.get(&declared_range) {
                 // A bounded custom datatype: emit the base type AND the bounds.
                 let xsd_prefix = "http://www.w3.org/2001/XMLSchema#";
                 let base_local = if bounded.base.starts_with(xsd_prefix) {
@@ -610,7 +715,7 @@ fn generate_shapes_from_store(
                         "warning: {} declares owl:onDatatype <{}>, which is not an XSD type — \
 no sh:datatype emitted for properties ranged at it. Range them at an XSD base type, \
 or the values save ungoverned.",
-                        local_name(&prop.range), bounded.base
+                        local_name(&declared_range), bounded.base
                     );
                     String::new()
                 };
@@ -647,7 +752,7 @@ or the values save ungoverned.",
 translate to a SHACL constraint — that bound is NOT enforced. Report it so the \
 generator learns it, or express the bound with a facet git-lex knows \
 (minInclusive, maxInclusive, minExclusive, maxExclusive, minLength, maxLength, pattern).",
-                                local_name(&prop.range), facet, value
+                                local_name(&declared_range), facet, value
                             );
                         }
                     }
@@ -663,8 +768,8 @@ generator learns it, or express the bound with a facet git-lex knows \
                 shacl.push_str(&format!("        sh:message \"{}\" ;\n", msg));
             } else {
                 let xsd_prefix = "http://www.w3.org/2001/XMLSchema#";
-                if prop.range.starts_with(xsd_prefix) && prop.range != format!("{}string", xsd_prefix) {
-                    let xsd_type = &prop.range[xsd_prefix.len()..];
+                if declared_range.starts_with(xsd_prefix) && declared_range != format!("{}string", xsd_prefix) {
+                    let xsd_type = &declared_range[xsd_prefix.len()..];
                     shacl.push_str(&format!("        sh:datatype xsd:{} ;\n", xsd_type));
                     let msg = format!("Expected datatype: xsd:{}.", xsd_type);
                     shacl.push_str(&format!("        sh:message \"{}\" ;\n", msg));
@@ -709,10 +814,7 @@ generator learns it, or express the bound with a facet git-lex knows \
             let is_last = i == class_quals.len() - 1;
             let on_local = local_name(&qr.on_class);
             shacl.push_str(" ;\n    sh:property [\n");
-            match qr.prop_iri.strip_prefix(namespace) {
-                Some(local) => shacl.push_str(&format!("        sh:path {}:{} ;\n", prefix_name, local)),
-                None => shacl.push_str(&format!("        sh:path <{}> ;\n", qr.prop_iri)),
-            }
+            shacl.push_str(&path_line(&qr.prop_iri));
             // NO sh:nodeKind here — and CORRECTING WHAT I FIRST WROTE HERE,
             // which was wrong and which I had already told @tr1p (2026-08-27).
             //
@@ -1274,5 +1376,176 @@ ex:s3 a ex:Scene ; ex:relatedToId ex:elsewhere .
         // the cross-repo option; it is the only one that can work here now.
         assert_eq!(validate(unresolvable), Ok(2),
             "an unresolvable target FAILS both qualified shapes — loud, not silent");
+    }
+}
+
+#[cfg(test)]
+mod equivalent_property_tests {
+    use super::*;
+    use rudof_rdf::rdf_core::RDFFormat;
+    use rudof_rdf::rdf_impl::{InMemoryGraph, ReaderMode};
+    use sparql_service::RdfData;
+    use shacl_rdf::ShaclParser;
+    use shacl_ir::compiled::schema_ir::SchemaIR as ShaclSchemaIR;
+    use shacl_validation::shacl_processor::{GraphValidation, ShaclProcessor, ShaclValidationMode};
+    use shacl_validation::store::Graph;
+
+    /// The real shape of the seam, in miniature (goodlux, 2026-09-17): a base
+    /// Thing requires exactly one `t:id`; a kit's Node inherits from it and
+    /// writes its OWN spelling, `p:id`, declared equivalent. The node must
+    /// satisfy the inherited rule under its own spelling.
+    const SEAM_TTL: &str = r#"
+@prefix owl:  <http://www.w3.org/2002/07/owl#> .
+@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+@prefix xsd:  <http://www.w3.org/2001/XMLSchema#> .
+@prefix t:    <https://repolex.ai/ontology/t/> .
+@prefix p:    <https://repolex.ai/ontology/p/> .
+
+t:Thing a owl:Class ;
+    rdfs:subClassOf [ a owl:Restriction ; owl:onProperty t:id ; owl:cardinality 1 ] .
+t:id a owl:ObjectProperty ; rdfs:domain t:Thing ; rdfs:range t:Thing .
+
+t:Node a owl:Class ; rdfs:subClassOf t:Thing .
+p:id a owl:ObjectProperty ;
+    owl:equivalentProperty t:id ;
+    rdfs:domain t:Node ; rdfs:range t:Thing .
+
+t:plainName a owl:DatatypeProperty ; rdfs:domain t:Node ; rdfs:range xsd:string .
+"#;
+
+    fn shapes_for(ttl: &str) -> String {
+        let store = crate::kit::load_ttl_str(ttl, "test").expect("ttl loads");
+        generate_shapes_from_store(&store, "t", "https://repolex.ai/ontology/t/", "test")
+            .expect("shapes generate")
+    }
+
+    fn node_shape(out: &str) -> &str {
+        let start = out.find("t:NodeShape").expect("Node shape present");
+        let rest = &out[start..];
+        let end = rest.find("\n# ---").unwrap_or(rest.len());
+        &rest[..end]
+    }
+
+    /// (a) Two spellings bridged by owl:equivalentProperty become ONE
+    /// alternative path: the class's own spelling first, the rest sorted.
+    #[test]
+    fn equivalent_spellings_become_one_alternative_path() {
+        let out = shapes_for(SEAM_TTL);
+        let node = node_shape(&out);
+        assert!(
+            node.contains("sh:path [ sh:alternativePath ( <https://repolex.ai/ontology/p/id> t:id ) ] ;"),
+            "Node's own spelling p:id leads, the bridged t:id follows:\n{node}"
+        );
+        // One property shape for the id, not one per spelling.
+        assert_eq!(node.matches("/id>").count() + node.matches("sh:path t:id").count(), 1,
+            "id must be shaped ONCE on Node, under the alternative path:\n{node}");
+        // The parent's own shape leads with ITS spelling.
+        let thing_start = out.find("t:ThingShape").expect("Thing shape present");
+        let thing = &out[thing_start..];
+        assert!(
+            thing.contains("sh:path [ sh:alternativePath ( t:id <https://repolex.ai/ontology/p/id> ) ] ;"),
+            "Thing leads with t:id:\n{thing}"
+        );
+    }
+
+    /// The inherited "exactly one t:id" is a rule about p:id too.
+    #[test]
+    fn inherited_requirement_reaches_the_equivalent_spelling() {
+        let out = shapes_for(SEAM_TTL);
+        let node = node_shape(&out);
+        let id_block = node.split("sh:alternativePath").nth(1).expect("alt path block");
+        let id_block = id_block.split("]\n").next().unwrap_or(id_block);
+        assert!(id_block.contains("sh:minCount 1"),
+            "the requirement declared on t:id must land on the merged shape:\n{node}");
+        assert!(id_block.contains("sh:nodeKind sh:IRI"),
+            "object-property typing must survive the merge:\n{node}");
+    }
+
+    /// (b) A chain a≡b, b≡c closes transitively into one path of three.
+    #[test]
+    fn equivalence_closure_is_transitive() {
+        let ttl = r#"
+@prefix owl:  <http://www.w3.org/2002/07/owl#> .
+@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+@prefix xsd:  <http://www.w3.org/2001/XMLSchema#> .
+@prefix t:    <https://repolex.ai/ontology/t/> .
+@prefix s:    <https://repolex.ai/ontology/s/> .
+@prefix u:    <https://repolex.ai/ontology/u/> .
+t:Thing a owl:Class .
+t:a a owl:DatatypeProperty ; rdfs:domain t:Thing ; rdfs:range xsd:dateTime .
+s:b a owl:DatatypeProperty ; owl:equivalentProperty t:a .
+u:c a owl:DatatypeProperty ; owl:equivalentProperty s:b .
+"#;
+        let out = shapes_for(ttl);
+        assert!(
+            out.contains("sh:path [ sh:alternativePath ( t:a <https://repolex.ai/ontology/s/b> <https://repolex.ai/ontology/u/c> ) ] ;"),
+            "a≡b and b≡c must close into one path of all three, own spelling first:\n{out}"
+        );
+        assert!(out.contains("sh:datatype xsd:dateTime"), "datatype kept on the merged shape:\n{out}");
+    }
+
+    /// (d) A property with no equivalents is emitted exactly as before.
+    #[test]
+    fn unrelated_property_keeps_a_plain_path() {
+        let out = shapes_for(SEAM_TTL);
+        assert!(out.contains("        sh:path t:plainName ;\n"),
+            "an unbridged property must keep its plain sh:path:\n{out}");
+        assert!(!node_shape(&out).contains("plainName ;\n") || !out.contains("alternativePath ( t:plainName"),
+            "plainName must not be wrapped in an alternative path:\n{out}");
+    }
+
+    fn violations(shapes: &str, data: &str) -> Result<usize, String> {
+        let sg = InMemoryGraph::from_reader(&mut shapes.as_bytes(), "s", &RDFFormat::Turtle, None, &ReaderMode::Lax)
+            .map_err(|e| format!("shapes parse: {e}"))?;
+        let sr = RdfData::from_graph(sg).map_err(|e| format!("shapes load: {e}"))?;
+        let schema = ShaclParser::new(sr).parse().map_err(|e| format!("shacl parse: {e}"))?;
+        let compiled = ShaclSchemaIR::compile(&schema).map_err(|e| format!("compile: {e}"))?;
+        let dg = InMemoryGraph::from_reader(&mut data.as_bytes(), "d", &RDFFormat::Turtle, None, &ReaderMode::Strict)
+            .map_err(|e| format!("data parse: {e}"))?;
+        let dr = RdfData::from_graph(dg).map_err(|e| format!("data load: {e}"))?;
+        let store = Graph::from_data(dr);
+        let mut p = GraphValidation::from_graph(store, ShaclValidationMode::Native);
+        let report = p.validate(&compiled).map_err(|e| format!("validate: {e}"))?;
+        Ok(report.results().len())
+    }
+
+    /// (c) The shipped validator, on the generated shapes: a Node carrying
+    /// ONLY its own spelling passes the inherited cardinality rule; a Node
+    /// carrying only the parent's spelling passes too; a Node with neither
+    /// fails it. This is the receipt that the alternative path is evaluated
+    /// as a union, not the assumption.
+    #[test]
+    fn node_with_only_its_own_spelling_satisfies_the_inherited_rule() {
+        let shapes = shapes_for(SEAM_TTL);
+        let own = r#"
+@prefix t: <https://repolex.ai/ontology/t/> .
+@prefix p: <https://repolex.ai/ontology/p/> .
+<https://repolex.ai/t/Node/n1> a t:Node ; p:id <https://repolex.ai/t/Node/n1> .
+"#;
+        let parents = r#"
+@prefix t: <https://repolex.ai/ontology/t/> .
+<https://repolex.ai/t/Node/n2> a t:Node ; t:id <https://repolex.ai/t/Node/n2> .
+"#;
+        let none = r#"
+@prefix t: <https://repolex.ai/ontology/t/> .
+<https://repolex.ai/t/Node/n3> a t:Node ; t:plainName "no id at all" .
+"#;
+        assert_eq!(violations(&shapes, own), Ok(0),
+            "p:id alone must satisfy the rule declared on t:id:\n{shapes}");
+        assert_eq!(violations(&shapes, parents), Ok(0),
+            "t:id alone must still satisfy it:\n{shapes}");
+        assert_eq!(violations(&shapes, none), Ok(1),
+            "no id under any spelling must fail exactly the id rule:\n{shapes}");
+    }
+
+    /// The template hint reader sees every spelling of a merged path.
+    #[test]
+    fn hints_index_every_spelling() {
+        let shapes = shapes_for(SEAM_TTL);
+        let hints = parse_shacl_hints(&shapes, "t");
+        let own = hints.get("<https://repolex.ai/ontology/p/id>").expect("foreign spelling indexed");
+        assert!(own.contains("required") && own.contains("IRI"), "{own}");
+        let bridged = hints.get("t:id").expect("kit spelling indexed");
+        assert!(bridged.contains("required") && bridged.contains("IRI"), "{bridged}");
     }
 }

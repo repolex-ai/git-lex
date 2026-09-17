@@ -149,13 +149,21 @@ fn parse_shape_file(content: &str, short_hint: &str) -> ShapeFile {
 
     // One row per (shape, property block). OPTIONAL keeps property-less
     // shapes (e.g. copia:Pose) as classes with zero props.
+    // `sh:path` is one IRI, or an alternative path over the spellings of ONE
+    // property bridged by owl:equivalentProperty (pan:id, subtexture:id,
+    // git-lex:id). The generator writes the class's own spelling FIRST in
+    // that list, and that is the IRI this class's documents carry — so the
+    // head of the list is the property's written IRI here.
     let q = "PREFIX sh: <http://www.w3.org/ns/shacl#>
+             PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
              PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>
              SELECT ?class ?prop ?path ?nodeKind ?datatype ?minCount ?comment WHERE {
                  ?shape sh:targetClass ?class .
                  OPTIONAL {
                      ?shape sh:property ?prop .
-                     ?prop sh:path ?path .
+                     ?prop sh:path ?pathNode .
+                     OPTIONAL { ?pathNode sh:alternativePath/rdf:first ?head }
+                     BIND(COALESCE(?head, ?pathNode) AS ?path)
                      OPTIONAL { ?prop sh:nodeKind ?nodeKind }
                      OPTIONAL { ?prop sh:datatype ?datatype }
                      OPTIONAL { ?prop sh:minCount ?minCount }
@@ -1194,6 +1202,40 @@ soul:Memory a owl:Class ;
     rdfs:label "Memory" .
 "#;
         assert!(parse_class_foldered(ttl, "soul", "Memory"));
+    }
+
+    // ── equivalent spellings (goodlux, 2026-09-17) ──
+
+    /// A merged path lists the class's OWN spelling first; the runtime reads
+    /// that head as the property's written IRI, so a pan:Node document keeps
+    /// emitting pan:id while the inherited rule is checked over every
+    /// spelling. The other spellings must not surface as extra properties.
+    #[test]
+    fn alternative_path_head_is_the_written_iri() {
+        let shapes = r#"
+@prefix sh:   <http://www.w3.org/ns/shacl#> .
+@prefix t:    <https://repolex.ai/ontology/t/> .
+@prefix xsd:  <http://www.w3.org/2001/XMLSchema#> .
+@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+
+t:NodeShape a sh:NodeShape ;
+    sh:targetClass t:Node ;
+    sh:property [
+        sh:path [ sh:alternativePath ( <https://repolex.ai/ontology/p/id> t:id ) ] ;
+        sh:nodeKind sh:IRI ;
+        sh:minCount 1 ;
+    ] ;
+    sh:property [
+        sh:path t:plainName ;
+    ] .
+"#;
+        let parsed = parse_shape_file(shapes, "t");
+        let node = parsed.shapes.iter().find(|s| s.class_name == "Node").expect("Node parsed");
+        assert_eq!(node.props.len(), 2, "one property per shape block, not per spelling: {:?}", node.props);
+        let id = node.props.iter().find(|p| p.name == "id").expect("id parsed");
+        assert_eq!(id.iri, "https://repolex.ai/ontology/p/id", "the head of the list is the written IRI");
+        assert!(id.is_iri && id.required, "typing and required-ness survive the alternative path");
+        assert!(node.props.iter().any(|p| p.name == "plainName" && p.iri == "https://repolex.ai/ontology/t/plainName"));
     }
 
     // ── domain-open properties (#82) ──

@@ -150,7 +150,10 @@ fn build_model(root: &Path) -> Model {
         "{PREFIXES} SELECT ?class ?path ?nodeKind ?datatype ?minCount ?comment ?range ?value WHERE {{
             ?shape sh:targetClass ?class .
             OPTIONAL {{
-                ?shape sh:property ?prop . ?prop sh:path ?path .
+                ?shape sh:property ?prop . ?prop sh:path ?pathNode .
+                OPTIONAL {{ ?pathNode sh:alternativePath/rdf:rest*/rdf:first ?alt }}
+                BIND(COALESCE(?alt, ?pathNode) AS ?path)
+                FILTER(isIRI(?path))
                 OPTIONAL {{ ?prop sh:nodeKind ?nodeKind }}
                 OPTIONAL {{ ?prop sh:datatype ?datatype }}
                 OPTIONAL {{ ?prop sh:minCount ?minCount }}
