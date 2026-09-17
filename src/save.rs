@@ -40,42 +40,36 @@ fn resolve_agent_identity(root: &std::path::Path) -> Option<(String, String)> {
     if let (Ok(name), Ok(email)) = (
         std::env::var("GIT_AUTHOR_NAME"),
         std::env::var("GIT_AUTHOR_EMAIL"),
-    ) {
-        if !name.is_empty() && !email.is_empty() {
+    )
+        && !name.is_empty() && !email.is_empty() {
             return Some((name, email));
         }
-    }
 
     // 2. repo.yml (the human-edited source of truth — authoritative over the
     //    settings.json cache, so editing it works WITHOUT a kit-update).
     let fields = read_repo_yml_fields(&root.join(".lex").join("repo.yml"));
-    if let (Some(name), Some(email)) = (fields.get("agent_name"), fields.get("agent_email")) {
-        if !name.is_empty() && !email.is_empty() {
+    if let (Some(name), Some(email)) = (fields.get("agent_name"), fields.get("agent_email"))
+        && !name.is_empty() && !email.is_empty() {
             return Some((name.clone(), email.clone()));
         }
-    }
 
     // 3. .claude/settings.json env block — last fallback, read through the
     //    module that WRITES that block (review #38: reader and writer of
     //    the env schema live in one file, so the schema can't drift apart
     //    across an unrelated module boundary again — the .env retirement
     //    already proved this block's location migrates).
-    if let Some(id) = harness::claude::read_identity_env(&root) {
+    if let Some(id) = harness::claude::read_identity_env(root) {
         return Some(id);
     }
 
     // 4. Fallback for generic / non-soul repos: read user's git config.
-    if !soul_md::soul_kit_installed(root) {
-        if let Ok(repo) = git2::Repository::open(root) {
-            if let Ok(sig) = repo.signature() {
-                if let (Some(name), Some(email)) = (sig.name(), sig.email()) {
-                    if !name.is_empty() && !email.is_empty() {
+    if !soul_md::soul_kit_installed(root)
+        && let Ok(repo) = git2::Repository::open(root)
+            && let Ok(sig) = repo.signature()
+                && let (Some(name), Some(email)) = (sig.name(), sig.email())
+                    && !name.is_empty() && !email.is_empty() {
                         return Some((name.to_string(), email.to_string()));
                     }
-                }
-            }
-        }
-    }
 
     None
 }
@@ -676,13 +670,11 @@ fn claude_session_model() -> Option<String> {
         let text = String::from_utf8_lossy(&buf);
         let mut last: Option<String> = None;
         for line in text.lines() {
-            if let Ok(v) = serde_json::from_str::<serde_json::Value>(line) {
-                if let Some(m) = v.get("message").and_then(|m| m.get("model")).and_then(|m| m.as_str()) {
-                    if !m.is_empty() && m != "<synthetic>" {
+            if let Ok(v) = serde_json::from_str::<serde_json::Value>(line)
+                && let Some(m) = v.get("message").and_then(|m| m.get("model")).and_then(|m| m.as_str())
+                    && !m.is_empty() && m != "<synthetic>" {
                         last = Some(m.to_string());
                     }
-                }
-            }
         }
         if last.is_some() || window >= len {
             return last;
@@ -1011,12 +1003,11 @@ fn converge_plain_dates_once() {
         // what git's last commit records.
         let first = git_file_time(rel, true);
         let last = git_file_time(rel, false);
-        if let Some(new_content) = upgrade_plain_dates(&content, &prefix, first.as_deref(), last.as_deref()) {
-            if std::fs::write(&path, &new_content).is_ok() {
+        if let Some(new_content) = upgrade_plain_dates(&content, &prefix, first.as_deref(), last.as_deref())
+            && std::fs::write(&path, &new_content).is_ok() {
                 let _ = Command::new("git").args(["add", "--"]).arg(&path).status();
                 converged.push(rel.to_string());
             }
-        }
     }
     if !converged.is_empty() {
         println!(
@@ -1067,14 +1058,13 @@ fn has_plain_date_value(content: &str, kit_class: &str) -> bool {
 fn plain_date_line_value(content: &str, key: &str) -> Option<String> {
     for line in content.lines() {
         let t = line.trim_start();
-        if let Some(rest) = t.strip_prefix(key) {
-            if let Some(v) = rest.strip_prefix(':') {
+        if let Some(rest) = t.strip_prefix(key)
+            && let Some(v) = rest.strip_prefix(':') {
                 let v = v.split('#').next().unwrap_or("").trim().trim_matches('"');
                 if v.len() == 10 && v.as_bytes()[4] == b'-' && !v.contains('T') {
                     return Some(v.to_string());
                 }
             }
-        }
     }
     None
 }
@@ -1166,13 +1156,11 @@ fn frontmatter_kit_class(content: &str) -> Option<String> {
         let mut parts = key.split('.');
         if let (Some(kit), Some(class), Some(_prop), None) =
             (parts.next(), parts.next(), parts.next(), parts.next())
-        {
-            if !kit.is_empty()
+            && !kit.is_empty()
                 && class.chars().next().is_some_and(|c| c.is_ascii_uppercase())
             {
                 return Some(format!("{}.{}", kit, class));
             }
-        }
     }
     None
 }
@@ -1275,8 +1263,8 @@ fn stamp_frontmatter_dates(
                 continue;
             }
         }
-        if let Some(sub) = substrate {
-            if key == substrate_key {
+        if let Some(sub) = substrate
+            && key == substrate_key {
                 found_substrate = true;
                 let stamped_line = format!("{}: \"{}\"", substrate_key, sub);
                 if *line != stamped_line {
@@ -1285,7 +1273,6 @@ fn stamp_frontmatter_dates(
                 }
                 continue;
             }
-        }
     }
 
     // Insert what's missing above the closing `---`, created before updated.
@@ -1299,12 +1286,11 @@ fn stamp_frontmatter_dates(
             changed = true;
         }
     }
-    if let Some(sub) = substrate {
-        if !found_substrate {
+    if let Some(sub) = substrate
+        && !found_substrate {
             lines.insert(close, format!("{}: \"{}\"", substrate_key, sub));
             changed = true;
         }
-    }
     if !changed {
         return None;
     }
@@ -1537,8 +1523,8 @@ pub(crate) fn cmd_extract() {
                 // URL-aware split (review #26): same splitter as the emitter,
                 // so the gate checks the exact values sync will resolve.
                 for val in nquad::split_object_values(parts[2]) {
-                    if let Some(target) = nquad::thing_iri_from_range(range_iri, &val) {
-                        if !owners.contains_key(&target) {
+                    if let Some(target) = nquad::thing_iri_from_range(range_iri, &val)
+                        && !owners.contains_key(&target) {
                             eprintln!(
                                 "identity gate: {}: `{}` references `{}` but no Thing {} exists \
                                  in this repo — dangling references reject at save (Law 6)",
@@ -1546,7 +1532,6 @@ pub(crate) fn cmd_extract() {
                             );
                             ref_errors += 1;
                         }
-                    }
                 }
             }
         }

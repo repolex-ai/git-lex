@@ -347,9 +347,8 @@ impl RepoYml {
     pub fn scalar_fields(&self) -> std::collections::HashMap<String, String> {
         let mut out = std::collections::HashMap::new();
         let mut put = |k: &str, v: &Option<String>| {
-            if let Some(v) = v {
-                if !v.is_empty() { out.insert(k.to_string(), v.clone()); }
-            }
+            if let Some(v) = v
+                && !v.is_empty() { out.insert(k.to_string(), v.clone()); }
         };
         put("name", &self.name);
         put("kit", &self.kit);
@@ -731,8 +730,8 @@ fn registry_update(edit: impl FnOnce(&mut Vec<serde_json::Value>)) -> Result<(),
     // One-time fold of the line-based registry: its paths join the list with
     // no time, because none was ever recorded for them.
     let legacy = legacy_registry_path().filter(|p| p.exists());
-    if let Some(lp) = &legacy {
-        if let Ok(text) = fs::read_to_string(lp) {
+    if let Some(lp) = &legacy
+        && let Ok(text) = fs::read_to_string(lp) {
             for line in text.lines() {
                 let path = line.trim();
                 if path.is_empty() || repos.iter().any(|e| entry_path(e) == Some(path)) {
@@ -741,7 +740,6 @@ fn registry_update(edit: impl FnOnce(&mut Vec<serde_json::Value>)) -> Result<(),
                 repos.push(serde_json::json!({ "path": path, "last_used": null }));
             }
         }
-    }
 
     edit(&mut repos);
     repos.sort_by(|a, b| entry_path(a).unwrap_or("").cmp(entry_path(b).unwrap_or("")));
@@ -1105,11 +1103,10 @@ fn kit_prefix_binding(root: &std::path::Path, spec: &str) -> Option<(String, Str
         .join("ontology")
         .join(&short)
         .join(format!("{}-shapes.ttl", short));
-    if let Ok(ttl) = fs::read_to_string(&shapes_path) {
-        if let Some((pname, ns)) = extract_kit_prefix(&ttl, &short) {
+    if let Ok(ttl) = fs::read_to_string(&shapes_path)
+        && let Some((pname, ns)) = extract_kit_prefix(&ttl, &short) {
             return Some((format!("{}:", pname), ns));
         }
-    }
     Some((format!("{}:", short), conventional_kit_namespace(&short)))
 }
 
@@ -1166,11 +1163,10 @@ pub fn prefix_bindings_at(root: Option<&std::path::Path>) -> Vec<(String, String
             if installed_kit_ontology_dir(r, &spec).is_none() {
                 continue;
             }
-            if let Some(binding) = kit_prefix_binding(r, &short) {
-                if !kit_prefixes.iter().any(|(name, _)| name == &binding.0) {
+            if let Some(binding) = kit_prefix_binding(r, &short)
+                && !kit_prefixes.iter().any(|(name, _)| name == &binding.0) {
                     kit_prefixes.push(binding);
                 }
-            }
         }
     }
 

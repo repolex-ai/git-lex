@@ -95,8 +95,7 @@ pub fn resolve_frontmatter_value(raw: &str) -> ResolveResult {
     }
 
     // Rule 2: reject @mentions
-    if raw.starts_with('@') {
-        let inner = &raw[1..];
+    if let Some(inner) = raw.strip_prefix('@') {
         return ResolveResult::Rejected(format!(
             "@mention syntax is not allowed in frontmatter. \
              Write the repo-relative path instead (e.g. {}.md with its folder)",

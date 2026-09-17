@@ -88,9 +88,8 @@ fn resolve_doctype_across_kits(
     let mut all_choices: Vec<(String, String)> = Vec::new(); // (kit_short, class_name)
     for spec in &installed {
         let (_, _, short) = resolve_kit_spec(spec);
-        if let Some(ref want_short) = kit_filter {
-            if short.to_lowercase() != *want_short { continue; }
-        }
+        if let Some(ref want_short) = kit_filter
+            && short.to_lowercase() != *want_short { continue; }
         for (name, props) in get_kit_types(spec) {
             all_choices.push((short.clone(), name.clone()));
             if name.to_lowercase() == class_lower {

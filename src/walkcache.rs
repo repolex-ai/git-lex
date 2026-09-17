@@ -247,11 +247,10 @@ impl WalkCache {
         links: usize,
     ) {
         let p = self.frag_path(relpath);
-        if let Some(parent) = p.parent() {
-            if fs::create_dir_all(parent).is_err() {
+        if let Some(parent) = p.parent()
+            && fs::create_dir_all(parent).is_err() {
                 return;
             }
-        }
         if fs::write(&p, fragment).is_err() {
             return;
         }

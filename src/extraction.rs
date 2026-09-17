@@ -47,7 +47,7 @@ pub(crate) fn normalize_wikilink_path(target: &str, source_dir: &str) -> Option<
         match seg {
             "" | "." => continue,
             ".." => {
-                if stack.pop().is_none() { return None; }
+                stack.pop()?;
             }
             other => stack.push(other),
         }
@@ -70,8 +70,8 @@ pub(crate) fn percent_decode(s: &str) -> String {
     let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
     let mut i = 0;
     while i < bytes.len() {
-        if bytes[i] == b'%' && i + 2 < bytes.len() {
-            if let Ok(b) = u8::from_str_radix(
+        if bytes[i] == b'%' && i + 2 < bytes.len()
+            && let Ok(b) = u8::from_str_radix(
                 std::str::from_utf8(&bytes[i + 1..i + 3]).unwrap_or(""),
                 16,
             ) {
@@ -79,7 +79,6 @@ pub(crate) fn percent_decode(s: &str) -> String {
                 i += 3;
                 continue;
             }
-        }
         out.push(bytes[i]);
         i += 1;
     }
@@ -325,8 +324,8 @@ fn emit_predicate(lookup_key: &str, prefix_name: &str, prop_name: &str) -> Strin
 
             static WARNED: std::sync::Mutex<Option<std::collections::HashSet<String>>> =
                 std::sync::Mutex::new(None);
-            if !is_deprecated {
-                if let Ok(mut guard) = WARNED.lock() {
+            if !is_deprecated
+                && let Ok(mut guard) = WARNED.lock() {
                     let seen = guard.get_or_insert_with(std::collections::HashSet::new);
                     if seen.insert(lookup_key.to_string()) {
                         // State WHAT HAPPENED and do not assert WHY. The first
@@ -345,7 +344,6 @@ fn emit_predicate(lookup_key: &str, prefix_name: &str, prop_name: &str) -> Strin
                         );
                     }
                 }
-            }
             format!("{}:{}", prefix_name, prop_name)
         }
     }

@@ -114,16 +114,14 @@ fn emit_signature(
 ) -> String {
     let su = format!("<{}>", git2_uri(&format!("Signature/{}-{}", commit_sha, role)));
     nq.push_str(&format!("{su} {RDF_TYPE} <{GIT2_NS}Signature> {graph} .\n"));
-    if let Some(name) = sig.name() {
-        if !name.is_empty() {
+    if let Some(name) = sig.name()
+        && !name.is_empty() {
             nq.push_str(&format!("{su} <{GIT2_NS}signatureName> \"{}\" {graph} .\n", nq_escape(name)));
         }
-    }
-    if let Some(email) = sig.email() {
-        if !email.is_empty() {
+    if let Some(email) = sig.email()
+        && !email.is_empty() {
             nq.push_str(&format!("{su} <{GIT2_NS}email> \"{}\" {graph} .\n", nq_escape(email)));
         }
-    }
     // Time (git2.ttl v0.2.0, Rob-ruled): the raw pair is library-native (what
     // git stores in the commit bytes); the dateTime is git-lex's DERIVATION
     // and its property name says so. git2:when is retired — never emit it.
@@ -342,8 +340,8 @@ pub(crate) fn emit_git2_nquads(nq: &mut impl NqSink) {
     // each joined to its content git2:Blob. (git2.ttl: entries materialized
     // from the commit's tree — the flat committed-files view, never the
     // mutable staging index.) --------------------------------------------
-    if let Ok(head) = repo.head() {
-        if let Some(head_oid) = head.target() {
+    if let Ok(head) = repo.head()
+        && let Some(head_oid) = head.target() {
             let head_sha = head_oid.to_string();
             let graph = format!("<{}>", graph_uri(&format!("filetree/{head_sha}")));
             let commits_graph = format!("<{}>", graph_uri("commits"));
@@ -395,7 +393,6 @@ pub(crate) fn emit_git2_nquads(nq: &mut impl NqSink) {
                 });
             }
         }
-    }
 }
 
 #[cfg(test)]

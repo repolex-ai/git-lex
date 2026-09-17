@@ -211,12 +211,11 @@ fn write_spine_file(
         // T-box/A-box split). Turtle's own answer, no minted prefix:
         // relativize against @base — `<copia/Being/w4r3z>` reads back to
         // the full IRI by the standard rule.
-        if let Some(rel) = iri.strip_prefix(SPINE_BASE) {
-            if !rel.is_empty() {
+        if let Some(rel) = iri.strip_prefix(SPINE_BASE)
+            && !rel.is_empty() {
                 base_used = true;
                 return format!("<{rel}>");
             }
-        }
         term
     };
 

@@ -142,22 +142,20 @@ fn remove_repo_yml_list_item(
                 continue;
             } else {
                 in_list = false;
-                if let Some(_dropped) = pending_key_line.take() {
-                    if matches!(out.last().map(|s| s.trim().is_empty()), Some(true)) {
+                if let Some(_dropped) = pending_key_line.take()
+                    && matches!(out.last().map(|s| s.trim().is_empty()), Some(true)) {
                         out.pop();
                     }
-                }
                 out.push(line.to_string());
                 continue;
             }
         }
         out.push(line.to_string());
     }
-    if in_list && pending_key_line.is_some() && list_items_remaining == 0 {
-        if matches!(out.last().map(|s| s.trim().is_empty()), Some(true)) {
+    if in_list && pending_key_line.is_some() && list_items_remaining == 0
+        && matches!(out.last().map(|s| s.trim().is_empty()), Some(true)) {
             out.pop();
         }
-    }
     let mut content = out.join("\n");
     if !content.ends_with('\n') { content.push('\n'); }
     fs::write(path, content)
@@ -236,11 +234,10 @@ pub(crate) fn read_kit_scope(kit_dir: &std::path::Path) -> KitScope {
     for line in content.lines() {
         let line = line.trim();
         if line.starts_with('#') { continue; }
-        if let Some(val) = line.strip_prefix("scope:") {
-            if let Some(s) = KitScope::parse(val) {
+        if let Some(val) = line.strip_prefix("scope:")
+            && let Some(s) = KitScope::parse(val) {
                 return s;
             }
-        }
     }
     KitScope::Domain
 }
@@ -598,8 +595,8 @@ pub(crate) fn fetch_kit_from_github(kit_spec: &str, target_dir: &std::path::Path
             match fs::read_to_string(target_dir.join("kit.yml")) {
                 Ok(yml) => {
                     let declared = declared_kit_name(&yml);
-                    if let Some(declared) = declared {
-                        if declared != requested_short {
+                    if let Some(declared) = declared
+                        && declared != requested_short {
                             eprintln!(
                                 "There is no kit called '{}'. It was renamed to '{}'.",
                                 requested_short, declared
@@ -652,7 +649,6 @@ pub(crate) fn fetch_kit_from_github(kit_spec: &str, target_dir: &std::path::Path
                             // cure, so the precise one gets the last word.
                             std::process::exit(1);
                         }
-                    }
                 }
                 Err(_) => {
                     // No kit.yml means identity cannot be confirmed. Say so
@@ -804,15 +800,14 @@ pub(crate) fn install_scaffold_files_from(kit_dir: &std::path::Path) -> usize {
                 fs::create_dir_all(dest.parent().unwrap_or(&dest)).ok();
                 if dest.symlink_metadata().is_ok() {
                     let dmeta = dest.symlink_metadata().ok().map(|m| m.file_type());
-                    if let Some(dft) = dmeta {
-                        if dft.is_symlink() || dft.is_dir() {
+                    if let Some(dft) = dmeta
+                        && (dft.is_symlink() || dft.is_dir()) {
                             if dft.is_dir() && !dft.is_symlink() {
                                 let _ = fs::remove_dir_all(&dest);
                             } else {
                                 let _ = fs::remove_file(&dest);
                             }
                         }
-                    }
                 }
                 if fs::copy(&src, &dest).is_ok() {
                     *count += 1;

@@ -32,12 +32,11 @@ pub(crate) fn cmd_init(directory: Option<String>, kit: Option<String>) {
     // If a directory is given, cd into it (creating it if necessary).
     if let Some(ref dir) = directory {
         let path = std::path::Path::new(dir);
-        if !path.exists() {
-            if let Err(e) = fs::create_dir_all(path) {
+        if !path.exists()
+            && let Err(e) = fs::create_dir_all(path) {
                 eprintln!("fatal: cannot create {}: {e}", path.display());
                 exit(1);
             }
-        }
         std::env::set_current_dir(path).expect("failed to cd into directory");
     }
 
@@ -540,7 +539,7 @@ fn generate_readme_lex(
                     doc.push_str(&format!("| {} | {} | {} |\n", prop_name, prop_type, comment));
                 }
             }
-            doc.push_str("\n");
+            doc.push('\n');
         }
     }
 
@@ -617,7 +616,7 @@ fn record_identity(root: &std::path::Path, repo_yml_path: &std::path::Path) {
         // and declares this fill as git-lex's job).
         match crate::soul_md::heal_soul_id(root) {
             crate::soul_md::HealOutcome::Filled
-            | crate::soul_md::HealOutcome::Healed { .. } => identity_paths.push("SOUL.md"),
+            | crate::soul_md::HealOutcome::Healed => identity_paths.push("SOUL.md"),
             _ => {}
         }
         if !identity_paths.is_empty() {

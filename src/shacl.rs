@@ -120,12 +120,11 @@ pub(crate) fn parse_shacl_hints(shapes_ttl: &str, short: &str) -> HashMap<String
             //
             // `or_insert` not `insert`: if this kit declares its own property
             // of the same local name, that one is the author's and wins.
-            if key.starts_with('<') {
-                if let Some(local) = path.as_str().rsplit(['/', '#']).next() {
+            if key.starts_with('<')
+                && let Some(local) = path.as_str().rsplit(['/', '#']).next() {
                     hints.entry(format!("{}:{}", prefix_name, local))
                         .or_insert_with(|| hint.clone());
                 }
-            }
             hints.insert(key, hint);
         }
     }
@@ -159,11 +158,9 @@ fn rdf_list_literals(store: &oxigraph::store::Store, head: &Term) -> Vec<String>
         if let Some(Ok(q)) = store
             .quads_for_pattern(Some(subject), Some(first), None, None)
             .next()
-        {
-            if let Term::Literal(l) = q.object {
+            && let Term::Literal(l) = q.object {
                 out.push(l.value().to_string());
             }
-        }
         match store
             .quads_for_pattern(Some(subject), Some(rest), None, None)
             .next()

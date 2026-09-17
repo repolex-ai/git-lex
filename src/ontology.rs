@@ -206,9 +206,8 @@ fn parse_shape_file(content: &str, short_hint: &str) -> ShapeFile {
         }
         let prop = shape.props.last_mut().unwrap();
 
-        if let Some(Term::NamedNode(nk)) = s.get("nodeKind") {
-            if nk.as_str() == SH_IRI { prop.is_iri = true; }
-        }
+        if let Some(Term::NamedNode(nk)) = s.get("nodeKind")
+            && nk.as_str() == SH_IRI { prop.is_iri = true; }
         if let Some(Term::NamedNode(dt)) = s.get("datatype") {
             // xsd:integer → "integer"; non-XSD datatypes stay untyped,
             // matching the old scanner.
@@ -216,11 +215,10 @@ fn parse_shape_file(content: &str, short_hint: &str) -> ShapeFile {
                 prop.datatype = Some(local.to_string());
             }
         }
-        if let Some(Term::Literal(n)) = s.get("minCount") {
-            if n.value().parse::<u32>().map(|n| n >= 1).unwrap_or(false) {
+        if let Some(Term::Literal(n)) = s.get("minCount")
+            && n.value().parse::<u32>().map(|n| n >= 1).unwrap_or(false) {
                 prop.required = true;
             }
-        }
         if let Some(Term::Literal(c)) = s.get("comment") {
             prop.comment = c.value().to_string();
         }
@@ -253,11 +251,10 @@ fn parse_kit_shapes(kit: &str) -> std::sync::Arc<ShapeFile> {
         .map(|m| (m.len(), m.modified().ok()));
 
     let memo = MEMO.get_or_init(|| Mutex::new(HashMap::new()));
-    if let Some((seen, cached)) = memo.lock().unwrap().get(kit) {
-        if *seen == fingerprint {
+    if let Some((seen, cached)) = memo.lock().unwrap().get(kit)
+        && *seen == fingerprint {
             return cached.clone();
         }
-    }
 
     let content = read_kit_shapes(kit);
     let parsed = Arc::new(if content.is_empty() {
@@ -826,11 +823,10 @@ pub(crate) fn get_reference_ranges_all_kits() -> HashMap<String, String> {
         .collect();
 
     let memo = MEMO.get_or_init(|| Mutex::new(None));
-    if let Some((seen, cached)) = memo.lock().unwrap().as_ref() {
-        if *seen == fingerprint {
+    if let Some((seen, cached)) = memo.lock().unwrap().as_ref()
+        && *seen == fingerprint {
             return cached.clone();
         }
-    }
 
     for (short, ttl) in &ttls {
         let Ok(content) = fs::read_to_string(ttl) else { continue };
@@ -867,11 +863,10 @@ pub(crate) fn get_deprecated_properties_all_kits() -> HashMap<String, Option<Str
 /// else stays a full IRI. A successor that moved kits (soul:Texture →
 /// copia:Texture) printed as a raw URL otherwise.
 fn shorten_successor(iri: &str, kit_ns: &str) -> String {
-    if let Some(local) = iri.strip_prefix(kit_ns) {
-        if !local.is_empty() {
+    if let Some(local) = iri.strip_prefix(kit_ns)
+        && !local.is_empty() {
             return local.to_string();
         }
-    }
     if let Some(rest) = iri.strip_prefix("https://repolex.ai/ontology/") {
         let parts: Vec<&str> = rest.split('/').collect();
         if parts.len() == 2 && !parts[0].is_empty() && !parts[1].is_empty() {

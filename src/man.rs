@@ -32,11 +32,10 @@ pub fn converge(cmd: clap::Command) {
     if fs::read(&target).ok().as_deref() == Some(rendered.as_slice()) {
         return;
     }
-    if let Some(dir) = target.parent() {
-        if fs::create_dir_all(dir).is_err() {
+    if let Some(dir) = target.parent()
+        && fs::create_dir_all(dir).is_err() {
             return;
         }
-    }
     let _ = fs::write(&target, rendered);
 }
 

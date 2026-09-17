@@ -77,12 +77,11 @@ fn heal_soul_id_inner(root: &Path, write: bool) -> HealOutcome {
     match healed_content(&content, &sha) {
         None => HealOutcome::Unchanged,
         Some((updated, previous)) => {
-            if write {
-                if let Err(e) = fs::write(&path, updated) {
+            if write
+                && let Err(e) = fs::write(&path, updated) {
                     eprintln!("warning: could not write SOUL.md soulId: {}", e);
                     return HealOutcome::Unchanged;
                 }
-            }
             match previous {
                 None => {
                     if write {

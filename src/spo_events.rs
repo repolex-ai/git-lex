@@ -583,11 +583,10 @@ fn git_rm(root: &std::path::Path, path: &str) -> Result<(), String> {
 fn git_mv(root: &std::path::Path, old: &str, new: &str) -> Result<(), String> {
     // Ensure the destination parent directory exists — git mv doesn't
     // auto-create intermediate dirs.
-    if let Some(parent) = root.join(new).parent() {
-        if !parent.as_os_str().is_empty() {
+    if let Some(parent) = root.join(new).parent()
+        && !parent.as_os_str().is_empty() {
             fs::create_dir_all(parent).ok();
         }
-    }
     let out = Command::new("git")
         .current_dir(root)
         .args(["mv", "--", old, new])
@@ -1721,11 +1720,10 @@ fn take_term(s: &str) -> Option<(String, &str)> {
             if bytes[i] == b'"' {
                 let mut end = i + 1;
                 // Check for `^^<datatype>` suffix.
-                if s[end..].starts_with("^^<") {
-                    if let Some(dt_end) = s[end + 2..].find('>') {
+                if s[end..].starts_with("^^<")
+                    && let Some(dt_end) = s[end + 2..].find('>') {
                         end = end + 2 + dt_end + 1;
                     }
-                }
                 return Some((s[..end].to_string(), &s[end..]));
             }
             i += 1;

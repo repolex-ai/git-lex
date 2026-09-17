@@ -45,17 +45,15 @@ pub(crate) fn write_sidecar_loud(path: &std::path::Path, content: &str) {
     // A read error is NOT a decision. Fall through and write, so a
     // permissions or encoding problem surfaces at the loud write below
     // instead of being silently mistaken for "unchanged".
-    if let Ok(existing) = fs::read_to_string(path) {
-        if existing == content {
+    if let Ok(existing) = fs::read_to_string(path)
+        && existing == content {
             return;
         }
-    }
-    if let Some(parent) = path.parent() {
-        if let Err(e) = fs::create_dir_all(parent) {
+    if let Some(parent) = path.parent()
+        && let Err(e) = fs::create_dir_all(parent) {
             eprintln!("fatal: failed to create sidecar dir {}: {e}", parent.display());
             std::process::exit(1);
         }
-    }
     if let Err(e) = fs::write(path, content) {
         eprintln!("fatal: failed to write sidecar {}: {e}", path.display());
         std::process::exit(1);
@@ -67,12 +65,11 @@ pub(crate) fn write_sidecar_loud(path: &std::path::Path, content: &str) {
 /// removal keeps its facts alive forever: the sync diff never sees the
 /// lines vanish, so the retraction events never exist (review finding A3).
 pub(crate) fn remove_sidecar_loud(path: &std::path::Path) {
-    if let Err(e) = fs::remove_file(path) {
-        if e.kind() != std::io::ErrorKind::NotFound {
+    if let Err(e) = fs::remove_file(path)
+        && e.kind() != std::io::ErrorKind::NotFound {
             eprintln!("fatal: failed to remove stale sidecar {}: {e}", path.display());
             std::process::exit(1);
         }
-    }
 }
 
 /// Escape a string for use in N-Quads literals.
@@ -231,14 +228,13 @@ pub(crate) fn load_lex_nquads() -> String {
                     if path != skip {
                         walk_nq(&path, skip, nq);
                     }
-                } else if path.extension().is_some_and(|e| e == "nq") {
-                    if let Ok(content) = fs::read_to_string(&path) {
+                } else if path.extension().is_some_and(|e| e == "nq")
+                    && let Ok(content) = fs::read_to_string(&path) {
                         nq.push_str(&content);
                         if !content.ends_with('\n') {
                             nq.push('\n');
                         }
                     }
-                }
             }
         }
     }
@@ -825,11 +821,10 @@ pub(crate) fn generate_frontmatter_nquads_with(
                 // enables skips a YAML parse, a tree-sitter parse and the
                 // quad emission).
                 let blob_hash = repo.as_ref().and_then(|r| {
-                    if let Ok(index) = r.index() {
-                        if let Some(entry) = index.get_path(std::path::Path::new(&relpath_str), 0) {
+                    if let Ok(index) = r.index()
+                        && let Some(entry) = index.get_path(std::path::Path::new(&relpath_str), 0) {
                             return Some(entry.id.to_string());
                         }
-                    }
                     let head = r.head().ok()?;
                     let tree = head.peel_to_tree().ok()?;
                     let entry = tree.get_path(std::path::Path::new(&relpath_str)).ok()?;
@@ -1015,8 +1010,8 @@ pub(crate) fn generate_frontmatter_nquads_with(
                 &spo_lines,
                 &relpath_str,
                 &ctx.declared_props,
-                &obj_props,
-                &kit_namespaces,
+                obj_props,
+                kit_namespaces,
                 true, // the now path is the save/sync moment — warn here
             );
 
@@ -1040,7 +1035,7 @@ pub(crate) fn generate_frontmatter_nquads_with(
             let mut emitted_types: HashSet<String> = HashSet::new();
 
             // File rdf:type + (when anchored) Thing rdf:type + fileId edge.
-            emit_file_anchor_nquads(&subjects, &kit_namespaces, &graph, &mut emitted_types, &mut nq);
+            emit_file_anchor_nquads(&subjects, kit_namespaces, &graph, &mut emitted_types, &mut nq);
 
             for line in &spo_lines {
                 total_errors += emit_spo_line_nquads(
@@ -1595,8 +1590,8 @@ pub(crate) fn emit_spo_line_nquads(
                     // identifier form minus its brackets is the attractive
                     // error, and the path lane swallows it silently. Note
                     // (not error) — resolution below is unchanged.
-                    if warn {
-                        if let Some(suggested) =
+                    if warn
+                        && let Some(suggested) =
                             bare_kit_reference_suggestion(val, kit_namespaces, path_index)
                         {
                             author_diag!(
@@ -1610,7 +1605,6 @@ pub(crate) fn emit_spo_line_nquads(
                                 suggested
                             );
                         }
-                    }
                     match resolve::resolve_frontmatter_value(val) {
                         resolve::ResolveResult::Iri(uri) => {
                             out.push_str(&format!(

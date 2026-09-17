@@ -223,7 +223,7 @@ fn fast_path_hit(store: &Store, root: &std::path::Path, head_sha: &str) -> bool 
     let already_synced = oxigraph::sparql::SparqlEvaluator::new()
         .parse_query(&probe)
         .ok()
-        .and_then(|q| q.on_store(&store).execute().ok())
+        .and_then(|q| q.on_store(store).execute().ok())
         .map(|r| matches!(r, oxigraph::sparql::QueryResults::Boolean(true)))
         .unwrap_or(false);
 
@@ -238,7 +238,7 @@ fn fast_path_hit(store: &Store, root: &std::path::Path, head_sha: &str) -> bool 
         oxigraph::sparql::SparqlEvaluator::new()
             .parse_query(&probe)
             .ok()
-            .and_then(|q| q.on_store(&store).execute().ok())
+            .and_then(|q| q.on_store(store).execute().ok())
             .map(|r| matches!(r, oxigraph::sparql::QueryResults::Boolean(true)))
             .unwrap_or(false)
     };
@@ -258,7 +258,7 @@ fn fast_path_hit(store: &Store, root: &std::path::Path, head_sha: &str) -> bool 
         oxigraph::sparql::SparqlEvaluator::new()
             .parse_query(&probe)
             .ok()
-            .and_then(|q| q.on_store(&store).execute().ok())
+            .and_then(|q| q.on_store(store).execute().ok())
             .map(|r| matches!(r, oxigraph::sparql::QueryResults::Boolean(true)))
             .unwrap_or(false)
     };
@@ -407,7 +407,7 @@ fn resume_point(store: &Store, root: &std::path::Path) -> Option<String> {
         oxigraph::sparql::SparqlEvaluator::new()
             .parse_query(&q)
             .ok()
-            .and_then(|q| q.on_store(&store).execute().ok())
+            .and_then(|q| q.on_store(store).execute().ok())
             .and_then(|r| match r {
                 oxigraph::sparql::QueryResults::Solutions(sols) => sols
                     .flatten()
@@ -439,7 +439,7 @@ fn resume_point(store: &Store, root: &std::path::Path) -> Option<String> {
             let file_typed = oxigraph::sparql::SparqlEvaluator::new()
                 .parse_query(&probe)
                 .ok()
-                .and_then(|q| q.on_store(&store).execute().ok())
+                .and_then(|q| q.on_store(store).execute().ok())
                 .map(|r| matches!(r, oxigraph::sparql::QueryResults::Boolean(true)))
                 .unwrap_or(false);
             if file_typed {
@@ -488,8 +488,7 @@ fn clear_derived_graphs(store: &Store) {
         if graph_uri != "https://repolex.ai/git-lex/NamedGraph/repo-ontology"
             && graph_uri != spo_events::LEXHISTORY_GRAPH_IRI
             && graph_uri != NOW_GRAPH_IRI
-        {
-            if let Ok(graph) = oxigraph::model::NamedNode::new(graph_uri) {
+            && let Ok(graph) = oxigraph::model::NamedNode::new(graph_uri) {
                 // remove (not clear): drops the graph's registration too, so a
                 // one-time legacy name (urn:soul:*) doesn't linger as an empty
                 // graph in the store forever.
@@ -497,7 +496,6 @@ fn clear_derived_graphs(store: &Store) {
                     eprintln!("warning: failed to clear graph {}: {} — stale triples may mix with the regeneration", graph_uri, e);
                 }
             }
-        }
     }
 }
 
@@ -519,7 +517,7 @@ fn heal_ontology_graph(store: &Store) {
         Err(_) => false,
     };
     if ont_empty {
-        let n = crate::nquad::load_ontology_graph(&store);
+        let n = crate::nquad::load_ontology_graph(store);
         if n > 0 {
             println!(
                 "Ontology graph was empty (fresh store) — loaded {} kit ttl file(s) from disk",
@@ -794,7 +792,7 @@ fn materialize_now_view(store: &Store) {
     let update = "PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>              PREFIX gl: <https://repolex.ai/ontology/git-lex/>              DROP SILENT GRAPH <https://repolex.ai/git-lex/NamedGraph/now> ;              INSERT { GRAPH <https://repolex.ai/git-lex/NamedGraph/now> { ?s ?p ?o } }              WHERE { GRAPH <https://repolex.ai/git-lex/LexHistoryGraph> { ?s ?p ?o .                        FILTER NOT EXISTS { ?s a gl:SpoEvent }                        FILTER(?p != rdf:reifies) } }";
     match oxigraph::sparql::SparqlEvaluator::new().parse_update(update) {
         Ok(u) => {
-            if let Err(e) = u.on_store(&store).execute() {
+            if let Err(e) = u.on_store(store).execute() {
                 // A stale now view silently lies to every downstream
                 // consumer (Syrinx, viz, agents) — fail the sync.
                 eprintln!("ERROR: now-view materialization failed: {e}");
@@ -938,9 +936,9 @@ fn sync_onegraph_walk(store: &Store, root: &std::path::Path, resume_sha: Option<
     // commit and diffs against the empty tree (the whole tree asserts as
     // of the horizon).
     let mut horizon_start: Option<String> = None;
-    if full_rebuild {
-        if let Some(h) = resolve_dev_horizon(root) {
-            if let Some(pos) = shas.iter().position(|s| *s == h) {
+    if full_rebuild
+        && let Some(h) = resolve_dev_horizon(root)
+            && let Some(pos) = shas.iter().position(|s| *s == h) {
                 let dropped = pos;
                 shas.drain(..pos);
                 horizon_start = Some(h);
@@ -948,8 +946,6 @@ fn sync_onegraph_walk(store: &Store, root: &std::path::Path, resume_sha: Option<
                     "One graph: dev_history_horizon active — {dropped} pre-horizon commit(s) excluded from the walk."
                 );
             }
-        }
-    }
 
     let mut changed_subjects = std::collections::HashSet::new();
     if !shas.is_empty() {

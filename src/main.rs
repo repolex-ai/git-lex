@@ -369,11 +369,10 @@ fn main() {
     // path and the current time in ~/.lex/repos.json, so a repo browser can
     // list this machine's git-lex repos by recency. Bookkeeping only — silent,
     // and never a reason for a command to fail.
-    if let Some(root) = find_git_root() {
-        if root.join(".lex").is_dir() {
+    if let Some(root) = find_git_root()
+        && root.join(".lex").is_dir() {
             git_lex::registry_touch(&root);
         }
-    }
 
     match cli.command {
         Commands::Init { directory, kit } => init::cmd_init(directory, kit),
@@ -484,12 +483,11 @@ fn cmd_nuke() {
         .status();
 
     // Mop up anything not tracked (untracked files, leftover empty dirs)
-    if lex_dir.exists() {
-        if let Err(e) = fs::remove_dir_all(&lex_dir) {
+    if lex_dir.exists()
+        && let Err(e) = fs::remove_dir_all(&lex_dir) {
             eprintln!("Failed to remove .lex/: {}", e);
             exit(1);
         }
-    }
     println!(".lex/ removed.");
 
     // Sweep the legacy pre-pocket store location too (a repo nuked before

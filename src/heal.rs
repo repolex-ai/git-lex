@@ -103,8 +103,8 @@ pub(crate) fn heal_content(content: &str, doc_relpath: &str, renames: &RenameMap
         renames: &RenameMap,
         edits: &mut Vec<(std::ops::Range<usize>, String)>,
     ) {
-        if node.kind() == "inline_link" {
-            if let Some(dest_node) = node
+        if node.kind() == "inline_link"
+            && let Some(dest_node) = node
                 .children(&mut node.walk())
                 .find(|c| c.kind() == "link_destination")
             {
@@ -116,11 +116,10 @@ pub(crate) fn heal_content(content: &str, doc_relpath: &str, renames: &RenameMap
                         None => (dest, ""),
                     };
                     let target = crate::extraction::percent_decode(path_part);
-                    if !target.is_empty() {
-                        if let Some(resolved) =
+                    if !target.is_empty()
+                        && let Some(resolved) =
                             crate::extraction::normalize_wikilink_path(&target, doc_dir)
-                        {
-                            if let Some((_, new_path)) =
+                            && let Some((_, new_path)) =
                                 renames.iter().find(|(old, _)| *old == resolved)
                             {
                                 // Canonical root-relative form (full-path
@@ -137,11 +136,8 @@ pub(crate) fn heal_content(content: &str, doc_relpath: &str, renames: &RenameMap
                                     healed,
                                 ));
                             }
-                        }
-                    }
                 }
             }
-        }
         for child in node.children(&mut node.walk()) {
             walk(child, source, doc_dir, renames, edits);
         }

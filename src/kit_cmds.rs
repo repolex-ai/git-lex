@@ -665,22 +665,20 @@ fn reap_stale_hooks(root: &Path) {
 ///   something).
 fn sweep_legacy_layouts(root: &Path) {
     let legacy_env = root.join(".env");
-    if legacy_env.exists() {
-        if fs::remove_file(&legacy_env).is_ok() {
+    if legacy_env.exists()
+        && fs::remove_file(&legacy_env).is_ok() {
             println!("Removed legacy .env — identity now lives in .claude/settings.json");
         }
-    }
 
     let legacy_ontology = root.join(".lex").join("ontology").join("kit");
-    if legacy_ontology.exists() {
-        if fs::remove_dir_all(&legacy_ontology).is_ok() {
+    if legacy_ontology.exists()
+        && fs::remove_dir_all(&legacy_ontology).is_ok() {
             println!("Removed legacy .lex/ontology/kit/ — shapes now resolve via canonical .lex/ontology/<short>/ path");
         }
-    }
 
     let ryml = root.join(".lex").join("repo.yml");
-    if let Ok(content) = fs::read_to_string(&ryml) {
-        if content.lines().any(|l| l.trim_start().starts_with("link_semantics:")) {
+    if let Ok(content) = fs::read_to_string(&ryml)
+        && content.lines().any(|l| l.trim_start().starts_with("link_semantics:")) {
             let cleaned: String = content
                 .lines()
                 .filter(|l| !l.trim_start().starts_with("link_semantics:"))
@@ -691,7 +689,6 @@ fn sweep_legacy_layouts(root: &Path) {
                 println!("Removed retired `link_semantics:` key from .lex/repo.yml (one link law)");
             }
         }
-    }
 }
 
 /// #71 (kit-update step): converge .lex/ontology/ to exactly what the
@@ -774,8 +771,8 @@ fn converge_ontology_mirror(root: &Path) {
                 let _ = fs::remove_dir_all(&tmp);
                 continue;
             }
-            if dest.exists() {
-                if let Err(e) = fs::remove_dir_all(&dest) {
+            if dest.exists()
+                && let Err(e) = fs::remove_dir_all(&dest) {
                     eprintln!(
                         "ERROR: could not clear .lex/ontology/{name}/ for convergence \
                          ({e}) — left as-is; re-run `git lex kit-update` after fixing."
@@ -783,7 +780,6 @@ fn converge_ontology_mirror(root: &Path) {
                     let _ = fs::remove_dir_all(&tmp);
                     continue;
                 }
-            }
             if let Err(e) = fs::rename(&tmp, &dest) {
                 eprintln!(
                     "ERROR: ontology mirror swap for `{name}` failed ({e}) — \
@@ -920,14 +916,13 @@ pub(crate) fn ensure_engine_gitignore(root: &Path) {
         format!("{}\n\n{}\n", existing.trim_end(), block)
     };
 
-    if new_contents != existing {
-        if fs::write(&gitignore, &new_contents).is_ok() {
+    if new_contents != existing
+        && fs::write(&gitignore, &new_contents).is_ok() {
             println!(
                 "Ensured engine runtime dirs are gitignored ({}).",
                 entries.join(" ")
             );
         }
-    }
 
     // Report — but never auto-remove — files already tracked that now match. A
     // soul that committed its engine state before this ran needs a deliberate
@@ -1204,11 +1199,10 @@ pub(crate) fn cmd_kit_remove(kit_spec: String, force: bool) {
     // vocabulary. repo.yml no longer lists the kit, so nothing reads the
     // folder either way (#17); this keeps the disk honest.
     let ont_dir = lex_dir.join("ontology").join(resolve_kit_spec(&canonical_spec).2);
-    if ont_dir.is_dir() {
-        if let Err(e) = fs::remove_dir_all(&ont_dir) {
+    if ont_dir.is_dir()
+        && let Err(e) = fs::remove_dir_all(&ont_dir) {
             eprintln!("Warning: failed to delete {}: {}", ont_dir.strip_prefix(&root).unwrap_or(&ont_dir).display(), e);
         }
-    }
     regenerate_installed_kits(&root, None);
     harness::run_substrate_setup(&root, None);
     reload_ontology_graph();
