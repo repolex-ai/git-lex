@@ -458,31 +458,45 @@ pub fn parse_staged_md_changes(raw: &str) -> (Vec<String>, Vec<(String, String)>
 /// Returns paths relative to the repo root, suitable for passing to
 /// `git rm` / `git mv` (both of which accept repo-relative paths when
 /// run from the repo root).
-fn sidecar_paths_for_md(root: &std::path::Path, md_path: &str) -> Vec<String> {
+fn sidecar_paths_for_md(index: &IndexProbe, md_path: &str) -> Vec<String> {
     let mut out = Vec::new();
     for suffix in SPO_EXTRACTOR_SUFFIXES {
         let rel = format!(".lex/extract/{}.{}.spo", md_path, suffix);
-        if git_path_is_tracked(root, &rel) {
+        if index.tracked(&rel) {
             out.push(rel);
         }
     }
     out
 }
 
-/// Ask git whether a given path is currently tracked in the index,
-/// with exact case sensitivity. Runs `git ls-files --error-unmatch -- <path>`
-/// and treats a successful exit as "tracked".
+/// Whether a path is currently tracked in git's index, with exact case —
+/// what `git ls-files --error-unmatch -- <path>` answers, for one cleanup
+/// pass and without a process per path. The index is re-read before each
+/// answer when it changed on disk, so a `git rm`/`git mv` made between two
+/// checks is seen; every merge stage counts as tracked, as it does for
+/// ls-files. Any libgit2 failure answers "not tracked", as a failed spawn
+/// did.
 ///
 /// Why not `Path::exists()`? Because on macOS APFS (case-insensitive by
 /// default), the filesystem answer is wrong for case-only rename cases.
 /// Git's index is always case-exact, so asking git gives us the truth.
-fn git_path_is_tracked(root: &std::path::Path, path: &str) -> bool {
-    Command::new("git")
-        .current_dir(root)
-        .args(["ls-files", "--error-unmatch", "--", path])
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
+struct IndexProbe {
+    repo: Option<git2::Repository>,
+}
+
+impl IndexProbe {
+    fn open(root: &std::path::Path) -> Self {
+        IndexProbe { repo: git2::Repository::open(root).ok() }
+    }
+
+    fn tracked(&self, path: &str) -> bool {
+        let Some(repo) = &self.repo else { return false };
+        let Ok(mut index) = repo.index() else { return false };
+        if index.read(false).is_err() {
+            return false;
+        }
+        (0..=3).any(|stage| index.get_path(std::path::Path::new(path), stage).is_some())
+    }
 }
 
 /// Run `git rm -f <path>` — used to stage the deletion of a stale .spo
@@ -575,9 +589,10 @@ pub fn cleanup_sidecars_for_staged_changes() -> CleanupReport {
     };
 
     let (deleted_mds, renamed_mds) = parse_staged_md_changes(&raw);
+    let index = IndexProbe::open(&root);
 
     for md_path in &deleted_mds {
-        for sidecar in sidecar_paths_for_md(&root, md_path) {
+        for sidecar in sidecar_paths_for_md(&index, md_path) {
             match git_rm(&root, &sidecar) {
                 Ok(()) => report.deleted.push(sidecar),
                 Err(e) => report.errors.push(e),
@@ -586,7 +601,7 @@ pub fn cleanup_sidecars_for_staged_changes() -> CleanupReport {
         // The jsonl extractor also keeps a `.meta` bookkeeping file next to
         // its sidecar; a deleted source must take it along.
         let meta = format!(".lex/extract/{}.meta", md_path);
-        if git_path_is_tracked(&root, &meta) {
+        if index.tracked(&meta) {
             match git_rm(&root, &meta) {
                 Ok(()) => report.deleted.push(meta),
                 Err(e) => report.errors.push(e),
@@ -613,7 +628,7 @@ pub fn cleanup_sidecars_for_staged_changes() -> CleanupReport {
         for suffix in SPO_EXTRACTOR_SUFFIXES {
             let old_sidecar = format!(".lex/extract/{}.{}.spo", old_md, suffix);
             let new_sidecar = format!(".lex/extract/{}.{}.spo", new_md, suffix);
-            if !git_path_is_tracked(&root, &old_sidecar) {
+            if !index.tracked(&old_sidecar) {
                 continue;
             }
             // Destination ALREADY TRACKED IN THE INDEX (separately from
@@ -626,7 +641,7 @@ pub fn cleanup_sidecars_for_staged_changes() -> CleanupReport {
             // A case-only rename resolving to the same inode on APFS is
             // excluded by the path-inequality guard: git's index tracks
             // exact casing, so same-inode ≠ same tracked path.
-            if git_path_is_tracked(&root, &new_sidecar) && new_sidecar != old_sidecar {
+            if index.tracked(&new_sidecar) && new_sidecar != old_sidecar {
                 match git_rm(&root, &old_sidecar) {
                     Ok(()) => report.deleted.push(old_sidecar),
                     Err(e) => report.errors.push(e),
@@ -642,8 +657,8 @@ pub fn cleanup_sidecars_for_staged_changes() -> CleanupReport {
         // renamed source (same tracked-in-index rules as the sidecars).
         let old_meta = format!(".lex/extract/{}.meta", old_md);
         let new_meta = format!(".lex/extract/{}.meta", new_md);
-        if git_path_is_tracked(&root, &old_meta) {
-            if git_path_is_tracked(&root, &new_meta) && new_meta != old_meta {
+        if index.tracked(&old_meta) {
+            if index.tracked(&new_meta) && new_meta != old_meta {
                 // Same rule as the sidecars above: tracked destination
                 // means the move already happened — the source is stale,
                 // and silently skipping it left it tracked forever.
@@ -972,9 +987,10 @@ pub fn onegraph_event(
 /// `clear_first = true`. It resolves every `.spo` line through the same
 /// `emit_spo_line_nquads` the query surface uses.
 ///
-/// Returns `(events_seen, events_emitted)` for the summary line, or an error
-/// if git or the store failed anywhere — a partial walk must never report
-/// success, because the one graph is the system of record.
+/// Returns the summary counts and the subjects whose base-layer facts
+/// changed (so the now view can be refreshed for exactly those), or an
+/// error if git or the store failed anywhere — a partial walk must never
+/// report success, because the one graph is the system of record.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn onegraph_walk_engine(
     commits: &[WalkCommit],
@@ -983,7 +999,7 @@ pub(crate) fn onegraph_walk_engine(
     ctx: &crate::nquad::ResolverContext,
     show_progress: bool,
     clear_first: bool,
-) -> Result<(usize, usize), String> {
+) -> Result<WalkOutcome, String> {
     let total = commits.len();
     let mut nq_buffer = String::new();
     let mut events_seen = 0usize;
@@ -1422,7 +1438,20 @@ pub(crate) fn onegraph_walk_engine(
             .map_err(|e| format!("one-graph event load failed: {e}"))?;
     }
 
-    Ok((events_seen, events_emitted))
+    let changed_subjects = base_final
+        .keys()
+        .filter_map(|line| take_term(line).map(|(subject, _)| subject))
+        .collect();
+    Ok(WalkOutcome { events_seen, events_emitted, changed_subjects })
+}
+
+/// What one walk did: the summary counts, and every subject whose
+/// base-layer (current-state) facts it changed.
+pub(crate) struct WalkOutcome {
+    pub events_seen: usize,
+    pub events_emitted: usize,
+    /// Bracketed subject terms (`<iri>`), deduplicated.
+    pub changed_subjects: HashSet<String>,
 }
 
 /// The Thing → File edge the anchor facts carry (git-lex:fileId).
