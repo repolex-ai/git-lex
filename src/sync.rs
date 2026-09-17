@@ -433,8 +433,9 @@ fn resume_point(store: &Store, root: &std::path::Path) -> Option<String> {
 fn clear_derived_graphs(store: &Store) {
     // ─── Phase 1: Clear and regenerate virtual graphs ───
     // Virtual graphs are ephemeral — rebuilt from git every sync.
-    // We clear ALL graphs that aren't /sync/ graphs, then reload.
-    // Sync graphs are persistent — never touched.
+    // We remove EVERY graph that is not on the keep-list below (the one
+    // graph, repo-ontology, the now view), then reload. The old sync/<sha>
+    // family is retired and is swept like any other graph.
 
     // Find all existing graph names
     // Enumerate via named_graphs(), NOT a GRAPH ?g pattern — a pattern query
@@ -449,8 +450,6 @@ fn clear_derived_graphs(store: &Store) {
         })
         .collect();
 
-    // Clear non-sync, non-history graphs (virtual graphs get regenerated).
-    // History and meta graphs are persistent — managed by Phase 4.
     for graph_uri in &existing_graphs {
         // Keep-list: the one graph (persistent, append-only — incremental
         // appends; full rebuild only via the spike command or an

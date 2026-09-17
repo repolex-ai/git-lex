@@ -283,7 +283,8 @@ pub(crate) fn cmd_query(query: String, json: bool) {
     // Fix: always extract the current working tree (git blobs + frontmatter) into a
     // fresh in-memory store. generate_frontmatter_nquads() reads the live .md files
     // directly — so this reflects exactly what's on disk now. The persistent store
-    // remains a SYNC/HISTORY artifact (sync/<sha> graphs); the "now" view is always
+    // remains a SYNC artifact (the one graph of history plus the graphs sync
+    // regenerates each run; the sync/<sha> family is retired); the "now" view is always
     // derived fresh here, trading a little speed for a correct, surprise-free flow.
     let start = Instant::now();
     let store = Store::new().expect("failed to create in-memory store");

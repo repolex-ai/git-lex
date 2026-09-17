@@ -394,7 +394,8 @@ fn canonical_identity_yml(sha: &str) -> String {
 ///
 /// C6 fix (Day 38): this is the gate inside all three `sha_from_*` readers.
 /// The genesis SHA is identity data — `.lex/identity.yml` + the
-/// `git:genesisSha` fact (it no longer appears in any IRI, Day-50). A short
+/// `git-lex:genesisSha` fact on the `git-lex:Repo` node (it no longer
+/// appears in any IRI, Day-50). A short
 /// SHA here is still an IDENTITY-SPLIT risk across the Pool seam:
 /// `pool sync-from` builds the Moments named-graph IRI from identity.yml's
 /// genesis_sha, so a length disagreement between tiers would orphan a

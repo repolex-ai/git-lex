@@ -27,7 +27,7 @@
 //! Signature records are PER COMMIT (Rob-ruled: git2's exact structure; no
 //! invented person-node dedup — an authors rollup, if ever wanted, is a
 //! derived view). A Signature's identity is its owning commit + role, so its
-//! IRI derives as git2/Signature/<sha>/author | /committer.
+//! IRI derives as git2/Signature/<sha>-author | -committer.
 //!
 //! NOT emitted here (deliberately):
 //!   - Changesets — ruled dead 2026-07-20 (the one graph subsumes them).
