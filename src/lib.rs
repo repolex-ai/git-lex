@@ -857,6 +857,103 @@ pub fn resolve_kit_spec(spec: &str) -> (String, String, String) {
     }
 }
 
+/// The base kit: installed in every git-lex repo, never listed in repo.yml.
+pub const BASE_KIT: &str = "repolex-ai/git-lex-kit-base";
+
+/// The folder under `.lex/ontology/` the base kit's vocabulary lives in. Every
+/// other kit's folder is its short name (`soul`, `copia`).
+pub const BASE_ONTOLOGY_FOLDER: &str = "git-lex";
+
+/// Which kits are installed in this repo. `.lex/repo.yml` is the ONLY answer
+/// (goodlux, 2026-09-16, issue #17): the base kit, then `kit:`, then
+/// `optional_kits:` sorted. What happens to sit on disk is never consulted.
+pub fn installed_kit_specs(root: &std::path::Path) -> Vec<String> {
+    let ry = RepoYml::load(root);
+    let mut all = vec![BASE_KIT.to_string()];
+    let mut rest: Vec<String> = ry.optional_kits.clone();
+    rest.sort();
+    for spec in ry.domain_kit().into_iter().chain(rest) {
+        let (org, repo, _) = resolve_kit_spec(&spec);
+        let seen = all.iter().any(|k| {
+            let (o, r, _) = resolve_kit_spec(k);
+            o == org && r == repo
+        });
+        if !seen {
+            all.push(spec);
+        }
+    }
+    all
+}
+
+/// The ontology folder of every installed kit, as (folder name, path), sorted
+/// by name. THE one reader of `.lex/ontology/` membership: a folder left
+/// behind by a removed kit is not in repo.yml, so it is not here, so nothing
+/// reads it.
+pub fn installed_ontology_dirs(root: &std::path::Path) -> Vec<(String, PathBuf)> {
+    let ont_root = root.join(".lex").join("ontology");
+    let mut out: Vec<(String, PathBuf)> = installed_kit_specs(root)
+        .iter()
+        .map(|spec| {
+            if spec == BASE_KIT { BASE_ONTOLOGY_FOLDER.to_string() } else { resolve_kit_spec(spec).2 }
+        })
+        .map(|name| (name.clone(), ont_root.join(&name)))
+        .filter(|(_, dir)| dir.is_dir())
+        .collect();
+    out.sort();
+    out.dedup();
+    out
+}
+
+/// The ontology folder for one kit, named the way callers name kits: a spec
+/// or a short name (`repolex-ai/git-lex-kit-soul`, `soul`, `git-lex`). None
+/// when repo.yml does not list that kit, whatever is on disk.
+pub fn installed_kit_ontology_dir(root: &std::path::Path, kit: &str) -> Option<PathBuf> {
+    let (_, _, folder) = resolve_kit_spec(kit);
+    installed_ontology_dirs(root).into_iter().find(|(name, _)| *name == folder).map(|(_, dir)| dir)
+}
+
+/// Does repo.yml list this kit (spec or short name) as installed?
+pub fn is_kit_installed(root: &std::path::Path, kit: &str) -> bool {
+    let (_, _, short) = resolve_kit_spec(kit);
+    short == BASE_ONTOLOGY_FOLDER
+        || installed_kit_specs(root).iter().any(|k| resolve_kit_spec(k).2 == short)
+}
+
+/// Every file under the installed kits' ontology folders, recursive, sorted.
+pub fn installed_ontology_files(root: &std::path::Path) -> Vec<PathBuf> {
+    fn walk(dir: &std::path::Path, out: &mut Vec<PathBuf>) {
+        let Ok(entries) = fs::read_dir(dir) else { return };
+        for e in entries.filter_map(|e| e.ok()) {
+            let p = e.path();
+            if p.is_dir() { walk(&p, out) } else { out.push(p) }
+        }
+    }
+    let mut out = Vec::new();
+    for (_, dir) in installed_ontology_dirs(root) {
+        walk(&dir, &mut out);
+    }
+    out.sort();
+    out
+}
+
+fn is_shapes_ttl(p: &std::path::Path) -> bool {
+    p.file_name().is_some_and(|n| n.to_string_lossy().ends_with("-shapes.ttl"))
+}
+
+/// Installed vocabulary TTLs: every `.ttl` that is not a GENERATED
+/// `*-shapes.ttl` (derived output, not vocabulary).
+pub fn installed_vocabulary_ttls(root: &std::path::Path) -> Vec<PathBuf> {
+    installed_ontology_files(root)
+        .into_iter()
+        .filter(|p| p.extension().is_some_and(|x| x == "ttl") && !is_shapes_ttl(p))
+        .collect()
+}
+
+/// Installed generated shape files (`*-shapes.ttl`).
+pub fn installed_shape_files(root: &std::path::Path) -> Vec<PathBuf> {
+    installed_ontology_files(root).into_iter().filter(|p| is_shapes_ttl(p)).collect()
+}
+
 /// Install dir for a given kit spec, relative to the repo root.
 /// `.lex/kit/{org}/{repo}/`.
 pub fn kit_install_dir_for_spec(root: &std::path::Path, spec: &str) -> PathBuf {
@@ -1062,18 +1159,11 @@ pub fn prefix_bindings_at(root: Option<&std::path::Path>) -> Vec<(String, String
     // not there to answer.
     let mut kit_prefixes: Vec<(String, String)> = Vec::new();
     if let Some(r) = root {
-        let ry = RepoYml::load(r);
-        let mut specs: Vec<String> = Vec::new();
-        if let Some(k) = ry.domain_kit() {
-            specs.push(k);
-        }
-        specs.extend(ry.optional_kits.iter().cloned());
-        for spec in specs {
+        // The base kit's prefixes are the fixed defaults below.
+        for spec in installed_kit_specs(r).into_iter().filter(|k| k != BASE_KIT) {
             let (_, _, short) = resolve_kit_spec(&spec);
-            // Installed = the ontology directory this kit's prefix would point
-            // into actually exists. A declared kit with no ontology on disk
-            // contributes nothing.
-            if !r.join(".lex").join("ontology").join(&short).is_dir() {
+            // A declared kit with no ontology on disk contributes nothing.
+            if installed_kit_ontology_dir(r, &spec).is_none() {
                 continue;
             }
             if let Some(binding) = kit_prefix_binding(r, &short) {
@@ -1680,6 +1770,69 @@ mod kit_prefix_binding_tests {
         let out = add_prefixes_at(Some(&root), "SELECT ?s WHERE { ?s a pool:Thing }");
         assert!(!out.contains("PREFIX pool:"),
             "a declared kit with no installed ontology must not bind:\n{out}");
+        let _ = fs::remove_dir_all(&root);
+    }
+}
+
+#[cfg(test)]
+mod installed_kits_tests {
+    use super::*;
+
+    fn tmp_repo(tag: &str, repo_yml: &str, folders: &[&str]) -> PathBuf {
+        let root = std::env::temp_dir().join(format!("glx-installed-{}-{}", tag, std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        for f in folders {
+            let dir = root.join(".lex").join("ontology").join(f);
+            fs::create_dir_all(&dir).unwrap();
+            fs::write(dir.join(format!("{f}.ttl")), "# vocabulary").unwrap();
+            fs::write(dir.join(format!("{f}-shapes.ttl")), "# shapes").unwrap();
+        }
+        fs::write(root.join(".lex").join("repo.yml"), repo_yml).unwrap();
+        root
+    }
+
+    /// #17: repo.yml decides. A folder it does not list is invisible to every
+    /// reader; a kit it lists with no folder contributes nothing.
+    #[test]
+    fn repo_yml_is_the_only_answer() {
+        let root = tmp_repo(
+            "only",
+            "kit: repolex-ai/git-lex-kit-soul\noptional_kits:\n  - repolex-ai/git-lex-kit-copia\n  - repolex-ai/git-lex-kit-absent\n",
+            &["git-lex", "soul", "copia", "pan"],
+        );
+        assert_eq!(
+            installed_kit_specs(&root),
+            vec![BASE_KIT, "repolex-ai/git-lex-kit-soul", "repolex-ai/git-lex-kit-absent", "repolex-ai/git-lex-kit-copia"]
+        );
+        let names: Vec<String> = installed_ontology_dirs(&root).into_iter().map(|(n, _)| n).collect();
+        assert_eq!(names, vec!["copia", "git-lex", "soul"]);
+
+        assert!(installed_kit_ontology_dir(&root, "pan").is_none());
+        assert!(installed_kit_ontology_dir(&root, "repolex-ai/git-lex-kit-pan").is_none());
+        assert!(installed_kit_ontology_dir(&root, "soul").is_some());
+        assert!(installed_kit_ontology_dir(&root, "git-lex").is_some());
+        assert!(!is_kit_installed(&root, "pan"));
+
+        for p in installed_ontology_files(&root) {
+            assert!(!p.to_string_lossy().contains("/pan/"), "{}", p.display());
+        }
+        assert_eq!(installed_vocabulary_ttls(&root).len(), 3);
+        assert_eq!(installed_shape_files(&root).len(), 3);
+
+        let prefixes: Vec<String> = prefix_bindings_at(Some(&root)).into_iter().map(|(n, _)| n).collect();
+        assert!(prefixes.contains(&"copia:".to_string()));
+        assert!(!prefixes.contains(&"pan:".to_string()), "{prefixes:?}");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_repo_with_no_repo_yml_still_has_the_base_kit() {
+        let root = std::env::temp_dir().join(format!("glx-installed-bare-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join(".lex/ontology/git-lex")).unwrap();
+        fs::create_dir_all(root.join(".lex/ontology/stray")).unwrap();
+        let names: Vec<String> = installed_ontology_dirs(&root).into_iter().map(|(n, _)| n).collect();
+        assert_eq!(names, vec!["git-lex"]);
         let _ = fs::remove_dir_all(&root);
     }
 }

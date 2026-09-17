@@ -64,49 +64,21 @@ struct Model {
 
 // ─── installed kits ──────────────────────────────────────────
 
-/// (kit spec, ontology folder name) for every installed kit, from repo.yml.
-/// The folder name is what the kit ships under its own `ontology/` (the base
-/// kit ships `git-lex`, not `base`); the kit's short name is the fallback.
+/// (kit spec, ontology folder name) for every installed kit. Which kits are
+/// installed is `git_lex::installed_kit_specs`' answer (repo.yml), like every
+/// other reader (#17).
 fn installed_ontologies(root: &Path) -> Vec<(String, String)> {
-    let ry = git_lex::RepoYml::load(root);
-    let mut specs: Vec<String> = vec![crate::BASE_KIT.to_string()];
-    specs.extend(ry.domain_kit());
-    specs.extend(ry.optional_kits.iter().cloned());
-
-    let mut out: Vec<(String, String)> = Vec::new();
-    for spec in specs {
-        let mut names: Vec<String> = fs::read_dir(git_lex::kit_install_dir_for_spec(root, &spec).join("ontology"))
-            .map(|rd| {
-                rd.filter_map(|e| e.ok())
-                    .filter(|e| e.path().is_dir())
-                    .map(|e| e.file_name().to_string_lossy().to_string())
-                    .collect()
-            })
-            .unwrap_or_default();
-        if names.is_empty() {
-            names.push(git_lex::resolve_kit_spec(&spec).2);
-        }
-        names.sort();
-        for n in names {
-            if !out.iter().any(|(_, have)| *have == n) {
-                out.push((spec.clone(), n));
-            }
-        }
-    }
-    out
-}
-
-fn ttl_files(dir: &Path, out: &mut Vec<PathBuf>) {
-    let Ok(rd) = fs::read_dir(dir) else { return };
-    let mut entries: Vec<PathBuf> = rd.filter_map(|e| e.ok()).map(|e| e.path()).collect();
-    entries.sort();
-    for p in entries {
-        if p.is_dir() {
-            ttl_files(&p, out);
-        } else if p.extension().and_then(|e| e.to_str()) == Some("ttl") {
-            out.push(p);
-        }
-    }
+    git_lex::installed_kit_specs(root)
+        .into_iter()
+        .map(|spec| {
+            let name = if spec == git_lex::BASE_KIT {
+                git_lex::BASE_ONTOLOGY_FOLDER.to_string()
+            } else {
+                git_lex::resolve_kit_spec(&spec).2
+            };
+            (spec, name)
+        })
+        .collect()
 }
 
 /// `folder base:` from an installed kit's kit.yml.
@@ -154,10 +126,10 @@ fn build_model(root: &Path) -> Model {
     // One in-memory graph: the shapes and vocabularies of the installed kits,
     // nothing else.
     let Ok(store) = Store::new() else { return Model::default() };
-    let mut files = Vec::new();
-    for (_, name) in &installed {
-        ttl_files(&root.join(".lex").join("ontology").join(name), &mut files);
-    }
+    let files: Vec<PathBuf> = git_lex::installed_ontology_files(root)
+        .into_iter()
+        .filter(|p| p.extension().is_some_and(|e| e == "ttl"))
+        .collect();
     for f in &files {
         let Ok(bytes) = fs::read(f) else { continue };
         if let Err(e) = store.load_from_reader(oxigraph::io::RdfFormat::Turtle, bytes.as_slice()) {

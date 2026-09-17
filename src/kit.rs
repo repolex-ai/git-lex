@@ -321,6 +321,10 @@ pub(crate) fn kit_config_str(kit: &str, key: &str) -> Option<String> {
 ///   3. `.lex/kit/{org}/{repo}/{short}.ttl`        — legacy
 pub(crate) fn find_kit_ttl(kit: &str) -> Option<PathBuf> {
     let root = find_git_root()?;
+    // repo.yml decides what is installed (#17); a folder on disk does not.
+    if !git_lex::is_kit_installed(&root, kit) {
+        return None;
+    }
     let (_, _, short_name) = resolve_kit_spec(kit);
 
     let try_dir = |dir: &PathBuf| -> Option<PathBuf> {
@@ -401,9 +405,7 @@ pub(crate) fn load_all_kit_ontologies_into_store(kit: &str) -> Result<Option<Sto
     let store = load_ttl_str(&target_content, &target_ttl.display().to_string())?;
 
     let Some(root) = find_git_root() else { return Ok(Some(store)) };
-    let mut others: Vec<PathBuf> = Vec::new();
-    collect_vocabulary_ttls(&root.join(".lex").join("ontology"), &mut others);
-    others.sort();
+    let others = git_lex::installed_vocabulary_ttls(&root);
 
     for path in others {
         if path == target_ttl {
@@ -421,23 +423,6 @@ shapes. Fix that TTL and re-run `git lex kit-update`.",
         }
     }
     Ok(Some(store))
-}
-
-/// Every installed vocabulary TTL under `.lex/ontology/`, excluding the
-/// GENERATED `*-shapes.ttl` — those are derived output, not vocabulary, and
-/// loading them would feed the generator its own previous answer.
-fn collect_vocabulary_ttls(dir: &std::path::Path, out: &mut Vec<PathBuf>) {
-    let Ok(entries) = fs::read_dir(dir) else { return };
-    for e in entries.filter_map(|e| e.ok()) {
-        let p = e.path();
-        if p.is_dir() {
-            collect_vocabulary_ttls(&p, out);
-        } else if p.extension().is_some_and(|x| x == "ttl")
-            && !p.file_name().is_some_and(|n| n.to_string_lossy().ends_with("-shapes.ttl"))
-        {
-            out.push(p);
-        }
-    }
 }
 
 /// Load Turtle TEXT into a fresh in-memory store — the ONE way git-lex reads

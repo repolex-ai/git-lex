@@ -214,11 +214,7 @@ pub(crate) fn emit_class_templates(kit_name: &str, root: &std::path::Path, creat
     let (_, _, short) = resolve_kit_spec(kit_name);
 
     let kit_types = get_kit_types(kit_name);
-    let shapes_content = {
-        let shapes_p = root.join(".lex").join("ontology").join(&short)
-            .join(format!("{}-shapes.ttl", short));
-        fs::read_to_string(&shapes_p).unwrap_or_default()
-    };
+    let shapes_content = crate::ontology::read_kit_shapes(kit_name);
     let shacl_hints = parse_shacl_hints(&shapes_content, &short);
     let prefix_name = get_kit_prefix_name(&short);
 
@@ -334,16 +330,7 @@ pub(crate) fn emit_class_templates(kit_name: &str, root: &std::path::Path, creat
 /// If `target` is provided, returns only that one kit (still validated
 /// against installed-kit list — refuses to update a kit that isn't here).
 pub(crate) fn collect_kits_for_update(root: &std::path::Path, target: Option<&str>) -> Vec<String> {
-    let mut all = vec![BASE_KIT.to_string()];
-    if let Some(domain) = git_lex::RepoYml::load(root).domain_kit() {
-        if domain != BASE_KIT { all.push(domain); }
-    }
-    let mut optionals = read_repo_yml_optional_kits(&root.join(".lex").join("repo.yml"));
-    optionals.sort();
-    optionals.dedup();
-    for o in optionals {
-        if !all.contains(&o) { all.push(o); }
-    }
+    let all = git_lex::installed_kit_specs(root);
     match target {
         None => all,
         Some(t) => {
@@ -729,22 +716,14 @@ fn converge_ontology_mirror(root: &Path) {
         }
         Ok(())
     }
-    let kit_root = root.join(".lex").join("kit");
+    // Ownership comes from the kits repo.yml lists (#17), never from whatever
+    // install dirs happen to be on disk.
     let mut payload_dirs: Vec<(String, std::path::PathBuf)> = Vec::new();
-    if let Ok(orgs) = fs::read_dir(&kit_root) {
-        for org in orgs.filter_map(|e| e.ok()).filter(|e| e.path().is_dir()) {
-            if let Ok(repos) = fs::read_dir(org.path()) {
-                for repo in repos.filter_map(|e| e.ok()).filter(|e| e.path().is_dir()) {
-                    let ont = repo.path().join("ontology");
-                    if let Ok(shorts) = fs::read_dir(&ont) {
-                        for s in shorts.filter_map(|e| e.ok()).filter(|e| e.path().is_dir()) {
-                            payload_dirs.push((
-                                s.file_name().to_string_lossy().to_string(),
-                                s.path(),
-                            ));
-                        }
-                    }
-                }
+    for spec in git_lex::installed_kit_specs(root) {
+        let ont = git_lex::kit_install_dir_for_spec(root, &spec).join("ontology");
+        if let Ok(shorts) = fs::read_dir(&ont) {
+            for s in shorts.filter_map(|e| e.ok()).filter(|e| e.path().is_dir()) {
+                payload_dirs.push((s.file_name().to_string_lossy().to_string(), s.path()));
             }
         }
     }
@@ -1058,6 +1037,17 @@ pub(crate) fn cmd_kit_add(kit_spec: String) {
     };
     println!("Kit fetched at {}.", kit_dir.strip_prefix(&root).unwrap_or(&kit_dir).display());
 
+    // Record in repo.yml FIRST: repo.yml is the only answer to "which kits
+    // are installed" (#17), so the artifacts below are generated for a kit
+    // that is already listed.
+    let repo_yml = lex_dir.join("repo.yml");
+    if let Err(e) = append_optional_kit(&repo_yml, &canonical_spec) {
+        eprintln!("fatal: could not record '{}' in .lex/repo.yml: {}", canonical_spec, e);
+        eprintln!("The kit was fetched but NOT installed. Fix the file and run `git lex kit-add {}` again.", canonical_spec);
+        exit(1);
+    }
+    println!("Recorded '{}' under optional_kits in .lex/repo.yml.", canonical_spec);
+
     // Install scaffold. For a new optional kit nothing should exist locally
     // yet, so this is almost entirely fresh-install — but if the agent has
     // already hand-authored files matching the kit's paths, those converge to
@@ -1083,17 +1073,6 @@ pub(crate) fn cmd_kit_add(kit_spec: String) {
     // class folders show up on disk immediately — lux's call: discoverability.
     println!("Regenerating artifacts for '{}/{}'...", org, repo);
     regenerate_kit_artifacts(&canonical_spec, &root, true);
-
-    // Record in repo.yml.
-    let repo_yml = lex_dir.join("repo.yml");
-    if let Err(e) = append_optional_kit(&repo_yml, &canonical_spec) {
-        eprintln!("Warning: failed to update .lex/repo.yml: {}", e);
-        eprintln!("The kit is installed but won't be tracked by `git lex kit-update`.");
-        eprintln!("Add this line manually under `optional_kits:`:");
-        eprintln!("  - {}", canonical_spec);
-    } else {
-        println!("Recorded '{}' under optional_kits in .lex/repo.yml.", canonical_spec);
-    }
 
     // Register the kit's hooks (and reap any orphans) in the substrate
     // config. install_scaffold_files_from_skip_existing above copies the
@@ -1205,6 +1184,23 @@ pub(crate) fn cmd_kit_remove(kit_spec: String, force: bool) {
     } else if content_exists {
         println!("Content folder '{}/' kept on disk (you said no).", folder_base.as_deref().unwrap_or("?"));
     }
+
+    // Delete the kit's ontology folder, then rebuild what was derived with
+    // it in view: another kit's shapes can carry properties this kit
+    // declared on a shared parent class, and the ontology graph holds its
+    // vocabulary. repo.yml no longer lists the kit, so nothing reads the
+    // folder either way (#17); this keeps the disk honest.
+    let ont_dir = lex_dir.join("ontology").join(resolve_kit_spec(&canonical_spec).2);
+    if ont_dir.is_dir() {
+        if let Err(e) = fs::remove_dir_all(&ont_dir) {
+            eprintln!("Warning: failed to delete {}: {}", ont_dir.strip_prefix(&root).unwrap_or(&ont_dir).display(), e);
+        }
+    }
+    for spec in git_lex::installed_kit_specs(&root) {
+        regenerate_kit_artifacts(&spec, &root, false);
+    }
+    harness::run_substrate_setup(&root, None);
+    reload_ontology_graph();
 
     println!("Kit '{}' removed.", canonical_spec);
     crate::context::refresh(&root);
