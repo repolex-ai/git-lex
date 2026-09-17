@@ -57,8 +57,8 @@ except the history graph, which has its own IRI. "Query door" is
 | `…/LexHistoryGraph` | Every assertion and retraction ever, with provenance | no | yes |
 | `commits` | One node per commit: sha, author, time, message | yes | yes |
 | `refs` | Branches and tags, and the commit each points at | yes | yes |
-| `repo` | The repository itself: genesis sha, HEAD | yes | yes |
-| `filetree/<sha>` | Every file at that commit, as index entries | HEAD only | yes |
+| `repo` | The repository itself: genesis sha, and the facts from `.lex/repo.yml` (name, kit, version, agent, created) | yes | yes |
+| `filetree/<sha>` | Every file at one commit, as index entries. There is only ever one such graph | the current HEAD | the last synced commit |
 | `repo-ontology` | The installed kits' schema, queryable | no | yes |
 
 The `repo-ontology` graph contains the ontology of every installed kit, loaded as data. It answers queries like "what fields can a Journal carry?" without reading TTL files directly:
