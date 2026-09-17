@@ -82,21 +82,22 @@ pub(crate) fn cmd_sync() {
     // (.fm.spo + .md.spo — the one graph's source) and derives the
     // working-tree now view. The now view is NO LONGER loaded into the
     // store (Rob-ruled: the now graph died as a store product — the one
-    // graph's base layer is current state); the text is still built here
-    // because the sync report counts its facts.
+    // graph's base layer is current state), so its text is not built: the
+    // sync report's fact count comes back from the walk as a number.
     let resolver_ctx = crate::nquad::ResolverContext::build(&root);
-    let (fm_nq, fm_errors) = crate::nquad::generate_frontmatter_nquads_with(
+    let walk = crate::nquad::generate_frontmatter_nquads_with(
         &root,
         &resolver_ctx,
-        crate::nquad::NowWalkOpts { write_sidecars: true, build_nquads: true },
+        crate::nquad::NowWalkOpts { write_sidecars: true, build_nquads: false },
     );
+    let fm_errors = walk.errors;
     if fm_errors > 0 {
         eprintln!(
             "warning: {fm_errors} live document(s) carry values the data rules reject (each is listed above with its file). \
 These are in your WORKING FILES, not history — fix the listed files and the warning goes away for good."
         );
     }
-    let fm_count = fm_nq.lines().filter(|l| !l.is_empty()).count();
+    let fm_count = walk.facts;
 
     // ─── One-graph phase: append new commits' statement events.
     // Shares the SAME resolver context, so one-graph facts resolve

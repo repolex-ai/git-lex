@@ -299,11 +299,12 @@ pub(crate) fn cmd_query(query: String, json: bool) {
     // computed fresh). write_sidecars is OFF — query is a READ command; it
     // used to rewrite the .spo sidecars as a side effect, dirtying the tree
     // from a question.
-    let (fm_nq, _errs) = generate_frontmatter_nquads(crate::nquad::NowWalkOpts {
+    let walk = generate_frontmatter_nquads(crate::nquad::NowWalkOpts {
         write_sidecars: false,
         build_nquads: true,
     });
-    let lex_count = fm_nq.lines().filter(|l| !l.is_empty()).count();
+    let fm_nq = walk.nquads;
+    let lex_count = walk.facts;
     if !fm_nq.is_empty() {
         store
             .load_from_reader(RdfFormat::NQuads, Cursor::new(fm_nq.as_bytes()))

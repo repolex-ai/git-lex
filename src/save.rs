@@ -1361,11 +1361,11 @@ pub(crate) fn cmd_extract() {
     let (extraction_errors, extract_ctx) = match &ctx_root {
         Some(root) => {
             let ctx = nquad::ResolverContext::build(root);
-            let (_, errs) = nquad::generate_frontmatter_nquads_with(root, &ctx, walk_opts);
+            let errs = nquad::generate_frontmatter_nquads_with(root, &ctx, walk_opts).errors;
             (errs, Some(ctx))
         }
         None => {
-            let (_, errs) = generate_frontmatter_nquads(walk_opts);
+            let errs = generate_frontmatter_nquads(walk_opts).errors;
             (errs, None)
         }
     };

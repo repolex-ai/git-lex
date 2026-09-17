@@ -58,6 +58,9 @@ pub(crate) struct CacheEntry {
     pub index_hash: String,
     /// .md.spo link lines this file contributed (the walk's link total).
     pub links: usize,
+    /// Quad lines in the fragment (the sync report's fact count), so a
+    /// caller that only needs the count never reads the fragment.
+    pub quads: usize,
 }
 
 pub(crate) struct WalkCache {
@@ -141,18 +144,20 @@ impl WalkCache {
         let mut entries = HashMap::new();
         for line in lines {
             let mut cols = line.split('\t');
-            let (Some(rel), Some(bh), Some(ih), Some(links)) =
-                (cols.next(), cols.next(), cols.next(), cols.next())
+            let (Some(rel), Some(bh), Some(ih), Some(links), Some(quads)) =
+                (cols.next(), cols.next(), cols.next(), cols.next(), cols.next())
             else {
-                return None; // torn manifest — distrust the whole thing
+                return None; // torn (or older-format) manifest — distrust the whole thing
             };
             let links: usize = links.parse().ok()?;
+            let quads: usize = quads.parse().ok()?;
             entries.insert(
                 rel.to_string(),
                 CacheEntry {
                     bytes_hash: bh.to_string(),
                     index_hash: ih.to_string(),
                     links,
+                    quads,
                 },
             );
         }
@@ -190,7 +195,7 @@ impl WalkCache {
         bytes_hash: &str,
         index_hash: &str,
         read_fragment: bool,
-    ) -> Option<(String, usize)> {
+    ) -> Option<(String, CacheEntry)> {
         let e = self.entries.get(relpath)?;
         if e.bytes_hash != bytes_hash || e.index_hash != index_hash {
             return None;
@@ -201,9 +206,8 @@ impl WalkCache {
             String::new()
         };
         let entry = e.clone();
-        let links = entry.links;
-        self.fresh.insert(relpath.to_string(), entry);
-        Some((frag, links))
+        self.fresh.insert(relpath.to_string(), entry.clone());
+        Some((frag, entry))
     }
 
     /// Record a freshly-extracted file. Errors>0 files are the caller's
@@ -231,6 +235,7 @@ impl WalkCache {
                 bytes_hash: bytes_hash.to_string(),
                 index_hash: index_hash.to_string(),
                 links,
+                quads: fragment.lines().filter(|l| !l.is_empty()).count(),
             },
         );
     }
@@ -249,8 +254,8 @@ impl WalkCache {
         for rel in rels {
             let e = &self.fresh[rel];
             out.push_str(&format!(
-                "{}\t{}\t{}\t{}\n",
-                rel, e.bytes_hash, e.index_hash, e.links
+                "{}\t{}\t{}\t{}\t{}\n",
+                rel, e.bytes_hash, e.index_hash, e.links, e.quads
             ));
         }
         let _ = fs::write(self.dir.join("manifest.tsv"), out);
@@ -312,9 +317,10 @@ mod tests {
         c.save();
 
         let mut loaded = WalkCache::load(&root, &ctx).expect("cache loads");
-        let (frag, links) = loaded.hit("a.md", "bh1", "ih1", true).expect("hit");
+        let (frag, entry) = loaded.hit("a.md", "bh1", "ih1", true).expect("hit");
         assert_eq!(frag, "<s> <p> <o> <g> .\n");
-        assert_eq!(links, 2);
+        assert_eq!(entry.links, 2);
+        assert_eq!(entry.quads, 1);
         // Either hash off → miss.
         assert!(loaded.hit("a.md", "bhX", "ih1", true).is_none());
         assert!(loaded.hit("a.md", "bh1", "ihX", true).is_none());

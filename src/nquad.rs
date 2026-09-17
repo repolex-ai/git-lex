@@ -219,13 +219,18 @@ pub(crate) fn load_lex_nquads() -> String {
     let mut nq = String::new();
     let lex_dir = root.join(".lex");
 
-    // Recursively find all .nq files
-    fn walk_nq(dir: &std::path::Path, nq: &mut String) {
+    // Recursively find all .nq files. `.lex/_ignore/` is machine-local
+    // derived state, never hand-written triples: its walk-cache fragments
+    // are the working-tree view the query path has already built, so
+    // reading them loaded every document twice.
+    fn walk_nq(dir: &std::path::Path, skip: &std::path::Path, nq: &mut String) {
         if let Ok(entries) = fs::read_dir(dir) {
             for entry in entries.filter_map(|e| e.ok()) {
                 let path = entry.path();
                 if path.is_dir() {
-                    walk_nq(&path, nq);
+                    if path != skip {
+                        walk_nq(&path, skip, nq);
+                    }
                 } else if path.extension().is_some_and(|e| e == "nq") {
                     if let Ok(content) = fs::read_to_string(&path) {
                         nq.push_str(&content);
@@ -238,9 +243,7 @@ pub(crate) fn load_lex_nquads() -> String {
         }
     }
 
-    if lex_dir.exists() {
-        walk_nq(&lex_dir, &mut nq);
-    }
+    walk_nq(&lex_dir, &lex_dir.join("_ignore"), &mut nq);
 
     nq
 }
@@ -699,10 +702,21 @@ pub(crate) struct NowWalkOpts {
 /// parse per document; the wikilink reader and commit-message scanning this
 /// doc once promised are retired (Rob-ruled 2026-08-06 — `[[...]]` in a
 /// body is plain prose).
-pub(crate) fn generate_frontmatter_nquads(opts: NowWalkOpts) -> (String, u32) {
+/// What one working-tree walk produced.
+pub(crate) struct NowWalk {
+    /// The now-graph N-Quads (empty unless `build_nquads`).
+    pub nquads: String,
+    /// Extraction/resolution errors (the save gate counts these).
+    pub errors: u32,
+    /// Quad lines the walk emitted — counted whether or not the text was
+    /// built, so a caller that only reports the number never pays for it.
+    pub facts: usize,
+}
+
+pub(crate) fn generate_frontmatter_nquads(opts: NowWalkOpts) -> NowWalk {
     let root = match find_git_root() {
         Some(r) => r,
-        None => return (String::new(), 0),
+        None => return NowWalk { nquads: String::new(), errors: 0, facts: 0 },
     };
     let ctx = ResolverContext::build(&root);
     generate_frontmatter_nquads_with(&root, &ctx, opts)
@@ -714,7 +728,7 @@ pub(crate) fn generate_frontmatter_nquads_with(
     root: &std::path::Path,
     ctx: &ResolverContext,
     opts: NowWalkOpts,
-) -> (String, u32) {
+) -> NowWalk {
     let root = root.to_path_buf();
 
     // The "now" graph is the canonical view of current state: extracted
@@ -788,6 +802,7 @@ pub(crate) fn generate_frontmatter_nquads_with(
     // the sidecar write converges it. One `git status` for the whole run.
     let forced_sources = dirty_sidecar_sources(&root);
     let mut cache_hits: usize = 0;
+    let mut total_facts: usize = 0;
 
     for filepath in files {
         // Unreadable docs are LOUD and counted (review #23): skipping one
@@ -834,11 +849,12 @@ pub(crate) fn generate_frontmatter_nquads_with(
         // save that introduced them and fire again on any change.
         let bytes_hash = crate::walkcache::blob_hash_of(content.as_bytes());
         if !force_full && !forced_sources.contains(&relpath_str) {
-            if let Some((frag, links)) =
+            if let Some((frag, entry)) =
                 cache.hit(&relpath_str, &bytes_hash, &blob_hash, opts.build_nquads)
             {
                 cache_hits += 1;
-                total_links += links;
+                total_links += entry.links;
+                total_facts += entry.quads;
                 if opts.build_nquads {
                     nq.push_str(&frag);
                 }
@@ -998,6 +1014,8 @@ pub(crate) fn generate_frontmatter_nquads_with(
             );
         }
 
+        total_facts += nq[file_nq_start..].lines().filter(|l| !l.is_empty()).count();
+
         // Cache what this file produced — but NEVER a file whose extraction
         // errored: errors must stay loud on every run, and a cached error
         // would read as clean forever.
@@ -1035,7 +1053,7 @@ pub(crate) fn generate_frontmatter_nquads_with(
     // (Rob-ruled 2026-08-06). git-lex reads no wikilinks anywhere; a
     // bracketed name in a commit subject is prose.
 
-    (nq, total_errors)
+    NowWalk { nquads: nq, errors: total_errors, facts: total_facts }
 }
 
 /// Source documents whose SIDECARS are dirty in git — the on-disk sidecar
