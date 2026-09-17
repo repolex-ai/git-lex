@@ -65,7 +65,9 @@ pub(crate) fn cmd_sync() {
         return;
     }
 
-    let onegraph_resume = resume_point(&store, &root);
+    let onegraph_resume = validated_resume(&root, resume_point(&store, &root));
+    // No resume point = the one graph is rebuilt from the first commit.
+    let full_rebuild = onegraph_resume.is_none();
 
     clear_derived_graphs(&store);
     let now_present = store
@@ -75,12 +77,14 @@ pub(crate) fn cmd_sync() {
     heal_ontology_graph(&store);
 
 
-    // Regenerate the git2 machinery layer (commits/signatures/refs/filetree)
-    let git_nq = crate::git2_nquads::generate_git2_nquads();
-    let git_count = git_nq.lines().count();
-    store
-        .load_from_reader(RdfFormat::NQuads, Cursor::new(git_nq.as_bytes()))
-        .expect("failed to load git triples");
+    // Regenerate the git2 machinery layer (commits/signatures/refs/filetree).
+    // An append loads it here, whole, as it always has. A full rebuild loads
+    // it AFTER the one graph and the now view (see below): the rebuild
+    // writes in batches (#15), and the git2 layer carries the sync marker.
+    let mut git_count = 0;
+    if !full_rebuild {
+        git_count = load_git2_layer(&store, Git2Load::Whole);
+    }
 
     // Extraction: the ONE working-tree walk WRITES both sidecar families
     // (.fm.spo + .md.spo — the one graph's source) and derives the
@@ -107,7 +111,7 @@ These are in your WORKING FILES, not history — fix the listed files and the wa
     // Shares the SAME resolver context, so one-graph facts resolve
     // identically to now-view facts (and the indexes build once per sync,
     // not twice). ───
-    let onegraph = sync_onegraph_phase(&store, &root, onegraph_resume, &resolver_ctx);
+    let onegraph = sync_onegraph_walk(&store, &root, onegraph_resume, &resolver_ctx);
 
     // ─── Stale graph cleanup ───
     // Subsumed by the Phase-1 clear filter: every graph not on the keep-list
@@ -119,10 +123,31 @@ These are in your WORKING FILES, not history — fix the listed files and the wa
     // The now view follows the base layer. A full rebuild (or a store that
     // has no now view yet) copies all of it; otherwise only the subjects
     // this walk changed can differ, and only they are refreshed.
-    if onegraph.full_rebuild || !now_present {
-        materialize_now_view(&store);
-    } else {
-        refresh_now_view(&store, &onegraph.changed_subjects);
+    //
+    // ── Full rebuild: everything in batches, the marker LAST (#15) ──
+    // Nothing is stored to say how far a sync got: the commits graph is the
+    // marker (goodlux-ruled; see resume_point). A rebuild held in one store
+    // transaction cost memory that grew with the whole of history, so the
+    // rebuild writes the one graph, the now view and the git2 layer in
+    // bounded batches — and the commit ordinals, which every "is this store
+    // synced?" reader keys on, go in last, in one transaction. Killed at any
+    // point before that, the store has no marker: the next sync finds no
+    // resume point and rebuilds from the first commit.
+    if full_rebuild {
+        materialize_now_view_in_batches(&store);
+        git_count = load_git2_layer(&store, Git2Load::BatchedMarkerLast);
+    }
+
+    // Every sync proves the store coherent or aborts. The proof joins
+    // events to commit ordinals, so it follows the git2 layer.
+    verify_onegraph(&store);
+
+    if !full_rebuild {
+        if now_present {
+            refresh_now_view(&store, &onegraph.changed_subjects);
+        } else {
+            materialize_now_view(&store);
+        }
     }
 
     store.flush().expect("failed to flush store");
@@ -189,9 +214,11 @@ fn gate_default_branch(root: &std::path::Path) {
     // Contract this depends on: the oxigraph store is derived. If you've
     // manually mutated it, rebuild via `rm -rf .lex/_ignore/oxigraph`.
 fn fast_path_hit(store: &Store, root: &std::path::Path, head_sha: &str) -> bool {
+    // The ordinal, not "any fact about HEAD": the ordinals are the sync
+    // marker (SYNC_MARKER_PREDICATE), written last by a batched rebuild.
     let probe = format!(
-        "ASK {{ GRAPH <{}> {{ <https://repolex.ai/git-lex/git2/Commit/{}> ?p ?o }} }}",
-        graph_uri("commits"), head_sha
+        "ASK {{ GRAPH <{}> {{ <https://repolex.ai/git-lex/git2/Commit/{}> <{}> ?o }} }}",
+        graph_uri("commits"), head_sha, SYNC_MARKER_PREDICATE
     );
     let already_synced = oxigraph::sparql::SparqlEvaluator::new()
         .parse_query(&probe)
@@ -364,7 +391,7 @@ fn resume_point(store: &Store, root: &std::path::Path) -> Option<String> {
     let onegraph_resume: Option<String> = {
         let q = format!(
             "SELECT ?sha WHERE {{ GRAPH <{}> {{ \
-               ?c <https://repolex.ai/ontology/git-lex/git2/ordinalDerived> ?o ; \
+               ?c <{SYNC_MARKER_PREDICATE}> ?o ; \
                   <https://repolex.ai/ontology/git-lex/git2/id> ?sha }} \
              }} ORDER BY DESC(?o)",
             graph_uri("commits")
@@ -561,6 +588,208 @@ fn refresh_now_view(store: &Store, subjects: &std::collections::HashSet<String>)
     }
 }
 
+/// The sync marker: git2 commit ordinals in the commits graph.
+///
+/// Nothing is stored to say how far a sync got (goodlux-ruled) — the
+/// persisted commit data IS the marker. Every reader that asks "is this
+/// store synced, and to where?" keys on the ordinal: the fast path, the
+/// resume point, and the spine's newest-synced-commit. So a rebuild that
+/// writes in batches must write the ordinals LAST, in one transaction: a
+/// store without them is a store no reader mistakes for a finished one.
+const SYNC_MARKER_PREDICATE: &str = "https://repolex.ai/ontology/git-lex/git2/ordinalDerived";
+
+/// How the git2 layer goes into the store.
+enum Git2Load {
+    /// One transaction — an append's load, unchanged.
+    Whole,
+    /// A full rebuild's load: bounded batches, the sync marker last (#15).
+    /// One transaction held the whole layer in memory at about 3 KB a quad
+    /// (measured: 1.03M quads, +2.9 GB), most of it the file tree.
+    BatchedMarkerLast,
+}
+
+/// Regenerate the git2 layer (commits/signatures/refs/filetree) and load
+/// it. Returns the number of quads.
+fn load_git2_layer(store: &Store, how: Git2Load) -> usize {
+    match how {
+        Git2Load::Whole => {
+            let git_nq = crate::git2_nquads::generate_git2_nquads();
+            store
+                .load_from_reader(RdfFormat::NQuads, Cursor::new(git_nq.as_bytes()))
+                .expect("failed to load git triples");
+            git_nq.lines().count()
+        }
+        Git2Load::BatchedMarkerLast => {
+            let mut loader = MarkerLastLoader::new(store, spo_events::REBUILD_BATCH_QUADS);
+            crate::git2_nquads::emit_git2_nquads(&mut loader);
+            loader.finish().expect("failed to load git triples")
+        }
+    }
+}
+
+/// Is this N-Quads line a sync-marker quad? (`<s> <p> o <g> .` — the
+/// subject is an IRI, so the predicate is the second space-separated term.)
+fn is_sync_marker_line(line: &str) -> bool {
+    line.split_once(' ')
+        .and_then(|(_, rest)| rest.strip_prefix('<'))
+        .and_then(|rest| rest.strip_prefix(SYNC_MARKER_PREDICATE))
+        .is_some_and(|rest| rest.starts_with("> "))
+}
+
+/// Takes N-Quads text as it is produced and loads it `batch_quads` lines per
+/// store transaction, holding back the sync-marker quads for one final
+/// transaction ([`MarkerLastLoader::finish`]). The git2 layer carries no
+/// blank nodes, so where a batch ends changes nothing that is stored.
+struct MarkerLastLoader<'a> {
+    store: &'a Store,
+    batch_quads: usize,
+    /// A line still waiting for its newline.
+    carry: String,
+    batch: String,
+    held: usize,
+    marker: String,
+    lines: usize,
+    /// The first load failure; nothing is loaded after it.
+    error: Option<String>,
+}
+
+impl<'a> MarkerLastLoader<'a> {
+    fn new(store: &'a Store, batch_quads: usize) -> Self {
+        MarkerLastLoader {
+            store,
+            batch_quads: batch_quads.max(1),
+            carry: String::new(),
+            batch: String::new(),
+            held: 0,
+            marker: String::new(),
+            lines: 0,
+            error: None,
+        }
+    }
+
+    fn line(&mut self, line: &str) {
+        if line.trim().is_empty() {
+            return;
+        }
+        self.lines += 1;
+        if is_sync_marker_line(line) {
+            self.marker.push_str(line);
+            return;
+        }
+        self.batch.push_str(line);
+        self.held += 1;
+        if self.held >= self.batch_quads {
+            self.load_batch();
+        }
+    }
+
+    fn load_batch(&mut self) {
+        if self.error.is_none()
+            && let Err(e) = self
+                .store
+                .load_from_reader(RdfFormat::NQuads, Cursor::new(self.batch.as_bytes()))
+        {
+            self.error = Some(e.to_string());
+        }
+        self.batch.clear();
+        self.held = 0;
+    }
+
+    /// Load what is left, then — only if every batch loaded — the marker.
+    /// Returns the number of quad lines taken.
+    fn finish(mut self) -> Result<usize, String> {
+        let last = std::mem::take(&mut self.carry);
+        if !last.is_empty() {
+            self.line(&format!("{last}\n"));
+        }
+        self.load_batch();
+        if let Some(e) = self.error {
+            return Err(e);
+        }
+        self.store
+            .load_from_reader(RdfFormat::NQuads, Cursor::new(self.marker.as_bytes()))
+            .map_err(|e| e.to_string())?;
+        Ok(self.lines)
+    }
+}
+
+impl crate::git2_nquads::NqSink for MarkerLastLoader<'_> {
+    fn push_str(&mut self, text: &str) {
+        let mut rest = text;
+        while let Some(end) = rest.find('\n') {
+            let (head, tail) = rest.split_at(end + 1);
+            if self.carry.is_empty() {
+                self.line(head);
+            } else {
+                self.carry.push_str(head);
+                let whole = std::mem::take(&mut self.carry);
+                self.line(&whole);
+            }
+            rest = tail;
+        }
+        self.carry.push_str(rest);
+    }
+}
+
+/// [`materialize_now_view`] for a full rebuild: the same copy, a bounded
+/// number of quads per store transaction (the single SPARQL update holds
+/// the whole view in one transaction — memory that grows with the repo).
+/// Same selection, stated the way `refresh_now_view` states it: every
+/// base-layer quad of the one graph — not an SpoEvent's, not `rdf:reifies`.
+/// Not all-or-nothing, so only a full rebuild may use it: there the sync
+/// marker is still unwritten, and a partial view is never read as finished.
+fn materialize_now_view_in_batches(store: &Store) {
+    now_view_in_batches(store, spo_events::REBUILD_BATCH_QUADS).unwrap_or_else(|e| {
+        // A stale now view silently lies to every downstream consumer
+        // (Syrinx, viz, agents) — fail the sync.
+        eprintln!("ERROR: now-view materialization failed: {e}");
+        std::process::exit(1);
+    })
+}
+
+fn now_view_in_batches(store: &Store, batch_quads: usize) -> Result<(), String> {
+    use oxigraph::model::{GraphNameRef, NamedNode, NamedNodeRef, NamedOrBlankNode, Quad, QuadRef};
+    let now = NamedNode::new_unchecked(NOW_GRAPH_IRI);
+    let one = NamedNodeRef::new_unchecked(spo_events::LEXHISTORY_GRAPH_IRI);
+    let rdf_type = NamedNodeRef::new_unchecked("http://www.w3.org/1999/02/22-rdf-syntax-ns#type");
+    let reifies = NamedNodeRef::new_unchecked("http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies");
+    let spo_event = NamedNodeRef::new_unchecked("https://repolex.ai/ontology/git-lex/SpoEvent");
+
+    // DROP SILENT GRAPH, bounded: empty it, then drop its registration
+    // (the first copied quad registers it again).
+    spo_events::clear_graph_in_batches(store, &now, batch_quads)?;
+    store.remove_named_graph(&now).map_err(|e| e.to_string())?;
+
+    let mut batch: Vec<Quad> = Vec::new();
+    // The one graph is read in subject order, so one remembered answer
+    // covers each subject's whole run of quads.
+    let mut last_subject: Option<(NamedOrBlankNode, bool)> = None;
+    for quad in store.quads_for_pattern(None, None, None, Some(GraphNameRef::from(one))) {
+        let quad = quad.map_err(|e| e.to_string())?;
+        if quad.predicate.as_ref() == reifies {
+            continue;
+        }
+        let is_event = match &last_subject {
+            Some((subject, is_event)) if *subject == quad.subject => *is_event,
+            _ => {
+                let is_event = store
+                    .contains(QuadRef::new(quad.subject.as_ref(), rdf_type, spo_event, one))
+                    .map_err(|e| e.to_string())?;
+                last_subject = Some((quad.subject.clone(), is_event));
+                is_event
+            }
+        };
+        if is_event {
+            continue;
+        }
+        batch.push(Quad::new(quad.subject, quad.predicate, quad.object, now.clone()));
+        if batch.len() >= batch_quads.max(1) {
+            store.extend(batch.drain(..)).map_err(|e| e.to_string())?;
+        }
+    }
+    store.extend(batch).map_err(|e| e.to_string())
+}
+
 fn materialize_now_view(store: &Store) {
     let update = "PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>              PREFIX gl: <https://repolex.ai/ontology/git-lex/>              DROP SILENT GRAPH <https://repolex.ai/git-lex/NamedGraph/now> ;              INSERT { GRAPH <https://repolex.ai/git-lex/NamedGraph/now> { ?s ?p ?o } }              WHERE { GRAPH <https://repolex.ai/git-lex/LexHistoryGraph> { ?s ?p ?o .                        FILTER NOT EXISTS { ?s a gl:SpoEvent }                        FILTER(?p != rdf:reifies) } }";
     match oxigraph::sparql::SparqlEvaluator::new().parse_update(update) {
@@ -624,24 +853,49 @@ SELECT (COUNT(*) AS ?n) WHERE { \
     } GROUP BY ?tt } \
   FILTER(!BOUND(?maxR) || ?maxR < ?maxA) }";
 
-/// What the one-graph phase did, for the now-view step after it.
+/// What the one-graph walk did, for the now-view step after it.
 struct OnegraphPhase {
-    full_rebuild: bool,
     changed_subjects: std::collections::HashSet<String>,
 }
 
-fn sync_onegraph_phase(store: &Store, root: &std::path::Path, resume_sha: Option<String>, ctx: &crate::nquad::ResolverContext) -> OnegraphPhase {
-    let one_graph_uri = format!("<{}>", spo_events::LEXHISTORY_GRAPH_IRI);
-
-    // Which commits are new?
-    let commit_exists = |sha: &str| -> bool {
-        Command::new("git")
-            .args(["cat-file", "-e", &format!("{sha}^{{commit}}")])
+/// The resume point, or None when it cannot be resumed from.
+///
+/// Belt-and-braces on top of the main-only gate: a resume commit that is
+/// gone, or is not an ancestor of HEAD, can only mean external interference
+/// (manual store surgery, a force-push that kept the sha alive on another
+/// ref). Never walk past it — fall back to a full rebuild. Decided here,
+/// before any store write, because a full rebuild orders its writes
+/// differently from an append (see cmd_sync).
+fn validated_resume(root: &std::path::Path, resume_sha: Option<String>) -> Option<String> {
+    let sha = resume_sha?;
+    let commit_exists = Command::new("git")
+        .args(["cat-file", "-e", &format!("{sha}^{{commit}}")])
+        .current_dir(root)
+        .status()
+        .map(|st| st.success())
+        .unwrap_or(false);
+    let is_ancestor_of_head = commit_exists
+        && Command::new("git")
             .current_dir(root)
+            .args(["merge-base", "--is-ancestor", &sha, "HEAD"])
             .status()
             .map(|st| st.success())
-            .unwrap_or(false)
-    };
+            .unwrap_or(false);
+    if is_ancestor_of_head {
+        return Some(sha);
+    }
+    eprintln!(
+        "warning: one-graph resume commit {sha} is gone or not an ancestor of HEAD (history rewritten?) — FULL one-graph rebuild"
+    );
+    None
+}
+
+/// The one-graph walk: append the new commits' statement events (or, with
+/// no resume point, rebuild the graph from the first commit). `resume_sha`
+/// has been through [`validated_resume`].
+fn sync_onegraph_walk(store: &Store, root: &std::path::Path, resume_sha: Option<String>, ctx: &crate::nquad::ResolverContext) -> OnegraphPhase {
+    let one_graph_uri = format!("<{}>", spo_events::LEXHISTORY_GRAPH_IRI);
+
     // A rev-list failure must NOT read as "no new commits" — that would make
     // sync print "up to date" over a range it never walked. Fail the sync.
     let rev_list = |range: &[&str]| -> Vec<String> {
@@ -671,29 +925,10 @@ fn sync_onegraph_phase(store: &Store, root: &std::path::Path, resume_sha: Option
             .collect()
     };
 
-    // Belt-and-braces on top of the main-only gate: a resume commit that
-    // is not an ancestor of HEAD can only mean external interference
-    // (manual store surgery, a force-push that kept the sha alive on
-    // another ref). Never walk past it — fall back to a full rebuild.
-    let is_ancestor_of_head = |sha: &str| -> bool {
-        Command::new("git")
-            .current_dir(root)
-            .args(["merge-base", "--is-ancestor", sha, "HEAD"])
-            .status()
-            .map(|st| st.success())
-            .unwrap_or(false)
-    };
-
     let (mut shas, full_rebuild) = match &resume_sha {
-        Some(sha) if commit_exists(sha) && is_ancestor_of_head(sha) => {
+        Some(sha) => {
             let exclude = format!("^{sha}");
             (rev_list(&[exclude.as_str(), "HEAD"]), false)
-        }
-        Some(sha) => {
-            eprintln!(
-                "warning: one-graph resume commit {sha} is gone or not an ancestor of HEAD (history rewritten?) — FULL one-graph rebuild"
-            );
-            (rev_list(&["HEAD"]), true)
         }
         None => (rev_list(&["HEAD"]), true),
     };
@@ -736,9 +971,17 @@ fn sync_onegraph_phase(store: &Store, root: &std::path::Path, resume_sha: Option
             full_rebuild, // clear_first only on a full rebuild
         ) {
             Ok(outcome) => outcome,
+            Err(e) if full_rebuild => {
+                // A rebuild writes in batches, so the graph holds the part
+                // built before the failure. It carries no sync marker (the
+                // git2 layer is not loaded yet), so the next sync rebuilds.
+                eprintln!("ERROR: one-graph rebuild failed: {e}");
+                eprintln!("Sync aborted part-way through a full rebuild: the store is INCOMPLETE until a sync succeeds. Fix the cause and re-run `git lex sync` — it will rebuild from the first commit again.");
+                std::process::exit(1);
+            }
             Err(e) => {
-                // The resume point is unchanged (events load at the end of the
-                // walk), so the next sync retries this same commit range.
+                // An append loads its events once, at the end of the walk,
+                // so nothing of this commit range was written.
                 eprintln!("ERROR: one-graph build failed: {e}");
                 eprintln!("Sync aborted; the one graph was not updated for this commit range. Fix the cause and re-run `git lex sync`.");
                 std::process::exit(1);
@@ -755,7 +998,13 @@ fn sync_onegraph_phase(store: &Store, root: &std::path::Path, resume_sha: Option
     } else {
         println!("One graph: up to date.");
     }
+    OnegraphPhase { changed_subjects }
+}
 
+/// Type the one graph for discovery, then prove the store coherent — every
+/// sync, or the sync aborts. Reads the commits graph, so it runs after the
+/// git2 layer is loaded.
+fn verify_onegraph(store: &Store) {
     // Discovery typing (default graph, idempotent): the graph's NamedGraph
     // object, dual-typed — the store does no inference, so both the class and
     // its NamedGraph parent are stated explicitly.
@@ -869,7 +1118,6 @@ fn sync_onegraph_phase(store: &Store, root: &std::path::Path, resume_sha: Option
             std::process::exit(1);
         }
     }
-    OnegraphPhase { full_rebuild, changed_subjects }
 }
 
 /// The branch HEAD is on, or None when detached.
@@ -1278,5 +1526,154 @@ mod coherence_query_tests {
              <https://ex/e2> <{GL}retractedIn> <https://ex/c2> <{LH}> .\n"
         );
         agree(&store_from(&nq), &old_integrity(), &new_integrity(), 0, "integrity-clean");
+    }
+}
+
+/// A full rebuild writes the git2 layer and the now view in batches (#15).
+/// The batches must not change what is stored, and a load that stops early
+/// must leave a store that no reader takes for a synced one.
+#[cfg(test)]
+mod batched_rebuild_tests {
+    use super::*;
+    use crate::git2_nquads::NqSink;
+
+    const CG: &str = "https://repolex.ai/git-lex/NamedGraph/commits";
+    const FT: &str = "https://repolex.ai/git-lex/NamedGraph/filetree/abc";
+    const LH: &str = spo_events::LEXHISTORY_GRAPH_IRI;
+    const G2: &str = "https://repolex.ai/ontology/git-lex/git2/";
+    const GL: &str = "https://repolex.ai/ontology/git-lex/";
+    const RDF: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#";
+    const XSD_INT: &str = "http://www.w3.org/2001/XMLSchema#integer";
+
+    /// A small git2 layer in the producer's own order: per commit, facts
+    /// with the ordinal in the middle; then the file tree, whose
+    /// commit → file links land back in the commits graph.
+    fn git2_layer() -> String {
+        let mut nq = String::new();
+        for (n, sha) in ["aaa", "bbb", "ccc"].iter().enumerate() {
+            let c = format!("<https://repolex.ai/git-lex/git2/Commit/{sha}>");
+            nq.push_str(&format!("{c} <{RDF}type> <{G2}Commit> <{CG}> .\n"));
+            nq.push_str(&format!("{c} <{G2}id> \"{sha}\" <{CG}> .\n"));
+            nq.push_str(&format!("{c} <{G2}ordinalDerived> \"{}\"^^<{XSD_INT}> <{CG}> .\n", n + 1));
+            nq.push_str(&format!("{c} <{G2}summary> \"a | b <{G2}ordinalDerived> c\" <{CG}> .\n"));
+        }
+        for path in ["x.md", "y.md"] {
+            let e = format!("<https://repolex.ai/git-lex/git2/IndexEntry/ccc/{path}>");
+            nq.push_str(&format!("{e} <{RDF}type> <{G2}IndexEntry> <{FT}> .\n"));
+            nq.push_str(&format!("{e} <{G2}path> \"{path}\" <{FT}> .\n"));
+            nq.push_str(&format!("<https://repolex.ai/git-lex/git2/Commit/ccc> <{G2}file> {e} <{CG}> .\n"));
+        }
+        nq
+    }
+
+    fn quads(store: &Store) -> Vec<String> {
+        let mut all: Vec<String> = store.iter().map(|q| q.unwrap().to_string()).collect();
+        all.sort();
+        all
+    }
+
+    fn marker_quads(store: &Store) -> usize {
+        quads(store).iter().filter(|q| q.contains(&format!("<{SYNC_MARKER_PREDICATE}> \""))).count()
+    }
+
+    #[test]
+    fn only_the_ordinal_predicate_is_the_marker() {
+        let layer = git2_layer();
+        let marker: Vec<&str> = layer.lines().filter(|l| is_sync_marker_line(l)).collect();
+        assert_eq!(marker.len(), 3, "one ordinal per commit, and the summary that only MENTIONS the predicate is not one");
+        assert!(marker.iter().all(|l| l.contains("/Commit/")));
+    }
+
+    #[test]
+    fn batches_store_what_one_load_stores() {
+        let layer = git2_layer();
+        let whole = Store::new().unwrap();
+        whole.load_from_reader(RdfFormat::NQuads, Cursor::new(layer.as_bytes())).unwrap();
+        for batch_quads in [1, 2, 5, 1000] {
+            let store = Store::new().unwrap();
+            let mut loader = MarkerLastLoader::new(&store, batch_quads);
+            // Hand the text over in pieces that ignore line ends, as any
+            // producer is free to.
+            for piece in layer.as_bytes().chunks(37) {
+                loader.push_str(std::str::from_utf8(piece).unwrap());
+            }
+            assert_eq!(loader.finish().unwrap(), layer.lines().count());
+            assert_eq!(quads(&store), quads(&whole), "batch of {batch_quads}");
+        }
+    }
+
+    /// Killed before `finish`: everything but the marker may be in the store,
+    /// and every "is this store synced?" reader must still say no.
+    #[test]
+    fn a_load_that_never_finished_reads_as_unsynced() {
+        let layer = git2_layer();
+        let store = Store::new().unwrap();
+        // A one graph that would pass the fast path's other two probes.
+        let one = format!(
+            "<https://repolex.ai/git-lex/File/x.md> <{RDF}type> <{GL}File> <{LH}> .\n"
+        );
+        store.load_from_reader(RdfFormat::NQuads, Cursor::new(one.as_bytes())).unwrap();
+        let mut loader = MarkerLastLoader::new(&store, 1);
+        loader.push_str(&layer);
+        drop(loader); // never finished
+
+        assert!(quads(&store).len() > 10, "the batches themselves were written");
+        assert_eq!(marker_quads(&store), 0);
+        let nowhere = std::path::Path::new("/nonexistent-git-lex-test-root");
+        assert!(!fast_path_hit(&store, nowhere, "ccc"), "HEAD has facts, but no ordinal: not synced");
+        assert_eq!(resume_point(&store, nowhere), None);
+
+        // Finished, the marker is there.
+        let mut loader = MarkerLastLoader::new(&store, 1);
+        loader.push_str(&layer);
+        loader.finish().unwrap();
+        assert_eq!(marker_quads(&store), 3);
+    }
+
+    /// Base facts, events about them, and an event whose statement has left
+    /// the base layer.
+    fn one_graph_fixture() -> String {
+        let mut nq = String::new();
+        for i in 0..7 {
+            let s = format!("<https://repolex.ai/soul/Note/n{i}>");
+            nq.push_str(&format!("{s} <{RDF}type> <https://repolex.ai/ontology/soul/Note> <{LH}> .\n"));
+            nq.push_str(&format!("{s} <{GL}title> \"note {i}\" <{LH}> .\n"));
+            let e = format!("<https://repolex.ai/git-lex/SpoEvent/e{i}>");
+            nq.push_str(&format!("{e} <{RDF}type> <{GL}SpoEvent> <{LH}> .\n"));
+            nq.push_str(&format!("{e} <{RDF}reifies> <<( {s} <{GL}title> \"note {i}\" )>> <{LH}> .\n"));
+            nq.push_str(&format!("{e} <{GL}assertedIn> <https://repolex.ai/git-lex/git2/Commit/aaa> <{LH}> .\n"));
+        }
+        nq.push_str(&format!("<https://e/elsewhere> <{GL}title> \"not the one graph\" <{CG}> .\n"));
+        nq
+    }
+
+    #[test]
+    fn the_batched_now_view_is_the_now_view() {
+        let build = |stale_now: bool| {
+            let store = Store::new().unwrap();
+            store.load_from_reader(RdfFormat::NQuads, Cursor::new(one_graph_fixture().as_bytes())).unwrap();
+            if stale_now {
+                let stale: String = ["gone", "gone2", "gone3"]
+                    .iter()
+                    .map(|s| format!("<https://e/{s}> <{GL}title> \"stale\" <{NOW_GRAPH_IRI}> .\n"))
+                    .collect();
+                store.load_from_reader(RdfFormat::NQuads, Cursor::new(stale.as_bytes())).unwrap();
+            }
+            store
+        };
+        let whole = build(true);
+        materialize_now_view(&whole);
+        let expected = quads(&whole);
+        assert_eq!(expected.iter().filter(|q| q.ends_with(&format!("<{NOW_GRAPH_IRI}>"))).count(), 14);
+
+        for batch_quads in [1, 3, 1000] {
+            let store = build(true);
+            now_view_in_batches(&store, batch_quads).unwrap();
+            assert_eq!(quads(&store), expected, "batch of {batch_quads}");
+        }
+        // No now view to drop first: same answer.
+        let store = build(false);
+        now_view_in_batches(&store, 2).unwrap();
+        assert_eq!(quads(&store), expected);
     }
 }

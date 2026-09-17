@@ -842,7 +842,13 @@ const SIDECAR_DIR_CACHE: usize = 64;
 impl SidecarReader {
     pub(crate) fn open() -> Result<Self, String> {
         let root = find_git_root().ok_or("not inside a git repository")?;
-        let repo = git2::Repository::open(&root)
+        Self::open_at(&root)
+    }
+
+    /// The reader for the repository at `root` (the walk's own entry point
+    /// is [`SidecarReader::open`]; tests hand in a scratch repository).
+    pub(crate) fn open_at(root: &std::path::Path) -> Result<Self, String> {
+        let repo = git2::Repository::open(root)
             .map_err(|e| format!("open git repository {}: {e}", root.display()))?;
         Ok(SidecarReader { repo, trees: HashMap::new(), dirs: HashMap::new() })
     }
@@ -1081,7 +1087,23 @@ pub fn onegraph_event(
 /// changed (so the now view can be refreshed for exactly those), or an
 /// error if git or the store failed anywhere — a partial walk must never
 /// report success, because the one graph is the system of record.
-#[allow(clippy::too_many_arguments)]
+///
+/// ── Memory (#15) ─────────────────────────────────────────────────────────
+/// A full rebuild writes the graph in BATCHES: the old graph is cleared
+/// first, and every `REBUILD_BATCH_QUADS` pending quads the events and the
+/// base-layer changes so far are written and dropped from memory. Each
+/// batch is exactly an incremental append onto what the earlier batches
+/// wrote, so the finished graph is the same graph. Held in one piece, a
+/// rebuild's single store transaction cost about 3 KB of memory per quad —
+/// 36 GB at 88,000 commits — and grew with the whole of history.
+///
+/// An append (`clear_first = false`) still writes once, at the end: its
+/// size follows the change, not the repo.
+///
+/// What a batched rebuild gives up is all-or-nothing: killed part-way, the
+/// graph holds only the batches written so far. The CALLER must therefore
+/// write the sync marker (git2 commit ordinals — see sync.rs) only after
+/// this returns Ok, so that a partial graph is never read as a finished one.
 pub(crate) fn onegraph_walk_engine(
     commits: &[WalkCommit],
     store: &oxigraph::store::Store,
@@ -1090,8 +1112,112 @@ pub(crate) fn onegraph_walk_engine(
     show_progress: bool,
     clear_first: bool,
 ) -> Result<WalkOutcome, String> {
+    let mut reader = SidecarReader::open()?;
+    let batch_quads = if clear_first { REBUILD_BATCH_QUADS } else { usize::MAX };
+    onegraph_walk_engine_with(&mut reader, commits, store, one_graph, ctx, show_progress, clear_first, batch_quads)
+}
+
+/// Pending quads that trigger a write during a full rebuild. One store
+/// transaction holds its whole write set in memory at roughly 3 KB a quad
+/// (measured: 1.26M quads, +3.7 GB), so 200,000 quads is about 600 MB per
+/// batch — small next to the store's own caches, large enough that a
+/// 17M-quad rebuild is under a hundred commits to the store.
+pub(crate) const REBUILD_BATCH_QUADS: usize = 200_000;
+
+/// Remove every quad of `graph`, a bounded number per store transaction.
+/// `Store::clear_graph` does the same removal in ONE transaction, whose
+/// memory grows with the graph. Like it, this leaves the graph registered.
+pub(crate) fn clear_graph_in_batches(
+    store: &oxigraph::store::Store,
+    graph: &oxigraph::model::NamedNode,
+    batch_quads: usize,
+) -> Result<(), String> {
+    let batch_quads = batch_quads.max(1);
+    loop {
+        let quads: Vec<oxigraph::model::Quad> = store
+            .quads_for_pattern(None, None, None, Some(graph.as_ref().into()))
+            .take(batch_quads)
+            .collect::<Result<_, _>>()
+            .map_err(|e| format!("reading {graph} to clear it failed: {e}"))?;
+        if quads.is_empty() {
+            return Ok(());
+        }
+        let mut transaction = store
+            .start_transaction()
+            .map_err(|e| format!("clearing {graph} failed: {e}"))?;
+        for quad in &quads {
+            transaction.remove(quad);
+        }
+        transaction
+            .commit()
+            .map_err(|e| format!("clearing {graph} failed: {e}"))?;
+    }
+}
+
+/// One batch of a walk, written: the pending events, plus the base-layer
+/// (current-state) effect of those events — net-assert → the plain triple
+/// is inserted, net-retract → it is REMOVED. Both buffers come back empty.
+///
+/// Both failure modes of a retract are hard errors: a malformed line here
+/// is OUR OWN emitter's output gone wrong, and a failed remove leaves a
+/// retracted fact live in the base layer — either way the materialized now
+/// would silently lie.
+fn write_walk_batch(
+    store: &oxigraph::store::Store,
+    nq_buffer: &mut String,
+    base_final: &mut HashMap<String, char>,
+) -> Result<(), String> {
+    for (line, op) in base_final.drain() {
+        match op {
+            '+' => {
+                nq_buffer.push_str(&line);
+                nq_buffer.push('\n');
+            }
+            '-' => {
+                let parser = oxigraph::io::RdfParser::from_format(oxigraph::io::RdfFormat::NQuads);
+                let mut line_owned = line.clone();
+                line_owned.push('\n');
+                for quad in parser.for_reader(std::io::Cursor::new(line_owned.into_bytes())) {
+                    let quad = quad.map_err(|e| {
+                        format!("base-layer retract: emitter produced an unparseable line ({e}): {line}")
+                    })?;
+                    store
+                        .remove(&quad)
+                        .map_err(|e| format!("base-layer retract removal failed: {e}"))?;
+                }
+            }
+            _ => {}
+        }
+    }
+    if !nq_buffer.is_empty() {
+        let parser = oxigraph::io::RdfParser::from_format(oxigraph::io::RdfFormat::NQuads);
+        store
+            .load_from_reader(parser, std::io::Cursor::new(nq_buffer.as_bytes()))
+            .map_err(|e| format!("one-graph event load failed: {e}"))?;
+    }
+    nq_buffer.clear();
+    Ok(())
+}
+
+/// The walk, with its reader and batch size handed in (tests drive a
+/// scratch repository and a tiny batch through here).
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn onegraph_walk_engine_with(
+    reader: &mut SidecarReader,
+    commits: &[WalkCommit],
+    store: &oxigraph::store::Store,
+    one_graph: &str,
+    ctx: &crate::nquad::ResolverContext,
+    show_progress: bool,
+    clear_first: bool,
+    batch_quads: usize,
+) -> Result<WalkOutcome, String> {
     let total = commits.len();
     let mut nq_buffer = String::new();
+    // Quad lines waiting in `nq_buffer`; with `base_final.len()` it is the
+    // size of the next store write.
+    let mut pending_quads = 0usize;
+    let mut changed_subjects: HashSet<String> = HashSet::new();
     let mut events_seen = 0usize;
     let mut events_emitted = 0usize;
 
@@ -1276,19 +1402,53 @@ pub(crate) fn onegraph_walk_engine(
     // one resolve per unique sidecar version. Guard scans count into a
     // SCRATCH accounting — those sidecars' lines are counted when their own
     // commits walk; the guard must not inflate the receipt.
+    // Dropped at every batch write: a cache, so emptying it changes no
+    // answer, and an old sidecar version stops being asked for as the walk
+    // moves forward.
     let mut blob_memo: HashMap<(git2::Oid, String), HashSet<String>> = HashMap::new();
     let mut guard_acct = DropAccounting::default();
-    let mut reader = SidecarReader::open()?;
-    // Which documents anchor which Thing, as of the walk's start (the
-    // store's base layer — skipped on a full rebuild, whose old graph is
-    // about to be cleared) plus every fileId change this walk has made so
-    // far. Keyed subject → (file → last op).
+    // Which documents anchor which Thing: the store's base layer plus every
+    // fileId change this walk has made SINCE ITS LAST WRITE. Keyed subject →
+    // (file → last op). On a full rebuild the base layer is this walk's own
+    // earlier batches (the old graph is cleared below, before the first
+    // commit), so the store is consulted there too.
     let file_id_pred = oxigraph::model::NamedNodeRef::new_unchecked(ONEGRAPH_FILE_ID);
     let graph_node = oxigraph::model::NamedNode::new(
         one_graph.trim_start_matches('<').trim_end_matches('>'),
     )
     .map_err(|e| format!("one-graph IRI is not a valid named node: {e}"))?;
     let mut walk_file_ids: HashMap<String, HashMap<String, char>> = HashMap::new();
+
+    // clear_first = full rebuild (store deleted/rebuilt; also the fallback when an
+    // incremental resume point turns out invalid, e.g. after history rewrite).
+    // clear_first = false is the sync path: the one graph is PERSISTENT and
+    // append-only; sync walks only commits newer than the store's newest and
+    // appends their events.
+    //
+    // Every store operation in this walk is a hard error: this graph is the
+    // system of record, and "printed a warning but reported success" was the
+    // defect class that let a build fail invisibly (review finding A2).
+    if clear_first {
+        clear_graph_in_batches(store, &graph_node, batch_quads)
+            .map_err(|e| format!("one-graph clear (full rebuild) failed: {e}"))?;
+    }
+
+    // Write what is pending and forget it. `walk_file_ids` and `blob_memo`
+    // go too: after the write the store's base layer answers for the first,
+    // and the second is a cache. A full rebuild re-materializes the whole
+    // now view, so it keeps no list of changed subjects.
+    macro_rules! write_batch {
+        () => {{
+            if !clear_first {
+                changed_subjects.extend(
+                    base_final.keys().filter_map(|line| take_term(line).map(|(subject, _)| subject)),
+                );
+            }
+            write_walk_batch(store, &mut nq_buffer, &mut base_final)?;
+            walk_file_ids.clear();
+            blob_memo.clear();
+        }};
+    }
 
     for (ci, c) in commits.iter().enumerate() {
         if show_progress && total > 0 {
@@ -1319,13 +1479,13 @@ pub(crate) fn onegraph_walk_engine(
         let mut new_triples: HashSet<String> = HashSet::new();
         for path in &old_side {
             old_triples.extend(
-                resolve_sidecar_at(&mut reader, &c.parent_sha, path, &mut acct, &mut warned_unknown)
+                resolve_sidecar_at(reader, &c.parent_sha, path, &mut acct, &mut warned_unknown)
                     .map_err(|e| format!("commit {} (old side): {e}", c.sha))?,
             );
         }
         for path in &new_side {
             new_triples.extend(
-                resolve_sidecar_at(&mut reader, &c.sha, path, &mut acct, &mut warned_unknown)
+                resolve_sidecar_at(reader, &c.sha, path, &mut acct, &mut warned_unknown)
                     .map_err(|e| format!("commit {} (new side): {e}", c.sha))?,
             );
         }
@@ -1369,9 +1529,7 @@ pub(crate) fn onegraph_walk_engine(
                     docs.insert(doc);
                 }
                 let mut files: HashMap<String, char> = HashMap::new();
-                if !clear_first
-                    && let Ok(s_node) = oxigraph::model::NamedNodeRef::new(iri)
-                {
+                if let Ok(s_node) = oxigraph::model::NamedNodeRef::new(iri) {
                     for q in store.quads_for_pattern(
                         Some(s_node.into()),
                         Some(file_id_pred),
@@ -1434,54 +1592,41 @@ pub(crate) fn onegraph_walk_engine(
             }
             events_seen += 1;
             if let Some(quads) = onegraph_event(line, '-', &c.sha, one_graph) {
-                for q in quads { nq_buffer.push_str(&q); nq_buffer.push('\n'); }
+                for q in quads { nq_buffer.push_str(&q); nq_buffer.push('\n'); pending_quads += 1; }
                 events_emitted += 1;
                 note_file_id(&mut walk_file_ids, line, '-');
                 base_final.insert(line.clone(), '-');
+            }
+            // The guard above has already judged this whole commit, so a
+            // write part-way through its events changes nothing it reads —
+            // and one commit that asserts a whole tree stays bounded too.
+            if pending_quads + base_final.len() >= batch_quads {
+                write_batch!();
+                pending_quads = 0;
             }
         }
         for line in new_triples.difference(&old_triples) {
             events_seen += 1;
             if let Some(quads) = onegraph_event(line, '+', &c.sha, one_graph) {
-                for q in quads { nq_buffer.push_str(&q); nq_buffer.push('\n'); }
+                for q in quads { nq_buffer.push_str(&q); nq_buffer.push('\n'); pending_quads += 1; }
                 events_emitted += 1;
                 note_file_id(&mut walk_file_ids, line, '+');
                 base_final.insert(line.clone(), '+');
+            }
+            if pending_quads + base_final.len() >= batch_quads {
+                write_batch!();
+                pending_quads = 0;
             }
         }
     }
 
     // ─── Base layer = the MATERIALIZED NOW (ruled contract) ───
     // net-assert → the plain triple is (re)asserted alongside its events;
-    // net-retract → the plain triple is REMOVED from the graph (on a full
-    // rebuild the graph was just cleared, so there is nothing to remove).
-    for (line, op) in &base_final {
-        match op {
-            '+' => {
-                nq_buffer.push_str(line);
-                nq_buffer.push('\n');
-            }
-            '-' if !clear_first => {
-                // Parse the single N-Quads line into a Quad and remove it.
-                // Both failure modes are hard errors: a malformed line here
-                // is OUR OWN emitter's output gone wrong, and a failed
-                // remove leaves a retracted fact live in the base layer —
-                // either way the materialized now would silently lie.
-                let parser = oxigraph::io::RdfParser::from_format(oxigraph::io::RdfFormat::NQuads);
-                let mut line_owned = line.clone();
-                line_owned.push('\n');
-                for quad in parser.for_reader(std::io::Cursor::new(line_owned.into_bytes())) {
-                    let quad = quad.map_err(|e| {
-                        format!("base-layer retract: emitter produced an unparseable line ({e}): {line}")
-                    })?;
-                    store
-                        .remove(&quad)
-                        .map_err(|e| format!("base-layer retract removal failed: {e}"))?;
-                }
-            }
-            _ => {}
-        }
-    }
+    // net-retract → the plain triple is REMOVED from the graph. Commits are
+    // walked oldest→newest and the last op on a triple wins, so applying
+    // each batch's net effect in order ends where applying the whole walk's
+    // net effect would. The last (for an append, the only) write:
+    write_batch!();
 
     // Completeness accounting (BUG 4). Malformed lines hard-fail above;
     // what remains countable is emitter-side drops and unknown suffixes.
@@ -1507,31 +1652,6 @@ pub(crate) fn onegraph_walk_engine(
         eprintln!(" done");
     }
 
-    // clear_first = full rebuild (store deleted/rebuilt; also the fallback when an
-    // incremental resume point turns out invalid, e.g. after history rewrite).
-    // clear_first = false is the sync path: the one graph is PERSISTENT and
-    // append-only; sync walks only commits newer than the store's newest and
-    // appends their events.
-    //
-    // Every store operation from here down is a hard error: this graph is the
-    // system of record, and "printed a warning but reported success" was the
-    // defect class that let a build fail invisibly (review finding A2).
-    if clear_first {
-        store
-            .clear_graph(&graph_node)
-            .map_err(|e| format!("one-graph clear (full rebuild) failed: {e}"))?;
-    }
-    if !nq_buffer.is_empty() {
-        let parser = oxigraph::io::RdfParser::from_format(oxigraph::io::RdfFormat::NQuads);
-        store
-            .load_from_reader(parser, std::io::Cursor::new(nq_buffer.as_bytes()))
-            .map_err(|e| format!("one-graph event load failed: {e}"))?;
-    }
-
-    let changed_subjects = base_final
-        .keys()
-        .filter_map(|line| take_term(line).map(|(subject, _)| subject))
-        .collect();
     Ok(WalkOutcome { events_seen, events_emitted, changed_subjects })
 }
 
@@ -1540,7 +1660,9 @@ pub(crate) fn onegraph_walk_engine(
 pub(crate) struct WalkOutcome {
     pub events_seen: usize,
     pub events_emitted: usize,
-    /// Bracketed subject terms (`<iri>`), deduplicated.
+    /// Bracketed subject terms (`<iri>`), deduplicated. EMPTY after a full
+    /// rebuild: everything changed, the caller re-materializes the whole
+    /// now view, and the list would grow with the whole of history.
     pub changed_subjects: HashSet<String>,
 }
 
@@ -2038,5 +2160,185 @@ mod name_status_parse_tests {
     fn empty_output_is_empty() {
         let (touched, renames) = parse_name_status_z("");
         assert!(touched.is_empty() && renames.is_empty());
+    }
+}
+
+/// A full rebuild writes in batches (#15). Wherever the batches fall, the
+/// store must end as the store one write would have made — and as the
+/// store a run of appends makes, which is the claim the batches rest on.
+#[cfg(test)]
+mod batched_walk_tests {
+    use super::*;
+    use std::path::{Path, PathBuf};
+
+    fn git(root: &Path, args: &[&str]) -> String {
+        let out = Command::new("git")
+            .current_dir(root)
+            .args(args)
+            .env("GIT_AUTHOR_NAME", "t")
+            .env("GIT_AUTHOR_EMAIL", "t@t")
+            .env("GIT_COMMITTER_NAME", "t")
+            .env("GIT_COMMITTER_EMAIL", "t@t")
+            .output()
+            .expect("git runs");
+        assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    }
+
+    fn note(id: &str, title: &str) -> String {
+        format!(
+            "soul.Note.id | hasValue | <soul/Note/{id}>\n\
+             soul.Note.noteId | hasValue | {id}\n\
+             soul.Note.title | hasValue | {title}\n"
+        )
+    }
+
+    /// One commit: write (`Some`) or delete (`None`) each sidecar, and hand
+    /// back the WalkCommit the collector would have built for it.
+    fn commit(root: &Path, parent: &str, changes: &[(&str, Option<String>)]) -> WalkCommit {
+        let mut touched = Vec::new();
+        for (doc, content) in changes {
+            let path = format!(".lex/extract/{doc}.fm.spo");
+            let full = root.join(&path);
+            match content {
+                Some(text) => {
+                    std::fs::create_dir_all(full.parent().unwrap()).unwrap();
+                    std::fs::write(&full, text).unwrap();
+                }
+                None => std::fs::remove_file(&full).unwrap(),
+            }
+            touched.push(path);
+        }
+        git(root, &["add", "-A"]);
+        git(root, &["commit", "-q", "-m", "c"]);
+        WalkCommit {
+            sha: git(root, &["rev-parse", "HEAD"]),
+            parent_sha: parent.to_string(),
+            touched,
+            renames: Vec::new(),
+        }
+    }
+
+    /// A short history with every kind of change the walk tells apart: new
+    /// facts, a changed value, a deleted document, a moved one (its fileId
+    /// retracts and re-asserts), a fact that comes back after it left, and
+    /// two documents claiming one id, one of which is then deleted (the
+    /// retract guard must find the survivor).
+    fn history(tag: &str) -> (PathBuf, Vec<WalkCommit>) {
+        let root = std::env::temp_dir().join(format!("gitlex-batched-walk-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        git(&root, &["init", "-q", "-b", "main"]);
+        let mut commits: Vec<WalkCommit> = Vec::new();
+        let mut add = |changes: &[(&str, Option<String>)]| {
+            let parent = commits.last().map(|c| c.sha.clone()).unwrap_or_else(|| EMPTY_TREE_SHA.to_string());
+            commits.push(commit(&root, &parent, changes));
+        };
+        add(&[("Soul/Note/a.md", Some(note("a", "first"))), ("Soul/Note/b.md", Some(note("b", "bee")))]);
+        add(&[("Soul/Note/a.md", Some(note("a", "second")))]);
+        add(&[("Soul/Note/c.md", Some(note("c", "sea"))), ("Soul/Note/b.md", None)]);
+        add(&[("Soul/Note/a.md", None), ("Soul/Note/moved/a.md", Some(note("a", "second")))]);
+        add(&[("Soul/Note/b.md", Some(note("b", "bee"))), ("Soul/Note/c.md", Some(note("c", "ocean")))]);
+        add(&[("Soul/Note/twin.md", Some(note("c", "ocean")))]);
+        add(&[("Soul/Note/c.md", None)]);
+        add(&[("Soul/Note/a.md", Some(note("a", "third"))), ("Soul/Note/moved/a.md", None)]);
+        (root, commits)
+    }
+
+    fn ctx() -> crate::nquad::ResolverContext {
+        let mut kit_namespaces = HashMap::new();
+        kit_namespaces.insert("soul".to_string(), "https://repolex.ai/ontology/soul/".to_string());
+        crate::nquad::ResolverContext {
+            files: Vec::new(),
+            path_index: HashSet::new(),
+            obj_props: HashSet::new(),
+            prop_datatypes: HashMap::new(),
+            declared_props: HashSet::new(),
+            kit_namespaces,
+            ref_ranges: HashMap::new(),
+            prop_iris: HashMap::new(),
+            deprecated_props: HashMap::new(),
+            domain_open_props: HashMap::new(),
+        }
+    }
+
+    fn one_graph() -> String {
+        format!("<{LEXHISTORY_GRAPH_IRI}>")
+    }
+
+    fn walk(root: &Path, store: &oxigraph::store::Store, commits: &[WalkCommit], clear_first: bool, batch_quads: usize) -> WalkOutcome {
+        let mut reader = SidecarReader::open_at(root).unwrap();
+        onegraph_walk_engine_with(&mut reader, commits, store, &one_graph(), &ctx(), false, clear_first, batch_quads)
+            .expect("walk succeeds")
+    }
+
+    fn quads(store: &oxigraph::store::Store) -> Vec<String> {
+        let mut all: Vec<String> = store.iter().map(|q| q.unwrap().to_string()).collect();
+        all.sort();
+        all
+    }
+
+    #[test]
+    fn a_rebuild_in_batches_is_the_rebuild_in_one_piece() {
+        let (root, commits) = history("batches");
+        let whole = oxigraph::store::Store::new().unwrap();
+        let outcome = walk(&root, &whole, &commits, true, usize::MAX);
+        let expected = quads(&whole);
+        // The history really does exercise retracts and the guard.
+        assert!(outcome.events_emitted > 20, "only {} events", outcome.events_emitted);
+        assert!(expected.iter().any(|q| q.contains("retractedIn")), "no retract in the fixture");
+        assert!(
+            expected.iter().any(|q| q.contains("/title> \"ocean\"") && !q.contains("<<(")),
+            "the twin's facts must survive its double's deletion: {expected:#?}"
+        );
+
+        // Batch sizes from one quad (a write after every event, so every
+        // commit is split) up past the whole walk.
+        for batch_quads in [1, 2, 3, 5, 7, 16, 40, 1000] {
+            let batched = oxigraph::store::Store::new().unwrap();
+            let got = walk(&root, &batched, &commits, true, batch_quads);
+            assert_eq!(got.events_seen, outcome.events_seen, "batch of {batch_quads}");
+            assert_eq!(got.events_emitted, outcome.events_emitted, "batch of {batch_quads}");
+            assert_eq!(quads(&batched), expected, "batch of {batch_quads} quads built a different store");
+        }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_rebuild_clears_what_the_graph_held_before() {
+        let (root, commits) = history("clears");
+        let fresh = oxigraph::store::Store::new().unwrap();
+        walk(&root, &fresh, &commits, true, 5);
+
+        let stale = oxigraph::store::Store::new().unwrap();
+        let junk: String = (0..12)
+            .map(|i| format!("<https://e/s{i}> <https://e/p> \"old\" {} .\n", one_graph()))
+            .chain(["<https://e/s> <https://e/p> \"kept\" <https://e/other-graph> .\n".to_string()])
+            .collect();
+        stale.load_from_reader(oxigraph::io::RdfFormat::NQuads, junk.as_bytes()).unwrap();
+        walk(&root, &stale, &commits, true, 5);
+
+        let mut expected = quads(&fresh);
+        expected.push("<https://e/s> <https://e/p> \"kept\" <https://e/other-graph>".to_string());
+        expected.sort();
+        assert_eq!(quads(&stale), expected);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The claim the batches rest on: a batch is an append onto what came
+    /// before. Appending the history in two syncs ends where a rebuild ends.
+    #[test]
+    fn appends_end_where_a_rebuild_ends() {
+        let (root, commits) = history("appends");
+        let rebuilt = oxigraph::store::Store::new().unwrap();
+        walk(&root, &rebuilt, &commits, true, usize::MAX);
+        for split in 1..commits.len() {
+            let appended = oxigraph::store::Store::new().unwrap();
+            walk(&root, &appended, &commits[..split], true, usize::MAX);
+            let outcome = walk(&root, &appended, &commits[split..], false, usize::MAX);
+            assert_eq!(quads(&appended), quads(&rebuilt), "split before commit {split}");
+            assert!(!outcome.changed_subjects.is_empty(), "an append reports what it changed");
+        }
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

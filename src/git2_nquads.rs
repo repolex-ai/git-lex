@@ -106,7 +106,7 @@ fn encode_path(path: &str) -> String {
 /// exactly and the join is obvious. Two nodes per commit always, even when
 /// author and committer are byte-identical values.
 fn emit_signature(
-    nq: &mut String,
+    nq: &mut impl NqSink,
     graph: &str,
     commit_sha: &str,
     role: &str,
@@ -143,19 +143,38 @@ fn emit_signature(
     su
 }
 
+/// Where the producer's N-Quads text goes: a `String` that holds all of it,
+/// or a sink that takes it as it comes (a full rebuild loads the layer in
+/// batches, #15 — the whole text is 2 GB at 10 million quads).
+pub(crate) trait NqSink {
+    fn push_str(&mut self, text: &str);
+}
+
+impl NqSink for String {
+    fn push_str(&mut self, text: &str) {
+        String::push_str(self, text);
+    }
+}
+
 /// The git2-layer producer. Reads the repository via the git2 library and
 /// returns N-Quads text (the same text `git lex query` serializes and sync
 /// loads into oxigraph — one producer, two sinks).
 pub(crate) fn generate_git2_nquads() -> String {
     let mut nq = String::new();
+    emit_git2_nquads(&mut nq);
+    nq
+}
+
+/// [`generate_git2_nquads`], written to `nq` as it is produced.
+pub(crate) fn emit_git2_nquads(nq: &mut impl NqSink) {
     let Some(git_root) = find_git_root() else {
-        return nq; // not a git repo — nothing to emit
+        return; // not a git repo — nothing to emit
     };
     let repo = match git2::Repository::open(&git_root) {
         Ok(r) => r,
         Err(e) => {
             eprintln!("warning: git2 could not open the repository — git layer will be EMPTY: {e}");
-            return nq;
+            return;
         }
     };
 
@@ -239,7 +258,7 @@ pub(crate) fn generate_git2_nquads() -> String {
             Ok(w) => w,
             Err(e) => {
                 eprintln!("warning: git2 revwalk failed — commits layer will be EMPTY: {e}");
-                return nq;
+                return;
             }
         };
         let _ = walk.push_glob("*"); // all refs (branches, tags, remotes)
@@ -270,9 +289,9 @@ pub(crate) fn generate_git2_nquads() -> String {
             if let Some(body) = commit.body() {
                 nq.push_str(&format!("{cu} <{GIT2_NS}body> \"{}\" {graph} .\n", nq_escape(body)));
             }
-            let au = emit_signature(&mut nq, &graph, &sha, "author", &commit.author());
+            let au = emit_signature(nq, &graph, &sha, "author", &commit.author());
             nq.push_str(&format!("{cu} <{GIT2_NS}author> {au} {graph} .\n"));
-            let com = emit_signature(&mut nq, &graph, &sha, "committer", &commit.committer());
+            let com = emit_signature(nq, &graph, &sha, "committer", &commit.committer());
             nq.push_str(&format!("{cu} <{GIT2_NS}committer> {com} {graph} .\n"));
             for parent in commit.parent_ids() {
                 nq.push_str(&format!(
@@ -377,8 +396,6 @@ pub(crate) fn generate_git2_nquads() -> String {
             }
         }
     }
-
-    nq
 }
 
 #[cfg(test)]
