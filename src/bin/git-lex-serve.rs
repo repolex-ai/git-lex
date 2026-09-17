@@ -143,50 +143,67 @@ fn run_sparql_to_json(store: &Store, query: &str) -> serde_json::Value {
     }
 }
 
+/// The File-node address family. Same value as `git::FILE_BASE` in the CLI
+/// crate, which this binary cannot reach (it links only the library).
+const FILE_BASE: &str = "https://repolex.ai/git-lex/File/";
+
+/// Percent-decode an IRI tail back to a filesystem path.
+fn percent_decode(tail: &str) -> String {
+    let mut out = Vec::new();
+    let b = tail.as_bytes();
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] == b'%' && i + 2 < b.len() {
+            if let Ok(byte) = u8::from_str_radix(&tail[i + 1..i + 3], 16) {
+                out.push(byte);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(b[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).to_string()
+}
+
 fn api_file_for_uri(state: &VizState, uri: Option<&str>) -> serde_json::Value {
     let uri = match uri {
         Some(u) if !u.is_empty() => u,
         _ => return serde_json::json!({"error": "missing 'uri' query parameter"}),
     };
 
-    // The doc IRI is a deterministic function of the file path
-    // (resource_uri: percent-encode, strip the scaffold "Soul/" prefix) —
-    // so the path is DERIVED back from the IRI, no store query. The old
-    // implementation asked the retired git: layer for git:path, which died
-    // at the git2 cutover (w3bl0rd's live-confirmed bug, 2026-07-21).
-    let base = format!("{}/", git_lex::resource_base_at(&state.repo_root));
-    let tail = match uri.strip_prefix(base.as_str()) {
-        Some(t) if !t.is_empty() => t,
-        _ => return serde_json::json!({"error": format!("not a document IRI (expected {base}<path>)"), "uri": uri}),
-    };
-    // Percent-decode the IRI tail back to a filesystem path.
-    let decoded = {
-        let mut out = Vec::new();
-        let b = tail.as_bytes();
-        let mut i = 0;
-        while i < b.len() {
-            if b[i] == b'%' && i + 2 < b.len() {
-                if let Ok(byte) = u8::from_str_radix(&tail[i + 1..i + 3], 16) {
-                    out.push(byte);
-                    i += 3;
-                    continue;
-                }
-            }
-            out.push(b[i]);
-            i += 1;
+    // Two address families name a file on disk:
+    //   - a File node, `https://repolex.ai/git-lex/File/<encoded path>`: the
+    //     path IS the id, verbatim, so it decodes straight to the repo path;
+    //   - the older path-shaped document IRI under the repo's derived base
+    //     (resource_uri: percent-encode, strip the scaffold "Soul/" prefix).
+    // Either way the path is DERIVED back from the IRI, no store query. The
+    // old implementation asked the retired git: layer for git:path, which
+    // died at the git2 cutover (w3bl0rd's live-confirmed bug, 2026-07-21).
+    let rel = if let Some(encoded) = uri.strip_prefix(FILE_BASE) {
+        let decoded = percent_decode(encoded);
+        if decoded.is_empty() || !state.repo_root.join(&decoded).exists() {
+            return serde_json::json!({"error": "no file for this IRI", "uri": uri, "tried": [decoded]});
         }
-        String::from_utf8_lossy(&out).to_string()
-    };
-    // The scaffold root doesn't repeat in the IRI: try the bare path, then
-    // under Soul/ (the same normalization resource_uri applies forward).
-    let rel = if state.repo_root.join(&decoded).exists() {
         decoded
     } else {
-        let scaffolded = format!("Soul/{}", decoded);
-        if state.repo_root.join(&scaffolded).exists() {
-            scaffolded
+        let base = format!("{}/", git_lex::resource_base_at(&state.repo_root));
+        let tail = match uri.strip_prefix(base.as_str()) {
+            Some(t) if !t.is_empty() => t,
+            _ => return serde_json::json!({"error": format!("not a document IRI (expected {FILE_BASE}<path> or {base}<path>)"), "uri": uri}),
+        };
+        let decoded = percent_decode(tail);
+        // The scaffold root doesn't repeat in the IRI: try the bare path, then
+        // under Soul/ (the same normalization resource_uri applies forward).
+        if state.repo_root.join(&decoded).exists() {
+            decoded
         } else {
-            return serde_json::json!({"error": "no file for this IRI", "uri": uri, "tried": [decoded, format!("Soul/…")]});
+            let scaffolded = format!("Soul/{}", decoded);
+            if state.repo_root.join(&scaffolded).exists() {
+                scaffolded
+            } else {
+                return serde_json::json!({"error": "no file for this IRI", "uri": uri, "tried": [decoded, format!("Soul/…")]});
+            }
         }
     };
 
@@ -598,4 +615,51 @@ fn cmd_sparql_server(port: u16) {
         println!("git-lex SPARQL endpoint on http://{addr}/sparql (swagger at /swagger-ui)");
         axum::serve(listener, app).await.expect("server error");
     });
+}
+
+#[cfg(test)]
+mod api_file_tests {
+    use super::*;
+
+    fn state_with(name: &str, files: &[(&str, &str)]) -> (VizState, PathBuf) {
+        let root = std::env::temp_dir().join(format!("git-lex-api-file-{}-{}", name, std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        for (rel, body) in files {
+            let p = root.join(rel);
+            fs::create_dir_all(p.parent().unwrap()).unwrap();
+            fs::write(p, body).unwrap();
+        }
+        let state = VizState {
+            store: Arc::new(Store::new().unwrap()),
+            repo_root: Arc::new(root.clone()),
+        };
+        (state, root)
+    }
+
+    /// A File node's address is `git-lex/File/<encoded path>`, outside the
+    /// repo's own base. The endpoint used to refuse every one of them.
+    #[test]
+    fn a_file_address_opens_its_file() {
+        let (state, root) = state_with("file", &[("Soul/Journal/day 1.md", "---\na: 1\n---\nhello\n")]);
+        let out = api_file_for_uri(&state, Some("https://repolex.ai/git-lex/File/Soul/Journal/day%201.md"));
+        assert_eq!(out["path"], "Soul/Journal/day 1.md", "{out}");
+        assert_eq!(out["content"], "hello\n", "{out}");
+        assert_eq!(out["frontmatter"], "a: 1\n", "{out}");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_file_address_with_no_file_says_so() {
+        let (state, root) = state_with("missing", &[("README.md", "x")]);
+        let out = api_file_for_uri(&state, Some("https://repolex.ai/git-lex/File/gone.md"));
+        assert_eq!(out["error"], "no file for this IRI", "{out}");
+        // A real file OUTSIDE the root: the path exists, the guard refuses it.
+        let outside = root.with_extension("outside.md");
+        fs::write(&outside, "secret").unwrap();
+        let uri = format!("https://repolex.ai/git-lex/File/../{}", outside.file_name().unwrap().to_string_lossy());
+        let out = api_file_for_uri(&state, Some(&uri));
+        assert_eq!(out["error"], "path escapes repo root", "{out}");
+        let _ = fs::remove_file(&outside);
+        let _ = fs::remove_dir_all(&root);
+    }
 }
