@@ -139,3 +139,53 @@ fn kit_remove_leaves_no_ontology_folder_and_frees_the_id() {
     assert!(shapes.contains("ontology/git-lex/id") && !shapes.contains("ghost"), "{shapes}");
     let _ = fs::remove_dir_all(&root);
 }
+
+/// kit-add fetches with `curl | tar`. Put a stand-in `curl` first on PATH that
+/// serves a tarball of the ghost kit, so the real command runs offline.
+#[cfg(unix)]
+fn kit_add_ghost_offline(root: &Path) -> String {
+    use std::os::unix::fs::PermissionsExt;
+    let stage = root.join(".stage");
+    let kit = stage.join("git-lex-kit-ghost-main");
+    fs::create_dir_all(kit.join("ontology").join("ghost")).unwrap();
+    fs::write(kit.join("kit.yml"), "scope: optional\nname: ghost\n").unwrap();
+    fs::write(kit.join("ontology/ghost/ghost.ttl"), GHOST_TTL).unwrap();
+    let tarball = stage.join("ghost.tar.gz");
+    assert!(Command::new("tar")
+        .args(["czf", &tarball.to_string_lossy(), "-C", &stage.to_string_lossy(), "git-lex-kit-ghost-main"])
+        .status().unwrap().success());
+    let bin = stage.join("bin");
+    fs::create_dir_all(&bin).unwrap();
+    fs::write(bin.join("curl"), format!("#!/bin/sh\ncat '{}'\n", tarball.display())).unwrap();
+    fs::set_permissions(bin.join("curl"), fs::Permissions::from_mode(0o755)).unwrap();
+    let path = format!("{}:{}", bin.display(), std::env::var("PATH").unwrap_or_default());
+    let out = Command::new(env!("CARGO_BIN_EXE_git-lex"))
+        .args(["kit-add", "repolex-ai/git-lex-kit-ghost"])
+        .current_dir(root)
+        .env("HOME", root.join(".home"))
+        .env("PATH", path)
+        .output()
+        .unwrap();
+    format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr))
+}
+
+/// goodlux, 2026-09-16: kit-add regenerates EVERY installed kit's shapes. A
+/// property the new kit declares on git-lex:Thing reaches kit t's shapes at
+/// kit-add, with no kit-update in between.
+#[cfg(unix)]
+#[test]
+fn kit_add_regenerates_the_other_kits_shapes() {
+    let root = fixture("add", &["dummy"]);
+    fs::remove_dir_all(root.join(".lex/ontology/ghost")).unwrap();
+    remove_kit(&root, "dummy");
+    assert!(!t_shapes(&root).contains("ghost"), "premise: t's shapes start without ghost");
+
+    let out = kit_add_ghost_offline(&root);
+    let yml = fs::read_to_string(root.join(".lex/repo.yml")).unwrap();
+    assert!(yml.contains("git-lex-kit-ghost"), "kit-add did not record the kit: {out}");
+    assert!(
+        t_shapes(&root).contains("ontology/ghost/id"),
+        "kit-add left kit t's shapes stale until the next kit-update: {out}"
+    );
+    let _ = fs::remove_dir_all(&root);
+}

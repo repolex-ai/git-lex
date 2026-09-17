@@ -42,6 +42,16 @@ fn fetch_kit_for_update(kit_spec: &str) -> bool {
     fetch_kit_from_github(kit_spec, &kit_dir)
 }
 
+/// Regenerate the derived artifacts of every installed kit (the list is
+/// repo.yml's). kit-add and kit-remove both change what a shared parent class
+/// carries, so every kit's shapes are rebuilt with the new set in view. Class
+/// folders are created only for `new_kit`, the kit being added.
+fn regenerate_installed_kits(root: &std::path::Path, new_kit: Option<&str>) {
+    for spec in git_lex::installed_kit_specs(root) {
+        regenerate_kit_artifacts(&spec, root, new_kit == Some(spec.as_str()));
+    }
+}
+
 /// Regenerate one kit's derived artifacts: SHACL shapes, class folders +
 /// __ClassName.md templates, and the folder-vs-ontology audit.
 ///
@@ -1069,10 +1079,13 @@ pub(crate) fn cmd_kit_add(kit_spec: String) {
         }
     }
 
-    // Regenerate derived artifacts for this kit. create_folders=true so the
-    // class folders show up on disk immediately — lux's call: discoverability.
-    println!("Regenerating artifacts for '{}/{}'...", org, repo);
-    regenerate_kit_artifacts(&canonical_spec, &root, true);
+    // Regenerate derived artifacts for EVERY installed kit, not only this
+    // one (goodlux, 2026-09-16): a property the new kit declares on a shared
+    // parent class belongs in the other kits' shapes now, not at the next
+    // kit-update. The new kit's class folders are created on disk
+    // immediately — discoverability.
+    println!("Regenerating artifacts for '{}/{}' and the kits already installed...", org, repo);
+    regenerate_installed_kits(&root, Some(&canonical_spec));
 
     // Register the kit's hooks (and reap any orphans) in the substrate
     // config. install_scaffold_files_from_skip_existing above copies the
@@ -1196,9 +1209,7 @@ pub(crate) fn cmd_kit_remove(kit_spec: String, force: bool) {
             eprintln!("Warning: failed to delete {}: {}", ont_dir.strip_prefix(&root).unwrap_or(&ont_dir).display(), e);
         }
     }
-    for spec in git_lex::installed_kit_specs(&root) {
-        regenerate_kit_artifacts(&spec, &root, false);
-    }
+    regenerate_installed_kits(&root, None);
     harness::run_substrate_setup(&root, None);
     reload_ontology_graph();
 
