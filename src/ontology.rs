@@ -294,7 +294,8 @@ fn parse_kit_shapes(kit: &str) -> std::sync::Arc<ShapeFile> {
     // Shared, not copied: the emitters ask for a kit's classes once per
     // sidecar line, and cloning every parsed shape on each ask was most of
     // a full walk's time (#15).
-    static MEMO: OnceLock<Mutex<HashMap<String, (Fingerprint, Arc<ShapeFile>)>>> = OnceLock::new();
+    type Memo = HashMap<String, (Fingerprint, Arc<ShapeFile>)>;
+    static MEMO: OnceLock<Mutex<Memo>> = OnceLock::new();
 
     let fingerprint: Fingerprint = kit_shapes_path(kit)
         .and_then(|p| fs::metadata(p).ok())

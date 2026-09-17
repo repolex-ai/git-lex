@@ -1279,17 +1279,17 @@ pub(crate) fn onegraph_walk_engine(
                     docs.insert(doc);
                 }
                 let mut files: HashMap<String, char> = HashMap::new();
-                if !clear_first {
-                    if let Ok(s_node) = oxigraph::model::NamedNodeRef::new(iri) {
-                        for q in store.quads_for_pattern(
-                            Some(s_node.into()),
-                            Some(file_id_pred),
-                            None,
-                            Some(graph_node.as_ref().into()),
-                        ) {
-                            let q = q.map_err(|e| format!("fileId lookup failed: {e}"))?;
-                            files.insert(q.object.to_string(), '+');
-                        }
+                if !clear_first
+                    && let Ok(s_node) = oxigraph::model::NamedNodeRef::new(iri)
+                {
+                    for q in store.quads_for_pattern(
+                        Some(s_node.into()),
+                        Some(file_id_pred),
+                        None,
+                        Some(graph_node.as_ref().into()),
+                    ) {
+                        let q = q.map_err(|e| format!("fileId lookup failed: {e}"))?;
+                        files.insert(q.object.to_string(), '+');
                     }
                 }
                 if let Some(changed) = walk_file_ids.get(&subject) {
@@ -1298,10 +1298,10 @@ pub(crate) fn onegraph_walk_engine(
                     }
                 }
                 for (f, op) in files {
-                    if op == '+' {
-                        if let Some(doc) = file_iri_document(f.trim_start_matches('<').trim_end_matches('>')) {
-                            docs.insert(doc);
-                        }
+                    if op == '+'
+                        && let Some(doc) = file_iri_document(f.trim_start_matches('<').trim_end_matches('>'))
+                    {
+                        docs.insert(doc);
                     }
                 }
             }
