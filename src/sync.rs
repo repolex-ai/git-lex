@@ -914,21 +914,81 @@ fn git_default_branch(root: &std::path::Path) -> String {
 /// pre-horizon CHURN is excluded.
 fn resolve_dev_horizon(root: &std::path::Path) -> Option<String> {
     let date = git_lex::RepoYml::load(root).dev_history_horizon?;
-    let out = Command::new("git")
-        .current_dir(root)
-        .args(["rev-list", "--reverse", "--after", date.trim(), "HEAD"])
-        .output()
-        .ok()
-        .filter(|o| o.status.success())?;
-    let first = String::from_utf8_lossy(&out.stdout)
-        .lines()
-        .next()
-        .map(|l| l.trim().to_string())
-        .filter(|l| !l.is_empty());
+    let first = first_commit_on_or_after(root, date.trim());
     if first.is_none() {
         eprintln!("warning: dev_history_horizon '{date}' matches no commit — walking full history");
     }
     first
+}
+
+/// The first commit on HEAD's line at or after 00:00:00 (local time) on
+/// `date`. Git reads a BARE date as that date at the CURRENT time of day, so
+/// `--after 2026-05-29` run at 17:00 skips that day's morning commits and
+/// the horizon moved with the clock (#24). The midnight is spelled out
+/// unless the value already carries a time.
+fn first_commit_on_or_after(root: &std::path::Path, date: &str) -> Option<String> {
+    let after = if date.contains(':') {
+        date.to_string()
+    } else {
+        format!("{date} 00:00:00")
+    };
+    let out = Command::new("git")
+        .current_dir(root)
+        .args(["rev-list", "--reverse", "--after", &after, "HEAD"])
+        .output()
+        .ok()
+        .filter(|o| o.status.success())?;
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .next()
+        .map(|l| l.trim().to_string())
+        .filter(|l| !l.is_empty())
+}
+
+#[cfg(test)]
+mod dev_horizon_tests {
+    use super::*;
+
+    fn git(root: &std::path::Path, date: &str, args: &[&str]) {
+        let ok = Command::new("git")
+            .current_dir(root)
+            .args(args)
+            .env("GIT_AUTHOR_DATE", date)
+            .env("GIT_COMMITTER_DATE", date)
+            .env("GIT_AUTHOR_NAME", "t")
+            .env("GIT_AUTHOR_EMAIL", "t@t")
+            .env("GIT_COMMITTER_NAME", "t")
+            .env("GIT_COMMITTER_EMAIL", "t@t")
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+        assert!(ok, "git {args:?} failed");
+    }
+
+    /// Two commits on the horizon date, one just after midnight and one just
+    /// before the next. Whatever time of day this test runs, the horizon is
+    /// the early one. With a bare date it was the early one only when the
+    /// test ran before 00:30.
+    #[test]
+    fn horizon_is_the_days_first_commit_at_any_time_of_day() {
+        let dir = std::env::temp_dir().join(format!("gitlex-horizon-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let root = dir.as_path();
+        git(root, "2026-06-30T12:00:00", &["init", "-q", "."]);
+        for t in ["2026-06-30T12:00:00", "2026-07-01T00:30:00", "2026-07-01T23:30:00"] {
+            git(root, t, &["commit", "-q", "--allow-empty", "-m", t]);
+        }
+        let early = Command::new("git")
+            .current_dir(root)
+            .args(["rev-parse", "HEAD~1"])
+            .output()
+            .unwrap();
+        let early = String::from_utf8_lossy(&early.stdout).trim().to_string();
+        let got = first_commit_on_or_after(root, "2026-07-01");
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(got, Some(early));
+    }
 }
 
 #[cfg(test)]
