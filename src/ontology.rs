@@ -1480,15 +1480,23 @@ copia:NocturneActivity a owl:Class ;
     }
 
     #[test]
-    fn type_label_parses_real_kit_soul() {
-        // Receipt check against the live kit-soul ontology — labels hold
-        // whether or not the retired lex-o annotations are still present
-        // (chain is label → local-name; lex-o is invisible to it).
-        let path = std::path::PathBuf::from("/Users/rob/repos/repolex-ai/git-lex-kit-soul/ontology/soul/soul.ttl");
-        let Ok(content) = fs::read_to_string(&path) else { return };
-        assert_eq!(parse_class_type_label(&content, "soul", "Memory"), "Memory");
-        assert_eq!(parse_class_type_label(&content, "soul", "Note"), "Note");
-        assert_eq!(parse_class_type_label(&content, "soul", "Journal"), "Journal");
+    fn type_label_reads_soul_shaped_classes() {
+        // Labels hold whether or not the retired lex-o annotations are
+        // present (chain is label → local-name; lex-o is invisible to it).
+        // Inline fixture in the soul kit's shape: one class with a label,
+        // one with a stale lex-o annotation beside it, one with no label.
+        const TTL: &str = r#"@prefix owl: <http://www.w3.org/2002/07/owl#> .
+@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+@prefix lex-o: <https://repolex.ai/ontology/lex-o/> .
+@prefix soul: <https://repolex.ai/ontology/soul/> .
+soul: a owl:Ontology .
+soul:Memory a owl:Class ; rdfs:label "Memory" .
+soul:Note a owl:Class ; rdfs:label "Note" ; lex-o:typeLabel "note" .
+soul:Journal a owl:Class ; rdfs:comment "One entry per waking." .
+"#;
+        assert_eq!(parse_class_type_label(TTL, "soul", "Memory"), "Memory");
+        assert_eq!(parse_class_type_label(TTL, "soul", "Note"), "Note");
+        assert_eq!(parse_class_type_label(TTL, "soul", "Journal"), "Journal");
     }
 
     #[test]
@@ -1505,14 +1513,6 @@ copia:CameraAngle a owl:Class ; rdfs:label "Camera Angle" .
 "#;
         assert_eq!(parse_class_type_label(TTL, "copia", "Place"), "Place");
         assert_eq!(parse_class_type_label(TTL, "copia", "CameraAngle"), "Camera Angle");
-    }
-
-    #[test]
-    fn type_label_parses_real_kit_pool() {
-        let path = std::path::PathBuf::from("/Users/rob/repos/repolex-ai/git-lex-kit-pool/ontology/pool/pool.ttl");
-        let Ok(content) = fs::read_to_string(&path) else { return };
-        assert_eq!(parse_class_type_label(&content, "pool", "Image"), "Image");
-        assert_eq!(parse_class_type_label(&content, "pool", "Document"), "Document");
     }
 
     // B1 regression (Day 38): the class-casing footgun. Two emitters used to
