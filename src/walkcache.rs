@@ -23,15 +23,21 @@
 //!   - the blob hash git's INDEX holds for it (the emitted `git/blobHash`
 //!     quad reads the index, so an index move — add, commit — must miss).
 //!
-//! **The two total gates (spec §4.3), enforced as one context hash:**
+//! **The total gates (spec §4.3), enforced as one context hash:**
 //!   - the installed ontology (every byte under `.lex/ontology/`) — a kit
 //!     change can alter every document's output without touching any
 //!     document;
 //!   - the document existence set (the sorted file list) — a link fact
 //!     exists only while its target exists, so an add/delete/rename
-//!     changes OTHER files' output. Either changes → the context hash
-//!     changes → the whole cache is invalid → full walk, exactly today's
-//!     behavior.
+//!     changes OTHER files' output;
+//!   - the git-lex binary itself — an upgrade can change every fragment,
+//!     and a cache written by the old binary would otherwise keep serving
+//!     the old output (and skip rewriting the sidecars history is built
+//!     from). Identified by the executable's path, size and modification
+//!     time: any install changes it, and reading it costs one stat.
+//!
+//! Any gate changes → the context hash changes → the whole cache is
+//! invalid → full walk, exactly the uncached behavior.
 //!
 //! **What is never cached:** a file whose extraction produced errors.
 //! Errors must stay loud on every run; caching one would let a broken
@@ -85,12 +91,33 @@ pub(crate) fn blob_hash_of(bytes: &[u8]) -> String {
         .unwrap_or_default()
 }
 
-/// The context hash: ontology bytes + sorted document list. Anything that
+/// The running binary's identity: executable path, size and mtime. An
+/// install replaces the file, so any upgrade (or downgrade) changes it.
+fn binary_identity() -> String {
+    let Ok(exe) = std::env::current_exe() else {
+        return String::new();
+    };
+    let Ok(meta) = fs::metadata(&exe) else {
+        return exe.to_string_lossy().to_string();
+    };
+    let mtime = meta
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    format!("{}\t{}\t{}", exe.to_string_lossy(), meta.len(), mtime)
+}
+
+/// The context hash: binary identity + ontology bytes + sorted document
+/// list. Anything that
 /// can change a document's output WITHOUT its bytes changing must be in
 /// here; when in doubt, include it — the cost of inclusion is a full walk,
 /// the cost of omission is silently stale derived state.
 pub(crate) fn context_hash(root: &Path, files: &[PathBuf]) -> String {
     let mut acc = Vec::new();
+    acc.extend_from_slice(binary_identity().as_bytes());
+    acc.push(b'\n');
     // Document existence set, sorted for determinism.
     let mut rels: Vec<String> = files
         .iter()
