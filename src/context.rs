@@ -64,6 +64,9 @@ struct Model {
     /// Properties every Thing carries, listed once.
     universals: Vec<Prop>,
     classes: Vec<Class>,
+    /// The repo's own kit (`kit:` in repo.yml), by prefix; the guide's
+    /// examples use one of ITS classes.
+    main_kit: Option<String>,
 }
 
 // ─── installed kits ──────────────────────────────────────────
@@ -284,7 +287,8 @@ fn build_model(root: &Path) -> Model {
         });
     }
 
-    Model { prefixes, universals: universals.into_values().collect(), classes }
+    let main_kit = installed.iter().map(|(spec, name)| (spec.as_str(), name)).find(|(spec, _)| *spec != git_lex::BASE_KIT).map(|(_, n)| n.clone());
+    Model { prefixes, universals: universals.into_values().collect(), classes, main_kit }
 }
 
 // ─── formatting ──────────────────────────────────────────────
@@ -300,16 +304,24 @@ fn shorten(prefixes: &[(String, String)], iri: &str) -> String {
     format!("<{iri}>")
 }
 
-/// First sentence, on one line, capped.
+/// First sentence, on one line. "e.g." and "i.e." do not end a sentence. A
+/// sentence over the cap is cut at a word boundary, never inside a word.
 fn brief(text: &str, cap: usize) -> String {
     let flat = text.split_whitespace().collect::<Vec<_>>().join(" ");
-    let first = flat.split_inclusive(". ").next().unwrap_or("").trim().trim_end_matches('.');
-    if first.chars().count() <= cap {
-        first.to_string()
-    } else {
-        let cut: String = first.chars().take(cap - 1).collect();
-        format!("{}…", cut.trim_end())
+    let mut end = flat.len();
+    for (i, _) in flat.match_indices(". ") {
+        let before = &flat[..i];
+        if before.ends_with("e.g") || before.ends_with("i.e") { continue; }
+        end = i;
+        break;
     }
+    let first = flat[..end].trim().trim_end_matches('.');
+    if first.chars().count() <= cap {
+        return first.to_string();
+    }
+    let cut: String = first.chars().take(cap).collect();
+    let cut = cut.rsplit_once(' ').map(|(head, _)| head).unwrap_or(&cut);
+    format!("{} …", cut.trim_end_matches([',', ';', ':', ' ']))
 }
 
 fn prop_line(m: &Model, p: &Prop) -> String {
@@ -330,7 +342,7 @@ fn prop_line(m: &Model, p: &Prop) -> String {
         (false, false) => "",
     });
     line.push_str(" .");
-    let c = brief(&p.comment, 70);
+    let c = brief(&p.comment, 120);
     if !c.is_empty() { line.push_str(&format!(" # {c}")); }
     line
 }
@@ -339,12 +351,11 @@ fn prop_line(m: &Model, p: &Prop) -> String {
 /// prose SHACLC has no slot for. Swap this one function to change the format.
 fn format_ontology(m: &Model) -> String {
     let mut out = String::new();
-    for (name, ns) in &m.prefixes {
-        if m.classes.iter().any(|c| c.iri.starts_with(ns.as_str()))
-            || m.classes.iter().flat_map(|c| &c.props).chain(&m.universals).any(|p| p.iri.starts_with(ns.as_str()))
-        {
-            out.push_str(&format!("PREFIX {name}: <{ns}>\n"));
-        }
+    // Every prefix `git lex query` binds for you (the same table), by name.
+    let mut bound: Vec<&(String, String)> = m.prefixes.iter().collect();
+    bound.sort();
+    for (name, ns) in bound {
+        out.push_str(&format!("PREFIX {name}: <{ns}>\n"));
     }
     if !m.universals.is_empty() {
         out.push_str("\n# Every Thing carries these. They are not repeated on the classes below.\n");
@@ -385,24 +396,83 @@ How to read it:
 - Header key for `git-lex:title` on `soul:Journal`: `soul.Journal.title`. The
   key always uses the CLASS's prefix and name, then the property's local name.
 - In a query, use the property exactly as written here.
-
-Named graphs (all under `https://repolex.ai/git-lex/NamedGraph/`): `now` holds
-your documents as they are; `commits`, `refs`, `repo` and `filetree/<sha>`
-hold the git layer. Queries see the union, so `GRAPH` is optional.
-
-```sparql
-SELECT ?doc ?title WHERE { ?doc a git-lex:Thing ; git-lex:title ?title } LIMIT 20
-SELECT ?from ?to WHERE { ?from md:linksTo ?to } LIMIT 20
-```
 ";
+
+/// What an agent needs to write a first query without guessing: what else is
+/// in the graph, what addresses look like, and examples that run. The example
+/// class is the first foldered class of the repo's own kit, so a repo never
+/// gets an example naming a kit it does not have.
+fn query_guide(m: &Model) -> String {
+    let example = m.main_kit.as_ref().and_then(|kit| {
+        let ns = &m.prefixes.iter().find(|(name, _)| name == kit)?.1;
+        m.classes.iter().find(|c| c.folder.is_some() && c.iri.starts_with(ns.as_str()))
+    }).or_else(|| m.classes.iter().find(|c| c.folder.is_some()));
+
+    let mut out = String::from("## Querying: what is in the graph\n\n");
+    out.push_str(
+"- A document carries ONLY its own class. Nothing is inferred: `?d a git-lex:Thing`
+  matches nothing, and neither does a parent class. `?d git-lex:id ?id` matches
+  every document of every class.
+- Optional properties are often absent on real documents (many have no title).
+  Put them in `OPTIONAL { }`, or the documents without them silently drop out.
+- Named graphs, all under `https://repolex.ai/git-lex/NamedGraph/`: `now` holds
+  your documents and one `git-lex:File` per file; `commits`, `refs`, `repo` and
+  `filetree/<sha>` hold git itself (`git2:Commit`, `git2:Signature`, `git2:Blob`,
+  `git2:IndexEntry`, `git2:Branch`, `git2:Repository`, `git-lex:Repo`). A query
+  sees all of them at once, and the git layer is most of the graph, so an open
+  pattern like `?s a ?class` is mostly git. Require `git-lex:id` to keep to
+  documents.
+- Body links run FILE to FILE: `?fromFile md:linksTo ?toFile`. A document
+  points at its file with `git-lex:fileId`; hop through it to get documents.
+");
+    let Some(c) = example else { return out };
+    let class = shorten(&m.prefixes, &c.iri);
+    let local = c.iri.rsplit(['/', '#']).next().unwrap_or_default();
+    let kit = class.split(':').next().unwrap_or_default();
+    let doc = crate::nquad::thing_iri_from_range(&c.iri, "my-id").unwrap_or_default();
+    let doc = doc.trim_matches(['<', '>']);
+    let file = format!("{}{}my-id.md", crate::git::FILE_BASE, c.folder.as_deref().unwrap_or_default());
+    out.push_str(&format!(
+"
+Addresses, for the class `{class}`:
+
+- the class: `{iri}`
+- a document: `{doc}` (the class address without `ontology/`, then the id).
+  In a header it is written `<{kit}/{local}/my-id>`.
+- its file: `{file}` (the path from the repo root)
+",
+        iri = c.iri));
+    let own_id = format!("{}{}Id", local[..1].to_lowercase(), &local[1..]);
+    if c.props.iter().any(|p| p.iri.rsplit(['/', '#']).next() == Some(own_id.as_str())) {
+        out.push_str(&format!(
+"- `{kit}:{own_id}` holds the bare id as plain text (`\"my-id\"`); `git-lex:id` holds
+  the document's own address, as a reference.
+"));
+    }
+    out.push_str(&format!(
+"
+```sparql
+# newest documents of one class; the title may be missing
+SELECT ?d ?title ?updated WHERE {{ ?d a {class} . OPTIONAL {{ ?d git-lex:title ?title }} OPTIONAL {{ ?d git-lex:updatedDate ?updated }} }} ORDER BY DESC(?updated) LIMIT 5
+# everything that relates to one document, with its class
+SELECT ?d ?class WHERE {{ ?d git-lex:relatedToId <{doc}> ; a ?class }}
+# which documents link to a file
+SELECT ?doc ?fromFile WHERE {{ ?fromFile md:linksTo <{file}> . OPTIONAL {{ ?doc git-lex:fileId ?fromFile }} }}
+# how many documents of each class
+SELECT ?class (COUNT(?d) AS ?n) WHERE {{ ?d git-lex:id ?id ; a ?class }} GROUP BY ?class ORDER BY DESC(?n)
+```
+"));
+    out
+}
 
 /// The whole context for a repo: manual, then ontology.
 pub(crate) fn render(root: &Path) -> String {
     let model = build_model(root);
     let kits: Vec<String> = installed_ontologies(root).into_iter().map(|(_, n)| n).collect();
     format!(
-        "{}\n{}\nInstalled: {}.\n\n```shaclc\n{}```\n",
+        "{}\n\n{}\n{}\nInstalled: {}.\n\n```shaclc\n{}```\n",
         MANUAL.trim_end(),
+        query_guide(&model),
         ONTOLOGY_INTRO,
         kits.join(", "),
         format_ontology(&model)
@@ -549,5 +619,31 @@ git-lex:foldered a owl:AnnotationProperty .
         assert!(special.contains("alpha:extra in=[\"a\" \"b\"]") && !special.contains("alpha:day"), "{text}");
         assert!(text.contains("# extends alpha:Entry"), "{text}");
         let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn the_guide_speaks_this_repos_kit_and_never_the_query_that_returns_nothing() {
+        let root = fake_root("guide", &["alpha", "beta"], &[]);
+        let text = render(&root);
+        let guide = text.split("## Querying: what is in the graph").nth(1).unwrap().split("## The ontology").next().unwrap();
+        // Examples use the repo's OWN kit's first foldered class, by derived addresses.
+        assert!(guide.contains("?d a alpha:Entry ."), "{guide}");
+        assert!(guide.contains("<https://repolex.ai/alpha/Entry/my-id>"), "{guide}");
+        assert!(guide.contains("<https://repolex.ai/git-lex/File/Basealpha/Entry/my-id.md>"), "{guide}");
+        assert!(!guide.contains("beta:") && !guide.contains("soul:"), "{guide}");
+        // No example may type a document as git-lex:Thing: nothing is inferred.
+        assert!(!text.contains("?doc a git-lex:Thing") && !text.contains("?d a git-lex:Thing ;"), "{text}");
+        // Every prefix the query command binds is listed, md: included.
+        assert!(text.contains("PREFIX md: <https://repolex.ai/ontology/git-lex/md/>"), "{text}");
+        assert!(text.contains("\n\n## The ontology of this repo"), "{text}");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn brief_keeps_the_whole_first_sentence_and_cuts_only_between_words() {
+        assert_eq!(brief("Which Thing this IS, written <namespace/Class/id>. Without it, more.", 120),
+                   "Which Thing this IS, written <namespace/Class/id>");
+        assert_eq!(brief("The model, e.g. claude. Second.", 120), "The model, e.g. claude");
+        assert_eq!(brief("alpha beta gamma delta", 12), "alpha beta …");
     }
 }

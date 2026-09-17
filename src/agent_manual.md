@@ -39,12 +39,13 @@ committed until the whole save passes.
 ## Querying
 
 - Prefixes for every installed kit are added for you. Do not declare them.
-- Queries see all graphs at once. You rarely need `GRAPH`.
 - A document is `?d a <kit>:<Class>`. Its properties are the IRIs in the
-  ontology section, for example `git-lex:title`, `soul:soulDay`.
+  ontology section, for example `git-lex:title`.
 - `git lex query <name>` runs a stored query from `.lex/query/<name>.md`.
 - For history ("when did this change?") use `git lex serve sparql`, which
   serves the synced store. `git lex query` shows the present only.
+- What else is in the graph, what addresses look like, and queries that run:
+  the "Querying" section after this manual, written for this repo.
 
 ## Where things live
 
