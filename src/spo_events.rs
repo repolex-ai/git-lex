@@ -828,45 +828,69 @@ pub(crate) struct SidecarReader {
     repo: git2::Repository,
     /// commit sha → its root tree (None = the empty tree).
     trees: HashMap<String, Option<git2::Oid>>,
+    /// tree oid → its entries (name → (oid, is a blob)). libgit2 re-reads
+    /// and re-parses a large tree on every path lookup, so a folder of 180k
+    /// sidecars cost a full parse per sidecar read. Trees are content-
+    /// addressed: an unchanged folder is one entry across every commit.
+    dirs: HashMap<git2::Oid, HashMap<String, (git2::Oid, bool)>>,
 }
+
+/// Parsed trees kept at once; the walk moves forward through history, so
+/// old folder versions stop being asked for.
+const SIDECAR_DIR_CACHE: usize = 64;
 
 impl SidecarReader {
     pub(crate) fn open() -> Result<Self, String> {
         let root = find_git_root().ok_or("not inside a git repository")?;
         let repo = git2::Repository::open(&root)
             .map_err(|e| format!("open git repository {}: {e}", root.display()))?;
-        Ok(SidecarReader { repo, trees: HashMap::new() })
+        Ok(SidecarReader { repo, trees: HashMap::new(), dirs: HashMap::new() })
     }
 
-    /// The root tree of a commit (or tree) sha; None for the empty tree.
-    fn tree_at(&mut self, sha: &str) -> Result<Option<git2::Tree<'_>>, String> {
-        let oid = match self.trees.get(sha) {
-            Some(oid) => *oid,
-            None => {
-                let oid = if sha == EMPTY_TREE_SHA {
-                    None
-                } else {
-                    let obj = self
-                        .repo
-                        .revparse_single(sha)
-                        .map_err(|e| format!("resolve {sha}: {e}"))?;
-                    let tree = obj
-                        .peel_to_tree()
-                        .map_err(|e| format!("tree of {sha}: {e}"))?;
-                    Some(tree.id())
-                };
-                self.trees.insert(sha.to_string(), oid);
-                oid
-            }
-        };
-        match oid {
-            None => Ok(None),
-            Some(oid) => self
-                .repo
-                .find_tree(oid)
-                .map(Some)
-                .map_err(|e| format!("read tree {oid} of {sha}: {e}")),
+    /// The root tree oid of a commit (or tree) sha; None for the empty tree.
+    fn root_tree(&mut self, sha: &str) -> Result<Option<git2::Oid>, String> {
+        if let Some(oid) = self.trees.get(sha) {
+            return Ok(*oid);
         }
+        let oid = if sha == EMPTY_TREE_SHA {
+            None
+        } else {
+            let obj = self
+                .repo
+                .revparse_single(sha)
+                .map_err(|e| format!("resolve {sha}: {e}"))?;
+            let tree = obj
+                .peel_to_tree()
+                .map_err(|e| format!("tree of {sha}: {e}"))?;
+            Some(tree.id())
+        };
+        self.trees.insert(sha.to_string(), oid);
+        Ok(oid)
+    }
+
+    /// One tree's entries, parsed once.
+    fn entries(&mut self, tree: git2::Oid) -> Result<&HashMap<String, (git2::Oid, bool)>, String> {
+        if !self.dirs.contains_key(&tree) {
+            if self.dirs.len() >= SIDECAR_DIR_CACHE {
+                self.dirs.clear();
+            }
+            let parsed = self
+                .repo
+                .find_tree(tree)
+                .map_err(|e| format!("read tree {tree}: {e}"))?;
+            let mut map = HashMap::with_capacity(parsed.len());
+            for entry in parsed.iter() {
+                // Names are raw bytes in git; sidecar paths are UTF-8 (they
+                // come from the diff as strings), so a non-UTF-8 name can
+                // never be the one asked for.
+                if let Ok(name) = std::str::from_utf8(entry.name_bytes()) {
+                    let is_blob = entry.kind() == Some(git2::ObjectType::Blob);
+                    map.insert(name.to_string(), (entry.id(), is_blob));
+                }
+            }
+            self.dirs.insert(tree, map);
+        }
+        Ok(&self.dirs[&tree])
     }
 
     /// A sidecar's SPO lines at a commit; empty when the path is absent there.
@@ -877,15 +901,23 @@ impl SidecarReader {
         }
     }
 
-    /// The blob a path holds at a commit; None when the path is absent there.
+    /// The blob a path holds at a commit; None when the path is absent there
+    /// (any missing component). A path that names a folder is an error.
     fn blob_at(&mut self, sha: &str, path: &str) -> Result<Option<git2::Oid>, String> {
-        let Some(tree) = self.tree_at(sha)? else { return Ok(None) };
-        match tree.get_path(std::path::Path::new(path)) {
-            Ok(entry) if entry.kind() == Some(git2::ObjectType::Blob) => Ok(Some(entry.id())),
-            Ok(_) => Err(format!("{sha}:{path} is not a file")),
-            Err(e) if e.code() == git2::ErrorCode::NotFound => Ok(None),
-            Err(e) => Err(format!("look up {sha}:{path}: {e}")),
+        let Some(mut tree) = self.root_tree(sha)? else { return Ok(None) };
+        let mut components = path.split('/').peekable();
+        while let Some(name) = components.next() {
+            let Some(&(oid, is_blob)) = self.entries(tree)?.get(name) else {
+                return Ok(None);
+            };
+            match (components.peek().is_some(), is_blob) {
+                (false, true) => return Ok(Some(oid)),
+                (false, false) => return Err(format!("{sha}:{path} is not a file")),
+                (true, false) => tree = oid,
+                (true, true) => return Ok(None), // a file where a folder was asked
+            }
         }
+        Ok(None)
     }
 
     /// A blob's SPO lines (non-empty, non-comment).
