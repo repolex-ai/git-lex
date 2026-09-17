@@ -67,6 +67,9 @@ pub(crate) fn cmd_sync() {
     let onegraph_resume = resume_point(&store, &root);
 
     clear_derived_graphs(&store);
+    let now_present = store
+        .contains_named_graph(&oxigraph::model::NamedNode::new_unchecked(NOW_GRAPH_IRI))
+        .unwrap_or(false);
 
     heal_ontology_graph(&store);
 
@@ -103,7 +106,7 @@ These are in your WORKING FILES, not history — fix the listed files and the wa
     // Shares the SAME resolver context, so one-graph facts resolve
     // identically to now-view facts (and the indexes build once per sync,
     // not twice). ───
-    sync_onegraph_phase(&store, &root, onegraph_resume, &resolver_ctx);
+    let onegraph = sync_onegraph_phase(&store, &root, onegraph_resume, &resolver_ctx);
 
     // ─── Stale graph cleanup ───
     // Subsumed by the Phase-1 clear filter: every graph not on the keep-list
@@ -112,7 +115,14 @@ These are in your WORKING FILES, not history — fix the listed files and the wa
     // all legacy urn:soul:* names. Migration off every old layout is
     // automatic on the first new-binary sync.
 
-    materialize_now_view(&store);
+    // The now view follows the base layer. A full rebuild (or a store that
+    // has no now view yet) copies all of it; otherwise only the subjects
+    // this walk changed can differ, and only they are refreshed.
+    if onegraph.full_rebuild || !now_present {
+        materialize_now_view(&store);
+    } else {
+        refresh_now_view(&store, &onegraph.changed_subjects);
+    }
 
     store.flush().expect("failed to flush store");
 
@@ -439,12 +449,14 @@ fn clear_derived_graphs(store: &Store) {
     for graph_uri in &existing_graphs {
         // Keep-list: the one graph (persistent, append-only — incremental
         // appends; full rebuild only via the spike command or an
-        // invalid-resume fallback) and the repo-ontology graph (loaded at
-        // init/kit-update, "stays put"). EVERYTHING else is derived and
+        // invalid-resume fallback), the repo-ontology graph (loaded at
+        // init/kit-update, "stays put") and the now view (refreshed after
+        // the walk from what the walk changed). EVERYTHING else is derived and
         // regenerated — including the retired sync/<sha>, history, and meta
         // families, which this sweep removes from pre-cutover stores.
         if graph_uri != "https://repolex.ai/git-lex/NamedGraph/repo-ontology"
             && graph_uri != spo_events::LEXHISTORY_GRAPH_IRI
+            && graph_uri != NOW_GRAPH_IRI
         {
             if let Ok(graph) = oxigraph::model::NamedNode::new(graph_uri) {
                 // remove (not clear): drops the graph's registration too, so a
@@ -493,6 +505,58 @@ fn heal_ontology_graph(store: &Store) {
     // one graph"): derived, disposable, rebuilt every sync, never edited.
     // It exists so downstream consumers (Syrinx, viz, agents) can query
     // current state as plain triples without filtering event machinery.
+const NOW_GRAPH_IRI: &str = "https://repolex.ai/git-lex/NamedGraph/now";
+
+/// The now view restricted to some subjects: exactly what
+/// `materialize_now_view` would copy for them. That query filters per
+/// subject (no SpoEvent subjects, no rdf:reifies), so the view for every
+/// subject the walk did not change is already right, and each changed
+/// subject's facts are replaced with its current base-layer facts.
+fn refresh_now_view(store: &Store, subjects: &std::collections::HashSet<String>) {
+    use oxigraph::model::{GraphNameRef, NamedNodeRef, NamedOrBlankNodeRef, Quad};
+    let fail = |e: String| -> ! {
+        // A stale now view silently lies to every downstream consumer.
+        eprintln!("ERROR: now-view refresh failed: {e}");
+        std::process::exit(1);
+    };
+    let now = NamedNodeRef::new_unchecked(NOW_GRAPH_IRI);
+    let one = NamedNodeRef::new_unchecked(spo_events::LEXHISTORY_GRAPH_IRI);
+    let rdf_type = NamedNodeRef::new_unchecked("http://www.w3.org/1999/02/22-rdf-syntax-ns#type");
+    let reifies = NamedNodeRef::new_unchecked("http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies");
+    let spo_event = NamedNodeRef::new_unchecked("https://repolex.ai/ontology/git-lex/SpoEvent");
+    for term in subjects {
+        let iri = term.trim_start_matches('<').trim_end_matches('>');
+        let Ok(subject) = NamedNodeRef::new(iri) else {
+            fail(format!("changed subject is not an IRI: {term}"));
+        };
+        let subject_ref = NamedOrBlankNodeRef::from(subject);
+        let stale: Vec<Quad> = store
+            .quads_for_pattern(Some(subject_ref), None, None, Some(GraphNameRef::from(now)))
+            .collect::<Result<_, _>>()
+            .unwrap_or_else(|e| fail(e.to_string()));
+        for q in &stale {
+            store.remove(q).unwrap_or_else(|e| fail(e.to_string()));
+        }
+        let is_event = store
+            .contains(oxigraph::model::QuadRef::new(subject_ref, rdf_type, spo_event, one))
+            .unwrap_or_else(|e| fail(e.to_string()));
+        if is_event {
+            continue;
+        }
+        let current: Vec<Quad> = store
+            .quads_for_pattern(Some(subject_ref), None, None, Some(GraphNameRef::from(one)))
+            .collect::<Result<_, _>>()
+            .unwrap_or_else(|e| fail(e.to_string()));
+        for q in current {
+            if q.predicate.as_ref() == reifies {
+                continue;
+            }
+            let copy = Quad::new(q.subject, q.predicate, q.object, now);
+            store.insert(&copy).unwrap_or_else(|e| fail(e.to_string()));
+        }
+    }
+}
+
 fn materialize_now_view(store: &Store) {
     let update = "PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>              PREFIX gl: <https://repolex.ai/ontology/git-lex/>              DROP SILENT GRAPH <https://repolex.ai/git-lex/NamedGraph/now> ;              INSERT { GRAPH <https://repolex.ai/git-lex/NamedGraph/now> { ?s ?p ?o } }              WHERE { GRAPH <https://repolex.ai/git-lex/LexHistoryGraph> { ?s ?p ?o .                        FILTER NOT EXISTS { ?s a gl:SpoEvent }                        FILTER(?p != rdf:reifies) } }";
     match oxigraph::sparql::SparqlEvaluator::new().parse_update(update) {
@@ -556,7 +620,13 @@ SELECT (COUNT(*) AS ?n) WHERE { \
     } GROUP BY ?tt } \
   FILTER(!BOUND(?maxR) || ?maxR < ?maxA) }";
 
-fn sync_onegraph_phase(store: &Store, root: &std::path::Path, resume_sha: Option<String>, ctx: &crate::nquad::ResolverContext) {
+/// What the one-graph phase did, for the now-view step after it.
+struct OnegraphPhase {
+    full_rebuild: bool,
+    changed_subjects: std::collections::HashSet<String>,
+}
+
+fn sync_onegraph_phase(store: &Store, root: &std::path::Path, resume_sha: Option<String>, ctx: &crate::nquad::ResolverContext) -> OnegraphPhase {
     let one_graph_uri = format!("<{}>", spo_events::LEXHISTORY_GRAPH_IRI);
 
     // Which commits are new?
@@ -642,6 +712,7 @@ fn sync_onegraph_phase(store: &Store, root: &std::path::Path, resume_sha: Option
         }
     }
 
+    let mut changed_subjects = std::collections::HashSet::new();
     if !shas.is_empty() {
         let commits = match spo_events::collect_commits_from_shas(&shas, horizon_start.as_deref()) {
             Ok(c) => c,
@@ -652,7 +723,7 @@ fn sync_onegraph_phase(store: &Store, root: &std::path::Path, resume_sha: Option
             }
         };
 
-        let (seen, emitted) = match spo_events::onegraph_walk_engine(
+        let outcome = match spo_events::onegraph_walk_engine(
             &commits,
             store,
             &one_graph_uri,
@@ -660,7 +731,7 @@ fn sync_onegraph_phase(store: &Store, root: &std::path::Path, resume_sha: Option
             false, // show_progress — sync prints its own phase summary
             full_rebuild, // clear_first only on a full rebuild
         ) {
-            Ok(counts) => counts,
+            Ok(outcome) => outcome,
             Err(e) => {
                 // The resume point is unchanged (events load at the end of the
                 // walk), so the next sync retries this same commit range.
@@ -673,9 +744,10 @@ fn sync_onegraph_phase(store: &Store, root: &std::path::Path, resume_sha: Option
             "One graph: {} {} commit(s), {} event(s) seen, {} emitted.",
             if full_rebuild { "full rebuild —" } else { "appended" },
             commits.len(),
-            seen,
-            emitted
+            outcome.events_seen,
+            outcome.events_emitted
         );
+        changed_subjects = outcome.changed_subjects;
     } else {
         println!("One graph: up to date.");
     }
@@ -793,6 +865,7 @@ fn sync_onegraph_phase(store: &Store, root: &std::path::Path, resume_sha: Option
             std::process::exit(1);
         }
     }
+    OnegraphPhase { full_rebuild, changed_subjects }
 }
 
 /// The branch HEAD is on, or None when detached.
