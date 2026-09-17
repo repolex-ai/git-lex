@@ -288,10 +288,13 @@ fn parse_shape_file(content: &str, short_hint: &str) -> ShapeFile {
 /// reads them back, so a plain cache would hand the pre-regeneration shapes to
 /// everything downstream. That is the stale-derived-state failure #102 was
 /// about, and it is not worth re-introducing to save a stat call.
-fn parse_kit_shapes(kit: &str) -> ShapeFile {
-    use std::sync::{Mutex, OnceLock};
+fn parse_kit_shapes(kit: &str) -> std::sync::Arc<ShapeFile> {
+    use std::sync::{Arc, Mutex, OnceLock};
     type Fingerprint = Option<(u64, Option<std::time::SystemTime>)>;
-    static MEMO: OnceLock<Mutex<HashMap<String, (Fingerprint, ShapeFile)>>> = OnceLock::new();
+    // Shared, not copied: the emitters ask for a kit's classes once per
+    // sidecar line, and cloning every parsed shape on each ask was most of
+    // a full walk's time (#15).
+    static MEMO: OnceLock<Mutex<HashMap<String, (Fingerprint, Arc<ShapeFile>)>>> = OnceLock::new();
 
     let fingerprint: Fingerprint = kit_shapes_path(kit)
         .and_then(|p| fs::metadata(p).ok())
@@ -305,13 +308,13 @@ fn parse_kit_shapes(kit: &str) -> ShapeFile {
     }
 
     let content = read_kit_shapes(kit);
-    let parsed = if content.is_empty() {
+    let parsed = Arc::new(if content.is_empty() {
         ShapeFile::default()
     } else {
         let (_, _, short) = resolve_kit_spec(kit);
         parse_shape_file(&content, &short)
-    };
-    memo.lock().unwrap().insert(kit.to_string(), (fingerprint, parsed.clone()));
+    });
+    memo.lock().unwrap().insert(kit.to_string(), (fingerprint, Arc::clone(&parsed)));
     parsed
 }
 
@@ -331,7 +334,7 @@ fn kit_shapes_path(kit: &str) -> Option<PathBuf> {
 pub(crate) fn get_kit_prefix_name(kit_name: &str) -> String {
     let parsed = parse_kit_shapes(kit_name);
     if !parsed.prefix_name.is_empty() {
-        return parsed.prefix_name;
+        return parsed.prefix_name.clone();
     }
     match kit_name {
         "claude-code" => "cc".to_string(),
@@ -342,8 +345,7 @@ pub(crate) fn get_kit_prefix_name(kit_name: &str) -> String {
 
 /// Get the namespace IRI declared for the kit prefix in its shapes file.
 pub(crate) fn get_kit_namespace(kit_name: &str) -> String {
-    let parsed = parse_kit_shapes(kit_name);
-    parsed.namespace
+    parse_kit_shapes(kit_name).namespace.clone()
 }
 
 /// Property local-names that are object properties (`sh:nodeKind sh:IRI`).
@@ -539,12 +541,12 @@ pub(crate) fn get_object_properties_all_kits() -> HashSet<String> {
 /// everything else (consumers only care about reference-vs-other).
 pub(crate) fn get_kit_types(kit: &str) -> Vec<(String, Vec<(String, String, bool, String)>)> {
     let parsed = parse_kit_shapes(kit);
-    parsed.shapes.into_iter().map(|s| {
-        let props = s.props.into_iter().map(|p| {
+    parsed.shapes.iter().map(|s| {
+        let props = s.props.iter().map(|p| {
             let kind = if p.is_iri { "reference".to_string() } else { "string".to_string() };
-            (p.name, kind, p.required, p.comment)
+            (p.name.clone(), kind, p.required, p.comment.clone())
         }).collect();
-        (s.class_name, props)
+        (s.class_name.clone(), props)
     }).collect()
 }
 
@@ -586,7 +588,8 @@ pub(crate) fn resolve_class_segment(
     context: &str,
     warn: bool,
 ) -> String {
-    let classes: Vec<String> = get_kit_types(kit).into_iter().map(|(name, _)| name).collect();
+    let shapes = parse_kit_shapes(kit);
+    let classes: Vec<&str> = shapes.shapes.iter().map(|s| s.class_name.as_str()).collect();
     match resolve_class_against(&classes, class_seg) {
         ClassMatch::Exact(name) | ClassMatch::PassThrough(name) => name,
         ClassMatch::CaseOnly { canonical, given } => {
@@ -648,16 +651,16 @@ enum ClassMatch {
     NoMatch,
 }
 
-fn resolve_class_against(classes: &[String], class_seg: &str) -> ClassMatch {
+fn resolve_class_against<S: AsRef<str>>(classes: &[S], class_seg: &str) -> ClassMatch {
     if classes.is_empty() {
         return ClassMatch::PassThrough(class_seg.to_string());
     }
-    if classes.iter().any(|c| c == class_seg) {
+    if classes.iter().any(|c| c.as_ref() == class_seg) {
         return ClassMatch::Exact(class_seg.to_string());
     }
-    if let Some(canonical) = classes.iter().find(|c| c.eq_ignore_ascii_case(class_seg)) {
+    if let Some(canonical) = classes.iter().find(|c| c.as_ref().eq_ignore_ascii_case(class_seg)) {
         return ClassMatch::CaseOnly {
-            canonical: canonical.clone(),
+            canonical: canonical.as_ref().to_string(),
             given: class_seg.to_string(),
         };
     }
