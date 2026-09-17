@@ -1,0 +1,22 @@
+name: Repolex Parse
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  dispatch-forx:
+    name: Dispatch parse to forx
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trigger parse in forx
+        run: |
+          gh workflow run parse.yml \
+            --repo repolex-ai/forx \
+            -f repo=${{ github.repository }} \
+            -f tag=${{ github.sha }} \
+            -f storage_repo=repolex-forx/${{ github.repository_owner }}--${{ github.event.repository.name }} \
+            -f phase=parse
+        env:
+          GH_TOKEN: ${{ secrets.REPOLEX_PAT }}
