@@ -32,6 +32,7 @@ mod save;
 mod query;
 mod walkcache;
 mod export_spine;
+mod context;
 mod voice;
 mod session;
 
@@ -354,6 +355,13 @@ fn main() {
     // Bare `git lex --help` is answered by git via man(1), not by this
     // binary — keep the man page converged so that path works (src/man.rs).
     man::converge(<Cli as clap::CommandFactory>::command());
+
+    // `git lex --skill`: the agent manual plus this repo's compact ontology
+    // (#8, #14). Answered before clap, which requires a subcommand.
+    if std::env::args().nth(1).as_deref() == Some("--skill") {
+        context::print_skill();
+        return;
+    }
 
     let cli = Cli::parse();
 

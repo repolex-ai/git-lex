@@ -602,6 +602,7 @@ pub(crate) fn cmd_kit_update(kit_arg: Option<String>) {
 
     // t-box refresh: kit vocab may have changed.
     reload_ontology_graph();
+    crate::context::refresh(&root);
 }
 
 /// kit-update step: file-level hook reap (twin of the registration reap).
@@ -1108,6 +1109,7 @@ pub(crate) fn cmd_kit_add(kit_spec: String) {
 
     // t-box: the new kit's ontology joins the persistent ontology graph.
     reload_ontology_graph();
+    crate::context::refresh(&root);
 }
 
 // ─── kit-remove ──────────────────────────────────────────────────
@@ -1205,6 +1207,7 @@ pub(crate) fn cmd_kit_remove(kit_spec: String, force: bool) {
     }
 
     println!("Kit '{}' removed.", canonical_spec);
+    crate::context::refresh(&root);
 }
 
 #[cfg(test)]

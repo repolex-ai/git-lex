@@ -61,6 +61,7 @@ pub(crate) fn cmd_sync() {
         // Converge the spine even on the fast path: a no-op when current,
         // and it heals a spine that failed to write on an earlier sync.
         crate::export_spine::refresh_after_sync(&root, &store);
+        crate::context::refresh(&root);
         return;
     }
 
@@ -140,6 +141,10 @@ These are in your WORKING FILES, not history — fix the listed files and the wa
     // already printed, and any failure here demotes to a warning, so a
     // cache artifact can never fail or mask a sync.
     crate::export_spine::refresh_after_sync(&root, &store);
+    // The agent context is a function of the installed kits only; this is
+    // the safety net behind kit-add/kit-remove/kit-update. Written only
+    // when its bytes change.
+    crate::context::refresh(&root);
 }
 
 fn gate_default_branch(root: &std::path::Path) {
