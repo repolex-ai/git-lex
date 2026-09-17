@@ -67,8 +67,15 @@ fn select_strings(store: &Store, q: &str, var: &str) -> Result<Vec<String>, Stri
                 // A per-solution error is a store error, not an empty row.
                 let sol = sol.map_err(|e| format!("query evaluation failed: {e}"))?;
                 if let Some(term) = sol.get(var) {
-                    let s = term.to_string();
-                    out.push(s.trim_matches(|c| c == '<' || c == '>' || c == '"').to_string());
+                    // The term's VALUE, not its N-Triples spelling: that
+                    // spelling escapes quotes and backslashes, and peeling
+                    // `<`, `>` and `"` off its ends mangled any path that
+                    // carried one of them.
+                    out.push(match term {
+                        oxigraph::model::Term::NamedNode(n) => n.as_str().to_string(),
+                        oxigraph::model::Term::Literal(l) => l.value().to_string(),
+                        other => other.to_string(),
+                    });
                 }
             }
             Ok(out)
@@ -86,9 +93,7 @@ fn count(store: &Store, q: &str) -> Result<u64, String> {
     let raw = rows
         .first()
         .ok_or_else(|| "COUNT returned no row — evaluation error".to_string())?;
-    let num = raw.split('"').next().unwrap_or(raw);
-    let num = num.split("^^").next().unwrap_or(num);
-    num.parse::<u64>()
+    raw.parse::<u64>()
         .map_err(|e| format!("COUNT value `{raw}` did not parse: {e}"))
 }
 
@@ -440,4 +445,54 @@ pub(crate) fn run_verify(store: &Store) -> usize {
         println!("{failures} CHECK(S) FAILED — the store carries drift; see above");
     }
     failures
+}
+
+#[cfg(test)]
+mod select_strings_tests {
+    use super::*;
+    use oxigraph::io::RdfFormat;
+
+    /// Check 6a joins `git2:path` strings to File addresses in Rust. That
+    /// only works if the path comes back as the VALUE the emitter wrote,
+    /// not as its N-Triples spelling with the quoting half peeled off.
+    #[test]
+    fn a_path_with_quote_characters_still_matches_its_file_address() {
+        let paths = ["\"quoted\".md", "Soul/Note/say \"hi\" \\ bye.md", "<angle>.md", "plain.md"];
+        let mut nq = String::new();
+        for (i, p) in paths.iter().enumerate() {
+            nq.push_str(&format!(
+                "<https://repolex.ai/git-lex/git2/IndexEntry/x/{i}> <https://repolex.ai/ontology/git-lex/git2/path> \"{}\" <https://repolex.ai/git-lex/NamedGraph/filetree/x> .\n",
+                crate::nquad::nq_escape(p)
+            ));
+        }
+        let store = Store::new().unwrap();
+        store
+            .load_from_reader(RdfFormat::NQuads, std::io::Cursor::new(nq.as_bytes()))
+            .unwrap();
+
+        let mut got = select_strings(
+            &store,
+            "SELECT ?path WHERE { GRAPH ?g { ?e <https://repolex.ai/ontology/git-lex/git2/path> ?path } }",
+            "path",
+        )
+        .unwrap();
+        got.sort();
+        let mut want: Vec<String> = paths.iter().map(|p| p.to_string()).collect();
+        want.sort();
+        assert_eq!(got, want);
+    }
+
+    #[test]
+    fn iris_come_back_bare_and_counts_still_parse() {
+        let store = Store::new().unwrap();
+        store
+            .load_from_reader(
+                RdfFormat::NQuads,
+                std::io::Cursor::new(&b"<https://a/s> <https://a/p> <https://a/o> <https://a/g> .\n"[..]),
+            )
+            .unwrap();
+        let got = select_strings(&store, "SELECT ?o WHERE { GRAPH ?g { ?s ?p ?o } }", "o").unwrap();
+        assert_eq!(got, vec!["https://a/o".to_string()]);
+        assert_eq!(count(&store, "SELECT (COUNT(*) AS ?n) WHERE { GRAPH ?g { ?s ?p ?o } }"), Ok(1));
+    }
 }
