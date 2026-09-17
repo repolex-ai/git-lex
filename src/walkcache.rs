@@ -23,15 +23,21 @@
 //!   - the blob hash git's INDEX holds for it (the emitted `git/blobHash`
 //!     quad reads the index, so an index move — add, commit — must miss).
 //!
-//! **The two total gates (spec §4.3), enforced as one context hash:**
+//! **The total gates (spec §4.3), enforced as one context hash:**
 //!   - the installed ontology (every byte under `.lex/ontology/`) — a kit
 //!     change can alter every document's output without touching any
 //!     document;
 //!   - the document existence set (the sorted file list) — a link fact
 //!     exists only while its target exists, so an add/delete/rename
-//!     changes OTHER files' output. Either changes → the context hash
-//!     changes → the whole cache is invalid → full walk, exactly today's
-//!     behavior.
+//!     changes OTHER files' output;
+//!   - the git-lex binary itself — an upgrade can change every fragment,
+//!     and a cache written by the old binary would otherwise keep serving
+//!     the old output (and skip rewriting the sidecars history is built
+//!     from). Identified by the executable's path, size and modification
+//!     time: any install changes it, and reading it costs one stat.
+//!
+//! Any gate changes → the context hash changes → the whole cache is
+//! invalid → full walk, exactly the uncached behavior.
 //!
 //! **What is never cached:** a file whose extraction produced errors.
 //! Errors must stay loud on every run; caching one would let a broken
@@ -58,6 +64,9 @@ pub(crate) struct CacheEntry {
     pub index_hash: String,
     /// .md.spo link lines this file contributed (the walk's link total).
     pub links: usize,
+    /// Quad lines in the fragment (the sync report's fact count), so a
+    /// caller that only needs the count never reads the fragment.
+    pub quads: usize,
 }
 
 pub(crate) struct WalkCache {
@@ -82,12 +91,33 @@ pub(crate) fn blob_hash_of(bytes: &[u8]) -> String {
         .unwrap_or_default()
 }
 
-/// The context hash: ontology bytes + sorted document list. Anything that
+/// The running binary's identity: executable path, size and mtime. An
+/// install replaces the file, so any upgrade (or downgrade) changes it.
+fn binary_identity() -> String {
+    let Ok(exe) = std::env::current_exe() else {
+        return String::new();
+    };
+    let Ok(meta) = fs::metadata(&exe) else {
+        return exe.to_string_lossy().to_string();
+    };
+    let mtime = meta
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    format!("{}\t{}\t{}", exe.to_string_lossy(), meta.len(), mtime)
+}
+
+/// The context hash: binary identity + ontology bytes + sorted document
+/// list. Anything that
 /// can change a document's output WITHOUT its bytes changing must be in
 /// here; when in doubt, include it — the cost of inclusion is a full walk,
 /// the cost of omission is silently stale derived state.
 pub(crate) fn context_hash(root: &Path, files: &[PathBuf]) -> String {
     let mut acc = Vec::new();
+    acc.extend_from_slice(binary_identity().as_bytes());
+    acc.push(b'\n');
     // Document existence set, sorted for determinism.
     let mut rels: Vec<String> = files
         .iter()
@@ -141,18 +171,20 @@ impl WalkCache {
         let mut entries = HashMap::new();
         for line in lines {
             let mut cols = line.split('\t');
-            let (Some(rel), Some(bh), Some(ih), Some(links)) =
-                (cols.next(), cols.next(), cols.next(), cols.next())
+            let (Some(rel), Some(bh), Some(ih), Some(links), Some(quads)) =
+                (cols.next(), cols.next(), cols.next(), cols.next(), cols.next())
             else {
-                return None; // torn manifest — distrust the whole thing
+                return None; // torn (or older-format) manifest — distrust the whole thing
             };
             let links: usize = links.parse().ok()?;
+            let quads: usize = quads.parse().ok()?;
             entries.insert(
                 rel.to_string(),
                 CacheEntry {
                     bytes_hash: bh.to_string(),
                     index_hash: ih.to_string(),
                     links,
+                    quads,
                 },
             );
         }
@@ -190,7 +222,7 @@ impl WalkCache {
         bytes_hash: &str,
         index_hash: &str,
         read_fragment: bool,
-    ) -> Option<(String, usize)> {
+    ) -> Option<(String, CacheEntry)> {
         let e = self.entries.get(relpath)?;
         if e.bytes_hash != bytes_hash || e.index_hash != index_hash {
             return None;
@@ -201,9 +233,8 @@ impl WalkCache {
             String::new()
         };
         let entry = e.clone();
-        let links = entry.links;
-        self.fresh.insert(relpath.to_string(), entry);
-        Some((frag, links))
+        self.fresh.insert(relpath.to_string(), entry.clone());
+        Some((frag, entry))
     }
 
     /// Record a freshly-extracted file. Errors>0 files are the caller's
@@ -231,6 +262,7 @@ impl WalkCache {
                 bytes_hash: bytes_hash.to_string(),
                 index_hash: index_hash.to_string(),
                 links,
+                quads: fragment.lines().filter(|l| !l.is_empty()).count(),
             },
         );
     }
@@ -249,8 +281,8 @@ impl WalkCache {
         for rel in rels {
             let e = &self.fresh[rel];
             out.push_str(&format!(
-                "{}\t{}\t{}\t{}\n",
-                rel, e.bytes_hash, e.index_hash, e.links
+                "{}\t{}\t{}\t{}\t{}\n",
+                rel, e.bytes_hash, e.index_hash, e.links, e.quads
             ));
         }
         let _ = fs::write(self.dir.join("manifest.tsv"), out);
@@ -312,9 +344,10 @@ mod tests {
         c.save();
 
         let mut loaded = WalkCache::load(&root, &ctx).expect("cache loads");
-        let (frag, links) = loaded.hit("a.md", "bh1", "ih1", true).expect("hit");
+        let (frag, entry) = loaded.hit("a.md", "bh1", "ih1", true).expect("hit");
         assert_eq!(frag, "<s> <p> <o> <g> .\n");
-        assert_eq!(links, 2);
+        assert_eq!(entry.links, 2);
+        assert_eq!(entry.quads, 1);
         // Either hash off → miss.
         assert!(loaded.hit("a.md", "bhX", "ih1", true).is_none());
         assert!(loaded.hit("a.md", "bh1", "ihX", true).is_none());

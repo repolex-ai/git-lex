@@ -117,9 +117,12 @@ pub(crate) fn collect_commits_from_shas(
     shas: &[String],
     horizon_start: Option<&str>,
 ) -> Result<Vec<WalkCommit>, String> {
+    let root = find_git_root().ok_or("not inside a git repository")?;
+    let repo = git2::Repository::open(&root)
+        .map_err(|e| format!("open git repository {}: {e}", root.display()))?;
     shas.iter()
         .map(|sha| {
-            let mut c = build_commit(sha)?;
+            let mut c = build_commit(&repo, sha)?;
             // dev_history_horizon: the first walked commit diffs against
             // the EMPTY tree so the whole tree asserts as of the horizon.
             if horizon_start == Some(sha.as_str()) {
@@ -163,27 +166,17 @@ fn rebuild_against_empty_tree(sha: &str) -> Result<WalkCommit, String> {
 /// initial `.spo` line as an addition.
 const EMPTY_TREE_SHA: &str = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
 
-/// Build a `WalkCommit`: find the first parent, then ONE NUL-separated
-/// `--name-status` diff for the touched sidecar set. `-M50%` keeps rename
-/// detection (folder recases must pair old→new, not read as delete+create).
-fn build_commit(sha: &str) -> Result<WalkCommit, String> {
-    let parent_out = Command::new("git")
-        .args(["rev-list", "--parents", "-n", "1", sha])
-        .output()
-        .map_err(|e| format!("git rev-list --parents {sha}: spawn failed: {e}"))?;
-    if !parent_out.status.success() {
-        return Err(format!(
-            "git rev-list --parents {sha} failed ({}): {}",
-            parent_out.status,
-            String::from_utf8_lossy(&parent_out.stderr).trim()
-        ));
-    }
-    let parent_line = String::from_utf8_lossy(&parent_out.stdout);
-    let parent_fields: Vec<&str> = parent_line.trim().split_whitespace().collect();
-    let base = if parent_fields.len() >= 2 {
-        parent_fields[1].to_string()
-    } else {
-        EMPTY_TREE_SHA.to_string()
+/// Build a `WalkCommit`: find the first parent (read in process), then ONE
+/// NUL-separated `--name-status` diff for the touched sidecar set. `-M50%`
+/// keeps rename detection (folder recases must pair old→new, not read as
+/// delete+create).
+fn build_commit(repo: &git2::Repository, sha: &str) -> Result<WalkCommit, String> {
+    let commit = git2::Oid::from_str(sha)
+        .and_then(|oid| repo.find_commit(oid))
+        .map_err(|e| format!("read commit {sha}: {e}"))?;
+    let base = match commit.parent_ids().next() {
+        Some(parent) => parent.to_string(),
+        None => EMPTY_TREE_SHA.to_string(),
     };
 
     let diff_out = Command::new("git")
@@ -458,31 +451,45 @@ pub fn parse_staged_md_changes(raw: &str) -> (Vec<String>, Vec<(String, String)>
 /// Returns paths relative to the repo root, suitable for passing to
 /// `git rm` / `git mv` (both of which accept repo-relative paths when
 /// run from the repo root).
-fn sidecar_paths_for_md(root: &std::path::Path, md_path: &str) -> Vec<String> {
+fn sidecar_paths_for_md(index: &IndexProbe, md_path: &str) -> Vec<String> {
     let mut out = Vec::new();
     for suffix in SPO_EXTRACTOR_SUFFIXES {
         let rel = format!(".lex/extract/{}.{}.spo", md_path, suffix);
-        if git_path_is_tracked(root, &rel) {
+        if index.tracked(&rel) {
             out.push(rel);
         }
     }
     out
 }
 
-/// Ask git whether a given path is currently tracked in the index,
-/// with exact case sensitivity. Runs `git ls-files --error-unmatch -- <path>`
-/// and treats a successful exit as "tracked".
+/// Whether a path is currently tracked in git's index, with exact case —
+/// what `git ls-files --error-unmatch -- <path>` answers, for one cleanup
+/// pass and without a process per path. The index is re-read before each
+/// answer when it changed on disk, so a `git rm`/`git mv` made between two
+/// checks is seen; every merge stage counts as tracked, as it does for
+/// ls-files. Any libgit2 failure answers "not tracked", as a failed spawn
+/// did.
 ///
 /// Why not `Path::exists()`? Because on macOS APFS (case-insensitive by
 /// default), the filesystem answer is wrong for case-only rename cases.
 /// Git's index is always case-exact, so asking git gives us the truth.
-fn git_path_is_tracked(root: &std::path::Path, path: &str) -> bool {
-    Command::new("git")
-        .current_dir(root)
-        .args(["ls-files", "--error-unmatch", "--", path])
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
+struct IndexProbe {
+    repo: Option<git2::Repository>,
+}
+
+impl IndexProbe {
+    fn open(root: &std::path::Path) -> Self {
+        IndexProbe { repo: git2::Repository::open(root).ok() }
+    }
+
+    fn tracked(&self, path: &str) -> bool {
+        let Some(repo) = &self.repo else { return false };
+        let Ok(mut index) = repo.index() else { return false };
+        if index.read(false).is_err() {
+            return false;
+        }
+        (0..=3).any(|stage| index.get_path(std::path::Path::new(path), stage).is_some())
+    }
 }
 
 /// Run `git rm -f <path>` — used to stage the deletion of a stale .spo
@@ -575,9 +582,10 @@ pub fn cleanup_sidecars_for_staged_changes() -> CleanupReport {
     };
 
     let (deleted_mds, renamed_mds) = parse_staged_md_changes(&raw);
+    let index = IndexProbe::open(&root);
 
     for md_path in &deleted_mds {
-        for sidecar in sidecar_paths_for_md(&root, md_path) {
+        for sidecar in sidecar_paths_for_md(&index, md_path) {
             match git_rm(&root, &sidecar) {
                 Ok(()) => report.deleted.push(sidecar),
                 Err(e) => report.errors.push(e),
@@ -586,7 +594,7 @@ pub fn cleanup_sidecars_for_staged_changes() -> CleanupReport {
         // The jsonl extractor also keeps a `.meta` bookkeeping file next to
         // its sidecar; a deleted source must take it along.
         let meta = format!(".lex/extract/{}.meta", md_path);
-        if git_path_is_tracked(&root, &meta) {
+        if index.tracked(&meta) {
             match git_rm(&root, &meta) {
                 Ok(()) => report.deleted.push(meta),
                 Err(e) => report.errors.push(e),
@@ -613,7 +621,7 @@ pub fn cleanup_sidecars_for_staged_changes() -> CleanupReport {
         for suffix in SPO_EXTRACTOR_SUFFIXES {
             let old_sidecar = format!(".lex/extract/{}.{}.spo", old_md, suffix);
             let new_sidecar = format!(".lex/extract/{}.{}.spo", new_md, suffix);
-            if !git_path_is_tracked(&root, &old_sidecar) {
+            if !index.tracked(&old_sidecar) {
                 continue;
             }
             // Destination ALREADY TRACKED IN THE INDEX (separately from
@@ -626,7 +634,7 @@ pub fn cleanup_sidecars_for_staged_changes() -> CleanupReport {
             // A case-only rename resolving to the same inode on APFS is
             // excluded by the path-inequality guard: git's index tracks
             // exact casing, so same-inode ≠ same tracked path.
-            if git_path_is_tracked(&root, &new_sidecar) && new_sidecar != old_sidecar {
+            if index.tracked(&new_sidecar) && new_sidecar != old_sidecar {
                 match git_rm(&root, &old_sidecar) {
                     Ok(()) => report.deleted.push(old_sidecar),
                     Err(e) => report.errors.push(e),
@@ -642,8 +650,8 @@ pub fn cleanup_sidecars_for_staged_changes() -> CleanupReport {
         // renamed source (same tracked-in-index rules as the sidecars).
         let old_meta = format!(".lex/extract/{}.meta", old_md);
         let new_meta = format!(".lex/extract/{}.meta", new_md);
-        if git_path_is_tracked(&root, &old_meta) {
-            if git_path_is_tracked(&root, &new_meta) && new_meta != old_meta {
+        if index.tracked(&old_meta) {
+            if index.tracked(&new_meta) && new_meta != old_meta {
                 // Same rule as the sidecars above: tracked destination
                 // means the move already happened — the source is stale,
                 // and silently skipping it left it tracked forever.
@@ -736,104 +744,104 @@ pub(crate) fn remove_orphaned_sidecars(root: &std::path::Path) -> Vec<String> {
     removed
 }
 
-/// Read a sidecar file's content at a specific git commit.
-/// Returns the non-empty, non-comment lines (the SPO lines).
+/// Committed-sidecar reads for the one-graph walk, in process (libgit2).
+///
+/// One repository handle per walk. It replaces a `git show` / `git ls-tree` /
+/// `git cat-file` process per sidecar per commit, which was most of a
+/// sync's wall time once a repo reached tens of thousands of documents
+/// (#15). The read semantics are unchanged:
 ///
 /// "Path absent at this commit" is a NORMAL outcome — the added/deleted side
 /// of a diff resolves against a commit where the file doesn't exist — and
-/// returns `Ok(empty)`. Every OTHER git failure is an ERROR: treating it as
-/// absence would let a transient failure fabricate history (an empty old side
-/// reads as "everything was added", an empty new side as "everything was
-/// removed" — assert/retract events manufactured into the one graph).
-fn read_sidecar_at_commit(sha: &str, sidecar_path: &str) -> Result<Vec<String>, String> {
-    let spec = format!("{}:{}", sha, sidecar_path);
-    let out = Command::new("git")
-        .args(["show", &spec])
-        .output()
-        .map_err(|e| format!("git show {spec}: spawn failed: {e}"))?;
-    if out.status.success() {
-        return Ok(String::from_utf8_lossy(&out.stdout)
+/// reads as empty. Every OTHER failure is an ERROR: treating it as absence
+/// would let a broken read fabricate history (an empty old side reads as
+/// "everything was added", an empty new side as "everything was removed" —
+/// assert/retract events manufactured into the one graph). Absence is
+/// libgit2's NotFound on the path lookup inside a tree that DID resolve; an
+/// unresolvable commit is an error, never an empty read.
+pub(crate) struct SidecarReader {
+    repo: git2::Repository,
+    /// commit sha → its root tree (None = the empty tree).
+    trees: HashMap<String, Option<git2::Oid>>,
+}
+
+impl SidecarReader {
+    pub(crate) fn open() -> Result<Self, String> {
+        let root = find_git_root().ok_or("not inside a git repository")?;
+        let repo = git2::Repository::open(&root)
+            .map_err(|e| format!("open git repository {}: {e}", root.display()))?;
+        Ok(SidecarReader { repo, trees: HashMap::new() })
+    }
+
+    /// The root tree of a commit (or tree) sha; None for the empty tree.
+    fn tree_at(&mut self, sha: &str) -> Result<Option<git2::Tree<'_>>, String> {
+        let oid = match self.trees.get(sha) {
+            Some(oid) => *oid,
+            None => {
+                let oid = if sha == EMPTY_TREE_SHA {
+                    None
+                } else {
+                    let obj = self
+                        .repo
+                        .revparse_single(sha)
+                        .map_err(|e| format!("resolve {sha}: {e}"))?;
+                    let tree = obj
+                        .peel_to_tree()
+                        .map_err(|e| format!("tree of {sha}: {e}"))?;
+                    Some(tree.id())
+                };
+                self.trees.insert(sha.to_string(), oid);
+                oid
+            }
+        };
+        match oid {
+            None => Ok(None),
+            Some(oid) => self
+                .repo
+                .find_tree(oid)
+                .map(Some)
+                .map_err(|e| format!("read tree {oid} of {sha}: {e}")),
+        }
+    }
+
+    /// A sidecar's SPO lines at a commit; empty when the path is absent there.
+    pub(crate) fn lines_at(&mut self, sha: &str, sidecar_path: &str) -> Result<Vec<String>, String> {
+        match self.blob_at(sha, sidecar_path)? {
+            Some(oid) => self.blob_lines(oid),
+            None => Ok(Vec::new()),
+        }
+    }
+
+    /// The blob a path holds at a commit; None when the path is absent there.
+    fn blob_at(&mut self, sha: &str, path: &str) -> Result<Option<git2::Oid>, String> {
+        let Some(tree) = self.tree_at(sha)? else { return Ok(None) };
+        match tree.get_path(std::path::Path::new(path)) {
+            Ok(entry) if entry.kind() == Some(git2::ObjectType::Blob) => Ok(Some(entry.id())),
+            Ok(_) => Err(format!("{sha}:{path} is not a file")),
+            Err(e) if e.code() == git2::ErrorCode::NotFound => Ok(None),
+            Err(e) => Err(format!("look up {sha}:{path}: {e}")),
+        }
+    }
+
+    /// A blob's SPO lines (non-empty, non-comment).
+    fn blob_lines(&self, oid: git2::Oid) -> Result<Vec<String>, String> {
+        let blob = self
+            .repo
+            .find_blob(oid)
+            .map_err(|e| format!("read blob {oid}: {e}"))?;
+        Ok(String::from_utf8_lossy(blob.content())
             .lines()
             .filter(|l| !l.is_empty() && !l.starts_with('#'))
             .map(|l| l.to_string())
-            .collect());
+            .collect())
     }
-    // `git show` failed. Absence is the only failure we accept as empty;
-    // disambiguate with ls-tree: exit 0 + empty output = path not in that
-    // tree, anything else = a real git failure that must not read as empty.
-    let probe = Command::new("git")
-        // --full-tree: pathspecs are otherwise cwd-relative, and this probe
-        // must mean the same thing no matter where sync was invoked from
-        // (a cwd-sensitive probe reclassifies real git failures as
-        // "verified absent" — the exact fabrication this fn prevents).
-        .args(["ls-tree", "--full-tree", sha, "--", sidecar_path])
-        .output()
-        .map_err(|e| format!("git ls-tree {sha} -- {sidecar_path}: spawn failed: {e}"))?;
-    if probe.status.success() && probe.stdout.iter().all(|b| b.is_ascii_whitespace()) {
-        return Ok(Vec::new());
-    }
-    Err(format!(
-        "git show {spec} failed ({}): {}",
-        out.status,
-        String::from_utf8_lossy(&out.stderr).trim()
-    ))
 }
 
-/// Read a sidecar's lines by blob oid (same comment/blank filtering as
-/// `read_sidecar_at_commit`). The duplicate-id retract guard resolves
-/// untouched sidecars content-addressed, so identical bytes across commits
-/// resolve once per walk.
-fn read_sidecar_blob(oid: &str) -> Result<Vec<String>, String> {
-    let out = Command::new("git")
-        .args(["cat-file", "blob", oid])
-        .output()
-        .map_err(|e| format!("git cat-file blob {oid}: spawn failed: {e}"))?;
-    if !out.status.success() {
-        return Err(format!(
-            "git cat-file blob {oid} failed ({}): {}",
-            out.status,
-            String::from_utf8_lossy(&out.stderr).trim()
-        ));
-    }
-    Ok(String::from_utf8_lossy(&out.stdout)
-        .lines()
-        .filter(|l| !l.is_empty() && !l.starts_with('#'))
-        .map(|l| l.to_string())
-        .collect())
-}
-
-/// List every `(blob oid, path)` under `.lex/extract/` at a commit. A
-/// malformed ls-tree record is a hard error — the guard that consumes this
-/// list decides whether facts LEAVE the graph, so a silently skipped entry
-/// would reintroduce the exact wrong-retract it exists to prevent.
-fn list_sidecar_blobs_at(sha: &str) -> Result<Vec<(String, String)>, String> {
-    let out = Command::new("git")
-        .args(["ls-tree", "-r", "-z", "--full-tree", sha, "--", ".lex/extract"])
-        .output()
-        .map_err(|e| format!("git ls-tree -r {sha}: spawn failed: {e}"))?;
-    if !out.status.success() {
-        return Err(format!(
-            "git ls-tree -r {sha} -- .lex/extract failed ({}): {}",
-            out.status,
-            String::from_utf8_lossy(&out.stderr).trim()
-        ));
-    }
-    let text = String::from_utf8_lossy(&out.stdout);
-    let mut entries = Vec::new();
-    for rec in text.split('\0').filter(|r| !r.is_empty()) {
-        // "<mode> <type> <oid>\t<path>"
-        let (meta, path) = rec
-            .split_once('\t')
-            .ok_or_else(|| format!("git ls-tree {sha}: malformed record: {rec:?}"))?;
-        let mut parts = meta.split_whitespace();
-        let (_mode, typ, oid) = (parts.next(), parts.next(), parts.next());
-        if typ != Some("blob") {
-            continue; // submodules etc. — not sidecar content
-        }
-        let oid = oid.ok_or_else(|| format!("git ls-tree {sha}: record missing oid: {rec:?}"))?;
-        entries.push((oid.to_string(), path.to_string()));
-    }
-    Ok(entries)
+/// A sidecar's SPO lines at a commit (see [`SidecarReader`] for the
+/// absent-vs-failure contract). One-off reads; the walk keeps one reader.
+#[cfg(test)]
+fn read_sidecar_at_commit(sha: &str, sidecar_path: &str) -> Result<Vec<String>, String> {
+    SidecarReader::open()?.lines_at(sha, sidecar_path)
 }
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -972,9 +980,10 @@ pub fn onegraph_event(
 /// `clear_first = true`. It resolves every `.spo` line through the same
 /// `emit_spo_line_nquads` the query surface uses.
 ///
-/// Returns `(events_seen, events_emitted)` for the summary line, or an error
-/// if git or the store failed anywhere — a partial walk must never report
-/// success, because the one graph is the system of record.
+/// Returns the summary counts and the subjects whose base-layer facts
+/// changed (so the now view can be refreshed for exactly those), or an
+/// error if git or the store failed anywhere — a partial walk must never
+/// report success, because the one graph is the system of record.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn onegraph_walk_engine(
     commits: &[WalkCommit],
@@ -983,7 +992,7 @@ pub(crate) fn onegraph_walk_engine(
     ctx: &crate::nquad::ResolverContext,
     show_progress: bool,
     clear_first: bool,
-) -> Result<(usize, usize), String> {
+) -> Result<WalkOutcome, String> {
     let total = commits.len();
     let mut nq_buffer = String::new();
     let mut events_seen = 0usize;
@@ -1130,7 +1139,8 @@ pub(crate) fn onegraph_walk_engine(
         Ok(triples)
     };
 
-    let resolve_sidecar_at = |commit: &str,
+    let resolve_sidecar_at = |reader: &mut SidecarReader,
+                              commit: &str,
                               sidecar_path: &str,
                               acct: &mut DropAccounting,
                               warned_unknown: &mut HashSet<String>|
@@ -1149,7 +1159,7 @@ pub(crate) fn onegraph_walk_engine(
             }
             return Ok(HashSet::new());
         };
-        let lines = read_sidecar_at_commit(commit, sidecar_path)?;
+        let lines = reader.lines_at(commit, sidecar_path)?;
         // ABSENT (or empty) sidecar = NO anchors (review-critical fix): the
         // File rdf:type used to emit unconditionally even for the verified-
         // empty set of a path absent at this commit — identical on both
@@ -1169,8 +1179,19 @@ pub(crate) fn onegraph_walk_engine(
     // one resolve per unique sidecar version. Guard scans count into a
     // SCRATCH accounting — those sidecars' lines are counted when their own
     // commits walk; the guard must not inflate the receipt.
-    let mut blob_memo: HashMap<(String, String), HashSet<String>> = HashMap::new();
+    let mut blob_memo: HashMap<(git2::Oid, String), HashSet<String>> = HashMap::new();
     let mut guard_acct = DropAccounting::default();
+    let mut reader = SidecarReader::open()?;
+    // Which documents anchor which Thing, as of the walk's start (the
+    // store's base layer — skipped on a full rebuild, whose old graph is
+    // about to be cleared) plus every fileId change this walk has made so
+    // far. Keyed subject → (file → last op).
+    let file_id_pred = oxigraph::model::NamedNodeRef::new_unchecked(ONEGRAPH_FILE_ID);
+    let graph_node = oxigraph::model::NamedNode::new(
+        one_graph.trim_start_matches('<').trim_end_matches('>'),
+    )
+    .map_err(|e| format!("one-graph IRI is not a valid named node: {e}"))?;
+    let mut walk_file_ids: HashMap<String, HashMap<String, char>> = HashMap::new();
 
     for (ci, c) in commits.iter().enumerate() {
         if show_progress && total > 0 {
@@ -1201,13 +1222,13 @@ pub(crate) fn onegraph_walk_engine(
         let mut new_triples: HashSet<String> = HashSet::new();
         for path in &old_side {
             old_triples.extend(
-                resolve_sidecar_at(&c.parent_sha, path, &mut acct, &mut warned_unknown)
+                resolve_sidecar_at(&mut reader, &c.parent_sha, path, &mut acct, &mut warned_unknown)
                     .map_err(|e| format!("commit {} (old side): {e}", c.sha))?,
             );
         }
         for path in &new_side {
             new_triples.extend(
-                resolve_sidecar_at(&c.sha, path, &mut acct, &mut warned_unknown)
+                resolve_sidecar_at(&mut reader, &c.sha, path, &mut acct, &mut warned_unknown)
                     .map_err(|e| format!("commit {} (new side): {e}", c.sha))?,
             );
         }
@@ -1220,39 +1241,87 @@ pub(crate) fn onegraph_walk_engine(
         // Retract guard (#28): a retract candidate may still be asserted by
         // an UNTOUCHED sidecar — duplicate ids enter history through merge
         // commits (which bypass the pre-commit identity gate), pre-gate
-        // history, and stale .lex/extract/ subtrees. The per-commit diff
+        // history, and stale .lex/extract/ subtrees; and a document's other
+        // sidecars carry its File node's anchor too. The per-commit diff
         // sees only touched paths, so deleting one duplicate would emit a
         // false death event AND drop the survivor's facts from the base
         // layer (state parity can't catch it: base and derived go wrong
-        // together). Scanning the untouched world costs one ls-tree plus
-        // memoized blob resolves, paid only on commits with candidates.
+        // together).
+        //
+        // Every emitted fact's subject is its document's File node or the
+        // Thing that document anchors (emit_spo_line_nquads,
+        // emit_file_anchor_nquads). So the only untouched sidecars that can
+        // still assert a candidate belong to the candidate subject's own
+        // document (a File node) or to a document whose fileId edge points
+        // from the candidate subject (a Thing). Those few are read and
+        // resolved; the rest of the repo is not (#15 — scanning the whole
+        // extract tree made every edit cost the size of the repo).
         let retracts: Vec<&String> = old_triples.difference(&new_triples).collect();
         let mut still_live: HashSet<&String> = HashSet::new();
         if !retracts.is_empty() {
             let touched_any: HashSet<&str> = old_side.union(&new_side).copied().collect();
-            'scan: for (oid, path) in list_sidecar_blobs_at(&c.sha)? {
-                if !path.ends_with(".spo") || touched_any.contains(path.as_str()) {
+            let mut docs: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+            let mut subjects_seen: HashSet<String> = HashSet::new();
+            for cand in &retracts {
+                let Some((subject, _)) = take_term(cand) else { continue };
+                if !subjects_seen.insert(subject.clone()) {
                     continue;
                 }
-                let Some(relpath_str) = derive_source_document(&path) else {
-                    continue; // unknown suffix — counted when its own commit walks
-                };
-                let key = (oid, path.clone());
-                if !blob_memo.contains_key(&key) {
-                    let lines = read_sidecar_blob(&key.0)?;
-                    let triples = if lines.is_empty() {
-                        HashSet::new()
-                    } else {
-                        resolve_lines(&lines, &path, &relpath_str, &mut guard_acct)?
-                    };
-                    blob_memo.insert(key.clone(), triples);
+                let iri = subject.trim_start_matches('<').trim_end_matches('>');
+                if let Some(doc) = file_iri_document(iri) {
+                    docs.insert(doc);
                 }
-                let set = &blob_memo[&key];
-                for cand in &retracts {
-                    if set.contains(*cand) {
-                        still_live.insert(*cand);
-                        if still_live.len() == retracts.len() {
-                            break 'scan; // every candidate accounted for
+                let mut files: HashMap<String, char> = HashMap::new();
+                if !clear_first
+                    && let Ok(s_node) = oxigraph::model::NamedNodeRef::new(iri)
+                {
+                    for q in store.quads_for_pattern(
+                        Some(s_node.into()),
+                        Some(file_id_pred),
+                        None,
+                        Some(graph_node.as_ref().into()),
+                    ) {
+                        let q = q.map_err(|e| format!("fileId lookup failed: {e}"))?;
+                        files.insert(q.object.to_string(), '+');
+                    }
+                }
+                if let Some(changed) = walk_file_ids.get(&subject) {
+                    for (f, op) in changed {
+                        files.insert(f.clone(), *op);
+                    }
+                }
+                for (f, op) in files {
+                    if op == '+'
+                        && let Some(doc) = file_iri_document(f.trim_start_matches('<').trim_end_matches('>'))
+                    {
+                        docs.insert(doc);
+                    }
+                }
+            }
+            'scan: for doc in &docs {
+                for suffix in SPO_EXTRACTOR_SUFFIXES {
+                    let path = format!(".lex/extract/{doc}.{suffix}.spo");
+                    if touched_any.contains(path.as_str()) {
+                        continue;
+                    }
+                    let Some(oid) = reader.blob_at(&c.sha, &path)? else { continue };
+                    let key = (oid, path.clone());
+                    if !blob_memo.contains_key(&key) {
+                        let lines = reader.blob_lines(oid)?;
+                        let triples = if lines.is_empty() {
+                            HashSet::new()
+                        } else {
+                            resolve_lines(&lines, &path, doc, &mut guard_acct)?
+                        };
+                        blob_memo.insert(key.clone(), triples);
+                    }
+                    let set = &blob_memo[&key];
+                    for cand in &retracts {
+                        if set.contains(*cand) {
+                            still_live.insert(*cand);
+                            if still_live.len() == retracts.len() {
+                                break 'scan; // every candidate accounted for
+                            }
                         }
                     }
                 }
@@ -1270,6 +1339,7 @@ pub(crate) fn onegraph_walk_engine(
             if let Some(quads) = onegraph_event(line, '-', &c.sha, one_graph) {
                 for q in quads { nq_buffer.push_str(&q); nq_buffer.push('\n'); }
                 events_emitted += 1;
+                note_file_id(&mut walk_file_ids, line, '-');
                 base_final.insert(line.clone(), '-');
             }
         }
@@ -1278,6 +1348,7 @@ pub(crate) fn onegraph_walk_engine(
             if let Some(quads) = onegraph_event(line, '+', &c.sha, one_graph) {
                 for q in quads { nq_buffer.push_str(&q); nq_buffer.push('\n'); }
                 events_emitted += 1;
+                note_file_id(&mut walk_file_ids, line, '+');
                 base_final.insert(line.clone(), '+');
             }
         }
@@ -1349,10 +1420,6 @@ pub(crate) fn onegraph_walk_engine(
     // system of record, and "printed a warning but reported success" was the
     // defect class that let a build fail invisibly (review finding A2).
     if clear_first {
-        let graph_node = oxigraph::model::NamedNode::new(
-            one_graph.trim_start_matches('<').trim_end_matches('>'),
-        )
-        .map_err(|e| format!("one-graph IRI is not a valid named node: {e}"))?;
         store
             .clear_graph(&graph_node)
             .map_err(|e| format!("one-graph clear (full rebuild) failed: {e}"))?;
@@ -1364,7 +1431,55 @@ pub(crate) fn onegraph_walk_engine(
             .map_err(|e| format!("one-graph event load failed: {e}"))?;
     }
 
-    Ok((events_seen, events_emitted))
+    let changed_subjects = base_final
+        .keys()
+        .filter_map(|line| take_term(line).map(|(subject, _)| subject))
+        .collect();
+    Ok(WalkOutcome { events_seen, events_emitted, changed_subjects })
+}
+
+/// What one walk did: the summary counts, and every subject whose
+/// base-layer (current-state) facts it changed.
+pub(crate) struct WalkOutcome {
+    pub events_seen: usize,
+    pub events_emitted: usize,
+    /// Bracketed subject terms (`<iri>`), deduplicated.
+    pub changed_subjects: HashSet<String>,
+}
+
+/// The Thing → File edge the anchor facts carry (git-lex:fileId).
+const ONEGRAPH_FILE_ID: &str = "https://repolex.ai/ontology/git-lex/fileId";
+
+/// Record a fileId event from the walk: `<Thing> fileId <File>` lines only.
+fn note_file_id(walk_file_ids: &mut HashMap<String, HashMap<String, char>>, line: &str, op: char) {
+    let Some((subject, rest)) = take_term(line) else { return };
+    let Some((predicate, rest)) = take_term(rest) else { return };
+    if predicate.trim_start_matches('<').trim_end_matches('>') != ONEGRAPH_FILE_ID {
+        return;
+    }
+    let Some((file, _)) = take_term(rest) else { return };
+    walk_file_ids.entry(subject).or_default().insert(file, op);
+}
+
+/// The repo-relative document path a File node names, or None when the IRI
+/// is not a File node. Inverse of `file_iri(uri_encode_path(path))`: the
+/// encoder escapes `%` itself, so percent-decoding is exact.
+fn file_iri_document(iri: &str) -> Option<String> {
+    let encoded = iri.strip_prefix(crate::git::FILE_BASE)?;
+    let bytes = encoded.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            let hex = std::str::from_utf8(&bytes[i + 1..i + 3]).ok()?;
+            out.push(u8::from_str_radix(hex, 16).ok()?);
+            i += 3;
+        } else {
+            out.push(bytes[i]);
+            i += 1;
+        }
+    }
+    String::from_utf8(out).ok()
 }
 
 /// take one whitespace-separated term from the start of `s`. A term
@@ -1677,6 +1792,38 @@ soul.Memory.category | hasValue | \n";
         assert_eq!(
             derive_source_document(".lex/extract/notes/a.md.gliner.spo"),
             Some("notes/a.md".to_string())
+        );
+    }
+
+    /// The retract guard maps a File node back to its document; the map
+    /// must invert the encoder exactly, or the guard reads the wrong file.
+    #[test]
+    fn file_iri_document_inverts_the_encoder() {
+        for path in ["Soul/Note/plain.md", "a b/100%.md", "Café/naïve \"q\".md", "x%41.md"] {
+            let iri = crate::git::file_iri(&crate::nquad::uri_encode_path(path));
+            assert_eq!(file_iri_document(&iri).as_deref(), Some(path), "{iri}");
+        }
+        assert_eq!(file_iri_document("https://repolex.ai/soul/Note/x"), None);
+    }
+
+    /// Only `<Thing> fileId <File>` lines feed the guard's anchor map.
+    #[test]
+    fn note_file_id_tracks_only_file_id_lines() {
+        let mut m: HashMap<String, HashMap<String, char>> = HashMap::new();
+        note_file_id(
+            &mut m,
+            "<https://repolex.ai/soul/Note/x> <https://repolex.ai/ontology/git-lex/fileId> <https://repolex.ai/git-lex/File/Soul/Note/x.md> <g> .",
+            '+',
+        );
+        note_file_id(
+            &mut m,
+            "<https://repolex.ai/soul/Note/x> <https://repolex.ai/ontology/git-lex/title> \"t\" <g> .",
+            '-',
+        );
+        assert_eq!(m.len(), 1);
+        assert_eq!(
+            m["<https://repolex.ai/soul/Note/x>"]["<https://repolex.ai/git-lex/File/Soul/Note/x.md>"],
+            '+'
         );
     }
 
