@@ -350,16 +350,25 @@ fn prop_line(m: &Model, p: &Prop) -> String {
     line
 }
 
+/// Does `text` write a name under this prefix (`md:linksTo`)? A longer prefix
+/// ending the same way (`git-lex:` for `lex:`), a filename (`x.md:`) and a URL
+/// scheme do not count.
+fn uses_prefix(text: &str, name: &str) -> bool {
+    let needle = format!("{name}:");
+    text.match_indices(&needle).any(|(i, _)| {
+        let before = text[..i].chars().next_back();
+        let after = text[i + needle.len()..].chars().next();
+        !before.is_some_and(|c| c.is_alphanumeric() || matches!(c, '-' | '_' | '.'))
+            && after.is_some_and(|c| c.is_alphanumeric())
+    })
+}
+
 /// THE formatter: the model as SHACL Compact Syntax, comments carrying the
 /// prose SHACLC has no slot for. Swap this one function to change the format.
-fn format_ontology(m: &Model) -> String {
+/// `around` is the rest of the generated file: the prefix list names what the
+/// file as a whole writes, so an agent can expand every short name it meets.
+fn format_ontology(m: &Model, around: &str) -> String {
     let mut out = String::new();
-    // Every prefix `git lex query` binds for you (the same table), by name.
-    let mut bound: Vec<&(String, String)> = m.prefixes.iter().collect();
-    bound.sort();
-    for (name, ns) in bound {
-        out.push_str(&format!("PREFIX {name}: <{ns}>\n"));
-    }
     if !m.universals.is_empty() {
         out.push_str("\n# Every Thing carries these. They are not repeated on the classes below.\n");
         out.push_str(&format!("shapeClass {} {{\n", shorten(&m.prefixes, THING)));
@@ -382,7 +391,14 @@ fn format_ontology(m: &Model) -> String {
             out.push_str("}\n");
         }
     }
-    out
+    // `git lex query` binds more prefixes than these (the same table); the
+    // ones nothing here writes are left out, by name order.
+    let mut bound: Vec<&(String, String)> = m.prefixes.iter()
+        .filter(|(name, _)| uses_prefix(&out, name) || uses_prefix(around, name))
+        .collect();
+    bound.sort();
+    let prefixes: String = bound.iter().map(|(name, ns)| format!("PREFIX {name}: <{ns}>\n")).collect();
+    prefixes + &out
 }
 
 const ONTOLOGY_INTRO: &str = "## The ontology of this repo
@@ -427,6 +443,11 @@ fn query_guide(m: &Model) -> String {
   documents.
 - Body links run FILE to FILE: `?fromFile md:linksTo ?toFile`. A document
   points at its file with `git-lex:fileId`; hop through it to get documents.
+- Not every file is a document. A markdown file whose header has no `id` (or
+  that has no header) is a `git-lex:File` and nothing more, so a `?doc` joined
+  through `git-lex:fileId` comes back blank for it.
+- `__<Class>.md` in a class folder is the kit's template for that class, not a
+  document: a File with no `git-lex:id`.
 ");
     let Some(c) = example else { return out };
     let class = shorten(&m.prefixes, &c.iri);
@@ -442,9 +463,12 @@ Addresses, for the class `{class}`:
 - the class: `{iri}`
 - a document: `{doc}` (the class address without `ontology/`, then the id).
   In a header it is written `<{kit}/{local}/my-id>`.
-- its file: `{file}` (the path from the repo root)
+- its file: `{file}` (the path from the repo root; a root file is
+  `{file_base}README.md`)
+- A document's address comes from the `id` in its header, never from where its
+  file sits. A document at the repo root is addressed like any other.
 ",
-        iri = c.iri));
+        iri = c.iri, file_base = crate::git::FILE_BASE));
     let own_id = format!("{}{}Id", local[..1].to_lowercase(), &local[1..]);
     if c.props.iter().any(|p| p.iri.rsplit(['/', '#']).next() == Some(own_id.as_str())) {
         out.push_str(&format!(
@@ -472,13 +496,11 @@ SELECT ?class (COUNT(?d) AS ?n) WHERE {{ ?d git-lex:id ?id ; a ?class }} GROUP B
 pub(crate) fn render(root: &Path) -> String {
     let model = build_model(root);
     let kits: Vec<String> = installed_ontologies(root).into_iter().map(|(_, n)| n).collect();
+    let head = format!("{}\n\n{}\n{}", MANUAL.trim_end(), query_guide(&model), ONTOLOGY_INTRO);
     format!(
-        "{}\n\n{}\n{}\nInstalled: {}.\n\n```shaclc\n{}```\n",
-        MANUAL.trim_end(),
-        query_guide(&model),
-        ONTOLOGY_INTRO,
+        "{head}\nInstalled: {}.\n\n```shaclc\n{}```\n",
         kits.join(", "),
-        format_ontology(&model)
+        format_ontology(&model, &head)
     )
 }
 
@@ -636,10 +658,29 @@ git-lex:foldered a owl:AnnotationProperty .
         assert!(!guide.contains("beta:") && !guide.contains("soul:"), "{guide}");
         // No example may type a document as git-lex:Thing: nothing is inferred.
         assert!(!text.contains("?doc a git-lex:Thing") && !text.contains("?d a git-lex:Thing ;"), "{text}");
-        // Every prefix the query command binds is listed, md: included.
+        // A prefix the file writes is listed, wherever it is written: md: and
+        // git2: only in the guide, beta: only in the ontology.
         assert!(text.contains("PREFIX md: <https://repolex.ai/ontology/git-lex/md/>"), "{text}");
+        assert!(text.contains("PREFIX git2: ") && text.contains("PREFIX beta: ") && text.contains("PREFIX xsd: "), "{text}");
+        // One nothing writes is not.
+        for unused in ["owl", "rdf", "rdfs", "fm", "git"] {
+            assert!(!text.contains(&format!("PREFIX {unused}: ")), "unused prefix {unused} listed:\n{text}");
+        }
+        // Root files, files that are not documents, templates.
+        assert!(guide.contains("`https://repolex.ai/git-lex/File/README.md`"), "{guide}");
+        assert!(guide.contains("comes back blank") && guide.contains("`__<Class>.md`"), "{guide}");
         assert!(text.contains("\n\n## The ontology of this repo"), "{text}");
         let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_prefix_counts_as_used_only_where_a_name_is_written_under_it() {
+        assert!(uses_prefix("?a md:linksTo ?b", "md"));
+        assert!(uses_prefix("(git2:Commit)", "git2"));
+        assert!(!uses_prefix("git-lex:title", "lex"), "the tail of a longer prefix");
+        assert!(!uses_prefix("git2:Commit", "git"));
+        assert!(!uses_prefix("see SOUL.md: it says", "md"), "a filename");
+        assert!(!uses_prefix("the rdf: namespace", "rdf"), "no name follows");
     }
 
     #[test]
