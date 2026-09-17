@@ -11,10 +11,12 @@ on:
     branches: [main]
   workflow_dispatch:
 
-# A newer push to the same branch makes the older run pointless.
+# A newer push to a pull request makes the older run pointless. On main every
+# push keeps its run: with several pushes inside one build's length, cancelling
+# meant no commit ever got a verdict.
 concurrency:
-  group: ci-${{ github.ref }}
-  cancel-in-progress: true
+  group: ci-${{ github.ref }}-${{ github.event_name == 'pull_request' && 'pr' || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   CARGO_TERM_COLOR: always
