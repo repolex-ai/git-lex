@@ -17,10 +17,14 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
-/// Where the generated context lives, relative to the repo root. Placeholder
-/// name (2026-09-16): the final name is goodlux's call, so it is spelled here
-/// and nowhere else.
-pub(crate) const CONTEXT_FILE: &str = ".lex/CONTEXT.md";
+/// Where the generated context lives, relative to the repo root. The name and
+/// location are provisional (goodlux, 2026-09-16; issue #19), so they are
+/// spelled here and nowhere else.
+pub(crate) const CONTEXT_FILE: &str = ".lex/COMPACT-ONTOLOGY.md";
+
+/// TRANSITIONAL: the file's first name, for one day. `refresh` removes it so
+/// no repo carries both. Delete once the fleet has regenerated.
+const OLD_CONTEXT_FILE: &str = ".lex/CONTEXT.md";
 
 const MANUAL: &str = include_str!("agent_manual.md");
 
@@ -411,6 +415,12 @@ pub(crate) fn refresh(root: &Path) {
     if !root.join(".lex").is_dir() { return; }
     let path = root.join(CONTEXT_FILE);
     let text = render(root);
+    // TRANSITIONAL: drop the generated file under its old name. The next save
+    // stages the deletion.
+    let old = root.join(OLD_CONTEXT_FILE);
+    if fs::read_to_string(&old).is_ok_and(|have| have.starts_with(MANUAL.lines().next().unwrap_or_default())) {
+        let _ = fs::remove_file(&old);
+    }
     if fs::read_to_string(&path).is_ok_and(|have| have == text) { return; }
     match fs::write(&path, &text) {
         Ok(()) => println!("Agent context: {CONTEXT_FILE} updated ({} classes).", text.matches("shapeClass ").count()),

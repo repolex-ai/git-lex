@@ -10,7 +10,7 @@ page), and every subcommand answers `--help` too.
 | `git lex save ["msg"] [--dry-run]` | Stage, validate, extract, commit; `--dry-run` runs every gate, commits nothing |
 | `git lex sync` | Build/update the synced knowledge graph store from commits |
 | `git lex export-spine` | Write the semantic index as one TSV spine for LLM context caches |
-| `git lex --skill` | Print the agent manual plus this repo's compact ontology (every class and property of the installed kits). The same text is kept current in `.lex/CONTEXT.md` |
+| `git lex --skill` | Print the agent manual plus this repo's compact ontology (every class and property of the installed kits). The same text is kept current in `.lex/COMPACT-ONTOLOGY.md` |
 | `git lex query "SPARQL"\|<name> [--json]` | Query a fresh view of the working tree (does NOT read the synced store); a bare name runs the saved query `.lex/query/<name>.md` |
 | `git lex list [--json]` | List every document class the installed kits define |
 | `git lex kit-add <kit>` | Add an optional kit |
