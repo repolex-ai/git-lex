@@ -683,6 +683,19 @@ pub(crate) fn setup_substrate_claude(root: &std::path::Path, agent_name: &str) {
     } else {
         serde_json::json!({})
     };
+    // A value of the wrong shape is the user's too: report it, never replace it.
+    let wrong_shape = |msg: String| -> ! {
+        eprintln!(
+            "ERROR: in {}, {msg}.\n\
+             Refusing to replace it — that would wipe a value you wrote. Give it \
+             the shape above (or remove it), then re-run `git lex kit-update`.",
+            settings_path.display()
+        );
+        std::process::exit(1);
+    };
+    if !settings.is_object() {
+        wrong_shape(wrong_shape_msg("the file as a whole", &settings, "an object, like {}"));
+    }
 
     // Kit-managed banner. JSON has no comments, but Claude Code ignores unknown
     // top-level keys (like `$schema`), so a `_comment` key survives as a visible
@@ -713,10 +726,10 @@ pub(crate) fn setup_substrate_claude(root: &std::path::Path, agent_name: &str) {
         .cloned()
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| format!("{}@lex.local", agent_name.to_lowercase()));
-    if !settings.get("env").is_some() {
-        settings["env"] = serde_json::json!({});
-    }
-    let env = settings["env"].as_object_mut().unwrap();
+    let env = match settings_block(&mut settings, "env", r#"an object, like {"NAME": "value"}"#) {
+        Ok(env) => env,
+        Err(msg) => wrong_shape(msg),
+    };
     env.insert("GIT_AUTHOR_NAME".to_string(), serde_json::json!(agent_name));
     env.insert("GIT_AUTHOR_EMAIL".to_string(), serde_json::json!(email));
     env.insert("GIT_COMMITTER_NAME".to_string(), serde_json::json!(agent_name));
@@ -764,7 +777,9 @@ pub(crate) fn setup_substrate_claude(root: &std::path::Path, agent_name: &str) {
                 r#"bash "$CLAUDE_PROJECT_DIR/.claude/hooks/{}""#,
                 name
             );
-            register_hook_in_settings(&mut settings, event, &cmd);
+            if let Err(msg) = register_hook_in_settings(&mut settings, event, &cmd) {
+                wrong_shape(msg);
+            }
         }
     }
 
@@ -940,19 +955,19 @@ fn reap_orphan_hook_registrations(settings: &mut serde_json::Value, hooks_dir: &
 /// companion `reap_orphan_hook_registrations` (called first in setup_substrate_claude)
 /// handles removal of stale registrations, so add + reap together give convergent
 /// (not merely additive) hook reconciliation.
-fn register_hook_in_settings(settings: &mut serde_json::Value, event: &str, command: &str) {
+///
+/// A `hooks` block or an event list of the wrong shape is an `Err` naming it:
+/// the value is the user's, so it is reported, never replaced.
+fn register_hook_in_settings(settings: &mut serde_json::Value, event: &str, command: &str) -> Result<(), String> {
     let hook_entry = serde_json::json!({
         "hooks": [{"type": "command", "command": command}]
     });
 
-    if !settings.get("hooks").is_some() {
-        settings["hooks"] = serde_json::json!({});
-    }
-    let hooks_obj = settings["hooks"].as_object_mut().unwrap();
-    if !hooks_obj.contains_key(event) {
-        hooks_obj.insert(event.to_string(), serde_json::json!([]));
-    }
-    let event_hooks = hooks_obj.get_mut(event).unwrap().as_array_mut().unwrap();
+    let hooks_obj = settings_block(settings, "hooks", r#"an object, like {"Stop": []}"#)?;
+    let event_hooks = match hooks_obj.entry(event.to_string()).or_insert_with(|| serde_json::json!([])) {
+        serde_json::Value::Array(list) => list,
+        other => return Err(wrong_shape_msg(&format!("`hooks.{event}`"), other, "a list, like []")),
+    };
     let already = event_hooks.iter().any(|entry| {
         entry.get("hooks")
             .and_then(|h| h.as_array())
@@ -962,6 +977,39 @@ fn register_hook_in_settings(settings: &mut serde_json::Value, event: &str, comm
     if !already {
         event_hooks.push(hook_entry);
     }
+    Ok(())
+}
+
+/// The object under `key` in a settings value, created empty when absent.
+/// `Err` when the settings value, or what already sits under `key`, is not an
+/// object.
+fn settings_block<'a>(
+    settings: &'a mut serde_json::Value,
+    key: &str,
+    wanted: &str,
+) -> Result<&'a mut serde_json::Map<String, serde_json::Value>, String> {
+    let top = match settings {
+        serde_json::Value::Object(top) => top,
+        other => return Err(wrong_shape_msg("the file as a whole", other, "an object, like {}")),
+    };
+    match top.entry(key.to_string()).or_insert_with(|| serde_json::json!({})) {
+        serde_json::Value::Object(block) => Ok(block),
+        other => Err(wrong_shape_msg(&format!("`{key}`"), other, wanted)),
+    }
+}
+
+/// "`env` is a string, but it has to be an object, like {...}" — the half of
+/// the message that names the value; the caller adds the file and what to do.
+fn wrong_shape_msg(what: &str, found: &serde_json::Value, wanted: &str) -> String {
+    let kind = match found {
+        serde_json::Value::Null => "null",
+        serde_json::Value::Bool(_) => "true or false",
+        serde_json::Value::Number(_) => "a number",
+        serde_json::Value::String(_) => "a string",
+        serde_json::Value::Array(_) => "a list",
+        serde_json::Value::Object(_) => "an object",
+    };
+    format!("{what} is {kind}, but it has to be {wanted}")
 }
 
 #[cfg(test)]
@@ -1166,6 +1214,53 @@ mod hook_registration_tests {
         assert_eq!(
             auto_memory_dir_value(Path::new("/Users/rob/repos/X"), None),
             "/Users/rob/repos/X/Harness/Memory"
+        );
+    }
+
+    // ---- a settings value of the wrong shape: reported, never replaced (#32) ----
+
+    #[test]
+    fn env_that_is_not_an_object_is_named_not_unwrapped() {
+        let mut s = serde_json::json!({"env": "GIT_AUTHOR_NAME=x"});
+        let err = settings_block(&mut s, "env", "an object").unwrap_err();
+        assert_eq!(err, "`env` is a string, but it has to be an object");
+        assert_eq!(s, serde_json::json!({"env": "GIT_AUTHOR_NAME=x"}), "the value is left as written");
+        // null is present-but-wrong too, not "absent".
+        let mut s = serde_json::json!({"env": null});
+        assert!(settings_block(&mut s, "env", "an object").unwrap_err().starts_with("`env` is null"));
+    }
+
+    #[test]
+    fn hooks_that_is_not_an_object_is_named_not_unwrapped() {
+        let mut s = serde_json::json!({"hooks": ["Stop.sh"]});
+        let err = register_hook_in_settings(&mut s, "Stop", "c").unwrap_err();
+        assert!(err.starts_with("`hooks` is a list, but it has to be an object"), "{err}");
+        assert_eq!(s, serde_json::json!({"hooks": ["Stop.sh"]}));
+    }
+
+    #[test]
+    fn an_event_that_is_not_a_list_is_named_not_unwrapped() {
+        let mut s = serde_json::json!({"hooks": {"Stop": {"command": "x"}}});
+        let err = register_hook_in_settings(&mut s, "Stop", "c").unwrap_err();
+        assert_eq!(err, "`hooks.Stop` is an object, but it has to be a list, like []");
+        assert_eq!(s, serde_json::json!({"hooks": {"Stop": {"command": "x"}}}));
+    }
+
+    #[test]
+    fn a_settings_file_that_is_not_an_object_is_named() {
+        let mut s = serde_json::json!([]);
+        let err = settings_block(&mut s, "env", "an object").unwrap_err();
+        assert!(err.starts_with("the file as a whole is a list"), "{err}");
+    }
+
+    #[test]
+    fn a_well_shaped_settings_value_still_registers_once() {
+        let mut s = serde_json::json!({});
+        register_hook_in_settings(&mut s, "Stop", "c").unwrap();
+        register_hook_in_settings(&mut s, "Stop", "c").unwrap();
+        assert_eq!(
+            s,
+            serde_json::json!({"hooks": {"Stop": [{"hooks": [{"type": "command", "command": "c"}]}]}})
         );
     }
 }
