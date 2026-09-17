@@ -804,236 +804,278 @@ pub(crate) fn generate_frontmatter_nquads_with(
     let mut cache_hits: usize = 0;
     let mut total_facts: usize = 0;
 
-    for filepath in files {
-        // Unreadable docs are LOUD and counted (review #23): skipping one
-        // bypasses the stale-sidecar removal below, so its existing sidecar
-        // keeps asserting facts the sync diff never sees vanish.
-        let content = match fs::read_to_string(filepath) {
-            Ok(c) => c,
-            Err(e) => {
-                eprintln!(
-                    "error: cannot read {} for extraction ({e}) — its \
-                     existing sidecar (if any) is NOT updated; fix the file \
-                     (permissions / invalid UTF-8) or delete it",
-                    filepath.display()
-                );
-                total_errors += 1;
-                continue;
-            }
-        };
-
-        let relpath = filepath.strip_prefix(&root).unwrap_or(filepath);
-        let relpath_str = relpath.to_string_lossy().to_string();
-
-        // Blob hash from the git index (staging area) — feeds the emitted
-        // `git/blobHash` quad AND the cache identity, so it is computed on
-        // every path now (it is one index lookup; the cache it enables
-        // skips a YAML parse, a tree-sitter parse and the quad emission).
-        let blob_hash = repo.as_ref().and_then(|r| {
-            if let Ok(index) = r.index() {
-                if let Some(entry) = index.get_path(std::path::Path::new(&relpath_str), 0) {
-                    return Some(entry.id.to_string());
-                }
-            }
-            let head = r.head().ok()?;
-            let tree = head.peel_to_tree().ok()?;
-            let entry = tree.get_path(std::path::Path::new(&relpath_str)).ok()?;
-            Some(entry.id().to_string())
-        }).unwrap_or_default();
-
-        // Cache hit: the file's bytes and index state are exactly what
-        // produced the stored fragment, and no belt forces it through.
-        // Its quads append verbatim; its sidecars are already right (same
-        // bytes → same extraction). Warnings for unchanged files go quiet
-        // until the file is next edited — deliberate; they fired at the
-        // save that introduced them and fire again on any change.
-        let bytes_hash = crate::walkcache::blob_hash_of(content.as_bytes());
-        if !force_full && !forced_sources.contains(&relpath_str) {
-            if let Some((frag, entry)) =
-                cache.hit(&relpath_str, &bytes_hash, &blob_hash, opts.build_nquads)
-            {
-                cache_hits += 1;
-                total_links += entry.links;
-                total_facts += entry.quads;
-                if opts.build_nquads {
-                    nq.push_str(&frag);
-                }
-                continue;
-            }
-        }
-        let file_errors_start = total_errors;
-        let file_nq_start = nq.len();
-        let mut file_links: usize = 0;
-
-        // --- Frontmatter extraction ---
-        // Only the YAML block is read here. The BODY is deliberately not
-        // parsed: wikilink extraction retired (Rob-ruled 2026-08-06) —
-        // markdown links are the linking story and extraction.rs emits
-        // their `linksTo` lines; `[[...]]` in a body is plain prose.
-        // Historical `linksTo` sidecar lines still replay through the quad
-        // emitter below — history doesn't un-happen.
-        let mut spo_lines = Vec::new();
-
-        // ONE frontmatter parser (review #9): the shared fence rule in lib.rs.
-        if let (Some(yaml_str), _) = git_lex::split_frontmatter(&content) {
-            // ONE frontmatter YAML parser (#101): the shared duplicate-key
-            // gate in lib.rs. This path used to deserialize into a HashMap,
-            // which accepts a repeated key and keeps only the last value — so
-            // a walk silently re-emitted the same loss the save made.
-            match git_lex::parse_frontmatter_map(yaml_str) {
-                Ok(yaml) => {
-                    for (key_node, value) in &yaml {
-                        if let Some(key) = key_node.as_str() {
-                            flatten_yaml(key, value, &mut spo_lines);
+    // Reading, hashing and markdown-parsing a document depend on nothing
+    // but the document, so they run on every core, a bounded chunk of
+    // files at a time. Everything with an order or a side effect — the
+    // cache bookkeeping, sidecar writes, emission, every warning — stays
+    // below, sequential and in file order, exactly as before (#15).
+    let cores = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1);
+    for chunk in files.chunks(WALK_CHUNK) {
+        let jobs: Vec<WalkJob> = chunk
+            .iter()
+            .map(|filepath| {
+                let relpath_str = filepath
+                    .strip_prefix(&root)
+                    .unwrap_or(filepath)
+                    .to_string_lossy()
+                    .to_string();
+                // Blob hash from the git index (staging area) — feeds the
+                // emitted `git/blobHash` quad AND the cache identity, so it
+                // is computed on every path (one index lookup; the cache it
+                // enables skips a YAML parse, a tree-sitter parse and the
+                // quad emission).
+                let blob_hash = repo.as_ref().and_then(|r| {
+                    if let Ok(index) = r.index() {
+                        if let Some(entry) = index.get_path(std::path::Path::new(&relpath_str), 0) {
+                            return Some(entry.id.to_string());
                         }
                     }
-                }
-                Err(e) => {
-                    eprintln!("error: {}: {}", relpath_str, e);
-                    total_errors += 1;
-                }
-            }
-        }
+                    let head = r.head().ok()?;
+                    let tree = head.peel_to_tree().ok()?;
+                    let entry = tree.get_path(std::path::Path::new(&relpath_str)).ok()?;
+                    Some(entry.id().to_string())
+                }).unwrap_or_default();
+                let cached = if force_full || forced_sources.contains(&relpath_str) {
+                    None
+                } else {
+                    cache
+                        .entries
+                        .get(&relpath_str)
+                        .map(|e| (e.bytes_hash.clone(), e.index_hash.clone()))
+                };
+                let is_md = md_index.contains(&relpath_str);
+                WalkJob { filepath, relpath_str, blob_hash, cached, is_md }
+            })
+            .collect();
+        let prepared = parallel_map(&jobs, cores, |parser, job| prepare_walk_file(parser, job, &md_index));
 
-        // Sort and dedup
-        spo_lines.sort();
-        spo_lines.dedup();
-
-        // Write .spo sidecar; when a doc's extractable content goes away its
-        // existing sidecar must go away too, so the sync diff sees the lines
-        // vanish and records retractions (the one graph's only
-        // signal — the now graph rebuilds from files and never notices).
-        let spo_path = extract_dir.join(format!("{}.fm.spo", relpath_str));
-        if opts.write_sidecars {
-            if !spo_lines.is_empty() {
-                let spo_content = spo_lines.join("\n") + "\n";
-                write_sidecar_loud(&spo_path, &spo_content);
-            } else if spo_path.exists() {
-                remove_sidecar_loud(&spo_path);
-            }
-        }
-
-        // Markdown links join the emission stream AFTER the sidecar write —
-        // the .fm.spo sidecar carries frontmatter only (th34 #5; see the
-        // md_index comment above the loop). This is THE md walk: the same
-        // parse also writes the `.md.spo` sidecar (link lines only,
-        // sorted+deduped — the bytes the retired second walk in
-        // extraction.rs produced), so each document is read and
-        // tree-sitter-parsed exactly once per run.
-        if md_index.contains(&relpath_str) {
-            let fm_len = spo_lines.len();
-            match md_parser.parse(content.as_bytes(), None) {
-                Some(tree) => {
-                    crate::extraction::extract_md_link_lines(
-                        &tree, &content, &relpath_str, &md_index, &mut spo_lines,
-                    );
-                    let mut md_lines: Vec<String> = spo_lines[fm_len..].to_vec();
-                    md_lines.sort();
-                    md_lines.dedup();
-                    file_links = md_lines.len();
-                    if opts.write_sidecars {
-                        let md_path =
-                            extract_dir.join(format!("{}.md.spo", relpath_str));
-                        if !md_lines.is_empty() {
-                            write_sidecar_loud(&md_path, &(md_lines.join("\n") + "\n"));
-                            total_links += md_lines.len();
-                        } else if md_path.exists() {
-                            remove_sidecar_loud(&md_path);
-                        }
-                    }
-                }
-                None => {
-                    // Same contract as the read-failure above: skipping
-                    // bypasses the sidecar-removal branch, so the doc's
-                    // existing sidecar keeps asserting links the doc may no
-                    // longer carry — be LOUD and count it.
+        for (job, prep) in jobs.into_iter().zip(prepared) {
+            let WalkJob { filepath, relpath_str, blob_hash, .. } = job;
+            let (content, bytes_hash, md_links) = match prep {
+                // Unreadable docs are LOUD and counted (review #23): skipping one
+                // bypasses the stale-sidecar removal below, so its existing sidecar
+                // keeps asserting facts the sync diff never sees vanish.
+                PreparedFile::Unreadable(e) => {
                     eprintln!(
-                        "error: tree-sitter could not parse {} — its existing \
-                         sidecar (if any) is NOT updated",
+                        "error: cannot read {} for extraction ({e}) — its \
+                         existing sidecar (if any) is NOT updated; fix the file \
+                         (permissions / invalid UTF-8) or delete it",
                         filepath.display()
                     );
                     total_errors += 1;
+                    continue;
+                }
+                PreparedFile::Unchanged { bytes_hash } => {
+                    // Cache hit: the file's bytes and index state are exactly what
+                    // produced the stored fragment, and no belt forces it through.
+                    // Its quads append verbatim; its sidecars are already right (same
+                    // bytes → same extraction). Warnings for unchanged files go quiet
+                    // until the file is next edited — deliberate; they fired at the
+                    // save that introduced them and fire again on any change.
+                    if let Some((frag, entry)) =
+                        cache.hit(&relpath_str, &bytes_hash, &blob_hash, opts.build_nquads)
+                    {
+                        cache_hits += 1;
+                        total_links += entry.links;
+                        total_facts += entry.quads;
+                        if opts.build_nquads {
+                            nq.push_str(&frag);
+                        }
+                        continue;
+                    }
+                    // The fragment could not be read back: extract it after all.
+                    match fs::read_to_string(filepath) {
+                        Ok(content) => {
+                            let is_md = md_index.contains(&relpath_str);
+                            let md_links = md_link_lines(&mut md_parser, is_md, &content, &relpath_str, &md_index);
+                            (content, bytes_hash, md_links)
+                        }
+                        Err(e) => {
+                            eprintln!(
+                                "error: cannot read {} for extraction ({e}) — its \
+                                 existing sidecar (if any) is NOT updated; fix the file \
+                                 (permissions / invalid UTF-8) or delete it",
+                                filepath.display()
+                            );
+                            total_errors += 1;
+                            continue;
+                        }
+                    }
+                }
+                PreparedFile::Changed { content, bytes_hash, md_links } => (content, bytes_hash, md_links),
+            };
+            let file_errors_start = total_errors;
+            let file_nq_start = nq.len();
+            let mut file_links: usize = 0;
+
+            // --- Frontmatter extraction ---
+            // Only the YAML block is read here. The BODY is deliberately not
+            // parsed: wikilink extraction retired (Rob-ruled 2026-08-06) —
+            // markdown links are the linking story and extraction.rs emits
+            // their `linksTo` lines; `[[...]]` in a body is plain prose.
+            // Historical `linksTo` sidecar lines still replay through the quad
+            // emitter below — history doesn't un-happen.
+            let mut spo_lines = Vec::new();
+
+            // ONE frontmatter parser (review #9): the shared fence rule in lib.rs.
+            if let (Some(yaml_str), _) = git_lex::split_frontmatter(&content) {
+                // ONE frontmatter YAML parser (#101): the shared duplicate-key
+                // gate in lib.rs. This path used to deserialize into a HashMap,
+                // which accepts a repeated key and keeps only the last value — so
+                // a walk silently re-emitted the same loss the save made.
+                match git_lex::parse_frontmatter_map(yaml_str) {
+                    Ok(yaml) => {
+                        for (key_node, value) in &yaml {
+                            if let Some(key) = key_node.as_str() {
+                                flatten_yaml(key, value, &mut spo_lines);
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!("error: {}: {}", relpath_str, e);
+                        total_errors += 1;
+                    }
                 }
             }
-        }
 
-        // --- Generate N-Quads for oxigraph (now graph) ---
-        // Identity model (Rob-ruled 2026-07-30, re-anchor 2026-08-02): two
-        // plane anchors per file. The File node `git-lex/File/<path>` (the
-        // path IS the id — Law 4) carries the git layer, links, and fm
-        // facts; when the file expresses a Thing with an authored id, the
-        // Thing node `<kit-app>/<Class>/<id>` (Law 2) carries the
-        // kit-declared facts, connected by the derived fileId edge (Law 5).
-        // Classes come from the ontology and explicit dot-notation, never
-        // folder-name guessing.
-        //
-        // File location is git:path — a git-lex-authored synthetic fact from
-        // the on-disk path, NOT a user frontmatter key; fm: carries ONLY what
-        // the user wrote (the fm firewall).
-        let subjects = derive_file_subjects(
-            &spo_lines,
-            &relpath_str,
-            &ctx.declared_props,
-            &obj_props,
-            &kit_namespaces,
-            true, // the now path is the save/sync moment — warn here
-        );
+            // Sort and dedup
+            spo_lines.sort();
+            spo_lines.dedup();
 
-        nq.push_str(&format!(
-            "{} <https://repolex.ai/ontology/git-lex/git/path> \"{}\" {} .\n",
-            subjects.file_uri, nq_escape(&relpath_str), graph
-        ));
-        // Omit the triple when the hash is unknown (review #51): an
-        // untracked new doc (or a failed repo discovery) used to assert
-        // `git/blobHash ""` — a false fact all untracked files SHARED,
-        // enabling spurious joins. Absence is the honest statement; the
-        // post-save sync fills it in.
-        if !blob_hash.is_empty() {
-            nq.push_str(&format!(
-                "{} <https://repolex.ai/ontology/git-lex/git/blobHash> \"{}\" {} .\n",
-                subjects.file_uri, blob_hash, graph
-            ));
-        }
+            // Write .spo sidecar; when a doc's extractable content goes away its
+            // existing sidecar must go away too, so the sync diff sees the lines
+            // vanish and records retractions (the one graph's only
+            // signal — the now graph rebuilds from files and never notices).
+            let spo_path = extract_dir.join(format!("{}.fm.spo", relpath_str));
+            if opts.write_sidecars {
+                if !spo_lines.is_empty() {
+                    let spo_content = spo_lines.join("\n") + "\n";
+                    write_sidecar_loud(&spo_path, &spo_content);
+                } else if spo_path.exists() {
+                    remove_sidecar_loud(&spo_path);
+                }
+            }
 
-        // Track which kit types we've seen for rdf:type emission (dedup)
-        let mut emitted_types: HashSet<String> = HashSet::new();
+            // Markdown links join the emission stream AFTER the sidecar write —
+            // the .fm.spo sidecar carries frontmatter only (th34 #5; see the
+            // md_index comment above the loop). This is THE md walk: the same
+            // parse also writes the `.md.spo` sidecar (link lines only,
+            // sorted+deduped — the bytes the retired second walk in
+            // extraction.rs produced), so each document is read and
+            // tree-sitter-parsed exactly once per run.
+            if let Some(parsed) = md_links {
+                match parsed {
+                    Some(links) => {
+                        let fm_len = spo_lines.len();
+                        spo_lines.extend(links);
+                        let mut md_lines: Vec<String> = spo_lines[fm_len..].to_vec();
+                        md_lines.sort();
+                        md_lines.dedup();
+                        file_links = md_lines.len();
+                        if opts.write_sidecars {
+                            let md_path =
+                                extract_dir.join(format!("{}.md.spo", relpath_str));
+                            if !md_lines.is_empty() {
+                                write_sidecar_loud(&md_path, &(md_lines.join("\n") + "\n"));
+                                total_links += md_lines.len();
+                            } else if md_path.exists() {
+                                remove_sidecar_loud(&md_path);
+                            }
+                        }
+                    }
+                    None => {
+                        // Same contract as the read-failure above: skipping
+                        // bypasses the sidecar-removal branch, so the doc's
+                        // existing sidecar keeps asserting links the doc may no
+                        // longer carry — be LOUD and count it.
+                        eprintln!(
+                            "error: tree-sitter could not parse {} — its existing \
+                             sidecar (if any) is NOT updated",
+                            filepath.display()
+                        );
+                        total_errors += 1;
+                    }
+                }
+            }
 
-        // File rdf:type + (when anchored) Thing rdf:type + fileId edge.
-        emit_file_anchor_nquads(&subjects, &kit_namespaces, &graph, &mut emitted_types, &mut nq);
-
-        for line in &spo_lines {
-            total_errors += emit_spo_line_nquads(
-                line,
-                &subjects,
-                &graph,
+            // --- Generate N-Quads for oxigraph (now graph) ---
+            // Identity model (Rob-ruled 2026-07-30, re-anchor 2026-08-02): two
+            // plane anchors per file. The File node `git-lex/File/<path>` (the
+            // path IS the id — Law 4) carries the git layer, links, and fm
+            // facts; when the file expresses a Thing with an authored id, the
+            // Thing node `<kit-app>/<Class>/<id>` (Law 2) carries the
+            // kit-declared facts, connected by the derived fileId edge (Law 5).
+            // Classes come from the ontology and explicit dot-notation, never
+            // folder-name guessing.
+            //
+            // File location is git:path — a git-lex-authored synthetic fact from
+            // the on-disk path, NOT a user frontmatter key; fm: carries ONLY what
+            // the user wrote (the fm firewall).
+            let subjects = derive_file_subjects(
+                &spo_lines,
                 &relpath_str,
-                ctx,
+                &ctx.declared_props,
+                &obj_props,
+                &kit_namespaces,
                 true, // the now path is the save/sync moment — warn here
-                &mut emitted_types,
-                &mut nq,
             );
-        }
 
-        total_facts += nq[file_nq_start..].lines().filter(|l| !l.is_empty()).count();
+            nq.push_str(&format!(
+                "{} <https://repolex.ai/ontology/git-lex/git/path> \"{}\" {} .\n",
+                subjects.file_uri, nq_escape(&relpath_str), graph
+            ));
+            // Omit the triple when the hash is unknown (review #51): an
+            // untracked new doc (or a failed repo discovery) used to assert
+            // `git/blobHash ""` — a false fact all untracked files SHARED,
+            // enabling spurious joins. Absence is the honest statement; the
+            // post-save sync fills it in.
+            if !blob_hash.is_empty() {
+                nq.push_str(&format!(
+                    "{} <https://repolex.ai/ontology/git-lex/git/blobHash> \"{}\" {} .\n",
+                    subjects.file_uri, blob_hash, graph
+                ));
+            }
 
-        // Cache what this file produced — but NEVER a file whose extraction
-        // errored: errors must stay loud on every run, and a cached error
-        // would read as clean forever.
-        if total_errors == file_errors_start {
-            cache.store(
-                &relpath_str,
-                &bytes_hash,
-                &blob_hash,
-                &nq[file_nq_start..],
-                file_links,
-            );
-        }
+            // Track which kit types we've seen for rdf:type emission (dedup)
+            let mut emitted_types: HashSet<String> = HashSet::new();
 
-        // Emission ran for its gates (resolution errors, warnings); when the
-        // caller discards the text, drop this file's quads now — the buffer's
-        // capacity is reused instead of accumulating the whole repo's worth.
-        if !opts.build_nquads {
-            nq.clear();
+            // File rdf:type + (when anchored) Thing rdf:type + fileId edge.
+            emit_file_anchor_nquads(&subjects, &kit_namespaces, &graph, &mut emitted_types, &mut nq);
+
+            for line in &spo_lines {
+                total_errors += emit_spo_line_nquads(
+                    line,
+                    &subjects,
+                    &graph,
+                    &relpath_str,
+                    ctx,
+                    true, // the now path is the save/sync moment — warn here
+                    &mut emitted_types,
+                    &mut nq,
+                );
+            }
+
+            total_facts += nq[file_nq_start..].lines().filter(|l| !l.is_empty()).count();
+
+            // Cache what this file produced — but NEVER a file whose extraction
+            // errored: errors must stay loud on every run, and a cached error
+            // would read as clean forever.
+            if total_errors == file_errors_start {
+                cache.store(
+                    &relpath_str,
+                    &bytes_hash,
+                    &blob_hash,
+                    &nq[file_nq_start..],
+                    file_links,
+                );
+            }
+
+            // Emission ran for its gates (resolution errors, warnings); when the
+            // caller discards the text, drop this file's quads now — the buffer's
+            // capacity is reused instead of accumulating the whole repo's worth.
+            if !opts.build_nquads {
+                nq.clear();
+            }
         }
     }
     cache.save();
@@ -1054,6 +1096,107 @@ pub(crate) fn generate_frontmatter_nquads_with(
     // bracketed name in a commit subject is prose.
 
     NowWalk { nquads: nq, errors: total_errors, facts: total_facts }
+}
+
+/// Files handed to the parallel half of the walk at once — bounds how many
+/// changed documents' contents are held in memory together.
+const WALK_CHUNK: usize = 2048;
+
+/// One document's inputs to the parallel half of the walk.
+struct WalkJob<'a> {
+    filepath: &'a PathBuf,
+    relpath_str: String,
+    blob_hash: String,
+    /// The cached (bytes hash, index hash) that may still be valid
+    /// (None = must extract).
+    cached: Option<(String, String)>,
+    is_md: bool,
+}
+
+/// The parallel half's answer for one document.
+enum PreparedFile {
+    Unreadable(String),
+    /// Bytes and index match the cache entry.
+    Unchanged { bytes_hash: String },
+    /// Needs extraction. `md_links`: None = not a markdown document;
+    /// Some(None) = tree-sitter could not parse it; Some(Some(lines)) = its
+    /// link lines, in extraction order.
+    Changed { content: String, bytes_hash: String, md_links: Option<Option<Vec<String>>> },
+}
+
+/// A markdown document's link lines (see [`PreparedFile::Changed`]).
+fn md_link_lines(
+    parser: &mut tree_sitter_md::MarkdownParser,
+    is_md: bool,
+    content: &str,
+    relpath_str: &str,
+    md_index: &HashSet<String>,
+) -> Option<Option<Vec<String>>> {
+    if !is_md {
+        return None;
+    }
+    Some(parser.parse(content.as_bytes(), None).map(|tree| {
+        let mut lines = Vec::new();
+        crate::extraction::extract_md_link_lines(&tree, content, relpath_str, md_index, &mut lines);
+        lines
+    }))
+}
+
+/// Read, hash and (when it must be extracted) markdown-parse one document.
+/// Touches nothing shared and prints nothing.
+fn prepare_walk_file(
+    parser: &mut tree_sitter_md::MarkdownParser,
+    job: &WalkJob,
+    md_index: &HashSet<String>,
+) -> PreparedFile {
+    let content = match fs::read_to_string(job.filepath) {
+        Ok(c) => c,
+        Err(e) => return PreparedFile::Unreadable(e.to_string()),
+    };
+    let bytes_hash = crate::walkcache::blob_hash_of(content.as_bytes());
+    if job
+        .cached
+        .as_ref()
+        .is_some_and(|(bh, ih)| *bh == bytes_hash && *ih == job.blob_hash)
+    {
+        return PreparedFile::Unchanged { bytes_hash };
+    }
+    let md_links = md_link_lines(parser, job.is_md, &content, &job.relpath_str, md_index);
+    PreparedFile::Changed { content, bytes_hash, md_links }
+}
+
+/// `items.iter().map(f)` across `threads` threads, results in input order.
+/// Each thread gets its own markdown parser.
+fn parallel_map<T: Sync, R: Send>(
+    items: &[T],
+    threads: usize,
+    f: impl Fn(&mut tree_sitter_md::MarkdownParser, &T) -> R + Sync,
+) -> Vec<R> {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Mutex;
+    let next = AtomicUsize::new(0);
+    let results: Mutex<Vec<Option<R>>> = Mutex::new((0..items.len()).map(|_| None).collect());
+    std::thread::scope(|scope| {
+        for _ in 0..threads.min(items.len()).max(1) {
+            scope.spawn(|| {
+                let mut parser = tree_sitter_md::MarkdownParser::default();
+                loop {
+                    let i = next.fetch_add(1, Ordering::Relaxed);
+                    if i >= items.len() {
+                        break;
+                    }
+                    let r = f(&mut parser, &items[i]);
+                    results.lock().unwrap()[i] = Some(r);
+                }
+            });
+        }
+    });
+    results
+        .into_inner()
+        .unwrap()
+        .into_iter()
+        .map(|r| r.expect("every item was processed"))
+        .collect()
 }
 
 /// Source documents whose SIDECARS are dirty in git — the on-disk sidecar
