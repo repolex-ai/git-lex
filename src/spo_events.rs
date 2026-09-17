@@ -117,9 +117,12 @@ pub(crate) fn collect_commits_from_shas(
     shas: &[String],
     horizon_start: Option<&str>,
 ) -> Result<Vec<WalkCommit>, String> {
+    let root = find_git_root().ok_or("not inside a git repository")?;
+    let repo = git2::Repository::open(&root)
+        .map_err(|e| format!("open git repository {}: {e}", root.display()))?;
     shas.iter()
         .map(|sha| {
-            let mut c = build_commit(sha)?;
+            let mut c = build_commit(&repo, sha)?;
             // dev_history_horizon: the first walked commit diffs against
             // the EMPTY tree so the whole tree asserts as of the horizon.
             if horizon_start == Some(sha.as_str()) {
@@ -163,27 +166,17 @@ fn rebuild_against_empty_tree(sha: &str) -> Result<WalkCommit, String> {
 /// initial `.spo` line as an addition.
 const EMPTY_TREE_SHA: &str = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
 
-/// Build a `WalkCommit`: find the first parent, then ONE NUL-separated
-/// `--name-status` diff for the touched sidecar set. `-M50%` keeps rename
-/// detection (folder recases must pair old→new, not read as delete+create).
-fn build_commit(sha: &str) -> Result<WalkCommit, String> {
-    let parent_out = Command::new("git")
-        .args(["rev-list", "--parents", "-n", "1", sha])
-        .output()
-        .map_err(|e| format!("git rev-list --parents {sha}: spawn failed: {e}"))?;
-    if !parent_out.status.success() {
-        return Err(format!(
-            "git rev-list --parents {sha} failed ({}): {}",
-            parent_out.status,
-            String::from_utf8_lossy(&parent_out.stderr).trim()
-        ));
-    }
-    let parent_line = String::from_utf8_lossy(&parent_out.stdout);
-    let parent_fields: Vec<&str> = parent_line.trim().split_whitespace().collect();
-    let base = if parent_fields.len() >= 2 {
-        parent_fields[1].to_string()
-    } else {
-        EMPTY_TREE_SHA.to_string()
+/// Build a `WalkCommit`: find the first parent (read in process), then ONE
+/// NUL-separated `--name-status` diff for the touched sidecar set. `-M50%`
+/// keeps rename detection (folder recases must pair old→new, not read as
+/// delete+create).
+fn build_commit(repo: &git2::Repository, sha: &str) -> Result<WalkCommit, String> {
+    let commit = git2::Oid::from_str(sha)
+        .and_then(|oid| repo.find_commit(oid))
+        .map_err(|e| format!("read commit {sha}: {e}"))?;
+    let base = match commit.parent_ids().next() {
+        Some(parent) => parent.to_string(),
+        None => EMPTY_TREE_SHA.to_string(),
     };
 
     let diff_out = Command::new("git")
