@@ -260,7 +260,7 @@ enum SoulCommands {
 
 /// The base kit every repo gets. Shared by `init` (implicit install),
 /// `kit_cmds` (update ordering, add/remove guards) and doctype resolution.
-pub(crate) const BASE_KIT: &str = "repolex-ai/git-lex-kit-base";
+pub(crate) use git_lex::BASE_KIT;
 
 
 // ─── git lex query ─────────────────────────────────────────────

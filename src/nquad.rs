@@ -1899,26 +1899,7 @@ pub(crate) fn load_ontology_graph(store: &oxigraph::store::Store) -> usize {
     if let Err(e) = store.remove_named_graph(&ontology_graph) {
         author_diag!("warning: failed to clear the repo-ontology graph before reload: {} — retired vocabulary may linger", e);
     }
-    fn walk_ttl(dir: &std::path::Path, out: &mut Vec<PathBuf>) {
-        if let Ok(entries) = fs::read_dir(dir) {
-            for entry in entries.filter_map(|e| e.ok()) {
-                let p = entry.path();
-                if p.is_dir() {
-                    walk_ttl(&p, out);
-                } else if p.extension().is_some_and(|e| e == "ttl")
-                    && !p.file_name().is_some_and(|n| n.to_string_lossy().ends_with("-shapes.ttl"))
-                {
-                    out.push(p);
-                }
-            }
-        }
-    }
-    let mut ttls: Vec<PathBuf> = Vec::new();
-    let ont_root = root.join(".lex").join("ontology");
-    if ont_root.exists() {
-        walk_ttl(&ont_root, &mut ttls);
-    }
-    ttls.sort();
+    let ttls = git_lex::installed_vocabulary_ttls(&root);
     let mut loaded = 0usize;
     for ttl in &ttls {
         match fs::read(ttl) {

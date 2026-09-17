@@ -24,93 +24,36 @@ use git_lex::{find_git_root, resolve_kit_spec};
 
 // ─── Shape file discovery ────────────────────────────────────
 
-/// Locate the shapes TTL for a kit. Returns empty string if not found.
-///
-/// Resolved by canonical path, NOT by glob-walk. The canonical install
-/// location is `.lex/ontology/{short}/{short}-shapes.ttl`.
-///
-/// Previous behavior glob-walked `all_shape_files()` and picked the FIRST
-/// file matching by name. That was first-wins-by-sort-order, which made
-/// stale fossils invisible to ls but visible to the loader — a 2-month-old
-/// `.lex/ontology/kit/{short}/{short}-shapes.ttl` (from a pre-multi-kit
-/// layout) sorted alphabetically before `.lex/ontology/{short}/...` and
-/// shadowed the current shapes. See task #29 (TR1P.L3X repro Day 22).
-///
-/// Now: only the canonical path is read. Anywhere else is ignored —
-/// `kit-update` sweeps the legacy `.lex/ontology/kit/` directory.
-pub(crate) fn read_kit_shapes(kit: &str) -> String {
-    let Some(root) = find_git_root() else { return String::new() };
-    let (_, _, short) = resolve_kit_spec(kit);
-    let target = format!("{}-shapes.ttl", short);
-
-    let canonical_path = root.join(".lex").join("ontology").join(&short).join(&target);
-    let canonical_content = fs::read_to_string(&canonical_path).ok();
-
-    // Audit: surface ANY extra `{short}-shapes.ttl` found outside the
-    // canonical path. Catches old-layout stragglers like
-    // `.lex/ontology/kit/{short}/{short}-shapes.ttl` that were silently
-    // shadowing canonical shapes prior to this resolver. Warning only —
-    // we ignore them either way. Once-per-process per kit-short so a
-    // file-per-call caller (e.g. cmd_validate) doesn't spam.
-    use std::sync::Mutex;
-    use std::sync::OnceLock;
-    static WARNED: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
-    let warned = WARNED.get_or_init(|| Mutex::new(HashSet::new()));
-    let mut should_warn = false;
-    {
-        let mut lock = warned.lock().unwrap();
-        if !lock.contains(&short) {
-            lock.insert(short.clone());
-            should_warn = true;
-        }
-    }
-    if should_warn {
-        let mut stragglers: Vec<PathBuf> = Vec::new();
-        for path in all_shape_files() {
-            if path.file_name().and_then(|n| n.to_str()) != Some(target.as_str()) { continue; }
-            if path == canonical_path { continue; }
-            stragglers.push(path);
-        }
-        if !stragglers.is_empty() {
-            eprintln!("warning: stale '{}' found outside the canonical install location(s):", target);
-            for p in &stragglers {
-                let rel = p.strip_prefix(&root).unwrap_or(p);
-                eprintln!("  {}", rel.display());
-            }
-            eprintln!("  These are ignored; `git lex kit-update` will sweep the legacy `.lex/ontology/kit/` location.");
-        }
-    }
-
-    canonical_content.unwrap_or_default()
+/// A kit's vocabulary TTL (`.lex/ontology/{short}/{short}.ttl`), or None when
+/// the kit is not installed. Installed means listed in repo.yml
+/// (`git_lex::installed_kit_specs`), never "a folder exists".
+fn kit_ttl_path(kit: &str) -> Option<PathBuf> {
+    let root = find_git_root()?;
+    let dir = git_lex::installed_kit_ontology_dir(&root, kit)?;
+    let name = dir.file_name()?.to_string_lossy().to_string();
+    Some(dir.join(format!("{}.ttl", name)))
 }
 
-/// Return paths to every shape TTL installed in the repo
-/// (`.lex/ontology/**/*-shapes.ttl`). Used by whole-repo listings.
+/// (folder name, vocabulary TTL path) for every installed kit, sorted.
+fn installed_kit_ttls() -> Vec<(String, PathBuf)> {
+    let Some(root) = find_git_root() else { return Vec::new() };
+    git_lex::installed_ontology_dirs(&root)
+        .into_iter()
+        .map(|(name, dir)| { let ttl = dir.join(format!("{}.ttl", name)); (name, ttl) })
+        .collect()
+}
+
+/// Read the generated shapes TTL for an installed kit: only the canonical
+/// `.lex/ontology/{short}/{short}-shapes.ttl`. Empty string when the kit is
+/// not installed or ships no shapes.
+pub(crate) fn read_kit_shapes(kit: &str) -> String {
+    kit_shapes_path(kit).and_then(|p| fs::read_to_string(p).ok()).unwrap_or_default()
+}
+
+/// Every generated shapes TTL of the installed kits. Used by whole-repo
+/// listings.
 pub(crate) fn all_shape_files() -> Vec<PathBuf> {
-    let root = match find_git_root() {
-        Some(r) => r,
-        None => return Vec::new(),
-    };
-    let mut out = Vec::new();
-    fn walk(dir: &std::path::Path, out: &mut Vec<PathBuf>) {
-        let Ok(entries) = fs::read_dir(dir) else { return };
-        for e in entries.filter_map(|e| e.ok()) {
-            let p = e.path();
-            if p.is_dir() {
-                walk(&p, out);
-            } else if p.file_name()
-                .and_then(|n| n.to_str())
-                .map(|n| n.ends_with("-shapes.ttl"))
-                .unwrap_or(false)
-            {
-                out.push(p);
-            }
-        }
-    }
-    let a = root.join(".lex").join("ontology");
-    if a.exists() { walk(&a, &mut out); }
-    out.sort();
-    out
+    find_git_root().map(|root| git_lex::installed_shape_files(&root)).unwrap_or_default()
 }
 
 // ─── Parsed shape representation ─────────────────────────────
@@ -324,8 +267,9 @@ fn parse_kit_shapes(kit: &str) -> std::sync::Arc<ShapeFile> {
 /// [`read_kit_shapes`] will open.
 fn kit_shapes_path(kit: &str) -> Option<PathBuf> {
     let root = find_git_root()?;
-    let (_, _, short) = resolve_kit_spec(kit);
-    Some(root.join(".lex").join("ontology").join(&short).join(format!("{}-shapes.ttl", short)))
+    let dir = git_lex::installed_kit_ontology_dir(&root, kit)?;
+    let name = dir.file_name()?.to_string_lossy().to_string();
+    Some(dir.join(format!("{}-shapes.ttl", name)))
 }
 
 // ─── Public API (runtime reads) ──────────────────────────────
@@ -681,11 +625,8 @@ fn resolve_class_against<S: AsRef<str>>(classes: &[S], class_seg: &str) -> Class
 /// Parser is intentionally string-level (not a full Turtle parse), same
 /// stanza-scan shape as the type-label lookup below.
 pub(crate) fn get_class_foldered(kit: &str, class_name: &str) -> bool {
-    let Some(root) = find_git_root() else { return false };
     let (_, _, short) = resolve_kit_spec(kit);
-    let target = format!("{}.ttl", short);
-
-    let path = root.join(".lex").join("ontology").join(&short).join(&target);
+    let Some(path) = kit_ttl_path(kit) else { return false };
     let content = fs::read_to_string(&path).unwrap_or_default();
     if content.is_empty() {
         return false;
@@ -711,11 +652,8 @@ pub(crate) fn class_gets_folder(kit: &str, class_name: &str) -> bool {
 /// string in every case; never panics. (The lex-o:okfType head of the old
 /// chain retired with lex-o — Rob's ruling; labels are correct everywhere.)
 pub(crate) fn get_class_type_label(kit: &str, class_name: &str) -> String {
-    let Some(root) = find_git_root() else { return class_name.to_string() };
     let (_, _, short) = resolve_kit_spec(kit);
-    let target = format!("{}.ttl", short);
-
-    let path = root.join(".lex").join("ontology").join(&short).join(&target);
+    let Some(path) = kit_ttl_path(kit) else { return class_name.to_string() };
     let content = fs::read_to_string(&path).unwrap_or_default();
     if content.is_empty() {
         return class_name.to_string();
@@ -741,11 +679,8 @@ pub(crate) struct ClassAuthoring {
 /// shapes (class annotations don't reach the shapes at all).
 pub(crate) fn get_class_authoring(kit: &str, class_name: &str) -> ClassAuthoring {
     let none = ClassAuthoring { comment: None, guidance: None };
-    let Some(root) = find_git_root() else { return none };
     let (_, _, short) = resolve_kit_spec(kit);
-    let target = format!("{}.ttl", short);
-
-    let path = root.join(".lex").join("ontology").join(&short).join(&target);
+    let Some(path) = kit_ttl_path(kit) else { return none };
     let content = fs::read_to_string(&path).unwrap_or_default();
     if content.is_empty() {
         return none;
@@ -869,20 +804,8 @@ pub(crate) fn get_reference_ranges_all_kits() -> HashMap<String, String> {
     static MEMO: OnceLock<Mutex<Option<(Fingerprint, HashMap<String, String>)>>> = OnceLock::new();
 
     let mut out = HashMap::new();
-    let Some(root) = find_git_root() else { return out };
-    let ont_root = root.join(".lex").join("ontology");
-    let Ok(entries) = fs::read_dir(&ont_root) else { return out };
-
     // Collect the TTLs once, then decide whether the parse can be skipped.
-    let mut ttls: Vec<(String, PathBuf)> = Vec::new();
-    for e in entries.filter_map(|e| e.ok()) {
-        let dir = e.path();
-        if !dir.is_dir() { continue }
-        let Some(short) = dir.file_name().and_then(|n| n.to_str()).map(String::from) else { continue };
-        let ttl = dir.join(format!("{}.ttl", short));
-        ttls.push((short, ttl));
-    }
-    ttls.sort();
+    let ttls = installed_kit_ttls();
     let fingerprint: Fingerprint = ttls.iter()
         .map(|(_, p)| {
             let meta = fs::metadata(p).ok();
@@ -920,14 +843,7 @@ pub(crate) fn get_reference_ranges_all_kits() -> HashMap<String, String> {
 /// kit's own namespace are shortened to the local name.
 pub(crate) fn get_deprecated_properties_all_kits() -> HashMap<String, Option<String>> {
     let mut out = HashMap::new();
-    let Some(root) = find_git_root() else { return out };
-    let ont_root = root.join(".lex").join("ontology");
-    let Ok(entries) = fs::read_dir(&ont_root) else { return out };
-    for e in entries.filter_map(|e| e.ok()) {
-        let dir = e.path();
-        if !dir.is_dir() { continue }
-        let Some(short) = dir.file_name().and_then(|n| n.to_str()).map(String::from) else { continue };
-        let ttl = dir.join(format!("{}.ttl", short));
+    for (short, ttl) in installed_kit_ttls() {
         let Ok(content) = fs::read_to_string(&ttl) else { continue };
         for (prop, replaced) in parse_deprecated_properties(&content, &short) {
             out.insert(format!("{}/{}", short, prop), replaced);
@@ -1018,14 +934,7 @@ pub(crate) struct DomainOpenProp {
 /// re-invent the restriction the ontology chose not to declare.
 pub(crate) fn get_domain_open_properties_all_kits() -> HashMap<String, DomainOpenProp> {
     let mut out = HashMap::new();
-    let Some(root) = find_git_root() else { return out };
-    let ont_root = root.join(".lex").join("ontology");
-    let Ok(entries) = fs::read_dir(&ont_root) else { return out };
-    for e in entries.filter_map(|e| e.ok()) {
-        let dir = e.path();
-        if !dir.is_dir() { continue }
-        let Some(short) = dir.file_name().and_then(|n| n.to_str()).map(String::from) else { continue };
-        let ttl = dir.join(format!("{}.ttl", short));
+    for (short, ttl) in installed_kit_ttls() {
         let Ok(content) = fs::read_to_string(&ttl) else { continue };
         for (prop, rec) in parse_domain_open_properties(&content, &short) {
             out.insert(format!("{}/{}", short, prop), rec);

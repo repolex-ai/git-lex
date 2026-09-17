@@ -129,11 +129,10 @@ pub(crate) fn context_hash(root: &Path, files: &[PathBuf]) -> String {
         acc.extend_from_slice(r.as_bytes());
         acc.push(b'\n');
     }
-    // Every byte of the installed ontology, path-sorted.
-    let ont = root.join(".lex").join("ontology");
-    let mut ont_files: Vec<PathBuf> = Vec::new();
-    collect_files(&ont, &mut ont_files);
-    ont_files.sort();
+    // Every byte of the installed kits' ontology, path-sorted. Installed
+    // means listed in repo.yml, so removing a kit changes this hash even
+    // when its folder is still on disk.
+    let ont_files = git_lex::installed_ontology_files(root);
     for f in &ont_files {
         acc.extend_from_slice(f.to_string_lossy().as_bytes());
         acc.push(b'\n');
@@ -332,7 +331,20 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("glx-walkcache-{}-{}", tag, std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(dir.join(".lex").join("ontology").join("t")).unwrap();
+        fs::write(dir.join(".lex").join("repo.yml"), "name: x\nkit: repolex-ai/git-lex-kit-t\n").unwrap();
         dir
+    }
+
+    /// #17: a folder repo.yml does not list is not part of the context.
+    #[test]
+    fn uninstalled_kit_folder_is_not_in_context() {
+        let root = tmp_root("ghost");
+        let files = vec![root.join("a.md")];
+        let before = context_hash(&root, &files);
+        fs::create_dir_all(root.join(".lex/ontology/ghost")).unwrap();
+        fs::write(root.join(".lex/ontology/ghost/ghost.ttl"), "ghost:anything").unwrap();
+        assert_eq!(before, context_hash(&root, &files));
+        let _ = fs::remove_dir_all(&root);
     }
 
     #[test]
