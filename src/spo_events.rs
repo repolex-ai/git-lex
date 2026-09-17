@@ -120,17 +120,125 @@ pub(crate) fn collect_commits_from_shas(
     let root = find_git_root().ok_or("not inside a git repository")?;
     let repo = git2::Repository::open(&root)
         .map_err(|e| format!("open git repository {}: {e}", root.display()))?;
+    // First parents, read in process.
+    let mut bases: Vec<String> = Vec::with_capacity(shas.len());
+    for sha in shas {
+        let commit = git2::Oid::from_str(sha)
+            .and_then(|oid| repo.find_commit(oid))
+            .map_err(|e| format!("read commit {sha}: {e}"))?;
+        bases.push(match commit.parent_ids().next() {
+            Some(parent) => parent.to_string(),
+            None => EMPTY_TREE_SHA.to_string(),
+        });
+    }
+    // Every diff through ONE `git diff-tree --stdin` (a process per commit
+    // was an hour of a 88k-commit rebuild, #15). Same options as before:
+    // NUL-separated name-status, `-M50%` rename detection (folder recases
+    // must pair old→new, not read as delete+create), sidecars only.
+    let mut input = String::new();
+    for (sha, base) in shas.iter().zip(&bases) {
+        if base == EMPTY_TREE_SHA {
+            input.push_str(sha); // a root commit: --root diffs it against nothing
+        } else {
+            input.push_str(&format!("{sha} {base}"));
+        }
+        input.push('\n');
+    }
+    let raw = diff_tree_stdin(&root, &input)?;
+    let per_commit = split_diff_tree_stdin(&raw, shas)?;
+
     shas.iter()
-        .map(|sha| {
-            let mut c = build_commit(&repo, sha)?;
+        .zip(bases)
+        .zip(per_commit)
+        .map(|((sha, base), records)| {
             // dev_history_horizon: the first walked commit diffs against
             // the EMPTY tree so the whole tree asserts as of the horizon.
             if horizon_start == Some(sha.as_str()) {
-                c = rebuild_against_empty_tree(sha)?;
+                return rebuild_against_empty_tree(sha);
             }
-            Ok(c)
+            let (touched, renames) = parse_name_status_z(&records);
+            Ok(WalkCommit { sha: sha.clone(), parent_sha: base, touched, renames })
         })
         .collect()
+}
+
+/// Run one `git diff-tree --stdin` over `input` (one "<commit> [<parent>]"
+/// line per commit) and return its raw NUL-separated output.
+fn diff_tree_stdin(root: &std::path::Path, input: &str) -> Result<String, String> {
+    use std::process::Stdio;
+    let mut child = Command::new("git")
+        .current_dir(root)
+        .args([
+            "diff-tree", "--stdin", "--always", "--root", "--no-color", "--no-ext-diff",
+            "--name-status", "-z", "-M50%", "-r", "--", ".lex/extract/*.spo",
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("git diff-tree --stdin: spawn failed: {e}"))?;
+    let mut stdin = child.stdin.take().ok_or("git diff-tree --stdin: no stdin")?;
+    let input = input.to_string();
+    // Feed from a thread: git writes as it reads, and a full pipe on either
+    // side would otherwise deadlock.
+    let writer = std::thread::spawn(move || stdin.write_all(input.as_bytes()));
+    let out = child
+        .wait_with_output()
+        .map_err(|e| format!("git diff-tree --stdin: {e}"))?;
+    writer
+        .join()
+        .map_err(|_| "git diff-tree --stdin: input writer panicked".to_string())?
+        .map_err(|e| format!("git diff-tree --stdin: writing input failed: {e}"))?;
+    if !out.status.success() {
+        return Err(format!(
+            "git diff-tree --stdin failed ({}): {}",
+            out.status,
+            String::from_utf8_lossy(&out.stderr).trim()
+        ));
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
+/// Split `git diff-tree --stdin -z --always` output into each commit's
+/// name-status records, in input order. Every commit prints its own sha as
+/// a header field first (`--always`), and no record field can be a bare
+/// sha — paths all start with `.lex/extract/`, statuses are letters — so a
+/// field equal to the next expected sha starts that commit's block. A
+/// missing or out-of-order header is an error: a commit whose diff cannot
+/// be attributed must stop the build.
+fn split_diff_tree_stdin(raw: &str, shas: &[String]) -> Result<Vec<String>, String> {
+    let mut blocks: Vec<String> = Vec::with_capacity(shas.len());
+    let mut current: Option<String> = None;
+    let mut next = 0usize;
+    for field in raw.split('\0') {
+        if next < shas.len() && field.trim() == shas[next] {
+            if let Some(done) = current.take() {
+                blocks.push(done);
+            }
+            current = Some(String::new());
+            next += 1;
+            continue;
+        }
+        if field.is_empty() {
+            continue;
+        }
+        let Some(block) = current.as_mut() else {
+            return Err(format!("git diff-tree --stdin: output before any commit header: {field:?}"));
+        };
+        block.push_str(field);
+        block.push('\0');
+    }
+    if let Some(done) = current.take() {
+        blocks.push(done);
+    }
+    if blocks.len() != shas.len() {
+        return Err(format!(
+            "git diff-tree --stdin: {} commit(s) asked, {} answered",
+            shas.len(),
+            blocks.len()
+        ));
+    }
+    Ok(blocks)
 }
 
 /// Build a WalkCommit whose baseline is the empty tree — every sidecar in
@@ -165,49 +273,6 @@ fn rebuild_against_empty_tree(sha: &str) -> Result<WalkCommit, String> {
 /// for root commits (commits with no parents) so the walker sees every
 /// initial `.spo` line as an addition.
 const EMPTY_TREE_SHA: &str = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
-
-/// Build a `WalkCommit`: find the first parent (read in process), then ONE
-/// NUL-separated `--name-status` diff for the touched sidecar set. `-M50%`
-/// keeps rename detection (folder recases must pair old→new, not read as
-/// delete+create).
-fn build_commit(repo: &git2::Repository, sha: &str) -> Result<WalkCommit, String> {
-    let commit = git2::Oid::from_str(sha)
-        .and_then(|oid| repo.find_commit(oid))
-        .map_err(|e| format!("read commit {sha}: {e}"))?;
-    let base = match commit.parent_ids().next() {
-        Some(parent) => parent.to_string(),
-        None => EMPTY_TREE_SHA.to_string(),
-    };
-
-    let diff_out = Command::new("git")
-        .args([
-            "diff-tree",
-            "--no-commit-id",
-            "--no-color",
-            "--no-ext-diff",
-            "--name-status",
-            "-z",
-            "-M50%",
-            "-r",
-            &base,
-            sha,
-            "--",
-            ".lex/extract/*.spo",
-        ])
-        .output()
-        .map_err(|e| format!("git diff-tree {sha}: spawn failed: {e}"))?;
-    if !diff_out.status.success() {
-        return Err(format!(
-            "git diff-tree {base}..{sha} failed ({}): {}",
-            diff_out.status,
-            String::from_utf8_lossy(&diff_out.stderr).trim()
-        ));
-    }
-
-    let (touched, renames) =
-        parse_name_status_z(&String::from_utf8_lossy(&diff_out.stdout));
-    Ok(WalkCommit { sha: sha.to_string(), parent_sha: base, touched, renames })
-}
 
 /// Parse `--name-status -z` output into (touched paths, rename pairs).
 ///
@@ -1825,6 +1890,26 @@ soul.Memory.category | hasValue | \n";
             m["<https://repolex.ai/soul/Note/x>"]["<https://repolex.ai/git-lex/File/Soul/Note/x.md>"],
             '+'
         );
+    }
+
+    /// Each commit's records land in its own block, in input order —
+    /// including a commit with no sidecar changes (an empty block).
+    #[test]
+    fn diff_tree_stdin_output_splits_per_commit() {
+        let a = "a".repeat(40);
+        let b = "b".repeat(40);
+        let c = "c".repeat(40);
+        let raw = format!(
+            "{a}\0M\0.lex/extract/x.md.fm.spo\0{b}\0{c}\0R090\0.lex/extract/o.md.fm.spo\0.lex/extract/n.md.fm.spo\0"
+        );
+        let shas = vec![a.clone(), b.clone(), c.clone()];
+        let blocks = split_diff_tree_stdin(&raw, &shas).unwrap();
+        assert_eq!(blocks[0], "M\0.lex/extract/x.md.fm.spo\0");
+        assert_eq!(blocks[1], "");
+        assert_eq!(parse_name_status_z(&blocks[2]).1.len(), 1);
+        // A commit git never answered for is an error, not an empty diff.
+        let short = format!("{a}\0M\0.lex/extract/x.md.fm.spo\0");
+        assert!(split_diff_tree_stdin(&short, &shas).is_err());
     }
 
     // ─── read_sidecar_at_commit: absence vs failure ─────────────────────
