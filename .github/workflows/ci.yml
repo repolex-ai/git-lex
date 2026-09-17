@@ -1,0 +1,58 @@
+# The correctness gate: build, test, lint and the deploy path, on the two
+# systems git-lex runs on. build.yml next door produces the release binaries
+# and runs no tests; this workflow is what says a push is sound.
+
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+# A newer push to the same branch makes the older run pointless.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    name: ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, ubuntu-latest]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build
+        run: cargo build --locked
+
+      - name: Test
+        run: cargo test --locked
+
+      # Warnings stay warnings until the codebase is clean; then this becomes
+      # `-- -D warnings` and a new lint fails the run.
+      - name: Clippy
+        run: cargo clippy --locked --all-targets
+
+      # Every machine deploys with `cargo install --path . --locked`.
+      - name: Install (the deploy path)
+        shell: bash
+        run: |
+          cargo install --path . --locked --root "$RUNNER_TEMP/install"
+          "$RUNNER_TEMP/install/bin/git-lex" --version
