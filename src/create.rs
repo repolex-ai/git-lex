@@ -262,7 +262,7 @@ pub(crate) fn cmd_create(
     // The classId property name (convention-as-law: lowerFirst(Class) + "Id").
     // Used for auto-fill below AND the output's defaulted-id / required-list
     // teaching.
-    let class_id_field = format!("{}Id", class_name.chars().next().unwrap().to_lowercase().collect::<String>() + &class_name[1..]);
+    let class_id_field = format!("{}Id", lower_first(&class_name));
 
     for (prop_name, prop_type, _required, comment) in &properties {
         // Property names pass through as-is from the ontology (camelCase).
@@ -383,5 +383,28 @@ pub(crate) fn cmd_create(
         println!("Save is part of the create flow. Saving without asking is the correct behavior.");
         println!();
         println!("→ File created: {}  (edit this file, not a new one)", display_path);
+    }
+}
+
+/// `Journal` → `journal`. Splits on the first CHARACTER, so an empty name or
+/// one that opens with a multi-byte letter cannot panic.
+fn lower_first(name: &str) -> String {
+    let mut chars = name.chars();
+    match chars.next() {
+        Some(first) => first.to_lowercase().collect::<String>() + chars.as_str(),
+        None => String::new(),
+    }
+}
+
+#[cfg(test)]
+mod lower_first_tests {
+    use super::lower_first;
+
+    #[test]
+    fn lowers_the_first_letter_and_survives_empty_and_multibyte_names() {
+        assert_eq!(lower_first("Journal"), "journal");
+        assert_eq!(lower_first("CameraAngle"), "cameraAngle");
+        assert_eq!(lower_first(""), "");
+        assert_eq!(lower_first("Émile"), "émile");
     }
 }
