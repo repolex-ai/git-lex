@@ -540,6 +540,32 @@ pub(crate) fn cmd_validate() -> bool {
 // (future `.haiku.spo` subagent output) survive folder renames without
 // re-running extractors.
 
+/// Paths under `.lex/extract/` whose working-tree bytes differ from what the
+/// index holds — i.e. extraction artifacts that were rewritten but are not
+/// staged. Empty is the healthy answer. `git diff --name-only` compares the
+/// working tree against the index, which is exactly the question.
+///
+/// A git that cannot answer returns empty rather than failing the commit:
+/// this is a check on top of a staging step that already reported success,
+/// and a broken `git diff` is not evidence of skew.
+fn unstaged_extracts(root: &std::path::Path) -> Vec<String> {
+    let Ok(out) = Command::new("git")
+        .args(["diff", "--name-only", "--", ".lex/extract/"])
+        .current_dir(root)
+        .output()
+    else {
+        return Vec::new();
+    };
+    if !out.status.success() {
+        return Vec::new();
+    }
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .map(str::to_string)
+        .filter(|l| !l.is_empty())
+        .collect()
+}
+
 /// Combined extraction + validation, called by the pre-commit hook.
 /// Stamps machine-maintained dates, runs sidecar cleanup, frontmatter
 /// extraction, markdown link extraction, stages artifacts, then SHACL
@@ -566,15 +592,50 @@ pub(crate) fn hook_pre_commit() {
     // committed, so no committed-sidecar divergence is possible. Skip
     // staging rather than fatal on `git add` refusing an ignored path,
     // which broke every commit in such repos (2026-08-04).
-    let lex_ignored = Command::new("git").args(["check-ignore", "-q", ".lex"]).status()
+    let root = crate::require_git_root();
+    let lex_ignored = Command::new("git").args(["check-ignore", "-q", ".lex"])
+        .current_dir(&root)
+        .status()
         .map(|s| s.success()).unwrap_or(false);
     if lex_ignored {
         println!(".lex/ is gitignored here — extraction artifacts stay local, not staged.");
     } else {
-        let staged = Command::new("git").args(["add", ".lex/extract/"]).status()
+        let staged = Command::new("git").args(["add", "--", ".lex/extract/"])
+            .current_dir(&root)
+            .status()
             .map(|s| s.success()).unwrap_or(false);
         if !staged {
             eprintln!("fatal: failed to stage extraction artifacts (.lex/extract/)");
+            exit(1);
+        }
+        // ...and check that it took. `git add` reporting success is not the
+        // same as the index holding what is on disk: on lUX, 12,102 extract
+        // files were written correctly during the hook, the add reported
+        // success, and the commit carried the PREVIOUS run's bytes anyway.
+        // They arrived one commit late, swept in by the next save's
+        // `git add -A`. For that whole window the graph answered with
+        // predicates the documents no longer used, and every gate passed.
+        //
+        // The invariant is one line of git: nothing under .lex/extract/ may
+        // differ between the working tree and the index once staging is
+        // done. Breaking the commit is the only honest outcome — a silent
+        // one-commit skew between a document and the facts derived from it
+        // is what history is built on.
+        let out_of_sync = unstaged_extracts(&root);
+        if !out_of_sync.is_empty() {
+            eprintln!(
+                "fatal: {} extraction artifact(s) under .lex/extract/ were rewritten \
+                 but did not reach the index, so this commit would carry documents \
+                 and extracts that disagree:",
+                out_of_sync.len()
+            );
+            for p in out_of_sync.iter().take(10) {
+                eprintln!("  {p}");
+            }
+            if out_of_sync.len() > 10 {
+                eprintln!("  ...and {} more", out_of_sync.len() - 10);
+            }
+            eprintln!("Run `git add .lex/extract/` and save again; if it happens twice, report it.");
             exit(1);
         }
     }
@@ -1377,4 +1438,58 @@ mod staging_tests {
         assert!(err.contains("nowhere.md"), "git's own words come back: {err}");
     }
 
+}
+
+#[cfg(test)]
+mod extract_staging_gate_tests {
+    use super::*;
+
+    struct Tmp(std::path::PathBuf);
+    impl Drop for Tmp {
+        fn drop(&mut self) { let _ = std::fs::remove_dir_all(&self.0); }
+    }
+
+    /// A repo with one committed extraction artifact.
+    fn repo() -> Tmp {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+        let dir = Tmp(std::env::temp_dir().join(format!("glx-gate-{}-{nanos}", std::process::id())));
+        let root = &dir.0;
+        std::fs::create_dir_all(root.join(".lex/extract/Soul/Note")).unwrap();
+        let repo = git2::Repository::init(root).unwrap();
+        std::fs::write(root.join(".lex/extract/Soul/Note/a.md.fm.spo"), "soul.Note.title | hasValue | one\n").unwrap();
+        let mut index = repo.index().unwrap();
+        index.add_path(std::path::Path::new(".lex/extract/Soul/Note/a.md.fm.spo")).unwrap();
+        index.write().unwrap();
+        let tree = repo.find_tree(index.write_tree().unwrap()).unwrap();
+        let sig = git2::Signature::now("t", "t@example.invalid").unwrap();
+        repo.commit(Some("HEAD"), &sig, &sig, "one", &tree, &[]).unwrap();
+        dir
+    }
+
+    #[test]
+    fn a_clean_tree_has_no_unstaged_extracts() {
+        let dir = repo();
+        assert!(unstaged_extracts(&dir.0).is_empty());
+    }
+
+    #[test]
+    fn an_extract_rewritten_but_not_staged_is_named() {
+        let dir = repo();
+        let p = dir.0.join(".lex/extract/Soul/Note/a.md.fm.spo");
+        // Same length as the committed bytes: a size-only check would miss it.
+        std::fs::write(&p, "soul.Note.title | hasValue | two\n").unwrap();
+        assert_eq!(unstaged_extracts(&dir.0), vec![".lex/extract/Soul/Note/a.md.fm.spo".to_string()]);
+        // Staging it clears the gate.
+        assert!(Command::new("git").args(["add", "--", ".lex/extract/"])
+            .current_dir(&dir.0).status().unwrap().success());
+        assert!(unstaged_extracts(&dir.0).is_empty());
+    }
+
+    #[test]
+    fn changes_outside_the_extract_folder_are_not_the_gates_business() {
+        let dir = repo();
+        std::fs::write(dir.0.join("README.md"), "hello\n").unwrap();
+        assert!(unstaged_extracts(&dir.0).is_empty());
+    }
 }
