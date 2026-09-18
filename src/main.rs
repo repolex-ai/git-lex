@@ -157,6 +157,9 @@ enum Commands {
         /// nothing. Exit 0 means a real save would pass its gates.
         #[arg(long)]
         dry_run: bool,
+        /// Do not bump updatedDate on existing documents (useful for mechanical migrations and bulk sweeps)
+        #[arg(long)]
+        no_restamp: bool,
     },
     /// Remove .lex/ entirely (content files and git history are preserved).
     Nuke,
@@ -378,7 +381,7 @@ fn main() {
         Commands::Init { directory, kit } => init::cmd_init(directory, kit),
         Commands::Create { doctype, instance_id, list, json } => create::cmd_create(doctype.as_deref(), instance_id.as_deref(), list, json),
         Commands::List { json } => create::cmd_list(json),
-        Commands::Save { message, dry_run } => save::cmd_save(&message, dry_run),
+        Commands::Save { message, dry_run, no_restamp } => save::cmd_save(&message, dry_run, no_restamp),
         Commands::Query { query, json } => query::cmd_query(query, json),
         Commands::Hook { event } => {
             match event.as_str() {
