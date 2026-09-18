@@ -620,7 +620,7 @@ pub fn detect_runtime_substrate(root: &std::path::Path) -> Option<String> {
         || std::env::var("CLAUDE_PROJECT_DIR").is_ok()
     {
         return Some(claude_session_model().unwrap_or_else(|| {
-            eprintln!("warning: could not read the Claude session log; stamping substrate as claude-opus-5");
+            eprintln!("warning: could not read the Claude session log; writing substrate: claude-opus-5 into the documents this save touches");
             "claude-opus-5".to_string()
         }));
     }
@@ -742,8 +742,8 @@ fn stamp_dates_for_staged_changes() {
             continue;
         };
         if std::fs::write(path, &new_content).is_err() {
-            eprintln!("warning: could not stamp updatedDate/substrate into {} — the \
-                       file commits unstamped", path.display());
+            eprintln!("warning: could not write createdDate/updatedDate/substrate into {} — \
+                       the file commits with the dates it already had", path.display());
             continue;
         }
         to_stage.push(path.to_path_buf());
@@ -757,15 +757,15 @@ fn stamp_dates_for_staged_changes() {
     // committed sidecar and document disagree forever. Fail the commit
     // instead, same posture as staging .lex/extract/ below.
     if let Err(e) = stage_paths(&root, &to_stage) {
-        eprintln!("fatal: could not stage the {} dated document(s): {e}", to_stage.len());
+        eprintln!("fatal: could not stage the {} document(s) whose dates were just written: {e}", to_stage.len());
         exit(1);
     }
     if stamped > 0 {
         if born > 0 {
-            println!("Dated: {} document(s) → updatedDate {} ({} new → createdDate too)",
-                stamped, now, born);
+            println!("Wrote updatedDate: {} into {} document(s); {} of them are new, so createdDate too",
+                now, stamped, born);
         } else {
-            println!("Dated: {} document(s) → updatedDate {}", stamped, now);
+            println!("Wrote updatedDate: {} into {} document(s)", now, stamped);
         }
     }
 }
