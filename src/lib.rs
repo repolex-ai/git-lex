@@ -271,7 +271,7 @@ pub fn eval_query_union_at<'a>(
 /// file (each with different whitespace/quoting/list rules — an observed
 /// drift source) collapsed into this struct. Read side only: writers still
 /// edit the file textually to preserve comments and ordering.
-#[derive(Debug, Default, serde::Deserialize)]
+#[derive(Debug, Default, Clone, serde::Deserialize)]
 pub struct RepoYml {
     #[serde(default)]
     pub name: Option<String>,
@@ -318,7 +318,36 @@ impl RepoYml {
     }
 
     /// [`RepoYml::load`] for an explicit file path.
+    ///
+    /// Memoized on the file's fingerprint (size + mtime), the same way the
+    /// shapes reader is: the emitters ask "which kits are installed?" once
+    /// per sidecar line, and parsing this YAML on every ask was 40% of a
+    /// full extraction walk (13,000 documents, 2026-09-18). A rewrite —
+    /// kit-add, kit-update, init — changes the fingerprint, so the next
+    /// read parses again; a plain cache would hand kit-update the list it
+    /// had just changed. The cost of the check is one stat.
     pub fn load_path(path: &std::path::Path) -> RepoYml {
+        use std::sync::{Mutex, OnceLock};
+        type Fingerprint = Option<(u64, Option<std::time::SystemTime>)>;
+        type Memo = std::collections::HashMap<PathBuf, (Fingerprint, RepoYml)>;
+        static MEMO: OnceLock<Mutex<Memo>> = OnceLock::new();
+
+        let fingerprint: Fingerprint =
+            fs::metadata(path).ok().map(|m| (m.len(), m.modified().ok()));
+        let memo = MEMO.get_or_init(|| Mutex::new(std::collections::HashMap::new()));
+        if let Some((seen, cached)) = memo.lock().unwrap().get(path)
+            && *seen == fingerprint
+        {
+            return cached.clone();
+        }
+
+        let parsed = Self::parse_path(path);
+        memo.lock().unwrap().insert(path.to_path_buf(), (fingerprint, parsed.clone()));
+        parsed
+    }
+
+    /// The uncached read behind [`RepoYml::load_path`].
+    fn parse_path(path: &std::path::Path) -> RepoYml {
         let Ok(content) = fs::read_to_string(path) else {
             return RepoYml::default();
         };

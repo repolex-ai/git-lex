@@ -737,7 +737,7 @@ fn stamp_dates_for_staged_changes() {
     // a sweep that touched every document in a 13,000-document soul spent
     // nine minutes in the hook, nearly all of it spawning git (2026-09-18).
     let head_repo = git2::Repository::open(&root).ok();
-    let head_tree = head_repo.as_ref().and_then(|r| r.head().ok()?.peel_to_tree().ok());
+    let head_blobs = head_repo.as_ref().map(head_blob_ids).unwrap_or_default();
     // Stamped documents are re-staged in ONE `git add` after the loop, so
     // the commit carries the stamped bytes.
     let mut to_stage: Vec<std::path::PathBuf> = Vec::new();
@@ -810,7 +810,7 @@ fn stamp_dates_for_staged_changes() {
         // stays machine-maintained everywhere else. REMOVE once the
         // fleet is backfilled; until then this is the one sanctioned
         // hole in "do not hand-edit".
-        if status.starts_with('M') && only_date_updated_changed(head_repo.as_ref(), head_tree.as_ref(), path, &content, &prefix) {
+        if status.starts_with('M') && only_date_updated_changed(head_repo.as_ref(), &head_blobs, path, &content, &prefix) {
             kept += 1;
             continue;
         }
@@ -909,10 +909,12 @@ impl DateKeys {
     }
 }
 
-/// Stage `paths` with ONE `git add`, the list fed NUL-separated on stdin
-/// (`--pathspec-from-file=-`), so a save that dated 13,000 documents costs
-/// one process, not 13,000. Nothing to stage is Ok. Err carries git's
-/// own words.
+/// Stage `paths` (repo-relative) with ONE `git update-index --add`, the
+/// list fed NUL-separated on stdin, so a save that dated 13,000 documents
+/// costs one process, not 13,000. `update-index` takes exact paths;
+/// `git add` treats each as a pattern and matches it against every index
+/// entry, which was 13,000 × 29,000 comparisons — 20 seconds — at that
+/// size. Nothing to stage is Ok. Err carries git's own words.
 fn stage_paths(root: &std::path::Path, paths: &[std::path::PathBuf]) -> Result<(), String> {
     use std::io::Write;
     if paths.is_empty() {
@@ -924,7 +926,7 @@ fn stage_paths(root: &std::path::Path, paths: &[std::path::PathBuf]) -> Result<(
         list.push(0);
     }
     let mut child = Command::new("git")
-        .args(["add", "--pathspec-from-file=-", "--pathspec-file-nul"])
+        .args(["update-index", "--add", "-z", "--stdin"])
         .current_dir(root)
         .stdin(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
@@ -949,9 +951,29 @@ fn stage_paths(root: &std::path::Path, paths: &[std::path::PathBuf]) -> Result<(
 /// identical once that line is dropped from both sides. Any read failure
 /// returns false: the normal stamp is the safe default, and a document
 /// with no HEAD version is new, which is not this case.
+/// Every blob in HEAD's tree, keyed by its repo-relative path — ONE walk
+/// of the tree. Looking a path up with `Tree::get_path` instead re-reads
+/// and re-hashes each folder's tree object on every call, and a folder
+/// of 7,600 documents made that 35 seconds across a 13,000-file sweep.
+/// Empty when there is no HEAD yet (unborn branch): nothing is "only a
+/// date change" then, and the normal stamp is the safe default.
+fn head_blob_ids(repo: &git2::Repository) -> std::collections::HashMap<String, git2::Oid> {
+    let mut out = std::collections::HashMap::new();
+    let Ok(tree) = repo.head().and_then(|h| h.peel_to_tree()) else { return out };
+    let _ = tree.walk(git2::TreeWalkMode::PreOrder, |dir, entry| {
+        if entry.kind() == Some(git2::ObjectType::Blob)
+            && let Some(name) = entry.name()
+        {
+            out.insert(format!("{dir}{name}"), entry.id());
+        }
+        git2::TreeWalkResult::Ok
+    });
+    out
+}
+
 fn only_date_updated_changed(
     repo: Option<&git2::Repository>,
-    head: Option<&git2::Tree<'_>>,
+    head_blobs: &std::collections::HashMap<String, git2::Oid>,
     path: &std::path::Path,
     content: &str,
     prefix: &str,
@@ -959,10 +981,10 @@ fn only_date_updated_changed(
     // Both spellings of the key are ignored, so a rename-only edit during
     // the window also counts as "nothing but the date changed".
     let keys = [format!("{prefix}.{}:", DateKeys::NEW.updated), format!("{prefix}.{}:", DateKeys::OLD.updated)];
-    // HEAD's copy, read from the tree already in hand: no process per file.
-    let (Some(repo), Some(tree)) = (repo, head) else { return false };
-    let Ok(entry) = tree.get_path(path) else { return false };
-    let Ok(blob) = repo.find_blob(entry.id()) else { return false };
+    // HEAD's copy, by id from the one tree walk: no process, no tree read.
+    let Some(repo) = repo else { return false };
+    let Some(id) = head_blobs.get(&path.to_string_lossy().to_string()) else { return false };
+    let Ok(blob) = repo.find_blob(*id) else { return false };
     let head = String::from_utf8_lossy(blob.content()).to_string();
     fn strip(s: &str, keys: &[String]) -> String {
         s.lines()
@@ -1059,7 +1081,7 @@ fn converge_plain_dates_once() {
                 converged.push(rel.to_string());
             }
     }
-    let paths: Vec<std::path::PathBuf> = converged.iter().map(|r| root.join(r)).collect();
+    let paths: Vec<std::path::PathBuf> = converged.iter().map(std::path::PathBuf::from).collect();
     if let Err(e) = stage_paths(&root, &paths) {
         eprintln!("fatal: could not stage the {} converged document(s): {e}", paths.len());
         exit(1);
@@ -1904,25 +1926,31 @@ mod staging_tests {
     }
 
     #[test]
-    fn stage_paths_reports_a_path_outside_the_repo() {
-        let (dir, _repo) = repo_with_one_commit("outside");
-        let err = stage_paths(dir.path(), &[std::path::PathBuf::from("../nowhere.md")]).unwrap_err();
+    fn stage_paths_reports_a_missing_file() {
+        let (dir, _repo) = repo_with_one_commit("missing");
+        let err = stage_paths(dir.path(), &[std::path::PathBuf::from("Soul/Note/nowhere.md")]).unwrap_err();
         assert!(err.contains("nowhere.md"), "git's own words come back: {err}");
     }
 
     #[test]
     fn only_date_updated_changed_reads_head_without_a_process() {
         let (dir, repo) = repo_with_one_commit("head");
-        let tree = repo.head().unwrap().peel_to_tree().unwrap();
+        let blobs = head_blob_ids(&repo);
+        assert_eq!(blobs.len(), 1, "one committed document, keyed by its full path: {blobs:?}");
+        assert!(blobs.contains_key("Soul/Note/a.md"));
         let path = std::path::Path::new("Soul/Note/a.md");
         let dated = "---\nsoul.Note.id: <soul/Note/a>\nsoul.Note.updatedDate: 2026-09-18T00:00:00-07:00\n---\nbody\n";
-        assert!(only_date_updated_changed(Some(&repo), Some(&tree), path, dated, "soul.Note"));
+        assert!(only_date_updated_changed(Some(&repo), &blobs, path, dated, "soul.Note"));
         let edited = "---\nsoul.Note.id: <soul/Note/a>\nsoul.Note.updatedDate: 2026-09-18T00:00:00-07:00\n---\nbody changed\n";
-        assert!(!only_date_updated_changed(Some(&repo), Some(&tree), path, edited, "soul.Note"));
+        assert!(!only_date_updated_changed(Some(&repo), &blobs, path, edited, "soul.Note"));
         // A document HEAD does not have is not this case.
-        assert!(!only_date_updated_changed(Some(&repo), Some(&tree), std::path::Path::new("Soul/Note/new.md"), dated, "soul.Note"));
+        assert!(!only_date_updated_changed(Some(&repo), &blobs, std::path::Path::new("Soul/Note/new.md"), dated, "soul.Note"));
         // No HEAD at all (unborn branch) — the normal stamp is the safe default.
-        assert!(!only_date_updated_changed(Some(&repo), None, path, dated, "soul.Note"));
+        let unborn = Tmp(std::env::temp_dir().join(format!("glx-stage-unborn-{}", std::process::id())));
+        std::fs::create_dir_all(unborn.path()).unwrap();
+        let fresh = git2::Repository::init(unborn.path()).unwrap();
+        assert!(head_blob_ids(&fresh).is_empty());
+        assert!(!only_date_updated_changed(Some(&fresh), &head_blob_ids(&fresh), path, dated, "soul.Note"));
         drop(dir);
     }
 }
