@@ -695,11 +695,10 @@ fn claude_session_model() -> Option<String> {
 /// (`__Class.md` is kit scaffold, not a document) and files with no
 /// git-lex frontmatter key (README and friends).
 ///
-/// The keys are spelled `createdDate` / `updatedDate`. A line under the
-/// retired spelling (`dateCreated` / `dateUpdated`, kit-base before 0.18)
-/// is the same key and is renamed in place — the birth date keeps its
-/// value — because leaving the old line and adding the new one would give
-/// a document two birth dates.
+/// The keys are spelled `createdDate` and `updatedDate`. A line under any
+/// other spelling is another key and is not touched: the undeclared-key
+/// warning names it at every save, and `kit-update` is what converges a
+/// soul's vocabulary.
 ///
 /// Stamped files are re-staged so the commit carries the stamped bytes.
 fn stamp_dates_for_staged_changes() {
@@ -742,9 +741,6 @@ fn stamp_dates_for_staged_changes() {
         else {
             continue;
         };
-        for (old_key, new_key) in renames_applied(&prefix, &content, &new_content) {
-            eprintln!("note: {}: `{}` is now `{}`; the key was renamed on this save", path.display(), old_key, new_key);
-        }
         if std::fs::write(path, &new_content).is_err() {
             eprintln!("warning: could not stamp updatedDate/substrate into {} — the \
                        file commits unstamped", path.display());
@@ -774,27 +770,9 @@ fn stamp_dates_for_staged_changes() {
     }
 }
 
-/// The current and the retired spelling of the two date keys.
+/// The two date keys. There is no second spelling of either.
 const CREATED: &str = "createdDate";
 const UPDATED: &str = "updatedDate";
-const OLD_CREATED: &str = "dateCreated";
-const OLD_UPDATED: &str = "dateUpdated";
-
-/// Which retired-spelling keys `after` no longer has that `before` had —
-/// the renames a stamp applied, so the author sees the rename happen
-/// rather than discovering it in a diff.
-fn renames_applied(kit_class: &str, before: &str, after: &str) -> Vec<(String, String)> {
-    let mut out = Vec::new();
-    for (from, to) in [(OLD_CREATED, CREATED), (OLD_UPDATED, UPDATED)] {
-        let old_key = format!("{kit_class}.{from}:");
-        let had = before.lines().any(|l| l.trim_start().starts_with(&old_key));
-        let has = after.lines().any(|l| l.trim_start().starts_with(&old_key));
-        if had && !has {
-            out.push((format!("{kit_class}.{from}"), format!("{kit_class}.{to}")));
-        }
-    }
-    out
-}
 
 /// Stage `paths` (repo-relative) with ONE `git update-index --add`, the
 /// list fed NUL-separated on stdin, so a save that dated 13,000 documents
@@ -872,12 +850,6 @@ fn frontmatter_kit_class(content: &str) -> Option<String> {
     None
 }
 
-/// Everything after the first `:` of a frontmatter line, so a key can be
-/// renamed while its value (and any trailing comment) stays byte-identical.
-fn line_value_part(line: &str) -> &str {
-    line.split_once(':').map(|(_, v)| v).unwrap_or("")
-}
-
 /// Pure stamping: returns the new content, or None when nothing changes.
 ///
 /// `updatedDate` is set to `now` on every call. `createdDate` is set to
@@ -886,8 +858,7 @@ fn line_value_part(line: &str) -> &str {
 /// is set when given. A present key line is rewritten whole (`key: value`;
 /// a scaffold's teaching comment retires once the machine owns the value);
 /// an absent key is inserted just above the closing `---`, createdDate
-/// before updatedDate. A line under the retired spelling is the same key
-/// and is rewritten under the current one.
+/// before updatedDate. No other key is read or written.
 fn stamp_frontmatter_dates(
     content: &str,
     kit_class: &str,
@@ -897,8 +868,6 @@ fn stamp_frontmatter_dates(
 ) -> Option<String> {
     let updated_key = format!("{kit_class}.{UPDATED}");
     let created_key = format!("{kit_class}.{CREATED}");
-    let old_updated_key = format!("{kit_class}.{OLD_UPDATED}");
-    let old_created_key = format!("{kit_class}.{OLD_CREATED}");
     let substrate_key = format!("{kit_class}.substrate");
 
     let mut lines: Vec<String> = content.lines().map(str::to_string).collect();
@@ -913,17 +882,15 @@ fn stamp_frontmatter_dates(
     let mut found_substrate = false;
     for line in &mut lines[1..close] {
         let key = line.trim_start().split(':').next().unwrap_or("").trim();
-        let wanted = if key == updated_key || key == old_updated_key {
+        let wanted = if key == updated_key {
             found_updated = true;
             format!("{updated_key}: {now}")
-        } else if key == created_key || key == old_created_key {
+        } else if key == created_key {
             found_created = true;
             if is_new {
                 format!("{created_key}: {now}")
-            } else if key == old_created_key {
-                // Birth date never touched; only the key spelling moves.
-                format!("{}:{}", created_key, line_value_part(line))
             } else {
+                // A modified document's birth date is never touched.
                 continue;
             }
         } else if key == substrate_key {
@@ -1216,7 +1183,7 @@ pub(crate) fn cmd_extract() {
 
 #[cfg(test)]
 mod date_stamp_tests {
-    use super::{frontmatter_kit_class, renames_applied, stamp_frontmatter_dates};
+    use super::{frontmatter_kit_class, stamp_frontmatter_dates};
 
     const NOW: &str = "2026-09-18T01:02:03-07:00";
 
@@ -1292,17 +1259,18 @@ body text stays byte-identical\n";
     }
 
     #[test]
-    fn retired_spelling_is_renamed_in_place_and_birth_value_kept() {
+    fn any_other_key_is_left_exactly_as_it_is() {
+        // The retired spellings are just other keys now. The stamp does
+        // not read them, rename them or remove them; it writes its own two
+        // and leaves the document's lines alone.
         let doc = "---\nsoul.Note.noteId: \"n\"\nsoul.Note.dateCreated: 2026-07-01T08:00:00-07:00\nsoul.Note.dateUpdated: 2026-07-02T08:00:00-07:00\n---\nbody\n";
         let out = stamp_frontmatter_dates(doc, "soul.Note", NOW, None, false).unwrap();
-        assert_eq!(out, format!("---\nsoul.Note.noteId: \"n\"\nsoul.Note.createdDate: 2026-07-01T08:00:00-07:00\nsoul.Note.updatedDate: {NOW}\n---\nbody\n"));
-        assert!(!out.contains("dateCreated") && !out.contains("dateUpdated"));
-        let renames = renames_applied("soul.Note", doc, &out);
-        assert_eq!(renames, vec![
-            ("soul.Note.dateCreated".to_string(), "soul.Note.createdDate".to_string()),
-            ("soul.Note.dateUpdated".to_string(), "soul.Note.updatedDate".to_string()),
-        ]);
-        assert!(renames_applied("soul.Note", &out, &out).is_empty());
+        assert_eq!(out, format!("---\nsoul.Note.noteId: \"n\"\nsoul.Note.dateCreated: 2026-07-01T08:00:00-07:00\nsoul.Note.dateUpdated: 2026-07-02T08:00:00-07:00\nsoul.Note.updatedDate: {NOW}\n---\nbody\n"));
+        // Same document as a new file: createdDate is written too, and the
+        // old lines still stand untouched.
+        let out = stamp_frontmatter_dates(doc, "soul.Note", NOW, None, true).unwrap();
+        assert!(out.contains("soul.Note.dateCreated: 2026-07-01T08:00:00-07:00\n"));
+        assert!(out.contains(&format!("soul.Note.createdDate: {NOW}\nsoul.Note.updatedDate: {NOW}\n---\n")));
     }
 
     #[test]
