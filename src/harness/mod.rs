@@ -168,6 +168,23 @@ pub fn sync_all(root: &Path) {
 /// caller just collected it (init — repo.yml may not carry the line yet);
 /// None reads .lex/repo.yml.
 pub fn run_substrate_setup(root: &Path, agent_name: Option<&str>) {
+    // Kit-owned, substrate-independent, and not gated on identity: the
+    // union of every installed kit's `.agents/hooks.json` (#40).
+    let composed = crate::kit::compose_agents_hooks(root);
+    if composed.written {
+        println!(
+            "Composed .agents/hooks.json from {} kit(s): {}",
+            composed.kits.len(),
+            composed.kits.join(", ")
+        );
+    }
+    for (hook, kept, dropped) in &composed.collisions {
+        eprintln!(
+            "⚠ kit CONFLICT: hook `{hook}` is declared by both {dropped} and {kept} — \
+             {kept}'s entry is in .agents/hooks.json, {dropped}'s is not. Two kits must \
+             not use one hook name. Report it to the kit owners."
+        );
+    }
     let name = match agent_name {
         Some(n) => n.trim().to_string(),
         None => git_lex::RepoYml::load(root)

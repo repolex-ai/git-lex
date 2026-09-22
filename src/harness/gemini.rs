@@ -51,14 +51,8 @@ pub fn setup_substrate_gemini(root: &Path, _agent_name: &str) {
     let _ = fs::create_dir_all(&hooks_dir);
     let _ = fs::create_dir_all(&rules_dir);
 
-    let mut merged_hooks = serde_json::Map::new();
-    let dst_hooks_json = agents_dir.join("hooks.json");
-    if dst_hooks_json.is_file()
-        && let Ok(content) = fs::read_to_string(&dst_hooks_json)
-            && let Ok(serde_json::Value::Object(map)) = serde_json::from_str(&content) {
-                merged_hooks = map;
-            }
-
+    // `.agents/hooks.json` itself is composed from every installed kit by
+    // `crate::kit::compose_agents_hooks`, before this runs (#40).
     let lex_kit = root.join(".lex").join("kit");
     if let Ok(entries) = fs::read_dir(&lex_kit) {
         for org_entry in entries.flatten() {
@@ -68,15 +62,6 @@ pub fn setup_substrate_gemini(root: &Path, _agent_name: &str) {
                     if !kit_agents.exists() {
                         continue;
                     }
-                    // Merge hooks.json if present
-                    let src_hooks_json = kit_agents.join("hooks.json");
-                    if src_hooks_json.is_file()
-                        && let Ok(content) = fs::read_to_string(&src_hooks_json)
-                            && let Ok(serde_json::Value::Object(map)) = serde_json::from_str(&content) {
-                                for (k, v) in map {
-                                    merged_hooks.insert(k, v);
-                                }
-                            }
                     // Copy hooks scripts
                     let src_hooks = kit_agents.join("hooks");
                     if let Ok(hook_files) = fs::read_dir(&src_hooks) {
@@ -97,11 +82,6 @@ pub fn setup_substrate_gemini(root: &Path, _agent_name: &str) {
             }
         }
     }
-
-    if !merged_hooks.is_empty()
-        && let Ok(json_str) = serde_json::to_string_pretty(&merged_hooks) {
-            let _ = fs::write(&dst_hooks_json, json_str);
-        }
 
     println!("Gemini: reconciled .agents/ customization tree");
 }

@@ -797,6 +797,10 @@ pub(crate) fn install_scaffold_files_from(kit_dir: &std::path::Path) -> usize {
             }
 
             if ft.is_file() {
+                if is_composite_hooks_file(&src) {
+                    // Composed from every kit after the copies (#40).
+                    continue;
+                }
                 fs::create_dir_all(dest.parent().unwrap_or(&dest)).ok();
                 if dest.symlink_metadata().is_ok() {
                     let dmeta = dest.symlink_metadata().ok().map(|m| m.file_type());
@@ -854,6 +858,99 @@ pub(crate) fn install_scaffold_files_from(kit_dir: &std::path::Path) -> usize {
     }
 
     count
+}
+
+/// `harness/.agents/hooks.json` in a kit: one file that more than one kit
+/// legitimately contributes to (the soul kit's recall and save hooks, the
+/// copia kit's four). It is never copied per kit; `compose_agents_hooks`
+/// writes the repo's copy from every installed kit's file (#40).
+fn is_composite_hooks_file(src: &Path) -> bool {
+    src.file_name().is_some_and(|n| n == "hooks.json")
+        && src.parent().and_then(Path::file_name).is_some_and(|n| n == ".agents")
+        && src.parent().and_then(Path::parent).and_then(Path::file_name).is_some_and(|n| n == "harness")
+}
+
+/// What `compose_agents_hooks` did. The caller prints; this reports.
+#[derive(Debug, Default, PartialEq)]
+pub(crate) struct ComposedHooks {
+    /// Kits (`org/repo`) that ship a `harness/.agents/hooks.json`.
+    pub kits: Vec<String>,
+    /// The repo's `.agents/hooks.json` was written because its bytes differed.
+    pub written: bool,
+    /// A hook name two kits both declare: (name, kit whose entry was kept,
+    /// kit whose entry was dropped). A real kit-lane conflict, unlike two
+    /// kits each shipping their own names in the same file.
+    pub collisions: Vec<(String, String, String)>,
+}
+
+/// Write `.agents/hooks.json` as the union of every installed kit's
+/// `harness/.agents/hooks.json`, keyed by hook name, names sorted (#40).
+///
+/// The file is composed fresh on every run from the kit copies under
+/// `.lex/kit/`, so a removed kit's hooks leave with it and the result does
+/// not depend on install order. Kits are visited in path order; when two
+/// declare the same hook name the later one is kept and the pair is
+/// reported. Written only when the bytes change. When no installed kit
+/// ships the file, nothing is touched.
+pub(crate) fn compose_agents_hooks(root: &Path) -> ComposedHooks {
+    let mut report = ComposedHooks::default();
+    let mut merged: std::collections::BTreeMap<String, serde_json::Value> =
+        std::collections::BTreeMap::new();
+    let mut owner: HashMap<String, String> = HashMap::new();
+
+    let mut kit_dirs: Vec<PathBuf> = Vec::new();
+    if let Ok(orgs) = fs::read_dir(root.join(".lex").join("kit")) {
+        for org in orgs.flatten() {
+            if let Ok(kits) = fs::read_dir(org.path()) {
+                kit_dirs.extend(kits.flatten().map(|k| k.path()));
+            }
+        }
+    }
+    kit_dirs.sort();
+
+    for kit_dir in kit_dirs {
+        let src = kit_dir.join("harness").join(".agents").join("hooks.json");
+        let Ok(content) = fs::read_to_string(&src) else { continue };
+        let kit = kit_dir
+            .strip_prefix(root.join(".lex").join("kit"))
+            .unwrap_or(&kit_dir)
+            .to_string_lossy()
+            .replace('\\', "/");
+        let map = match serde_json::from_str::<serde_json::Value>(&content) {
+            Ok(serde_json::Value::Object(map)) => map,
+            _ => {
+                eprintln!(
+                    "warning: {} is not a JSON object of hooks — kit {} contributes nothing to .agents/hooks.json",
+                    src.display(),
+                    kit
+                );
+                continue;
+            }
+        };
+        for (name, value) in map {
+            if let Some(prev) = owner.insert(name.clone(), kit.clone()) {
+                report.collisions.push((name.clone(), kit.clone(), prev));
+            }
+            merged.insert(name, value);
+        }
+        report.kits.push(kit);
+    }
+
+    if report.kits.is_empty() {
+        return report;
+    }
+    let Ok(mut json) = serde_json::to_string_pretty(&merged) else { return report };
+    json.push('\n');
+    let dest = root.join(".agents").join("hooks.json");
+    let unchanged = fs::read_to_string(&dest).map(|cur| cur == json).unwrap_or(false);
+    if !unchanged {
+        let _ = fs::create_dir_all(root.join(".agents"));
+        match fs::write(&dest, json) {
+            Ok(()) => report.written = true,
+            Err(e) => eprintln!("ERROR: could not write .agents/hooks.json: {e}"),
+        }
+    }
+    report
 }
 
 /// Report from `install_scaffold_files_from_skip_existing`.
@@ -1093,6 +1190,11 @@ pub(crate) fn install_scaffold_files_from_skip_existing(
             }
 
             if !ft.is_file() {
+                continue;
+            }
+            if is_composite_hooks_file(&src) {
+                // Composed from every kit after the copies (#40): a per-kit
+                // copy here would make the last kit win by install order.
                 continue;
             }
 
@@ -1718,5 +1820,105 @@ mod kit_version_receipt_tests {
         // A nested name belongs to something else. Reading it as the kit's
         // identity would turn this gate into a source of false refusals.
         assert_eq!(declared_kit_name("init_variables:\n  name: agent_name\n"), None);
+    }
+}
+
+#[cfg(test)]
+mod compose_agents_hooks_tests {
+    use super::{compose_agents_hooks, is_composite_hooks_file};
+    use std::fs;
+    use std::path::{Path, PathBuf};
+
+    fn fresh_root(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("glx-hooks-{}-{}", tag, std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn ship(root: &Path, kit: &str, json: &str) {
+        let dir = root.join(".lex/kit").join(kit).join("harness/.agents");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("hooks.json"), json).unwrap();
+    }
+
+    #[test]
+    fn only_the_kit_hooks_file_is_composite() {
+        assert!(is_composite_hooks_file(Path::new("/r/.lex/kit/o/soul/harness/.agents/hooks.json")));
+        assert!(!is_composite_hooks_file(Path::new("/r/.lex/kit/o/soul/harness/.claude/hooks.json")));
+        assert!(!is_composite_hooks_file(Path::new("/r/.lex/kit/o/soul/harness/.agents/hooks/x.json")));
+        assert!(!is_composite_hooks_file(Path::new("/r/.lex/kit/o/soul/content/.agents/hooks.json")));
+    }
+
+    /// #40: two kits, each with its own hook names — the repo file is the
+    /// union, names sorted, whatever order the kits were installed in.
+    #[test]
+    fn two_kits_compose_into_one_file() {
+        let root = fresh_root("union");
+        ship(&root, "o/soul", r#"{"soul-save": {"Stop": [{"type": "command", "command": "git lex save"}]}}"#);
+        ship(&root, "o/copia", r#"{"copia-share": {"PreInvocation": [{"type": "command", "command": "python3 x.py"}]}}"#);
+
+        let r = compose_agents_hooks(&root);
+        assert_eq!(r.kits, vec!["o/copia", "o/soul"]);
+        assert!(r.written);
+        assert!(r.collisions.is_empty());
+        let out = fs::read_to_string(root.join(".agents/hooks.json")).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        let names: Vec<&String> = v.as_object().unwrap().keys().collect();
+        assert_eq!(names, vec!["copia-share", "soul-save"]);
+        assert!(out.ends_with('\n'));
+
+        // Same kits again: nothing to write.
+        let again = compose_agents_hooks(&root);
+        assert!(!again.written);
+        assert_eq!(fs::read_to_string(root.join(".agents/hooks.json")).unwrap(), out);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// A kit that leaves takes its hooks with it: the file is composed
+    /// from what is installed now, not merged onto what was there.
+    #[test]
+    fn a_removed_kit_leaves_the_file() {
+        let root = fresh_root("removed");
+        ship(&root, "o/soul", r#"{"soul-save": {}}"#);
+        ship(&root, "o/copia", r#"{"copia-share": {}}"#);
+        compose_agents_hooks(&root);
+        fs::remove_dir_all(root.join(".lex/kit/o/copia")).unwrap();
+
+        let r = compose_agents_hooks(&root);
+        assert!(r.written);
+        let v: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(root.join(".agents/hooks.json")).unwrap()).unwrap();
+        let names: Vec<&String> = v.as_object().unwrap().keys().collect();
+        assert_eq!(names, vec!["soul-save"]);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// Two kits declaring ONE hook name is the real conflict: reported by
+    /// name with both kits, the later kit in path order kept.
+    #[test]
+    fn a_shared_hook_name_is_reported() {
+        let root = fresh_root("collide");
+        ship(&root, "o/a-kit", r#"{"recall": {"from": "a"}}"#);
+        ship(&root, "o/b-kit", r#"{"recall": {"from": "b"}}"#);
+
+        let r = compose_agents_hooks(&root);
+        assert_eq!(r.collisions, vec![("recall".to_string(), "o/b-kit".to_string(), "o/a-kit".to_string())]);
+        let v: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(root.join(".agents/hooks.json")).unwrap()).unwrap();
+        assert_eq!(v["recall"]["from"], "b");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// No installed kit ships the file: nothing is created or touched.
+    #[test]
+    fn no_kit_file_means_no_repo_file() {
+        let root = fresh_root("none");
+        fs::create_dir_all(root.join(".lex/kit/o/plain/harness/.claude")).unwrap();
+        let r = compose_agents_hooks(&root);
+        assert!(r.kits.is_empty());
+        assert!(!r.written);
+        assert!(!root.join(".agents").exists());
+        let _ = fs::remove_dir_all(&root);
     }
 }
