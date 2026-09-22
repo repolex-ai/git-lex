@@ -770,6 +770,7 @@ dependencies = [
  "clap_mangen",
  "form_urlencoded",
  "git2",
+ "libc",
  "oxigraph",
  "rudof_rdf",
  "serde",

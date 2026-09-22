@@ -276,6 +276,7 @@ pub(crate) use git_lex::BASE_KIT;
 // ─── main ──────────────────────────────────────────────────────
 
 fn main() {
+    git_lex::exit_quietly_on_closed_pipe();
     // Bare `git lex --help` is answered by git via man(1), not by this
     // binary — keep the man page converged so that path works (src/man.rs).
     man::converge(<Cli as clap::CommandFactory>::command());

@@ -28,10 +28,14 @@ fn main() {
             serve(true)
         }
         ["stop"] => {
+            git_lex::exit_quietly_on_closed_pipe();
             stop_all();
             0
         }
-        ["status"] => status(),
+        ["status"] => {
+            git_lex::exit_quietly_on_closed_pipe();
+            status()
+        }
         ["worker", path] => worker(path),
         _ => {
             eprintln!("usage: gitlexd | gitlexd start | gitlexd restart | gitlexd stop | gitlexd status");

@@ -2020,3 +2020,19 @@ mod registry_fold_tests {
         assert!(repos.iter().any(|r| r["path"] == "/gone/C"), "a dead row stays: skipped, not deleted");
     }
 }
+
+/// Let a closed pipe end the process quietly, the way every other Unix
+/// command does. Rust arranges for SIGPIPE to be ignored, so a command
+/// whose reader has gone away (`git lex query ... | head`) would instead
+/// panic on its next print with "failed printing to stdout: Broken pipe".
+/// Called first thing by the command-line binaries; never by the daemon
+/// while it serves (its sockets do not raise SIGPIPE, and its stdout is
+/// not a pipe anyone closes).
+pub fn exit_quietly_on_closed_pipe() {
+    #[cfg(unix)]
+    // SAFETY: resetting a signal disposition to its default, before any
+    // thread is spawned, with no handler state to race.
+    unsafe {
+        libc::signal(libc::SIGPIPE, libc::SIG_DFL);
+    }
+}
