@@ -57,8 +57,10 @@ at a plain terminal, the terminal's. From there: the git root, then the
 first commit hash. `git lex direct`, by contrast, follows the shell's
 current directory and needs no gitlexd.
 
-A repository initialized after gitlexd started is not held until
-`gitlexd restart`; `git lex sync` says so and syncs in process meanwhile.
+A repository initialized after gitlexd started joins on the first save,
+sync, or query that names it: `git lex init` registers it, and a request
+for a repository gitlexd does not hold makes it read the registry again.
+No restart.
 
 ## HTTP interface
 

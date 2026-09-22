@@ -136,7 +136,7 @@ fn serve(after_stop: bool) -> i32 {
     if let Some(p) = daemon.log_path() {
         daemon.log(&format!("gitlexd {} starting; log: {}", env!("CARGO_PKG_VERSION"), p.display()));
     }
-    for s in &daemon.souls {
+    for s in daemon.souls() {
         let st = s.status();
         daemon.log(&format!(
             "{} {} {}{}",

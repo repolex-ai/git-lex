@@ -110,7 +110,9 @@ pub enum FindError {
 }
 
 pub struct Daemon {
-    pub souls: Vec<Arc<Soul>>,
+    /// Every soul held, in registry order. Behind a lock because a soul
+    /// registered after start joins on the first request that names it.
+    souls: std::sync::RwLock<Vec<Arc<Soul>>>,
     pub started: Instant,
     /// The binary to run as the sync worker: this executable.
     worker_exe: PathBuf,
@@ -141,42 +143,80 @@ impl Daemon {
             None => None,
         };
         let d = Daemon {
-            souls: Vec::new(),
+            souls: std::sync::RwLock::new(Vec::new()),
             started: Instant::now(),
             worker_exe,
             log_file: Mutex::new(log_file),
             log_path,
             syncs: Semaphore::new(PARALLEL_SYNCS),
         };
-        let mut souls: Vec<Arc<Soul>> = Vec::new();
         for entry in crate::registry_entries() {
-            let path = entry.path;
-            let genesis = match entry.genesis.or_else(|| crate::git::genesis_sha_at(&path)) {
-                Some(g) => g,
-                None => {
-                    d.log(&format!("skip {}: no first commit (nothing committed yet)", path.display()));
-                    continue;
-                }
-            };
-            if let Some(dup) = souls.iter().find(|s| s.genesis == genesis) {
-                d.log(&format!(
-                    "skip {}: same first commit as {} (a clone; one store per soul)",
-                    path.display(),
-                    dup.path.display()
-                ));
+            d.adopt(entry);
+        }
+        Ok(d)
+    }
+
+    /// A snapshot of the souls held right now.
+    pub fn souls(&self) -> Vec<Arc<Soul>> {
+        self.souls.read().unwrap().clone()
+    }
+
+    /// The first commit that keys a registry entry's soul, if it has one.
+    fn genesis_of(entry: &crate::RegistryEntry) -> Option<String> {
+        entry.genesis.clone().or_else(|| crate::git::genesis_sha_at(&entry.path))
+    }
+
+    /// Take one registry entry in: open its store (if it has one) and add
+    /// it to the souls held. Says why when it cannot. Returns the soul when
+    /// it was added; None when skipped.
+    fn adopt(&self, entry: crate::RegistryEntry) -> Option<Arc<Soul>> {
+        let path = entry.path.clone();
+        let Some(genesis) = Self::genesis_of(&entry) else {
+            self.log(&format!("skip {}: no first commit (nothing committed yet)", path.display()));
+            return None;
+        };
+        let mut souls = self.souls.write().unwrap();
+        if let Some(dup) = souls.iter().find(|s| s.genesis == genesis) {
+            self.log(&format!(
+                "skip {}: same first commit as {} (a clone; one store per soul)",
+                path.display(),
+                dup.path.display()
+            ));
+            return None;
+        }
+        let name = crate::RepoYml::load(&path).name;
+        let (store, open_error) = match open_existing(&path) {
+            Ok(s) => (s, None),
+            Err(e) => {
+                self.log(&format!("{} store failed to open: {e}", &genesis[..8]));
+                (None, Some(e))
+            }
+        };
+        let soul = Arc::new(Soul::new(genesis, path, name, store, open_error));
+        souls.push(Arc::clone(&soul));
+        Some(soul)
+    }
+
+    /// Read the registry again and take in every repository registered
+    /// since the last look, starting its loops. Called when a request names
+    /// a soul that is not held: `git lex init` registers the repository and
+    /// the first save, sync or query after it lands here, so a new
+    /// repository needs no restart (goodlux, 2026-09-22). Returns how many
+    /// joined.
+    pub fn refresh(self: &Arc<Self>) -> usize {
+        let held: Vec<String> = self.souls().iter().map(|s| s.genesis.clone()).collect();
+        let mut joined = 0;
+        for entry in crate::registry_entries() {
+            if Self::genesis_of(&entry).is_some_and(|g| held.contains(&g)) {
                 continue;
             }
-            let name = crate::RepoYml::load(&path).name;
-            let (store, open_error) = match open_existing(&path) {
-                Ok(s) => (s, None),
-                Err(e) => {
-                    d.log(&format!("{} store failed to open: {e}", &genesis[..8]));
-                    (None, Some(e))
-                }
-            };
-            souls.push(Arc::new(Soul::new(genesis, path, name, store, open_error)));
+            if let Some(soul) = self.adopt(entry) {
+                self.log(&format!("{} {} joined (registered after start)", soul.short(), soul.path.display()));
+                self.spawn_soul_loops(&soul);
+                joined += 1;
+            }
         }
-        Ok(Daemon { souls, ..d })
+        joined
     }
 
     pub fn log_path(&self) -> Option<&Path> {
@@ -196,7 +236,8 @@ impl Daemon {
 
     /// The soul whose genesis hash starts with `prefix`.
     pub fn find(&self, prefix: &str) -> Result<Arc<Soul>, FindError> {
-        let hits: Vec<&Arc<Soul>> = self.souls.iter().filter(|s| s.genesis.starts_with(prefix)).collect();
+        let souls = self.souls.read().unwrap();
+        let hits: Vec<&Arc<Soul>> = souls.iter().filter(|s| s.genesis.starts_with(prefix)).collect();
         match hits.as_slice() {
             [one] => Ok(Arc::clone(one)),
             [] => Err(FindError::NotFound),
@@ -207,10 +248,14 @@ impl Daemon {
     /// Start the per-soul sync loops and HEAD watchers. The watcher's first
     /// reading is the catch-up: a store behind its HEAD syncs at start.
     pub fn spawn_loops(self: &Arc<Self>) {
-        for soul in &self.souls {
-            tokio::spawn(sync_loop(Arc::clone(self), Arc::clone(soul)));
-            tokio::spawn(watch_loop(Arc::clone(soul)));
+        for soul in self.souls() {
+            self.spawn_soul_loops(&soul);
         }
+    }
+
+    fn spawn_soul_loops(self: &Arc<Self>, soul: &Arc<Soul>) {
+        tokio::spawn(sync_loop(Arc::clone(self), Arc::clone(soul)));
+        tokio::spawn(watch_loop(Arc::clone(soul)));
     }
 
     /// One sync of one soul, as a worker process. Holds the store's write

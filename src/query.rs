@@ -341,11 +341,6 @@ pub(crate) fn cmd_direct(query: String, json: bool) {
     );
 }
 
-/// Scaffold the default stored queries into `.lex/query/` — ONLY when the
-/// folder does not exist yet. A folder that exists is the operator's,
-/// whatever is or isn't in it; re-running init/kit-update never overwrites
-/// or re-adds. (Soul-kit override — `Soul/Query/` replacing this folder
-/// wholesale — is the kit's move, not built here.)
 // ─── git lex query: the soul's graph, through gitlexd ─────────────────
 
 /// Ask gitlexd for the soul this session is bound to. The soul is resolved
@@ -490,6 +485,11 @@ pub(crate) fn print_w3c_table(body: &str) -> usize {
     rows.len()
 }
 
+/// Scaffold the default stored queries into `.lex/query/` — ONLY when the
+/// folder does not exist yet. A folder that exists is the operator's,
+/// whatever is or isn't in it; re-running init/kit-update never overwrites
+/// or re-adds. (Soul-kit override — `Soul/Query/` replacing this folder
+/// wholesale — is the kit's move, not built here.)
 pub(crate) fn scaffold_default_queries(root: &std::path::Path) {
     let dir = git_lex::layout::query_dir(root);
     if dir.exists() {

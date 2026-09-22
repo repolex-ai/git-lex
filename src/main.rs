@@ -342,7 +342,7 @@ fn main() {
 
 /// Sync this repo's store. gitlexd, when it runs, is the store's only
 /// writer, so the work is handed to it and waited for; a repo gitlexd does
-/// not hold (registered after it started) syncs here. Without gitlexd the
+/// not hold (not in the registry) syncs here. Without gitlexd the
 /// engine runs in this process, as it always has.
 fn cmd_sync() {
     let root = require_git_root();
@@ -360,7 +360,7 @@ fn cmd_sync() {
                     return;
                 }
                 Err(e) if e.starts_with("no soul with first commit") => {
-                    eprintln!("gitlexd is running but does not hold this repo yet (it reads the registry at start; `gitlexd restart` picks it up). Syncing here.");
+                    eprintln!("gitlexd is running but does not hold this repo (it is not in ~/.lex/repos.json, or has no first commit). Syncing here.");
                 }
                 Err(e) => {
                     eprintln!("gitlexd could not sync this repo: {e}");

@@ -26,8 +26,15 @@ fn err(status: StatusCode, msg: String) -> Response {
     (status, Json(serde_json::json!({ "error": msg }))).into_response()
 }
 
-fn find(d: &Daemon, genesis: &str) -> Result<Arc<Soul>, Box<Response>> {
-    d.find(genesis).map_err(|e| Box::new(match e {
+/// The soul a request names. A miss looks at the registry once more
+/// before it is a miss: a repository initialized after gitlexd started
+/// joins here, on the first request that names it.
+fn find(d: &Arc<Daemon>, genesis: &str) -> Result<Arc<Soul>, Box<Response>> {
+    let found = match d.find(genesis) {
+        Err(FindError::NotFound) if d.refresh() > 0 => d.find(genesis),
+        other => other,
+    };
+    found.map_err(|e| Box::new(match e {
         FindError::NotFound => err(
             StatusCode::NOT_FOUND,
             format!("no soul with first commit {genesis} — GET /souls lists the ones gitlexd holds"),
@@ -202,7 +209,7 @@ async fn sync(
 }
 
 async fn souls(State(d): State<Arc<Daemon>>) -> Json<serde_json::Value> {
-    Json(serde_json::json!({ "souls": d.souls.iter().map(|s| soul_json(s)).collect::<Vec<_>>() }))
+    Json(serde_json::json!({ "souls": d.souls().iter().map(|s| soul_json(s)).collect::<Vec<_>>() }))
 }
 
 async fn health(State(d): State<Arc<Daemon>>) -> Json<serde_json::Value> {
@@ -212,8 +219,8 @@ async fn health(State(d): State<Arc<Daemon>>) -> Json<serde_json::Value> {
         "version": env!("CARGO_PKG_VERSION"),
         "uptime_secs": d.started.elapsed().as_secs(),
         "port": super::PORT,
-        "souls": d.souls.len(),
-        "syncing": d.souls.iter().filter(|s| s.status().syncing).count(),
+        "souls": d.souls().len(),
+        "syncing": d.souls().iter().filter(|s| s.status().syncing).count(),
     }))
 }
 
@@ -238,7 +245,7 @@ pub async fn serve(d: Arc<Daemon>, listener: std::net::TcpListener) -> Result<()
         .map_err(|e| format!("cannot make the listener non-blocking: {e}"))?;
     let listener = tokio::net::TcpListener::from_std(listener)
         .map_err(|e| format!("cannot hand the listener to the runtime: {e}"))?;
-    d.log(&format!("gitlexd listening on {} with {} soul(s)", super::base_url(), d.souls.len()));
+    d.log(&format!("gitlexd listening on {} with {} soul(s)", super::base_url(), d.souls().len()));
     d.spawn_loops();
     let app = router(Arc::clone(&d));
     axum::serve(listener, app)
