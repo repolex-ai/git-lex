@@ -51,7 +51,7 @@ fn main() {
 /// be edited without rebuilding the binary.
 fn resolve_www_dir() -> PathBuf {
     find_git_root()
-        .map(|r| r.join(".lex").join("www"))
+        .map(|r| git_lex::layout::www_dir(&r))
         .unwrap_or_else(|| PathBuf::from(".lex/www"))
 }
 
@@ -570,7 +570,7 @@ mod query_server {
         let Some(root) = find_git_root() else {
             return err(StatusCode::SERVICE_UNAVAILABLE, "not in a git repo".to_string());
         };
-        let repo_yml = root.join(".lex").join("repo.yml");
+        let repo_yml = git_lex::layout::repo_yml(&root);
         Json(InfoResponse {
             root: root.display().to_string(),
             kit: git_lex::get_kit(),

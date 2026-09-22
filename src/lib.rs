@@ -3,6 +3,7 @@
 //! Used by both `git-lex` (the CLI) and `git-lex-serve` (the server binary).
 
 pub mod clock;
+pub mod layout;
 
 use oxigraph::store::Store;
 use std::fs;
@@ -68,10 +69,10 @@ pub fn open_store_read_only() -> Option<Store> {
     open_store_read_only_at(&find_git_root()?)
 }
 
-/// Store dir for an EXPLICIT repo root (multi-repo servers) — the single
-/// authority for the `.lex/_ignore/oxigraph` layout.
+/// Store dir for an EXPLICIT repo root (multi-repo servers). The layout
+/// itself is spelled in `layout`.
 pub fn store_path_at(root: &std::path::Path) -> PathBuf {
-    root.join(".lex").join("_ignore").join("oxigraph")
+    crate::layout::store_dir(root)
 }
 
 /// Pre-pocket store dir (`.git/lex/oxigraph`). TRANSITIONAL: exists only as
@@ -316,7 +317,7 @@ impl RepoYml {
     /// that exists but is not valid YAML WARNS loudly and returns Default —
     /// never a silent misread.
     pub fn load(root: &std::path::Path) -> RepoYml {
-        Self::load_path(&root.join(".lex").join("repo.yml"))
+        Self::load_path(&crate::layout::repo_yml(root))
     }
 
     /// [`RepoYml::load`] for an explicit file path.
@@ -827,7 +828,7 @@ pub fn registry_repos() -> Vec<PathBuf> {
     entries
         .into_iter()
         .map(|(p, _)| PathBuf::from(p))
-        .filter(|p| p.join(".lex").is_dir())
+        .filter(|p| crate::layout::lex_dir(p).is_dir())
         .collect()
 }
 
@@ -917,7 +918,7 @@ pub fn installed_kit_specs(root: &std::path::Path) -> Vec<String> {
 /// behind by a removed kit is not in repo.yml, so it is not here, so nothing
 /// reads it.
 pub fn installed_ontology_dirs(root: &std::path::Path) -> Vec<(String, PathBuf)> {
-    let ont_root = root.join(".lex").join("ontology");
+    let ont_root = crate::layout::ontology_dir(root);
     let mut out: Vec<(String, PathBuf)> = installed_kit_specs(root)
         .iter()
         .map(|spec| {
@@ -985,7 +986,7 @@ pub fn installed_shape_files(root: &std::path::Path) -> Vec<PathBuf> {
 /// `.lex/kit/{org}/{repo}/`.
 pub fn kit_install_dir_for_spec(root: &std::path::Path, spec: &str) -> PathBuf {
     let (org, repo, _) = resolve_kit_spec(spec);
-    root.join(".lex").join("kit").join(&org).join(&repo)
+    crate::layout::kit_dir(root, &org, &repo)
 }
 
 /// THE canonical install path for a static kit's ontology TTL, relative to the
@@ -1005,7 +1006,7 @@ pub fn kit_install_dir_for_spec(root: &std::path::Path, spec: &str) -> PathBuf {
 /// forcing every consumer to carry a fallback chain. One pinned path ends that.)
 pub fn canonical_kit_ontology_path(root: &std::path::Path, spec: &str) -> PathBuf {
     let (_, _, short) = resolve_kit_spec(spec);
-    root.join(".lex")
+    crate::layout::lex_dir(root)
         .join("ontology")
         .join(&short)
         .join(format!("{short}.ttl"))
@@ -1127,11 +1128,8 @@ pub fn explain_unbound_prefix(prefixed_query: &str, err: &str) -> Option<String>
 /// rather than silently none.
 fn kit_prefix_binding(root: &std::path::Path, spec: &str) -> Option<(String, String)> {
     let (_, _, short) = resolve_kit_spec(spec);
-    let shapes_path = root
-        .join(".lex")
-        .join("ontology")
-        .join(&short)
-        .join(format!("{}-shapes.ttl", short));
+    let shapes_path =
+        crate::layout::kit_ontology_dir(root, &short).join(format!("{}-shapes.ttl", short));
     if let Ok(ttl) = fs::read_to_string(&shapes_path)
         && let Some((pname, ns)) = extract_kit_prefix(&ttl, &short) {
             return Some((format!("{}:", pname), ns));
@@ -1748,7 +1746,7 @@ mod kit_prefix_binding_tests {
     fn fake_root(tag: &str, domain: &str, optional: &[&str], installed: &[&str]) -> PathBuf {
         let root = std::env::temp_dir().join(format!("gl-prefix-{}-{}", tag, std::process::id()));
         let _ = fs::remove_dir_all(&root);
-        fs::create_dir_all(root.join(".lex")).unwrap();
+        fs::create_dir_all(crate::layout::lex_dir(&root)).unwrap();
         let mut yml = format!("name: t\nkit: repolex-ai/git-lex-kit-{}\n", domain);
         if !optional.is_empty() {
             yml.push_str("optional_kits:\n");
@@ -1756,9 +1754,9 @@ mod kit_prefix_binding_tests {
                 yml.push_str(&format!("  - repolex-ai/git-lex-kit-{}\n", o));
             }
         }
-        fs::write(root.join(".lex").join("repo.yml"), yml).unwrap();
+        fs::write(crate::layout::repo_yml(&root), yml).unwrap();
         for i in installed {
-            fs::create_dir_all(root.join(".lex").join("ontology").join(i)).unwrap();
+            fs::create_dir_all(crate::layout::kit_ontology_dir(&root, i)).unwrap();
         }
         root
     }
@@ -1807,12 +1805,12 @@ mod installed_kits_tests {
         let root = std::env::temp_dir().join(format!("glx-installed-{}-{}", tag, std::process::id()));
         let _ = fs::remove_dir_all(&root);
         for f in folders {
-            let dir = root.join(".lex").join("ontology").join(f);
+            let dir = crate::layout::kit_ontology_dir(&root, f);
             fs::create_dir_all(&dir).unwrap();
             fs::write(dir.join(format!("{f}.ttl")), "# vocabulary").unwrap();
             fs::write(dir.join(format!("{f}-shapes.ttl")), "# shapes").unwrap();
         }
-        fs::write(root.join(".lex").join("repo.yml"), repo_yml).unwrap();
+        fs::write(crate::layout::repo_yml(&root), repo_yml).unwrap();
         root
     }
 

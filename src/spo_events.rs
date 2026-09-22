@@ -785,7 +785,7 @@ pub(crate) fn derive_source_document(sidecar_rel_path: &str) -> Option<String> {
 /// orphan's facts honestly. Unknown .spo suffixes are left untouched
 /// (derive_source_document returns None — never guess an attribution).
 pub(crate) fn remove_orphaned_sidecars(root: &std::path::Path) -> Vec<String> {
-    let extract_root = root.join(".lex").join("extract");
+    let extract_root = git_lex::layout::extract_dir(root);
     let mut removed = Vec::new();
     let mut stack = vec![extract_root];
     while let Some(dir) = stack.pop() {

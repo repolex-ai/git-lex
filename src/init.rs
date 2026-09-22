@@ -69,7 +69,7 @@ pub(crate) fn cmd_init(directory: Option<String>, kit: Option<String>) {
     let (org, repo, kit_short) = resolve_kit_spec(kit_name);
     let kit_spec = format!("{}/{}", org, repo);
 
-    let lex_dir = root.join(".lex");
+    let lex_dir = git_lex::layout::lex_dir(&root);
 
     // Carry-over on re-init: if repo.yml already exists, stash its fields so
     // we can reuse previously-collected init variables (agent_name, etc.)

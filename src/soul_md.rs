@@ -228,7 +228,7 @@ mod tests {
 
     #[test]
     fn heals_wrong_value_and_reports_previous() {
-        let content = format!("---\nsoul.Soul.soulId: deadbeef\n---\n\nbody\n");
+        let content = "---\nsoul.Soul.soulId: deadbeef\n---\n\nbody\n".to_string();
         let (out, prev) = healed_content(&content, SHA).expect("should heal");
         assert_eq!(prev.as_deref(), Some("deadbeef"));
         assert!(out.contains(&format!("soul.Soul.soulId: {}\n", SHA)));

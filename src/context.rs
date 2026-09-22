@@ -507,7 +507,7 @@ pub(crate) fn render(root: &Path) -> String {
 /// Regenerate the context file. Writes only when the bytes changed; a failure
 /// is a warning, never a reason for the calling command to fail.
 pub(crate) fn refresh(root: &Path) {
-    if !root.join(".lex").is_dir() { return; }
+    if !git_lex::layout::lex_dir(root).is_dir() { return; }
     let path = root.join(CONTEXT_FILE);
     let text = render(root);
     // TRANSITIONAL: drop the generated file under its old name. The next save
@@ -526,7 +526,7 @@ pub(crate) fn refresh(root: &Path) {
 /// `git lex --skill`: print the context for the current repo, or the manual
 /// alone outside one.
 pub(crate) fn print_skill() {
-    match git_lex::find_git_root().filter(|r| r.join(".lex").is_dir()) {
+    match git_lex::find_git_root().filter(|r| git_lex::layout::lex_dir(r).is_dir()) {
         Some(root) => print!("{}", render(&root)),
         None => print!("{MANUAL}"),
     }
@@ -583,7 +583,7 @@ git-lex:foldered a owl:AnnotationProperty .
     fn fake_root(tag: &str, installed: &[&str], leftover: &[&str]) -> PathBuf {
         let root = std::env::temp_dir().join(format!("gl-context-{tag}-{}", std::process::id()));
         let _ = fs::remove_dir_all(&root);
-        let lex = root.join(".lex");
+        let lex = git_lex::layout::lex_dir(&root);
         let put = |dir: PathBuf, name: &str, body: &str| {
             fs::create_dir_all(&dir).unwrap();
             fs::write(dir.join(name), body).unwrap();

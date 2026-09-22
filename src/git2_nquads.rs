@@ -191,7 +191,7 @@ pub(crate) fn emit_git2_nquads(nq: &mut impl NqSink) {
         nq.push_str(&format!("{ru} {RDF_TYPE} <{GITLEX_NS}Repo> {graph} .\n"));
         nq.push_str(&format!("{ru} {RDF_TYPE} <{GIT2_NS}Repository> {graph} .\n"));
         nq.push_str(&format!("{ru} <{GITLEX_NS}genesisSha> \"{genesis}\" {graph} .\n"));
-        if let Ok(content) = std::fs::read_to_string(git_root.join(".lex").join("repo.yml")) {
+        if let Ok(content) = std::fs::read_to_string(git_lex::layout::repo_yml(&git_root)) {
             let mut current_list: Option<&str> = None;
             for line in content.lines() {
                 let trimmed = line.trim();

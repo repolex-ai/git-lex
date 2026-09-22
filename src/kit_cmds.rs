@@ -34,7 +34,7 @@ fn fetch_kit_for_update(kit_spec: &str) -> bool {
         None => return false,
     };
     let (org, repo, _) = resolve_kit_spec(kit_spec);
-    let kit_dir = root.join(".lex").join("kit").join(&org).join(&repo);
+    let kit_dir = git_lex::layout::kit_dir(&root, &org, &repo);
     let _ = fs::remove_dir_all(&kit_dir);
     if fs::create_dir_all(&kit_dir).is_err() {
         return false;
@@ -364,7 +364,7 @@ pub(crate) fn collect_kits_for_update(root: &std::path::Path, target: Option<&st
 
 pub(crate) fn cmd_kit_update(kit_arg: Option<String>) {
     let root = require_git_root();
-    let lex_dir = root.join(".lex");
+    let lex_dir = git_lex::layout::lex_dir(&root);
 
     if !lex_dir.exists() {
         eprintln!("Not a git-lex repo. Run 'git lex init' first.");
@@ -413,7 +413,7 @@ pub(crate) fn cmd_kit_update(kit_arg: Option<String>) {
     let mut already_current = 0usize;
     for spec in &kits_to_fetch {
         let (org, repo, _) = resolve_kit_spec(spec);
-        let kit_dir = root.join(".lex").join("kit").join(&org).join(&repo);
+        let kit_dir = git_lex::layout::kit_dir(&root, &org, &repo);
         let before = installed_kit_sha(&kit_dir);
         let remote = remote_kit_sha(spec);
 
@@ -615,7 +615,7 @@ pub(crate) fn cmd_kit_update(kit_arg: Option<String>) {
 /// settings.json registrations get pruned by the substrate-setup pass
 /// (the file is gone → its registration reaps).
 fn reap_stale_hooks(root: &Path) {
-    let lex_dir = root.join(".lex");
+    let lex_dir = git_lex::layout::lex_dir(root);
     let mut kit_hook_names: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut reap_safe = true;
     for spec in collect_kits_for_update(root, None) {
@@ -670,13 +670,13 @@ fn sweep_legacy_layouts(root: &Path) {
             println!("Removed legacy .env — identity now lives in .claude/settings.json");
         }
 
-    let legacy_ontology = root.join(".lex").join("ontology").join("kit");
+    let legacy_ontology = git_lex::layout::kit_ontology_dir(root, "kit");
     if legacy_ontology.exists()
         && fs::remove_dir_all(&legacy_ontology).is_ok() {
             println!("Removed legacy .lex/ontology/kit/ — shapes now resolve via canonical .lex/ontology/<short>/ path");
         }
 
-    let ryml = root.join(".lex").join("repo.yml");
+    let ryml = git_lex::layout::repo_yml(root);
     if let Ok(content) = fs::read_to_string(&ryml)
         && content.lines().any(|l| l.trim_start().starts_with("link_semantics:")) {
             let cleaned: String = content
@@ -739,7 +739,7 @@ fn converge_ontology_mirror(root: &Path) {
     if !payload_dirs.is_empty() {
         let owned: std::collections::HashSet<&String> =
             payload_dirs.iter().map(|(n, _)| n).collect();
-        let ont_root = root.join(".lex").join("ontology");
+        let ont_root = git_lex::layout::ontology_dir(root);
         if let Ok(entries) = fs::read_dir(&ont_root) {
             for e in entries.filter_map(|e| e.ok()).filter(|e| e.path().is_dir()) {
                 let name = e.file_name().to_string_lossy().to_string();
@@ -989,7 +989,7 @@ fn report_tracked_engine_paths(root: &Path) {
 /// records the kit in `repo.yml`'s `optional_kits:` list.
 pub(crate) fn cmd_kit_add(kit_spec: String) {
     let root = require_git_root();
-    let lex_dir = root.join(".lex");
+    let lex_dir = git_lex::layout::lex_dir(&root);
     if !lex_dir.exists() {
         eprintln!("Not a git-lex repo. Run 'git lex init' first.");
         exit(1);
@@ -1106,7 +1106,7 @@ pub(crate) fn cmd_kit_add(kit_spec: String) {
 /// (e.g. `Innerworld/`) unless --force.
 pub(crate) fn cmd_kit_remove(kit_spec: String, force: bool) {
     let root = require_git_root();
-    let lex_dir = root.join(".lex");
+    let lex_dir = git_lex::layout::lex_dir(&root);
     if !lex_dir.exists() {
         eprintln!("Not a git-lex repo. Run 'git lex init' first.");
         exit(1);
@@ -1494,8 +1494,8 @@ mod update_scope_tests {
             std::process::id()
         ));
         let _ = fs::remove_dir_all(&dir);
-        fs::create_dir_all(dir.join(".lex")).unwrap();
-        fs::write(dir.join(".lex").join("repo.yml"), repo_yml).unwrap();
+        fs::create_dir_all(git_lex::layout::lex_dir(&dir)).unwrap();
+        fs::write(git_lex::layout::repo_yml(&dir), repo_yml).unwrap();
         dir
     }
 

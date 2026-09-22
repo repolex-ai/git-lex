@@ -117,7 +117,7 @@ pub fn auto_detect(root: &Path) -> Vec<Substrate> {
 ///
 /// Unknown substrate names in `repo.yml` are warned-on-stderr and skipped.
 pub fn active_substrates(root: &Path) -> Vec<Substrate> {
-    let repo_yml = root.join(".lex").join("repo.yml");
+    let repo_yml = git_lex::layout::repo_yml(root);
     let declared = read_repo_yml_substrates(&repo_yml);
     if !declared.is_empty() {
         let mut out = Vec::new();
@@ -286,9 +286,9 @@ mod tests {
     #[test]
     fn active_substrates_falls_back_to_claude_when_soul_kit_present() {
         let root = unique_tmp_root();
-        std::fs::create_dir_all(root.join(".lex")).unwrap();
+        std::fs::create_dir_all(git_lex::layout::lex_dir(&root)).unwrap();
         std::fs::write(
-            root.join(".lex").join("repo.yml"),
+            git_lex::layout::repo_yml(&root),
             "name: test\nkit: repolex-ai/git-lex-kit-soul\n",
         ).unwrap();
         // Soul repo with no substrates declared falls back to Claude for back-compat
@@ -310,9 +310,9 @@ mod tests {
         // Detection would only find Claude (.claude/ exists), but repo.yml
         // says hermes — the explicit declaration should win.
         std::fs::create_dir_all(root.join(".claude")).unwrap();
-        std::fs::create_dir_all(root.join(".lex")).unwrap();
+        std::fs::create_dir_all(git_lex::layout::lex_dir(&root)).unwrap();
         std::fs::write(
-            root.join(".lex").join("repo.yml"),
+            git_lex::layout::repo_yml(&root),
             "name: TEST\nsubstrates:\n  - hermes\n",
         ).unwrap();
         assert_eq!(active_substrates(&root), vec![Substrate::Hermes]);
@@ -322,9 +322,9 @@ mod tests {
     #[test]
     fn active_substrates_skips_unknown_names() {
         let root = unique_tmp_root();
-        std::fs::create_dir_all(root.join(".lex")).unwrap();
+        std::fs::create_dir_all(git_lex::layout::lex_dir(&root)).unwrap();
         std::fs::write(
-            root.join(".lex").join("repo.yml"),
+            git_lex::layout::repo_yml(&root),
             "name: TEST\nsubstrates:\n  - nonsense\n  - claude\n",
         ).unwrap();
         // The "nonsense" line is warned-and-skipped; claude survives.

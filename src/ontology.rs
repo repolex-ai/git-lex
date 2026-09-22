@@ -1066,6 +1066,32 @@ fn parse_class_foldered(content: &str, short: &str, class_name: &str) -> bool {
     )
 }
 
+/// Every class declared across all installed shape files — kit and
+/// Each entry: (prefix_name, class_name, namespace).
+/// Used by `list` / `create` when they need a whole-repo view, not just one
+/// kit.
+pub(crate) fn all_classes() -> Vec<(String, String, String)> {
+    let mut out = Vec::new();
+    for path in all_shape_files() {
+        let Ok(content) = fs::read_to_string(&path) else { continue };
+        // Derive short name from the filename stem (`soul-shapes.ttl` → `soul`).
+        let short = path.file_stem()
+            .and_then(|s| s.to_str())
+            .and_then(|s| s.strip_suffix("-shapes"))
+            .unwrap_or("")
+            .to_string();
+        let parsed = parse_shape_file(&content, &short);
+        for shape in parsed.shapes {
+            out.push((
+                parsed.prefix_name.clone(),
+                shape.class_name,
+                parsed.namespace.clone(),
+            ));
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1539,30 +1565,4 @@ copia:CameraAngle a owl:Class ; rdfs:label "Camera Angle" .
             ClassMatch::PassThrough("whatever".to_string())
         );
     }
-}
-
-/// Every class declared across all installed shape files — kit and
-/// Each entry: (prefix_name, class_name, namespace).
-/// Used by `list` / `create` when they need a whole-repo view, not just one
-/// kit.
-pub(crate) fn all_classes() -> Vec<(String, String, String)> {
-    let mut out = Vec::new();
-    for path in all_shape_files() {
-        let Ok(content) = fs::read_to_string(&path) else { continue };
-        // Derive short name from the filename stem (`soul-shapes.ttl` → `soul`).
-        let short = path.file_stem()
-            .and_then(|s| s.to_str())
-            .and_then(|s| s.strip_suffix("-shapes"))
-            .unwrap_or("")
-            .to_string();
-        let parsed = parse_shape_file(&content, &short);
-        for shape in parsed.shapes {
-            out.push((
-                parsed.prefix_name.clone(),
-                shape.class_name,
-                parsed.namespace.clone(),
-            ));
-        }
-    }
-    out
 }

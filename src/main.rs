@@ -373,7 +373,7 @@ fn main() {
     // list this machine's git-lex repos by recency. Bookkeeping only — silent,
     // and never a reason for a command to fail.
     if let Some(root) = find_git_root()
-        && root.join(".lex").is_dir() {
+        && git_lex::layout::lex_dir(&root).is_dir() {
             git_lex::registry_touch(&root);
         }
 
@@ -434,7 +434,7 @@ fn main() {
 
 fn cmd_nuke() {
     let root = require_git_root();
-    let lex_dir = root.join(".lex");
+    let lex_dir = git_lex::layout::lex_dir(&root);
 
     if !lex_dir.exists() {
         println!("Nothing to remove — .lex/ does not exist.");

@@ -348,7 +348,7 @@ pub(crate) fn find_kit_ttl(kit: &str) -> Option<PathBuf> {
 
     // Resilience tier: any non-shapes .ttl already in the canonical kit dir
     // (covers a kit that ships its TTL under a different filename — rare).
-    let static_dir = root.join(".lex").join("ontology").join(&short_name);
+    let static_dir = git_lex::layout::kit_ontology_dir(&root, &short_name);
     if let Some(p) = try_dir(&static_dir) { return Some(p); }
 
     // Legacy fallback: .lex/kit/{org}/{repo}/{short}.ttl
@@ -829,7 +829,7 @@ pub(crate) fn install_scaffold_files_from(kit_dir: &std::path::Path) -> usize {
     //   scaffold/ → repo root       (legacy, for pre-migration kits)
     let ontology_src = kit_dir.join("ontology");
     if ontology_src.exists() {
-        let ontology_dest = root.join(".lex").join("ontology");
+        let ontology_dest = git_lex::layout::ontology_dir(&root);
         fs::create_dir_all(&ontology_dest).ok();
         install_recursive(&ontology_src, &ontology_dest, &mut count);
     }
@@ -846,7 +846,7 @@ pub(crate) fn install_scaffold_files_from(kit_dir: &std::path::Path) -> usize {
 
     let www_src = kit_dir.join("www");
     if www_src.exists() {
-        let www_dest = root.join(".lex").join("www");
+        let www_dest = git_lex::layout::www_dir(&root);
         fs::create_dir_all(&www_dest).ok();
         install_recursive(&www_src, &www_dest, &mut count);
     }
@@ -899,7 +899,7 @@ pub(crate) fn compose_agents_hooks(root: &Path) -> ComposedHooks {
     let mut owner: HashMap<String, String> = HashMap::new();
 
     let mut kit_dirs: Vec<PathBuf> = Vec::new();
-    if let Ok(orgs) = fs::read_dir(root.join(".lex").join("kit")) {
+    if let Ok(orgs) = fs::read_dir(git_lex::layout::kits_dir(root)) {
         for org in orgs.flatten() {
             if let Ok(kits) = fs::read_dir(org.path()) {
                 kit_dirs.extend(kits.flatten().map(|k| k.path()));
@@ -912,7 +912,7 @@ pub(crate) fn compose_agents_hooks(root: &Path) -> ComposedHooks {
         let src = kit_dir.join("harness").join(".agents").join("hooks.json");
         let Ok(content) = fs::read_to_string(&src) else { continue };
         let kit = kit_dir
-            .strip_prefix(root.join(".lex").join("kit"))
+            .strip_prefix(git_lex::layout::kits_dir(root))
             .unwrap_or(&kit_dir)
             .to_string_lossy()
             .replace('\\', "/");
@@ -1271,7 +1271,7 @@ pub(crate) fn install_scaffold_files_from_skip_existing(
     // Ontology is kit-owned schema — converges like everything else.
     let ontology_src = kit_dir.join("ontology");
     if ontology_src.exists() {
-        let ontology_dest = root.join(".lex").join("ontology");
+        let ontology_dest = git_lex::layout::ontology_dir(&root);
         fs::create_dir_all(&ontology_dest).ok();
         install_recursive(&ontology_src, &ontology_dest, &ctx, &mut report);
     }
@@ -1288,7 +1288,7 @@ pub(crate) fn install_scaffold_files_from_skip_existing(
 
     let www_src = kit_dir.join("www");
     if www_src.exists() {
-        let www_dest = root.join(".lex").join("www");
+        let www_dest = git_lex::layout::www_dir(&root);
         fs::create_dir_all(&www_dest).ok();
         install_recursive(&www_src, &www_dest, &ctx, &mut report);
     }
@@ -1330,7 +1330,7 @@ pub(crate) fn fetch_and_validate_optional_kit(kit_spec: &str) -> KitFetchOutcome
         None => return KitFetchOutcome::FetchFailed,
     };
     let (org, repo, _) = resolve_kit_spec(kit_spec);
-    let kit_dir = root.join(".lex").join("kit").join(&org).join(&repo);
+    let kit_dir = git_lex::layout::kit_dir(&root, &org, &repo);
 
     // Clean any prior state so the fetch is fresh.
     let _ = fs::remove_dir_all(&kit_dir);
@@ -1358,7 +1358,7 @@ pub(crate) fn remove_kit_install_dir(kit_spec: &str) -> std::io::Result<()> {
         std::io::Error::new(std::io::ErrorKind::NotFound, "not in a git repo")
     })?;
     let (org, repo, _) = resolve_kit_spec(kit_spec);
-    let kit_dir = root.join(".lex").join("kit").join(&org).join(&repo);
+    let kit_dir = git_lex::layout::kit_dir(&root, &org, &repo);
     if kit_dir.exists() {
         fs::remove_dir_all(&kit_dir)?;
     }
@@ -1377,7 +1377,7 @@ mod tests {
         assert_eq!(ts.len(), 15);
         assert_eq!(ts.chars().nth(8), Some('-'));
         let year: u32 = ts[0..4].parse().expect("year parses");
-        assert!(year >= 2026 && year <= 2200, "year out of range: {}", year);
+        assert!((2026..=2200).contains(&year), "year out of range: {}", year);
         let month: u32 = ts[4..6].parse().expect("month parses");
         assert!((1..=12).contains(&month), "month out of range: {}", month);
         let day: u32 = ts[6..8].parse().expect("day parses");
@@ -1560,7 +1560,7 @@ mod tests {
         std::fs::create_dir_all(canon.parent().unwrap()).unwrap();
         std::fs::write(&canon, "# copia ontology\n").unwrap();
         // try_dir's exact-name primary should find it at the canonical location.
-        let dir = tmp.join(".lex").join("ontology").join("copia");
+        let dir = git_lex::layout::kit_ontology_dir(&tmp, "copia");
         let primary = dir.join("copia.ttl");
         assert!(primary.exists(), "canonical install must exist for the pin");
         assert_eq!(primary, canon, "find path agrees with the canonical contract");

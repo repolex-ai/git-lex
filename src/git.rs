@@ -65,7 +65,7 @@ pub(crate) fn head_commit_sha() -> Option<String> {
 /// neither → appended.
 pub(crate) fn ensure_repo_yml_genesis(sha: &str) -> std::io::Result<()> {
     let Some(root) = find_git_root() else { return Ok(()) };
-    let path = root.join(".lex").join("repo.yml");
+    let path = git_lex::layout::repo_yml(&root);
     let existing = fs::read_to_string(&path).unwrap_or_default();
     if existing.lines().any(|l| l.trim_start().starts_with("genesis_sha:")) {
         return Ok(());
@@ -128,7 +128,7 @@ pub(crate) const REPO_YML_HEADER: &str = "\
 /// Called from kit-update, which runs at every compaction, so the whole
 /// existing fleet converges without anyone doing anything.
 pub(crate) fn ensure_repo_yml_header(root: &std::path::Path) -> std::io::Result<()> {
-    let path = root.join(".lex").join("repo.yml");
+    let path = git_lex::layout::repo_yml(root);
     let Ok(existing) = fs::read_to_string(&path) else { return Ok(()) };
     let body = strip_managed_header(&existing);
     let want = format!("{REPO_YML_HEADER}{body}");
@@ -271,7 +271,7 @@ pub(crate) fn resource_uri(path: &str) -> String {
 /// separation makes the invariant visible.
 fn sha_from_identity_yml() -> Option<String> {
     let root = find_git_root()?;
-    let content = fs::read_to_string(root.join(".lex").join("identity.yml")).ok()?;
+    let content = fs::read_to_string(git_lex::layout::identity_yml(&root)).ok()?;
     for line in content.lines() {
         if let Some(rest) = line.trim().strip_prefix("genesis_sha:") {
             let sha = rest.trim();
@@ -333,7 +333,7 @@ fn write_identity_yml_sha(sha: &str) -> std::io::Result<()> {
         Some(r) => r,
         None => return Ok(()),
     };
-    let path = root.join(".lex").join("identity.yml");
+    let path = git_lex::layout::identity_yml(&root);
     if path.exists() {
         let existing = fs::read_to_string(&path).unwrap_or_default();
         match identity_yml_rewrite_decision(&existing, sha) {
@@ -568,7 +568,7 @@ mod repo_yml_header_tests {
         let nanos = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH).unwrap().subsec_nanos();
         let root = std::env::temp_dir().join(format!("gitlex-hdr-{tag}-{}-{nanos}", std::process::id()));
-        fs::create_dir_all(root.join(".lex")).unwrap();
+        fs::create_dir_all(git_lex::layout::lex_dir(&root)).unwrap();
         root
     }
 
@@ -579,7 +579,7 @@ mod repo_yml_header_tests {
     fn header_prepends_once_and_preserves_everything() {
         let root = tmp_repo("prepend");
         let body = "name: lUX\nagent_name: selkie\nagent_email: selkie@repolex.ai\n\noptional_kits:\n  - repolex-ai/git-lex-kit-copia\n";
-        let path = root.join(".lex").join("repo.yml");
+        let path = git_lex::layout::repo_yml(&root);
         fs::write(&path, body).unwrap();
 
         ensure_repo_yml_header(&root).unwrap();
@@ -600,7 +600,7 @@ mod repo_yml_header_tests {
     fn header_is_invisible_to_the_readers() {
         let root = tmp_repo("readers");
         fs::write(
-            root.join(".lex").join("repo.yml"),
+            git_lex::layout::repo_yml(&root),
             "name: lUX\nkit: repolex-ai/git-lex-kit-soul\nagent_name: selkie\nagent_email: selkie@repolex.ai\n",
         ).unwrap();
         ensure_repo_yml_header(&root).unwrap();
@@ -622,7 +622,7 @@ mod repo_yml_header_tests {
     #[test]
     fn an_old_header_is_replaced_not_kept() {
         let root = tmp_repo("converge");
-        let path = root.join(".lex").join("repo.yml");
+        let path = git_lex::layout::repo_yml(&root);
         let stale = "# ─────\n# MANAGED BY git-lex — DO NOT EDIT.\n# some wording we since cut\n# ─────\n";
         let body = "name: lUX\nagent_name: selkie\n";
         fs::write(&path, format!("{stale}{body}")).unwrap();
@@ -640,7 +640,7 @@ mod repo_yml_header_tests {
     #[test]
     fn a_squaddies_own_leading_comment_survives() {
         let root = tmp_repo("theirs");
-        let path = root.join(".lex").join("repo.yml");
+        let path = git_lex::layout::repo_yml(&root);
         fs::write(&path, "# my own note about this repo\nname: lUX\n").unwrap();
 
         ensure_repo_yml_header(&root).unwrap();
@@ -655,7 +655,7 @@ mod repo_yml_header_tests {
     fn missing_repo_yml_is_left_alone() {
         let root = tmp_repo("missing");
         ensure_repo_yml_header(&root).unwrap();
-        assert!(!root.join(".lex").join("repo.yml").exists());
+        assert!(!git_lex::layout::repo_yml(&root).exists());
         fs::remove_dir_all(&root).ok();
     }
 }

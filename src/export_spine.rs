@@ -64,7 +64,7 @@ const SPINE_BASE: &str = "https://repolex.ai/";
 /// Pocket dir for the spine — same shape as `.lex/_ignore/oxigraph` and
 /// `.lex/_ignore/walkcache`.
 pub(crate) fn spine_dir(root: &Path) -> PathBuf {
-    root.join(".lex").join("_ignore").join("spine")
+    git_lex::layout::spine_dir(root)
 }
 
 pub(crate) fn cmd_export_spine() {
@@ -135,7 +135,7 @@ pub(crate) fn run_export(root: &Path, store: &Store) -> Result<(), String> {
 
     // The retired Parquet-era pocket: derived data whose format died
     // (Rob-ruled 2026-08-29). Clean it up once, loudly.
-    let old = root.join(".lex").join("_ignore").join("cottas");
+    let old = git_lex::layout::cottas_dir(root);
     if old.is_dir() && fs::remove_dir_all(&old).is_ok() {
         println!("Cleaned: .lex/_ignore/cottas/ (retired format; the spine replaced it)");
     }

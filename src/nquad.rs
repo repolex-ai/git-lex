@@ -214,7 +214,7 @@ pub(crate) fn load_lex_nquads() -> String {
     };
 
     let mut nq = String::new();
-    let lex_dir = root.join(".lex");
+    let lex_dir = git_lex::layout::lex_dir(&root);
 
     // Recursively find all .nq files. `.lex/_ignore/` is machine-local
     // derived state, never hand-written triples: its walk-cache fragments
@@ -798,7 +798,7 @@ pub(crate) fn generate_frontmatter_nquads_with(
     // resolver trusts bare-slug + full-IRI resolution without range filtering.
 
     // Ensure extract dir exists
-    let extract_dir = root.join(".lex").join("extract");
+    let extract_dir = git_lex::layout::extract_dir(&root);
     fs::create_dir_all(&extract_dir).ok();
 
     // The walk cache (incremental-sync spec §4.3, Rob-approved 2026-08-26):

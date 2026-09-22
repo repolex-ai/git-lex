@@ -47,7 +47,7 @@ fn resolve_agent_identity(root: &std::path::Path) -> Option<(String, String)> {
 
     // 2. repo.yml (the human-edited source of truth — authoritative over the
     //    settings.json cache, so editing it works WITHOUT a kit-update).
-    let fields = read_repo_yml_fields(&root.join(".lex").join("repo.yml"));
+    let fields = read_repo_yml_fields(&git_lex::layout::repo_yml(root));
     if let (Some(name), Some(email)) = (fields.get("agent_name"), fields.get("agent_email"))
         && !name.is_empty() && !email.is_empty() {
             return Some((name.clone(), email.clone()));
@@ -127,7 +127,7 @@ pub(crate) fn cmd_save(message: &str, dry_run: bool, no_restamp: bool) {
     // ungated without a word. Converge the hook before anything else; if it
     // cannot be converged, refuse (a save without the hook is a save
     // without gates, and a gate that can't run must not pretend it passed).
-    if root.join(".lex").exists() {
+    if git_lex::layout::lex_dir(&root).exists() {
         match crate::hooks::converge_hook() {
             Ok(true) => println!(
                 "Repaired: the pre-commit hook was missing or stale (clones don't \
@@ -1195,7 +1195,7 @@ pub(crate) fn cmd_extract() {
     let all_spo: Vec<(std::path::PathBuf, String)> = {
         let mut out = Vec::new();
         if let Some(root) = &ctx_root {
-            let mut stack = vec![root.join(".lex").join("extract")];
+            let mut stack = vec![git_lex::layout::extract_dir(root)];
             while let Some(dir) = stack.pop() {
                 let Ok(entries) = std::fs::read_dir(&dir) else { continue };
                 for entry in entries.filter_map(|e| e.ok()) {

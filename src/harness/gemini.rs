@@ -53,7 +53,7 @@ pub fn setup_substrate_gemini(root: &Path, _agent_name: &str) {
 
     // `.agents/hooks.json` itself is composed from every installed kit by
     // `crate::kit::compose_agents_hooks`, before this runs (#40).
-    let lex_kit = root.join(".lex").join("kit");
+    let lex_kit = git_lex::layout::kits_dir(root);
     if let Ok(entries) = fs::read_dir(&lex_kit) {
         for org_entry in entries.flatten() {
             if let Ok(kit_entries) = fs::read_dir(org_entry.path()) {

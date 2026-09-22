@@ -175,7 +175,7 @@ pub(crate) fn run_query(store: &Store, query: &str, store_type: &str, json: bool
 /// is not a stored-query name, in which case it runs as SPARQL text.
 fn resolve_stored_query(arg: &str) -> Option<String> {
     let root = git_lex::find_git_root()?;
-    let path = root.join(".lex").join("query").join(format!("{}.md", arg));
+    let path = git_lex::layout::query_dir(&root).join(format!("{}.md", arg));
     let md = std::fs::read_to_string(&path).ok()?;
     eprintln!("Stored query: .lex/query/{}.md", arg);
     Some(stored_query_text(&md))
@@ -228,7 +228,7 @@ fn stored_query_miss(arg: &str) -> bool {
         return false;
     }
     let Some(root) = git_lex::find_git_root() else { return false };
-    let dir = root.join(".lex").join("query");
+    let dir = git_lex::layout::query_dir(&root);
     let mut names: Vec<String> = std::fs::read_dir(&dir)
         .map(|entries| {
             entries
@@ -334,47 +334,13 @@ pub(crate) fn cmd_query(query: String, json: bool) {
     );
 }
 
-#[cfg(test)]
-mod stored_query_tests {
-    use super::stored_query_text;
-
-    #[test]
-    fn first_fence_wins_prose_is_details() {
-        let md = "---\ntitle: x\n---\n\n# Recent things\n\nWhat changed lately.\n\n```sparql\nSELECT ?s WHERE { ?s ?p ?o }\n```\n\nMore notes below.\n\n```\nnot the query\n```\n";
-        assert_eq!(stored_query_text(md), "SELECT ?s WHERE { ?s ?p ?o }");
-    }
-
-    #[test]
-    fn bare_fence_label_is_fine() {
-        let md = "```\nASK { ?s ?p ?o }\n```\n";
-        assert_eq!(stored_query_text(md), "ASK { ?s ?p ?o }");
-    }
-
-    #[test]
-    fn no_fence_means_whole_body_is_the_query() {
-        let md = "---\nk: v\n---\nSELECT * WHERE { ?s ?p ?o } LIMIT 5\n";
-        assert_eq!(stored_query_text(md), "SELECT * WHERE { ?s ?p ?o } LIMIT 5");
-    }
-
-    #[test]
-    fn no_frontmatter_no_fence() {
-        assert_eq!(stored_query_text("ASK { ?s ?p ?o }\n"), "ASK { ?s ?p ?o }");
-    }
-
-    #[test]
-    fn unclosed_fence_takes_the_tail() {
-        let md = "notes\n```sparql\nSELECT ?s WHERE { ?s ?p ?o }\n";
-        assert_eq!(stored_query_text(md), "SELECT ?s WHERE { ?s ?p ?o }");
-    }
-}
-
 /// Scaffold the default stored queries into `.lex/query/` — ONLY when the
 /// folder does not exist yet. A folder that exists is the operator's,
 /// whatever is or isn't in it; re-running init/kit-update never overwrites
 /// or re-adds. (Soul-kit override — `Soul/Query/` replacing this folder
 /// wholesale — is the kit's move, not built here.)
 pub(crate) fn scaffold_default_queries(root: &std::path::Path) {
-    let dir = root.join(".lex").join("query");
+    let dir = git_lex::layout::query_dir(root);
     if dir.exists() {
         return;
     }
@@ -420,5 +386,39 @@ pub(crate) fn scaffold_default_queries(root: &std::path::Path) {
              with `git lex query <name>`, add your own as .lex/query/<name>.md",
             written
         );
+    }
+}
+
+#[cfg(test)]
+mod stored_query_tests {
+    use super::stored_query_text;
+
+    #[test]
+    fn first_fence_wins_prose_is_details() {
+        let md = "---\ntitle: x\n---\n\n# Recent things\n\nWhat changed lately.\n\n```sparql\nSELECT ?s WHERE { ?s ?p ?o }\n```\n\nMore notes below.\n\n```\nnot the query\n```\n";
+        assert_eq!(stored_query_text(md), "SELECT ?s WHERE { ?s ?p ?o }");
+    }
+
+    #[test]
+    fn bare_fence_label_is_fine() {
+        let md = "```\nASK { ?s ?p ?o }\n```\n";
+        assert_eq!(stored_query_text(md), "ASK { ?s ?p ?o }");
+    }
+
+    #[test]
+    fn no_fence_means_whole_body_is_the_query() {
+        let md = "---\nk: v\n---\nSELECT * WHERE { ?s ?p ?o } LIMIT 5\n";
+        assert_eq!(stored_query_text(md), "SELECT * WHERE { ?s ?p ?o } LIMIT 5");
+    }
+
+    #[test]
+    fn no_frontmatter_no_fence() {
+        assert_eq!(stored_query_text("ASK { ?s ?p ?o }\n"), "ASK { ?s ?p ?o }");
+    }
+
+    #[test]
+    fn unclosed_fence_takes_the_tail() {
+        let md = "notes\n```sparql\nSELECT ?s WHERE { ?s ?p ?o }\n";
+        assert_eq!(stored_query_text(md), "SELECT ?s WHERE { ?s ?p ?o }");
     }
 }

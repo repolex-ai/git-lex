@@ -84,7 +84,7 @@ pub(crate) struct WalkCache {
 }
 
 fn cache_dir(root: &Path) -> PathBuf {
-    root.join(".lex").join("_ignore").join("walkcache")
+    git_lex::layout::walkcache_dir(root)
 }
 
 /// git's own blob hash of a byte string — the ONE content-identity
@@ -342,8 +342,8 @@ mod tests {
     fn tmp_root(tag: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("glx-walkcache-{}-{}", tag, std::process::id()));
         let _ = fs::remove_dir_all(&dir);
-        fs::create_dir_all(dir.join(".lex").join("ontology").join("t")).unwrap();
-        fs::write(dir.join(".lex").join("repo.yml"), "name: x\nkit: repolex-ai/git-lex-kit-t\n").unwrap();
+        fs::create_dir_all(git_lex::layout::kit_ontology_dir(&dir, "t")).unwrap();
+        fs::write(git_lex::layout::repo_yml(&dir), "name: x\nkit: repolex-ai/git-lex-kit-t\n").unwrap();
         dir
     }
 
@@ -447,7 +447,7 @@ mod tests {
                 .unwrap_or(0)
         ));
         let _ = fs::remove_dir_all(&root);
-        fs::create_dir_all(root.join(".lex").join("ontology").join("t")).unwrap();
+        fs::create_dir_all(git_lex::layout::kit_ontology_dir(&root, "t")).unwrap();
         let ctx = context_hash(&root, &[root.join("a.md")]);
 
         // Run 1: two documents seen, two fragments written.

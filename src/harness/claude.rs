@@ -293,7 +293,7 @@ fn kit_shipped_deploy_names(
     last_seg: &str,
 ) -> Option<std::collections::HashSet<String>> {
     let mut names = std::collections::HashSet::new();
-    let lex_kit = root.join(".lex").join("kit");
+    let lex_kit = git_lex::layout::kits_dir(root);
     for spec in crate::kit_cmds::collect_kits_for_update(root, None) {
         let (org, repo, _) = git_lex::resolve_kit_spec(&spec);
         let kit_dir = lex_kit.join(&org).join(&repo);
@@ -720,7 +720,7 @@ pub(crate) fn setup_substrate_claude(root: &std::path::Path, agent_name: &str) {
     // Falls back to the generated `<slug>@lex.local` form for souls who
     // never set one. Without this, every `git lex kit-update` would silently
     // clobber a custom-set email in settings.json with the @lex.local default.
-    let repo_yml = read_repo_yml_fields(&root.join(".lex").join("repo.yml"));
+    let repo_yml = read_repo_yml_fields(&git_lex::layout::repo_yml(root));
     let email = repo_yml
         .get("agent_email")
         .cloned()
