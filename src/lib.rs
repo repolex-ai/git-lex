@@ -2,6 +2,8 @@
 //!
 //! Used by both `git-lex` (the CLI) and `git-lex-serve` (the server binary).
 
+pub mod clock;
+
 use oxigraph::store::Store;
 use std::fs;
 use std::path::PathBuf;
@@ -713,12 +715,10 @@ fn legacy_registry_path() -> Option<PathBuf> {
 }
 
 /// Now, ISO-8601 with the machine's UTC offset (`2026-09-01T14:02:11-07:00`) —
-/// the same shape and the same never-guess contract as the save-time stamps.
-/// No usable `date` means no timestamp; the path is still recorded.
+/// the same shape and the same never-guess contract as the save-time dates.
+/// No readable clock means no timestamp; the path is still recorded.
 fn registry_now() -> Option<String> {
-    let out = Command::new("date").args(["-Iseconds"]).output().ok()?;
-    let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    if s.len() >= 19 && s.as_bytes().get(10) == Some(&b'T') { Some(s) } else { None }
+    clock::now_rfc3339()
 }
 
 /// Absolute path for the registry, resolved through symlinks when it can be.

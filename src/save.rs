@@ -987,12 +987,10 @@ fn stage_paths(root: &std::path::Path, paths: &[std::path::PathBuf]) -> Result<(
 }
 
 /// Now, ISO-8601 with the machine's UTC offset (`2026-08-26T14:32:05-07:00`)
-/// — a valid xsd:dateTime. None when the platform `date` is unavailable:
-/// never guess a date into a permanent record.
+/// — a valid xsd:dateTime. None when no clock can be read: never guess a
+/// date into a permanent record.
 fn local_datetime_now() -> Option<String> {
-    let out = Command::new("date").args(["-Iseconds"]).output().ok()?;
-    let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    if s.len() >= 19 && s.as_bytes().get(10) == Some(&b'T') { Some(s) } else { None }
+    git_lex::clock::now_rfc3339()
 }
 
 /// The document's `<kit>.<Class>` key prefix, read from the first flat

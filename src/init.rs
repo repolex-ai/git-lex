@@ -396,9 +396,7 @@ fn write_repo_yml(repo_yml_path: &std::path::Path, root: &std::path::Path, kit_s
         let repo_name = root.file_name()
             .map(|n| n.to_string_lossy().to_string())
             .unwrap_or_else(|| "unknown".to_string());
-        let today = Command::new("date").args(["+%Y-%m-%d"]).output().ok()
-            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-            .unwrap_or_else(|| "unknown".to_string());
+        let today = git_lex::clock::today_ymd().unwrap_or_else(|| "unknown".to_string());
         fs::write(repo_yml_path, format!(
             "{}name: {}\nkit: {}\ncreated: {}\n",
             crate::git::REPO_YML_HEADER, repo_name, kit_spec, today
