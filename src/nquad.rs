@@ -245,27 +245,51 @@ pub(crate) fn load_lex_nquads() -> String {
 }
 
 /// THE repo document walker. Every consumer walks the same file set —
-/// `.md` and `.txt`, dot-entries skipped — through this one function.
-/// Call sites that need a narrower set filter EXPLICITLY (see
-/// `is_template`); the four hand-rolled walkers this replaces had drifted
-/// into three different file policies.
+/// `.md` and `.txt`, dot-entries skipped, paths git ignores skipped —
+/// through this one function. Call sites that need a narrower set filter
+/// EXPLICITLY (see `is_template`); the four hand-rolled walkers this
+/// replaces had drifted into three different file policies.
+///
+/// git's ignore rules are git's own (`.gitignore` at every level,
+/// `.git/info/exclude`, the global excludes file): libgit2 answers the
+/// same question `git check-ignore` does, so a build folder or a
+/// dependency tree is neither read, hashed nor given a File record (#28).
+/// An ignored directory is pruned whole, so its contents are never
+/// listed. Outside a git repository nothing is ignored.
 pub(crate) fn walk_repo_docs(root: &std::path::Path) -> Vec<PathBuf> {
-    fn walk(dir: &std::path::Path, files: &mut Vec<PathBuf>) {
+    let repo = git2::Repository::discover(root).ok();
+    // libgit2 matches a path against the ignore files along it, so it must
+    // see the path RELATIVE TO THE WORK TREE — an absolute path finds only
+    // the basename rules. Both sides are canonicalized: the walk root and
+    // the work tree can spell one directory two ways (a symlinked /tmp).
+    let root_in_workdir: Option<PathBuf> = repo.as_ref().and_then(|r| {
+        let wd = r.workdir()?.canonicalize().ok()?;
+        root.canonicalize().ok()?.strip_prefix(&wd).ok().map(std::path::Path::to_path_buf)
+    });
+    let ignored = |path: &std::path::Path| -> bool {
+        let (Some(repo), Some(prefix)) = (repo.as_ref(), root_in_workdir.as_deref()) else {
+            return false;
+        };
+        let Ok(under_root) = path.strip_prefix(root) else { return false };
+        repo.is_path_ignored(prefix.join(under_root)).unwrap_or(false)
+    };
+    fn walk(dir: &std::path::Path, files: &mut Vec<PathBuf>, ignored: &dyn Fn(&std::path::Path) -> bool) {
         if let Ok(entries) = fs::read_dir(dir) {
             for entry in entries.filter_map(|e| e.ok()) {
                 let path = entry.path();
                 let name = entry.file_name().to_string_lossy().to_string();
                 if name.starts_with('.') { continue; }
                 if path.is_dir() {
-                    walk(&path, files);
-                } else if name.ends_with(".md") || name.ends_with(".txt") {
+                    if ignored(&path) { continue; }
+                    walk(&path, files, ignored);
+                } else if (name.ends_with(".md") || name.ends_with(".txt")) && !ignored(&path) {
                     files.push(path);
                 }
             }
         }
     }
     let mut files = Vec::new();
-    walk(root, &mut files);
+    walk(root, &mut files, &ignored);
     files
 }
 
@@ -2534,5 +2558,64 @@ mod id_key_case_tolerance_tests {
         assert!(!id_key_matches("copia.Journal.journalId", "soul", "Journal", "journalId"));
         assert!(!id_key_matches("soul.Note.journalId", "soul", "Journal", "journalId"));
         assert!(!id_key_matches("journalId", "soul", "Journal", "journalId"));
+    }
+}
+
+#[cfg(test)]
+mod walk_ignore_tests {
+    use super::walk_repo_docs;
+    use std::fs;
+    use std::path::PathBuf;
+
+    fn fresh_root(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("glx-walk-{}-{}", tag, std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn names(root: &std::path::Path) -> Vec<String> {
+        let mut v: Vec<String> = walk_repo_docs(root)
+            .iter()
+            .map(|p| p.strip_prefix(root).unwrap().to_string_lossy().replace('\\', "/"))
+            .collect();
+        v.sort();
+        v
+    }
+
+    /// #28: a `.md`/`.txt` under a folder git ignores is not a document.
+    /// Rules from `.gitignore` at the root and from a nested `.gitignore`
+    /// both apply, and an ignored directory is pruned whole.
+    #[test]
+    fn ignored_paths_are_not_walked() {
+        let root = fresh_root("ignored");
+        git2::Repository::init(&root).unwrap();
+        fs::write(root.join(".gitignore"), "target/\n*.log.txt\n").unwrap();
+        fs::create_dir_all(root.join("Soul/Note")).unwrap();
+        fs::write(root.join("Soul/Note/kept.md"), "# kept\n").unwrap();
+        fs::write(root.join("Soul/Note/trace.log.txt"), "ignored by pattern\n").unwrap();
+        fs::create_dir_all(root.join("Soul/code/target/debug/build")).unwrap();
+        fs::write(root.join("Soul/code/target/debug/build/host-target.txt"), "artifact\n").unwrap();
+        fs::create_dir_all(root.join("Soul/code/vendor")).unwrap();
+        fs::write(root.join("Soul/code/.gitignore"), "vendor/\n").unwrap();
+        fs::write(root.join("Soul/code/vendor/README.md"), "# vendored\n").unwrap();
+        fs::write(root.join("Soul/code/notes.md"), "# notes\n").unwrap();
+
+        assert_eq!(names(&root), vec!["Soul/Note/kept.md", "Soul/code/notes.md"]);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// Outside a git repository there are no ignore rules: every document
+    /// is walked, a `.gitignore` file's rules are not applied.
+    #[test]
+    fn no_repository_means_nothing_is_ignored() {
+        let root = fresh_root("plain");
+        fs::write(root.join(".gitignore"), "target/\n").unwrap();
+        fs::create_dir_all(root.join("target")).unwrap();
+        fs::write(root.join("target/out.md"), "# out\n").unwrap();
+        fs::write(root.join("doc.md"), "# doc\n").unwrap();
+
+        assert_eq!(names(&root), vec!["doc.md", "target/out.md"]);
+        let _ = fs::remove_dir_all(&root);
     }
 }
