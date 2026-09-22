@@ -888,11 +888,18 @@ pub(crate) fn generate_frontmatter_nquads_with(
                     // Cache hit: the file's bytes and index state are exactly what
                     // produced the stored fragment, and no belt forces it through.
                     // Its quads append verbatim; its sidecars are already right (same
-                    // bytes → same extraction). Warnings for unchanged files go quiet
-                    // until the file is next edited — deliberate; they fired at the
-                    // save that introduced them and fire again on any change.
+                    // bytes → same extraction) — PROVIDED the walk that stored the
+                    // entry wrote them. `git lex query` extracts without writing
+                    // sidecars (#39): a save after such a query hit the cache here,
+                    // skipped the write, and committed the previous sidecar as this
+                    // document's — silently, and the gate saw disk and index agree.
+                    // A sidecar-writing walk treats that entry as a miss.
+                    // Warnings for unchanged files go quiet until the file is next
+                    // edited — deliberate; they fired at the save that introduced
+                    // them and fire again on any change.
                     if let Some((frag, entry)) =
                         cache.hit(&relpath_str, &bytes_hash, &blob_hash, opts.build_nquads)
+                        && (entry.sidecars || !opts.write_sidecars)
                     {
                         cache_hits += 1;
                         total_links += entry.links;
@@ -1086,6 +1093,7 @@ pub(crate) fn generate_frontmatter_nquads_with(
                     &blob_hash,
                     &nq[file_nq_start..],
                     file_links,
+                    opts.write_sidecars,
                 );
             }
 

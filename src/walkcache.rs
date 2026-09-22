@@ -67,6 +67,10 @@ pub(crate) struct CacheEntry {
     /// Quad lines in the fragment (the sync report's fact count), so a
     /// caller that only needs the count never reads the fragment.
     pub quads: usize,
+    /// The walk that produced this entry also wrote the file's sidecars.
+    /// `git lex query` extracts without writing them (#39): its entry must
+    /// not let a later save take "cached" for "sidecar already right".
+    pub sidecars: bool,
 }
 
 pub(crate) struct WalkCache {
@@ -170,13 +174,18 @@ impl WalkCache {
         let mut entries = HashMap::new();
         for line in lines {
             let mut cols = line.split('\t');
-            let (Some(rel), Some(bh), Some(ih), Some(links), Some(quads)) =
-                (cols.next(), cols.next(), cols.next(), cols.next(), cols.next())
+            let (Some(rel), Some(bh), Some(ih), Some(links), Some(quads), Some(sidecars)) =
+                (cols.next(), cols.next(), cols.next(), cols.next(), cols.next(), cols.next())
             else {
                 return None; // torn (or older-format) manifest — distrust the whole thing
             };
             let links: usize = links.parse().ok()?;
             let quads: usize = quads.parse().ok()?;
+            let sidecars = match sidecars {
+                "1" => true,
+                "0" => false,
+                _ => return None,
+            };
             entries.insert(
                 rel.to_string(),
                 CacheEntry {
@@ -184,6 +193,7 @@ impl WalkCache {
                     index_hash: ih.to_string(),
                     links,
                     quads,
+                    sidecars,
                 },
             );
         }
@@ -237,7 +247,8 @@ impl WalkCache {
     }
 
     /// Record a freshly-extracted file. Errors>0 files are the caller's
-    /// responsibility to NOT store (loud-every-run contract).
+    /// responsibility to NOT store (loud-every-run contract). `sidecars`
+    /// says whether this walk wrote the file's sidecars as well.
     pub(crate) fn store(
         &mut self,
         relpath: &str,
@@ -245,6 +256,7 @@ impl WalkCache {
         index_hash: &str,
         fragment: &str,
         links: usize,
+        sidecars: bool,
     ) {
         let p = self.frag_path(relpath);
         if let Some(parent) = p.parent()
@@ -261,6 +273,7 @@ impl WalkCache {
                 index_hash: index_hash.to_string(),
                 links,
                 quads: fragment.lines().filter(|l| !l.is_empty()).count(),
+                sidecars,
             },
         );
     }
@@ -279,8 +292,8 @@ impl WalkCache {
         for rel in rels {
             let e = &self.fresh[rel];
             out.push_str(&format!(
-                "{}\t{}\t{}\t{}\t{}\n",
-                rel, e.bytes_hash, e.index_hash, e.links, e.quads
+                "{}\t{}\t{}\t{}\t{}\t{}\n",
+                rel, e.bytes_hash, e.index_hash, e.links, e.quads, u8::from(e.sidecars)
             ));
         }
         let _ = fs::write(self.dir.join("manifest.tsv"), out);
@@ -351,7 +364,7 @@ mod tests {
         let root = tmp_root("roundtrip");
         let ctx = context_hash(&root, &[root.join("a.md")]);
         let mut c = WalkCache::empty(&root, &ctx);
-        c.store("a.md", "bh1", "ih1", "<s> <p> <o> <g> .\n", 2);
+        c.store("a.md", "bh1", "ih1", "<s> <p> <o> <g> .\n", 2, true);
         c.save();
 
         let mut loaded = WalkCache::load(&root, &ctx).expect("cache loads");
@@ -399,11 +412,11 @@ mod tests {
         let root = tmp_root("prune");
         let ctx = context_hash(&root, &[]);
         let mut c = WalkCache::empty(&root, &ctx);
-        c.store("keep.md", "b", "i", "x\n", 0);
+        c.store("keep.md", "b", "i", "x\n", 0, true);
         c.save();
         // Next run proves nothing, stores one new file.
         let mut c2 = WalkCache::load(&root, &ctx).unwrap();
-        c2.store("only.md", "b", "i", "y\n", 0);
+        c2.store("only.md", "b", "i", "y\n", 0, true);
         c2.save();
         let c3 = WalkCache::load(&root, &ctx).unwrap();
         assert!(c3.entries.contains_key("only.md"));
@@ -439,15 +452,15 @@ mod tests {
 
         // Run 1: two documents seen, two fragments written.
         let mut c = WalkCache::empty(&root, &ctx);
-        c.store("a.md", "bh-a", "ih-a", "<x> <y> <z> .\n", 0);
-        c.store("b.md", "bh-b", "ih-b", "<p> <q> <r> .\n", 0);
+        c.store("a.md", "bh-a", "ih-a", "<x> <y> <z> .\n", 0, true);
+        c.store("b.md", "bh-b", "ih-b", "<p> <q> <r> .\n", 0, true);
         c.save();
         assert!(root.join(".lex/_ignore/walkcache/frag/a.md.nq").exists());
         assert!(root.join(".lex/_ignore/walkcache/frag/b.md.nq").exists());
 
         // Run 2: b.md is gone from disk, so the walk never sees it.
         let mut c2 = WalkCache::empty(&root, &ctx);
-        c2.store("a.md", "bh-a", "ih-a", "<x> <y> <z> .\n", 0);
+        c2.store("a.md", "bh-a", "ih-a", "<x> <y> <z> .\n", 0, true);
         c2.save();
 
         assert!(root.join(".lex/_ignore/walkcache/frag/a.md.nq").exists(),
@@ -457,6 +470,22 @@ mod tests {
              source is what made a reference to a deleted document read as perfectly resolved, \
              defeating the only dangling-reference check the fleet had");
 
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// #39: an entry written by a walk that did not write sidecars says so,
+    /// and says so again after a round trip through the manifest.
+    #[test]
+    fn sidecar_flag_survives_the_manifest() {
+        let root = tmp_root("sidecar-flag");
+        let mut c = WalkCache::empty(&root, "ctx");
+        c.store("q.md", "b", "i", "<s> <p> <o> <g> .\n", 0, false);
+        c.store("s.md", "b", "i", "<s> <p> <o> <g> .\n", 0, true);
+        c.save();
+
+        let mut loaded = WalkCache::load(&root, "ctx").expect("manifest loads");
+        assert!(!loaded.hit("q.md", "b", "i", false).unwrap().1.sidecars);
+        assert!(loaded.hit("s.md", "b", "i", false).unwrap().1.sidecars);
         let _ = fs::remove_dir_all(&root);
     }
 }
