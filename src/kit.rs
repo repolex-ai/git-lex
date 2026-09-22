@@ -26,19 +26,19 @@ use std::process::Command;
 #[cfg(test)]
 use std::time::SystemTime;
 
-use git_lex::{
+use crate::{
     canonical_kit_ontology_path, find_git_root, kit_install_dir_for_spec,
     resolve_kit_spec,
 };
 
 /// Scalar key:value fields of a repo.yml, via the ONE reader.
-pub(crate) fn read_repo_yml_fields(path: &std::path::Path) -> HashMap<String, String> {
-    git_lex::RepoYml::load_path(path).scalar_fields()
+pub fn read_repo_yml_fields(path: &std::path::Path) -> HashMap<String, String> {
+    crate::RepoYml::load_path(path).scalar_fields()
 }
 
 /// Current entries of one of repo.yml's two lists, via the ONE reader.
 fn read_repo_yml_list(path: &std::path::Path, key: &str) -> Vec<String> {
-    let y = git_lex::RepoYml::load_path(path);
+    let y = crate::RepoYml::load_path(path);
     match key {
         "optional_kits" => y.optional_kits,
         "substrates" => y.substrates,
@@ -170,24 +170,24 @@ fn remove_repo_yml_list_item(
 ///   - repolex-ai/git-lex-kit-innerworld
 ///   - repolex-ai/git-lex-kit-thoughtsmith
 /// ```
-pub(crate) use git_lex::read_repo_yml_optional_kits;
+pub use crate::read_repo_yml_optional_kits;
 
 /// The `substrates:` list, via the ONE reader.
-pub(crate) fn read_repo_yml_substrates(path: &std::path::Path) -> Vec<String> {
-    git_lex::RepoYml::load_path(path).substrates
+pub fn read_repo_yml_substrates(path: &std::path::Path) -> Vec<String> {
+    crate::RepoYml::load_path(path).substrates
 }
 
 /// Append a kit spec to `optional_kits:` in repo.yml. Creates the list if
 /// missing. Idempotent — no duplicate entries. Preserves all other fields
 /// and existing list entries.
-pub(crate) fn append_optional_kit(path: &std::path::Path, spec: &str) -> std::io::Result<()> {
+pub fn append_optional_kit(path: &std::path::Path, spec: &str) -> std::io::Result<()> {
     append_repo_yml_list_item(path, "optional_kits", spec)
 }
 
 /// Remove a kit spec from `optional_kits:` in repo.yml. If the list becomes
 /// empty, also removes the `optional_kits:` key. Idempotent: removing a
 /// kit that isn't there is a no-op success.
-pub(crate) fn remove_optional_kit(path: &std::path::Path, spec: &str) -> std::io::Result<()> {
+pub fn remove_optional_kit(path: &std::path::Path, spec: &str) -> std::io::Result<()> {
     remove_repo_yml_list_item(path, "optional_kits", spec)
 }
 
@@ -203,14 +203,14 @@ pub(crate) fn remove_optional_kit(path: &std::path::Path, spec: &str) -> std::io
 /// If a kit's kit.yml omits `scope:`, default is `Domain` (back-compat —
 /// every pre-scope kit was a domain kit).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum KitScope {
+pub enum KitScope {
     Base,
     Domain,
     Optional,
 }
 
 impl KitScope {
-    pub(crate) fn parse(s: &str) -> Option<Self> {
+    pub fn parse(s: &str) -> Option<Self> {
         match s.trim().to_lowercase().as_str() {
             "base" => Some(KitScope::Base),
             "domain" => Some(KitScope::Domain),
@@ -225,7 +225,7 @@ impl KitScope {
 ///
 /// The kit_dir is the on-disk install location of the kit (e.g.
 /// `.lex/kit/repolex-ai/git-lex-kit-innerworld/`).
-pub(crate) fn read_kit_scope(kit_dir: &std::path::Path) -> KitScope {
+pub fn read_kit_scope(kit_dir: &std::path::Path) -> KitScope {
     let path = kit_dir.join("kit.yml");
     let content = match fs::read_to_string(&path) {
         Ok(c) => c,
@@ -244,7 +244,7 @@ pub(crate) fn read_kit_scope(kit_dir: &std::path::Path) -> KitScope {
 
 /// Read the `init_prompts:` list from a kit's kit.yml. Returns the variable
 /// names the kit wants init to prompt for. Empty list if missing or absent.
-pub(crate) fn kit_config_init_prompts(kit_name: &str) -> Vec<String> {
+pub fn kit_config_init_prompts(kit_name: &str) -> Vec<String> {
     let root = match find_git_root() {
         Some(r) => r,
         None => return Vec::new(),
@@ -271,7 +271,7 @@ pub(crate) fn kit_config_init_prompts(kit_name: &str) -> Vec<String> {
 
 /// Read a boolean config value from the kit's kit.yml. Recognizes `true`
 /// and `yes` as true; everything else (including missing) returns `default`.
-pub(crate) fn kit_config_bool(kit: &str, key: &str, default: bool) -> bool {
+pub fn kit_config_bool(kit: &str, key: &str, default: bool) -> bool {
     let root = match find_git_root() {
         Some(r) => r,
         None => return default,
@@ -293,7 +293,7 @@ pub(crate) fn kit_config_bool(kit: &str, key: &str, default: bool) -> bool {
 }
 
 /// Read a string config value from the kit's kit.yml file.
-pub(crate) fn kit_config_str(kit: &str, key: &str) -> Option<String> {
+pub fn kit_config_str(kit: &str, key: &str) -> Option<String> {
     let root = find_git_root()?;
     let config_path = kit_install_dir_for_spec(&root, kit).join("kit.yml");
     let content = fs::read_to_string(&config_path).ok()?;
@@ -316,10 +316,10 @@ pub(crate) fn kit_config_str(kit: &str, key: &str) -> Option<String> {
 ///   1. `.lex/ontology/{short}/{short}.ttl`        — canonical
 ///   2. any non-shapes `.ttl` in `.lex/ontology/{short}/` — fallback
 ///   3. `.lex/kit/{org}/{repo}/{short}.ttl`        — legacy
-pub(crate) fn find_kit_ttl(kit: &str) -> Option<PathBuf> {
+pub fn find_kit_ttl(kit: &str) -> Option<PathBuf> {
     let root = find_git_root()?;
     // repo.yml decides what is installed (#17); a folder on disk does not.
-    if !git_lex::is_kit_installed(&root, kit) {
+    if !crate::is_kit_installed(&root, kit) {
         return None;
     }
     let (_, _, short_name) = resolve_kit_spec(kit);
@@ -348,7 +348,7 @@ pub(crate) fn find_kit_ttl(kit: &str) -> Option<PathBuf> {
 
     // Resilience tier: any non-shapes .ttl already in the canonical kit dir
     // (covers a kit that ships its TTL under a different filename — rare).
-    let static_dir = git_lex::layout::kit_ontology_dir(&root, &short_name);
+    let static_dir = crate::layout::kit_ontology_dir(&root, &short_name);
     if let Some(p) = try_dir(&static_dir) { return Some(p); }
 
     // Legacy fallback: .lex/kit/{org}/{repo}/{short}.ttl
@@ -395,14 +395,14 @@ pub(crate) fn find_kit_ttl(kit: &str) -> Option<PathBuf> {
 /// yield empty shapes. Every OTHER kit is best-effort with a LOUD warning that
 /// names the consequence: one unrelated broken vocabulary should not block this
 /// kit's shapes, but it must not quietly delete inherited properties either.
-pub(crate) fn load_all_kit_ontologies_into_store(kit: &str) -> Result<Option<Store>, String> {
+pub fn load_all_kit_ontologies_into_store(kit: &str) -> Result<Option<Store>, String> {
     let Some(target_ttl) = find_kit_ttl(kit) else { return Ok(None) };
     let target_content = fs::read_to_string(&target_ttl)
         .map_err(|e| format!("cannot read {}: {}", target_ttl.display(), e))?;
     let store = load_ttl_str(&target_content, &target_ttl.display().to_string())?;
 
     let Some(root) = find_git_root() else { return Ok(Some(store)) };
-    let others = git_lex::installed_vocabulary_ttls(&root);
+    let others = crate::installed_vocabulary_ttls(&root);
 
     for path in others {
         if path == target_ttl {
@@ -425,7 +425,7 @@ shapes. Fix that TTL and re-run `git lex kit-update`.",
 /// Load Turtle TEXT into a fresh in-memory store — the ONE way git-lex reads
 /// TTL content (a real parse queried with SPARQL; never line scanning).
 /// `label` names the source in the error message.
-pub(crate) fn load_ttl_str(content: &str, label: &str) -> Result<Store, String> {
+pub fn load_ttl_str(content: &str, label: &str) -> Result<Store, String> {
     let store = Store::new().map_err(|e| format!("store init failed: {}", e))?;
     store
         .load_from_reader(RdfFormat::Turtle, Cursor::new(content.as_bytes()))
@@ -441,7 +441,7 @@ pub(crate) fn load_ttl_str(content: &str, label: &str) -> Result<Store, String> 
 /// Deliberately reads only a top-level `name:` line: a nested `name:` under
 /// some other key is not the kit's identity, and treating it as such would
 /// make the identity check itself a source of false refusals.
-pub(crate) fn declared_kit_name(yml: &str) -> Option<String> {
+pub fn declared_kit_name(yml: &str) -> Option<String> {
     yml.lines()
         .find(|l| !l.starts_with(char::is_whitespace) && l.trim_start().starts_with("name:"))
         .and_then(|l| l.trim().strip_prefix("name:"))
@@ -452,7 +452,7 @@ pub(crate) fn declared_kit_name(yml: &str) -> Option<String> {
 /// Display form for a commit id — first 8 chars, or the whole thing if it is
 /// somehow shorter. Display only: the full sha is what gets recorded, because
 /// a truncated id is an identity you cannot compare later.
-pub(crate) fn short_sha(sha: &str) -> &str {
+pub fn short_sha(sha: &str) -> &str {
     &sha[..8.min(sha.len())]
 }
 
@@ -462,14 +462,14 @@ pub(crate) fn short_sha(sha: &str) -> &str {
 /// because it describes THIS install and nothing else. `fetch_kit_for_update`
 /// wipes that directory before every fetch, so the marker cannot outlive the
 /// bytes it describes — a stale marker is not possible by construction.
-pub(crate) const KIT_SHA_FILE: &str = ".kit-sha";
+pub const KIT_SHA_FILE: &str = ".kit-sha";
 
 /// The commit currently installed for a kit, if it was recorded.
 ///
 /// `None` means "installed before this marker existed, or fetched while the
 /// remote was unreachable" — NOT "up to date". Callers must report unknown as
 /// unknown; an absent receipt is a gap in the record, never a clean bill.
-pub(crate) fn installed_kit_sha(kit_dir: &std::path::Path) -> Option<String> {
+pub fn installed_kit_sha(kit_dir: &std::path::Path) -> Option<String> {
     let s = fs::read_to_string(kit_dir.join(KIT_SHA_FILE)).ok()?;
     let s = s.trim().to_string();
     if s.is_empty() { None } else { Some(s) }
@@ -481,7 +481,7 @@ pub(crate) fn installed_kit_sha(kit_dir: &std::path::Path) -> Option<String> {
 /// written is still a working kit, so this never fails the update. It does
 /// warn, because silently having no receipt is the exact condition this
 /// whole mechanism exists to end.
-pub(crate) fn record_kit_sha(kit_dir: &std::path::Path, sha: &str) {
+pub fn record_kit_sha(kit_dir: &std::path::Path, sha: &str) {
     if let Err(e) = fs::write(kit_dir.join(KIT_SHA_FILE), format!("{}\n", sha)) {
         eprintln!("warning: kit fetched but its version receipt could not be written to {}: {}",
             kit_dir.join(KIT_SHA_FILE).display(), e);
@@ -500,7 +500,7 @@ pub(crate) fn record_kit_sha(kit_dir: &std::path::Path, sha: &str) {
 ///
 /// Returns `None` on any failure. The caller reports that as unknown rather
 /// than guessing — a wrong version claim is worse than no version claim.
-pub(crate) fn remote_kit_sha(kit_spec: &str) -> Option<String> {
+pub fn remote_kit_sha(kit_spec: &str) -> Option<String> {
     let (org, repo, _) = resolve_kit_spec(kit_spec);
     let url = format!("https://github.com/{}/{}", org, repo);
     let out = Command::new("git")
@@ -529,7 +529,7 @@ pub(crate) fn remote_kit_sha(kit_spec: &str) -> Option<String> {
 /// reader should not go looking for it.
 ///
 /// Returns true on success (and if at least one file was extracted).
-pub(crate) fn fetch_kit_from_github(kit_spec: &str, target_dir: &std::path::Path) -> bool {
+pub fn fetch_kit_from_github(kit_spec: &str, target_dir: &std::path::Path) -> bool {
     let (org, repo, _) = resolve_kit_spec(kit_spec);
     let url = format!(
         "https://github.com/{}/{}/archive/refs/heads/main.tar.gz",
@@ -672,7 +672,7 @@ pub(crate) fn fetch_kit_from_github(kit_spec: &str, target_dir: &std::path::Path
 /// Interactively prompt the user for each kit-declared init variable and
 /// return the collected name→value map. Re-uses existing values from repo.yml
 /// if present (supports idempotent re-init).
-pub(crate) fn collect_init_variables(kit_name: &str, existing: &HashMap<String, String>) -> HashMap<String, String> {
+pub fn collect_init_variables(kit_name: &str, existing: &HashMap<String, String>) -> HashMap<String, String> {
     let mut out = HashMap::new();
     // The `{kit}` template variable is the short name ("soul"), not the full
     // spec ("repolex-ai/git-lex-kit-soul"), because that's what templates want
@@ -740,7 +740,7 @@ pub(crate) fn collect_init_variables(kit_name: &str, existing: &HashMap<String, 
 // the silent-overwrite-of-user-intent bug class (cf. the Day-37 <slug>@lex.local
 // identity reverts, and the copia COPIA_CONFIG default). Keep agent-editable
 // files OUT of scaffold/, or route them through a drift-aware/merge path.
-pub(crate) fn install_scaffold_files_from(kit_dir: &std::path::Path) -> usize {
+pub fn install_scaffold_files_from(kit_dir: &std::path::Path) -> usize {
     let root = match find_git_root() {
         Some(r) => r,
         None => return 0,
@@ -829,7 +829,7 @@ pub(crate) fn install_scaffold_files_from(kit_dir: &std::path::Path) -> usize {
     //   scaffold/ → repo root       (legacy, for pre-migration kits)
     let ontology_src = kit_dir.join("ontology");
     if ontology_src.exists() {
-        let ontology_dest = git_lex::layout::ontology_dir(&root);
+        let ontology_dest = crate::layout::ontology_dir(&root);
         fs::create_dir_all(&ontology_dest).ok();
         install_recursive(&ontology_src, &ontology_dest, &mut count);
     }
@@ -846,7 +846,7 @@ pub(crate) fn install_scaffold_files_from(kit_dir: &std::path::Path) -> usize {
 
     let www_src = kit_dir.join("www");
     if www_src.exists() {
-        let www_dest = git_lex::layout::www_dir(&root);
+        let www_dest = crate::layout::www_dir(&root);
         fs::create_dir_all(&www_dest).ok();
         install_recursive(&www_src, &www_dest, &mut count);
     }
@@ -872,7 +872,7 @@ fn is_composite_hooks_file(src: &Path) -> bool {
 
 /// What `compose_agents_hooks` did. The caller prints; this reports.
 #[derive(Debug, Default, PartialEq)]
-pub(crate) struct ComposedHooks {
+pub struct ComposedHooks {
     /// Kits (`org/repo`) that ship a `harness/.agents/hooks.json`.
     pub kits: Vec<String>,
     /// The repo's `.agents/hooks.json` was written because its bytes differed.
@@ -892,14 +892,14 @@ pub(crate) struct ComposedHooks {
 /// declare the same hook name the later one is kept and the pair is
 /// reported. Written only when the bytes change. When no installed kit
 /// ships the file, nothing is touched.
-pub(crate) fn compose_agents_hooks(root: &Path) -> ComposedHooks {
+pub fn compose_agents_hooks(root: &Path) -> ComposedHooks {
     let mut report = ComposedHooks::default();
     let mut merged: std::collections::BTreeMap<String, serde_json::Value> =
         std::collections::BTreeMap::new();
     let mut owner: HashMap<String, String> = HashMap::new();
 
     let mut kit_dirs: Vec<PathBuf> = Vec::new();
-    if let Ok(orgs) = fs::read_dir(git_lex::layout::kits_dir(root)) {
+    if let Ok(orgs) = fs::read_dir(crate::layout::kits_dir(root)) {
         for org in orgs.flatten() {
             if let Ok(kits) = fs::read_dir(org.path()) {
                 kit_dirs.extend(kits.flatten().map(|k| k.path()));
@@ -912,7 +912,7 @@ pub(crate) fn compose_agents_hooks(root: &Path) -> ComposedHooks {
         let src = kit_dir.join("harness").join(".agents").join("hooks.json");
         let Ok(content) = fs::read_to_string(&src) else { continue };
         let kit = kit_dir
-            .strip_prefix(git_lex::layout::kits_dir(root))
+            .strip_prefix(crate::layout::kits_dir(root))
             .unwrap_or(&kit_dir)
             .to_string_lossy()
             .replace('\\', "/");
@@ -962,7 +962,7 @@ pub(crate) fn compose_agents_hooks(root: &Path) -> ComposedHooks {
 ///
 /// Paths are relative to the repo root, for display.
 #[derive(Default)]
-pub(crate) struct ScaffoldInstallReport {
+pub struct ScaffoldInstallReport {
     pub installed: usize,
     pub skipped: usize,
     pub updated: Vec<String>,
@@ -1014,7 +1014,7 @@ fn files_byte_identical(src: &Path, dest: &Path) -> bool {
 /// `harness/.claude/hooks/` dir. Used by the file-level hook reap to decide which
 /// local hook files are kit-owned (survive) vs orphaned (removed). The caller passes
 /// each installed kit's vendored dir; this unions them across all kits.
-pub(crate) fn kit_shipped_hook_names(kit_dir: &Path) -> Vec<String> {
+pub fn kit_shipped_hook_names(kit_dir: &Path) -> Vec<String> {
     let hooks_src = kit_dir.join("harness").join(".claude").join("hooks");
     let mut names = Vec::new();
     if let Ok(entries) = fs::read_dir(&hooks_src) {
@@ -1051,7 +1051,7 @@ fn is_local_hook_name(name: &str) -> bool {
 /// kit-update bails hard on any fetch failure before this point, so `kit_hook_names`
 /// is the COMPLETE canonical set. Never reap on a partial fetch (a network blip would
 /// otherwise delete a real hook whose kit just didn't download).
-pub(crate) fn reap_non_kit_non_local_hooks(
+pub fn reap_non_kit_non_local_hooks(
     root: &Path,
     kit_hook_names: &std::collections::HashSet<String>,
 ) -> Vec<String> {
@@ -1088,7 +1088,7 @@ pub(crate) fn reap_non_kit_non_local_hooks(
 /// simply overwrite — the interim `.bak` backup was itself retired 2026-08-08,
 /// git history is the backup), so any remaining sidecar is debris
 /// from the old mechanism. Returns rel-paths of removed files.
-pub(crate) fn sweep_kit_latest_files(root: &Path) -> Vec<String> {
+pub fn sweep_kit_latest_files(root: &Path) -> Vec<String> {
     let mut swept = Vec::new();
     fn walk(dir: &Path, root: &Path, swept: &mut Vec<String>) {
         let Ok(entries) = fs::read_dir(dir) else { return };
@@ -1126,7 +1126,7 @@ fn is_never_overwrite(dest: &Path) -> bool {
 ///     `updated`) — no backup copy, the old bytes live in git history.
 ///     No agent decision, no diff homework.
 ///   - `SOUL.md`: never overwritten (identity is the squaddie's own).
-pub(crate) fn install_scaffold_files_from_skip_existing(
+pub fn install_scaffold_files_from_skip_existing(
     kit_dir: &std::path::Path,
 ) -> ScaffoldInstallReport {
     let root = match find_git_root() {
@@ -1271,7 +1271,7 @@ pub(crate) fn install_scaffold_files_from_skip_existing(
     // Ontology is kit-owned schema — converges like everything else.
     let ontology_src = kit_dir.join("ontology");
     if ontology_src.exists() {
-        let ontology_dest = git_lex::layout::ontology_dir(&root);
+        let ontology_dest = crate::layout::ontology_dir(&root);
         fs::create_dir_all(&ontology_dest).ok();
         install_recursive(&ontology_src, &ontology_dest, &ctx, &mut report);
     }
@@ -1288,7 +1288,7 @@ pub(crate) fn install_scaffold_files_from_skip_existing(
 
     let www_src = kit_dir.join("www");
     if www_src.exists() {
-        let www_dest = git_lex::layout::www_dir(&root);
+        let www_dest = crate::layout::www_dir(&root);
         fs::create_dir_all(&www_dest).ok();
         install_recursive(&www_src, &www_dest, &ctx, &mut report);
     }
@@ -1307,7 +1307,7 @@ pub(crate) fn install_scaffold_files_from_skip_existing(
 /// Outcome of `fetch_and_validate_optional_kit`. See that function for the
 /// validation flow.
 #[derive(Debug)]
-pub(crate) enum KitFetchOutcome {
+pub enum KitFetchOutcome {
     /// Fetched and scope-validated as Optional. The kit is on disk at the
     /// returned path, ready to install.
     Ready(PathBuf),
@@ -1324,13 +1324,13 @@ pub(crate) enum KitFetchOutcome {
 ///
 /// On `ScopeMismatch`, the fetched dir is left on disk (caller can inspect
 /// or clean up). On `FetchFailed`, the dir is removed.
-pub(crate) fn fetch_and_validate_optional_kit(kit_spec: &str) -> KitFetchOutcome {
+pub fn fetch_and_validate_optional_kit(kit_spec: &str) -> KitFetchOutcome {
     let root = match find_git_root() {
         Some(r) => r,
         None => return KitFetchOutcome::FetchFailed,
     };
     let (org, repo, _) = resolve_kit_spec(kit_spec);
-    let kit_dir = git_lex::layout::kit_dir(&root, &org, &repo);
+    let kit_dir = crate::layout::kit_dir(&root, &org, &repo);
 
     // Clean any prior state so the fetch is fresh.
     let _ = fs::remove_dir_all(&kit_dir);
@@ -1353,12 +1353,12 @@ pub(crate) fn fetch_and_validate_optional_kit(kit_spec: &str) -> KitFetchOutcome
 /// Remove a kit's on-disk install dir (`.lex/kit/{org}/{repo}/`). Does NOT
 /// touch the kit's content/ folders in the repo root (those are user data
 /// — `cmd_kit_remove` asks before deleting).
-pub(crate) fn remove_kit_install_dir(kit_spec: &str) -> std::io::Result<()> {
+pub fn remove_kit_install_dir(kit_spec: &str) -> std::io::Result<()> {
     let root = find_git_root().ok_or_else(|| {
         std::io::Error::new(std::io::ErrorKind::NotFound, "not in a git repo")
     })?;
     let (org, repo, _) = resolve_kit_spec(kit_spec);
-    let kit_dir = git_lex::layout::kit_dir(&root, &org, &repo);
+    let kit_dir = crate::layout::kit_dir(&root, &org, &repo);
     if kit_dir.exists() {
         fs::remove_dir_all(&kit_dir)?;
     }
@@ -1560,7 +1560,7 @@ mod tests {
         std::fs::create_dir_all(canon.parent().unwrap()).unwrap();
         std::fs::write(&canon, "# copia ontology\n").unwrap();
         // try_dir's exact-name primary should find it at the canonical location.
-        let dir = git_lex::layout::kit_ontology_dir(&tmp, "copia");
+        let dir = crate::layout::kit_ontology_dir(&tmp, "copia");
         let primary = dir.join("copia.ttl");
         assert!(primary.exists(), "canonical install must exist for the pin");
         assert_eq!(primary, canon, "find path agrees with the canonical contract");
@@ -1921,4 +1921,186 @@ mod compose_agents_hooks_tests {
         assert!(!root.join(".agents").exists());
         let _ = fs::remove_dir_all(&root);
     }
+}
+
+// ─── engine runtime dirs: the managed .gitignore block ────────────
+
+/// The engine runtime dirs every soul must gitignore: the per-soul LOCAL state
+/// of the Subtexture engines. These hold index stores, embeddings, HNSW
+/// indexes, and media roots — heavy, high-churn, machine-local, never
+/// committed. `.weave/` retired 2026-08-04 after a fleet sweep found zero
+/// on-disk and zero tracked dirs. Removing a live entry commits someone's
+/// store at their next save (th34's day-one repo vacuumed 1.4MB of .ravel/
+/// RocksDB before ".ravel/" was here) — sweep before you drop.
+///
+/// Pocket law (Rob, 2026-08-05; doc:
+/// subtexture/docs/stack/2026_08_05_DOTDIR_IGNORE_POCKET.md): in any tool's
+/// dotdir, `_ignore/` is machine-local and everything else is committed. An
+/// engine's entry converges whole-dir → `<dir>_ignore/` per repo, gated on
+/// that engine's KNOWN legacy machine-local paths being gone from outside
+/// the pocket — the engine's own data migration is the trigger, so the flip
+/// can never make a pre-move store committable (spaceGOAT's inverted-82fe1d7
+/// hazard: an 81M transcript tree, one file over GitHub's 100MB cap, one
+/// save away from a rejected push). The gate + legacy lists are
+/// TRANSITIONAL — they die in ship-prep once every engine has moved.
+struct EngineIgnore {
+    dir: &'static str,
+    /// Known legacy machine-local paths (relative to `dir`) from before the
+    /// pocket law. `Some(paths)`: flip to the narrow pocket entry once ALL
+    /// are absent. `None`: never flips (whole-dir entry retained).
+    legacy: Option<&'static [&'static str]>,
+}
+
+const ENGINE_IGNORE: &[EngineIgnore] = &[
+    // Rob 2026-08-05: .pool/ absolutely untouched until the Pool conversion
+    // ("it's hanging on by a thread").
+    EngineIgnore { dir: ".pool/", legacy: None },
+    // Legacy path list not yet confirmed by the copia owner — whole-dir
+    // until it is.
+    EngineIgnore { dir: ".copia/", legacy: None },
+    // Horae (nomia's ask, Rob-approved 2026-08-26): live render queue is
+    // ~170MB of machine-local sqlite at .horae/sqlite/ — already swept into
+    // a lUX commit once and caught. Whole-dir until nomia confirms the
+    // legacy path list (queue home + PNG spool), then flips to the pocket
+    // like every post-law engine.
+    EngineIgnore { dir: ".horae/", legacy: None },
+    // spaceGOAT-confirmed complete (disk survey ×3 installs + sync.rs writes
+    // only these two): store + transcript mirror.
+    EngineIgnore { dir: ".ravel/", legacy: Some(&["oxigraph", "transcripts"]) },
+    // Pan adopts the pocket young; defensive single entry.
+    EngineIgnore { dir: ".pan/", legacy: Some(&["oxigraph"]) },
+];
+
+/// git-lex's own pocket entry. UNCONDITIONAL: the legacy store lived under
+/// `.git/lex/`, never loose in `.lex/`, so there is nothing to gate on.
+const LEX_POCKET_IGNORE: &str = ".lex/_ignore/";
+
+/// The ignore entries to emit for this repo's ACTUAL layout: git-lex's own
+/// pocket first, then each engine at whole-dir or narrow pocket form per the
+/// gate above. Stray files outside a pocket after a flip are committable by
+/// law and surface LOUD in git status — gating on dir-emptiness instead of
+/// the known list would hide them forever (dedup-hides-errors disease).
+fn engine_ignore_entries(root: &Path) -> Vec<String> {
+    let mut entries = vec![LEX_POCKET_IGNORE.to_string()];
+    for e in ENGINE_IGNORE {
+        let flipped = match e.legacy {
+            None => false,
+            Some(paths) => paths.iter().all(|p| !root.join(e.dir).join(p).exists()),
+        };
+        if flipped {
+            entries.push(format!("{}_ignore/", e.dir));
+        } else {
+            entries.push(e.dir.to_string());
+        }
+    }
+    entries
+}
+
+pub const ENGINE_GITIGNORE_BEGIN: &str = "# >>> git-lex engine runtime (managed) >>>";
+pub const ENGINE_GITIGNORE_END: &str = "# <<< git-lex engine runtime (managed) <<<";
+
+/// Idempotently ensure the soul repo's root `.gitignore` carries the managed
+/// engine-runtime entries for this repo's layout (`engine_ignore_entries`).
+/// Wrapped in a sentinel block so re-runs replace-in-place (never duplicate);
+/// the next `git lex kit-update` re-emits the block, which is also how an
+/// engine's whole-dir entry converges to its `_ignore/` pocket form after
+/// that engine migrates its data. Reports (does NOT auto-remove) files
+/// already tracked that now match, so the soul can `git rm --cached` them
+/// deliberately — git-lex never mutates the index on the soul's behalf
+/// (Rob's call, Day 51).
+pub fn ensure_engine_gitignore(root: &Path) {
+    let gitignore = root.join(".gitignore");
+    let existing = fs::read_to_string(&gitignore).unwrap_or_default();
+
+    // Build the managed block from the repo's actual layout.
+    let entries = engine_ignore_entries(root);
+    let mut block = String::from(ENGINE_GITIGNORE_BEGIN);
+    block.push('\n');
+    for entry in &entries {
+        block.push_str(entry);
+        block.push('\n');
+    }
+    block.push_str(ENGINE_GITIGNORE_END);
+
+    // Replace an existing managed block in place, or append a fresh one.
+    let new_contents = if let (Some(start), Some(end_idx)) = (
+        existing.find(ENGINE_GITIGNORE_BEGIN),
+        existing.find(ENGINE_GITIGNORE_END),
+    ) {
+        let end = end_idx + ENGINE_GITIGNORE_END.len();
+        let mut s = String::with_capacity(existing.len());
+        s.push_str(&existing[..start]);
+        s.push_str(&block);
+        s.push_str(&existing[end..]);
+        s
+    } else if existing.trim().is_empty() {
+        format!("{block}\n")
+    } else {
+        format!("{}\n\n{}\n", existing.trim_end(), block)
+    };
+
+    if new_contents != existing
+        && fs::write(&gitignore, &new_contents).is_ok() {
+            println!(
+                "Ensured engine runtime dirs are gitignored ({}).",
+                entries.join(" ")
+            );
+        }
+
+    // Report — but never auto-remove — files already tracked that now match. A
+    // soul that committed its engine state before this ran needs a deliberate
+    // `git rm --cached` (history retained, files stay on disk).
+    report_tracked_engine_paths(root);
+}
+
+/// Print a warning for any git-tracked paths that fall under the engine runtime
+/// dirs, with the exact `git rm --cached` line to untrack them. Read-only: this
+/// never touches the index.
+fn report_tracked_engine_paths(root: &Path) {
+    let out = Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(["ls-files", "-z"])
+        .output();
+    let stdout = match out {
+        Ok(o) if o.status.success() => o.stdout,
+        _ => return,
+    };
+    // Prefixes to match against tracked paths: the entries actually emitted
+    // for this repo's layout (post-flip, e.g. `.ravel/config/` is committable
+    // by law — only the pocket must stay untracked) plus legacy trees the
+    // report should still catch — retired `.weave/` (anyone resurrecting a
+    // pre-rename store deserves the warning) and the capitalized `Pool/` tree
+    // from the pre-`.pool` layout.
+    let mut prefixes: Vec<String> = engine_ignore_entries(root);
+    prefixes.push(".weave/".to_string());
+    prefixes.push("Pool/".to_string());
+    let mut hits: std::collections::BTreeMap<&str, usize> = std::collections::BTreeMap::new();
+    for path in stdout.split(|b| *b == 0) {
+        if path.is_empty() {
+            continue;
+        }
+        let p = String::from_utf8_lossy(path);
+        for pre in &prefixes {
+            if p.starts_with(pre.as_str()) {
+                *hits.entry(pre.as_str()).or_insert(0) += 1;
+                break;
+            }
+        }
+    }
+    if hits.is_empty() {
+        return;
+    }
+    let total: usize = hits.values().sum();
+    eprintln!(
+        "\nwarning: {total} tracked file(s) match engine runtime dirs and should NOT be committed:"
+    );
+    for (pre, n) in &hits {
+        eprintln!("    {pre} ({n} file(s))");
+    }
+    eprintln!("  To untrack (history retained, files stay on disk):");
+    for pre in hits.keys() {
+        eprintln!("    git rm -r --cached {}", pre.trim_end_matches('/'));
+    }
+    eprintln!("  Then commit the removal. (`Pool/` is legacy — migrate it to `.pool/` first.)\n");
 }

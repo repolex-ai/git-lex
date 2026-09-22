@@ -38,11 +38,11 @@
 
 use crate::git::graph_uri;
 use crate::nquad::{nq_escape, uri_encode_path};
-use git_lex::find_git_root;
+use crate::find_git_root;
 
 /// Instance-IRI base for git2 machinery objects (universal law: the git2
 /// t-box minus `ontology/`).
-pub(crate) fn git2_uri(path: &str) -> String {
+pub fn git2_uri(path: &str) -> String {
     format!("https://repolex.ai/git-lex/git2/{path}")
 }
 
@@ -66,7 +66,7 @@ const XSD_BOOLEAN: &str = "http://www.w3.org/2001/XMLSchema#boolean";
 ///
 /// Date math is the standard civil-from-days algorithm (Howard Hinnant,
 /// public domain) — no external date dependency.
-pub(crate) fn git2_time_to_datetime(seconds: i64, offset_minutes: i32) -> String {
+pub fn git2_time_to_datetime(seconds: i64, offset_minutes: i32) -> String {
     let local_secs = seconds + (offset_minutes as i64) * 60;
     let days = local_secs.div_euclid(86_400);
     let secs_of_day = local_secs.rem_euclid(86_400);
@@ -144,7 +144,7 @@ fn emit_signature(
 /// Where the producer's N-Quads text goes: a `String` that holds all of it,
 /// or a sink that takes it as it comes (a full rebuild loads the layer in
 /// batches, #15 — the whole text is 2 GB at 10 million quads).
-pub(crate) trait NqSink {
+pub trait NqSink {
     fn push_str(&mut self, text: &str);
 }
 
@@ -157,14 +157,14 @@ impl NqSink for String {
 /// The git2-layer producer. Reads the repository via the git2 library and
 /// returns N-Quads text (the same text `git lex query` serializes and sync
 /// loads into oxigraph — one producer, two sinks).
-pub(crate) fn generate_git2_nquads() -> String {
+pub fn generate_git2_nquads() -> String {
     let mut nq = String::new();
     emit_git2_nquads(&mut nq);
     nq
 }
 
 /// [`generate_git2_nquads`], written to `nq` as it is produced.
-pub(crate) fn emit_git2_nquads(nq: &mut impl NqSink) {
+pub fn emit_git2_nquads(nq: &mut impl NqSink) {
     let Some(git_root) = find_git_root() else {
         return; // not a git repo — nothing to emit
     };
@@ -191,7 +191,7 @@ pub(crate) fn emit_git2_nquads(nq: &mut impl NqSink) {
         nq.push_str(&format!("{ru} {RDF_TYPE} <{GITLEX_NS}Repo> {graph} .\n"));
         nq.push_str(&format!("{ru} {RDF_TYPE} <{GIT2_NS}Repository> {graph} .\n"));
         nq.push_str(&format!("{ru} <{GITLEX_NS}genesisSha> \"{genesis}\" {graph} .\n"));
-        if let Ok(content) = std::fs::read_to_string(git_lex::layout::repo_yml(&git_root)) {
+        if let Ok(content) = std::fs::read_to_string(crate::layout::repo_yml(&git_root)) {
             let mut current_list: Option<&str> = None;
             for line in content.lines() {
                 let trimmed = line.trim();

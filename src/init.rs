@@ -11,13 +11,13 @@ use std::process::{Command, exit};
 
 use git_lex::{find_git_root, registry_add, resolve_kit_spec};
 
-use crate::git::auto_commit_snapshot;
+use git_lex::git::auto_commit_snapshot;
 use crate::harness;
 use crate::hooks;
-use crate::kit::{collect_init_variables, fetch_kit_from_github, install_scaffold_files_from,
+use git_lex::kit::{collect_init_variables, fetch_kit_from_github, install_scaffold_files_from,
                  kit_config_bool, kit_config_str, read_repo_yml_fields};
 use crate::kit_cmds;
-use crate::ontology::{self, get_kit_types};
+use git_lex::ontology::{self, get_kit_types};
 use crate::shacl::build_shacl_shapes;
 use crate::BASE_KIT;
 
@@ -158,7 +158,7 @@ pub(crate) fn cmd_init(directory: Option<String>, kit: Option<String>) {
     // committed. Pushed by git-lex so souls don't hand-maintain it and miss a new
     // dir (the leak: lUX committed 155 .pool/ files, W4R3Z 11 Pool/oxigraph/, both
     // because their hand-written .gitignore predated .pool/). Idempotent.
-    kit_cmds::ensure_engine_gitignore(&root);
+    git_lex::kit::ensure_engine_gitignore(&root);
 
     // repo.yml — create if missing, otherwise update the kit: field to
     // match the spec passed to this init run. This matters for re-init:
@@ -399,7 +399,7 @@ fn write_repo_yml(repo_yml_path: &std::path::Path, root: &std::path::Path, kit_s
         let today = git_lex::clock::today_ymd().unwrap_or_else(|| "unknown".to_string());
         fs::write(repo_yml_path, format!(
             "{}name: {}\nkit: {}\ncreated: {}\n",
-            crate::git::REPO_YML_HEADER, repo_name, kit_spec, today
+            git_lex::git::REPO_YML_HEADER, repo_name, kit_spec, today
         )).unwrap_or_else(|e| {
             eprintln!("fatal: could not write .lex/repo.yml: {}", e);
             exit(1);
@@ -596,13 +596,13 @@ fn commit_setup_and_content() {
 /// as "git lex identity" — loudly on failure (#50): identity is the
 /// anchor engines join on.
 fn record_identity(root: &std::path::Path, repo_yml_path: &std::path::Path) {
-    let first_sha = crate::git::genesis_sha().unwrap_or_default();
+    let first_sha = git_lex::git::genesis_sha().unwrap_or_default();
 
     if !first_sha.is_empty() {
         let existing = fs::read_to_string(repo_yml_path).unwrap_or_default();
         let mut identity_paths: Vec<&str> = Vec::new();
         if !existing.contains("genesis_sha:") && !existing.contains("first_commit:") {
-            if let Err(e) = crate::git::ensure_repo_yml_genesis(&first_sha) {
+            if let Err(e) = git_lex::git::ensure_repo_yml_genesis(&first_sha) {
                 eprintln!("fatal: could not record genesis_sha identity in .lex/repo.yml: {}", e);
                 exit(1);
             }
@@ -612,9 +612,9 @@ fn record_identity(root: &std::path::Path, repo_yml_path: &std::path::Path) {
         // Fill soul.Soul.soulId in the freshly installed root SOUL.md from
         // the same genesis sha (#29 — the kit template ships the key empty
         // and declares this fill as git-lex's job).
-        match crate::soul_md::heal_soul_id(root) {
-            crate::soul_md::HealOutcome::Filled
-            | crate::soul_md::HealOutcome::Healed => identity_paths.push("SOUL.md"),
+        match git_lex::soul_md::heal_soul_id(root) {
+            git_lex::soul_md::HealOutcome::Filled
+            | git_lex::soul_md::HealOutcome::Healed => identity_paths.push("SOUL.md"),
             _ => {}
         }
         if !identity_paths.is_empty() {

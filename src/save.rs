@@ -4,12 +4,13 @@
 use std::process::{Command, exit};
 use std::time::Instant;
 use git_lex::get_kit;
-use crate::nquad;
-use crate::require_git_root;
-use crate::nquad::generate_frontmatter_nquads;
-use crate::extraction::frontmatter_to_turtle;
-use crate::kit::read_repo_yml_fields;
-use crate::{harness, ontology, soul_md, spo_events};
+use git_lex::nquad;
+use git_lex::require_git_root;
+use git_lex::nquad::generate_frontmatter_nquads;
+use git_lex::extraction::frontmatter_to_turtle;
+use git_lex::kit::read_repo_yml_fields;
+use crate::harness;
+use git_lex::{ontology, soul_md, spo_events};
 
 // ─── git lex save ──────────────────────────────────────────────
 
@@ -299,7 +300,7 @@ pub(crate) fn cmd_save(message: &str, dry_run: bool, no_restamp: bool) {
             // not move or reshape those lines — it puts the number where the eye
             // lands, and stays compatible with whatever shape the stream itself
             // ends up with.
-            let author_warnings = crate::nquad::author_warning_count();
+            let author_warnings = git_lex::nquad::author_warning_count();
             if author_warnings > 0 {
                 eprintln!(
                     "...saved with {} warning(s) — see the warning:/note: lines above. \
@@ -388,7 +389,7 @@ pub(crate) fn cmd_validate() -> bool {
     // One walker for the whole codebase; `.txt` files ride along for the
     // slug index (sync's resolver indexes them as link targets, so validate
     // must too). Only .md files are validated (filter in the loop below).
-    let files = crate::nquad::walk_repo_docs(&root);
+    let files = git_lex::nquad::walk_repo_docs(&root);
 
     // Parse SHACL shapes into compiled schema (once)
     use rudof_rdf::rdf_core::RDFFormat;
@@ -440,7 +441,7 @@ pub(crate) fn cmd_validate() -> bool {
         // no triples → Ok(None)); now that a classed document emits its type
         // even with no values, the skip must be explicit — the same filter
         // extraction's own walker applies.
-        if crate::nquad::is_template(filepath) { continue; }
+        if git_lex::nquad::is_template(filepath) { continue; }
         let ttl = match frontmatter_to_turtle(filepath, &root, &kit) {
             Ok(Some(t)) => t,
             Ok(None) => continue,
@@ -597,7 +598,7 @@ pub(crate) fn hook_pre_commit() {
     // committed, so no committed-sidecar divergence is possible. Skip
     // staging rather than fatal on `git add` refusing an ignored path,
     // which broke every commit in such repos (2026-08-04).
-    let root = crate::require_git_root();
+    let root = git_lex::require_git_root();
     let lex_ignored = Command::new("git").args(["check-ignore", "-q", ".lex"])
         .current_dir(&root)
         .status()
@@ -846,7 +847,7 @@ fn is_substantive_doc_change(old_content: &str, new_content: &str) -> bool {
 ///
 /// Stamped files are re-staged so the commit carries the stamped bytes.
 fn stamp_dates_for_staged_changes() {
-    let root = crate::require_git_root();
+    let root = git_lex::require_git_root();
     let runtime_sub = detect_runtime_substrate(&root);
     // Never guess a date into a permanent record: no clock, no stamp.
     let Some(now) = local_datetime_now() else { return };
@@ -893,7 +894,7 @@ fn stamp_dates_for_staged_changes() {
         };
         let Some(path) = path else { continue };
         let path = std::path::Path::new(path);
-        if crate::nquad::is_template(path) {
+        if git_lex::nquad::is_template(path) {
             continue;
         }
         let full_path = root.join(path);
@@ -1333,7 +1334,7 @@ pub(crate) fn cmd_extract() {
                 // in-repo existence law below has no single id-space to
                 // check them against. Resolution/rejection already
                 // happened in the emit lane.
-                if range_iri == crate::nquad::THING_CLASS_IRI {
+                if range_iri == git_lex::nquad::THING_CLASS_IRI {
                     continue;
                 }
                 let enforce = *foldered_cache.entry(range_iri.clone()).or_insert_with(|| {

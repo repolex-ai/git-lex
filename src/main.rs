@@ -1,48 +1,36 @@
 use clap::{Parser, Subcommand};
-use oxigraph::store::Store;
 use std::process::{Command, exit};
 use std::fs;
 
 // Shared utilities (also used by git-lex-serve)
-use git_lex::{find_git_root,
-              registry_remove};
+use git_lex::{find_git_root, registry_remove, require_git_root, open_or_create_store};
+#[cfg(test)]
+use git_lex::migrate_legacy_store;
+use git_lex::{context, export_spine, sync};
 
 // Frontmatter ObjectProperty value resolver. The rules for what is and isn't
 // allowed in frontmatter values are codified as tests in this module — read
 // the test suite for the definitive spec.
-mod resolve;
 mod heal;
 mod man;
-mod sync;
 mod harness;
-mod git;
 mod hooks;
 mod init;
-mod git2_nquads;
 mod verify;
-mod nquad;
-mod ontology;
 mod shacl;
-mod kit;
 mod kit_cmds;
-mod extraction;
-mod soul_md;
 mod create;
 mod save;
 mod query;
-mod walkcache;
-mod export_spine;
-mod context;
 mod voice;
 mod session;
 
-use crate::git::auto_commit_snapshot;
+use git_lex::git::auto_commit_snapshot;
 
 // .spo event stream — git-aware change detector for .spo sidecars. Used by
 // orphan cleanup (pre-commit hook) and history graph ingest (rebuild +
 // incremental). The full model is documented in docs/history.md and in the
 // module header of src/spo_events.rs itself.
-mod spo_events;
 
 #[derive(Parser)]
 #[command(
@@ -270,87 +258,6 @@ pub(crate) use git_lex::BASE_KIT;
 
 
 // store paths and open_store_read_only come from the git_lex lib
-
-/// Exit with a clean one-line error when run outside a git repository —
-/// a panic + backtrace here is a crash report for a user mistake.
-pub(crate) fn require_git_root() -> std::path::PathBuf {
-    match find_git_root() {
-        Some(r) => r,
-        None => {
-            eprintln!("fatal: not a git repository (run this inside a repo)");
-            exit(1);
-        }
-    }
-}
-
-/// Create or open the persistent store, with clean errors (no panics) for
-/// the two user-reachable failures: not-a-repo and a locked/broken store.
-/// Every write path enters here, so this is also where a pre-pocket store
-/// migrates into `.lex/_ignore/` (the ravel pattern: migrate at the top of
-/// every write, loud on action, refuse ambiguity).
-pub(crate) fn open_or_create_store() -> Store {
-    let root = require_git_root();
-    if let Err(e) = migrate_legacy_store(&root) {
-        eprintln!("fatal: {e}");
-        exit(1);
-    }
-    let path = git_lex::store_path_at(&root);
-    if let Err(e) = fs::create_dir_all(&path) {
-        eprintln!("fatal: cannot create store directory {}: {e}", path.display());
-        exit(1);
-    }
-    match Store::open(&path) {
-        Ok(s) => s,
-        Err(e) => {
-            eprintln!("fatal: cannot open the store at {}: {e}", path.display());
-            eprintln!("(another git-lex write process may hold the lock — is a sync already running?)");
-            exit(1);
-        }
-    }
-}
-
-/// Move a pre-pocket store (`.git/lex/oxigraph`) into `.lex/_ignore/oxigraph`
-/// (pocket law, Rob 2026-08-05). No-op when there is nothing legacy to move.
-/// Refuses an ambiguous dual layout rather than guessing which store is
-/// current. TRANSITIONAL — dies in ship-prep with `legacy_store_path_at`.
-pub(crate) fn migrate_legacy_store(root: &std::path::Path) -> Result<(), String> {
-    let legacy = git_lex::legacy_store_path_at(root);
-    let pocket = git_lex::store_path_at(root);
-    if !legacy.exists() {
-        return Ok(());
-    }
-    if pocket.exists() {
-        return Err(format!(
-            "both {} and {} exist — ambiguous store layout, refusing to guess which is current. \
-             The pocket path is canonical: if it is current, delete the legacy dir; \
-             if unsure, delete BOTH and re-run `git lex sync` (the store is derived).",
-            legacy.display(),
-            pocket.display()
-        ));
-    }
-    // Ignore entry FIRST: the pocket must never exist on disk without its
-    // gitignore line, or the store is committable until the next kit-update
-    // (the inverted-82fe1d7 hazard, pointed at ourselves).
-    kit_cmds::ensure_engine_gitignore(root);
-    if let Some(parent) = pocket.parent() {
-        fs::create_dir_all(parent)
-            .map_err(|e| format!("cannot create {}: {e}", parent.display()))?;
-    }
-    fs::rename(&legacy, &pocket)
-        .map_err(|e| format!("cannot move store {} → {}: {e}", legacy.display(), pocket.display()))?;
-    println!(
-        "Store migrated into the pocket: {} → {}",
-        legacy.display(),
-        pocket.display()
-    );
-    // The legacy shell (.git/lex/) only ever held the store; drop it if empty.
-    if let Some(shell) = legacy.parent() {
-        let _ = fs::remove_dir(shell);
-    }
-    Ok(())
-}
-
-
 
 // ─── main ──────────────────────────────────────────────────────
 

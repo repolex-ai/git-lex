@@ -7,7 +7,7 @@ use std::process::exit;
 use oxigraph::io::RdfFormat;
 use oxigraph::model::*;
 use oxigraph::store::Store;
-use crate::nquad::{generate_frontmatter_nquads, load_lex_nquads};
+use git_lex::nquad::{generate_frontmatter_nquads, load_lex_nquads};
 use git_lex::add_prefixes;
 
 pub(crate) fn run_query(store: &Store, query: &str, store_type: &str, json: bool) {
@@ -289,7 +289,7 @@ pub(crate) fn cmd_query(query: String, json: bool) {
     let start = Instant::now();
     let store = Store::new().expect("failed to create in-memory store");
 
-    let git_nq = crate::git2_nquads::generate_git2_nquads();
+    let git_nq = git_lex::git2_nquads::generate_git2_nquads();
     let git_count = git_nq.lines().count();
     store
         .load_from_reader(RdfFormat::NQuads, Cursor::new(git_nq.as_bytes()))
@@ -300,7 +300,7 @@ pub(crate) fn cmd_query(query: String, json: bool) {
     // computed fresh). write_sidecars is OFF — query is a READ command; it
     // used to rewrite the .spo sidecars as a side effect, dirtying the tree
     // from a question.
-    let walk = generate_frontmatter_nquads(crate::nquad::NowWalkOpts {
+    let walk = generate_frontmatter_nquads(git_lex::nquad::NowWalkOpts {
         write_sidecars: false,
         build_nquads: true,
     });

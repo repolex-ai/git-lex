@@ -1,8 +1,8 @@
 //! `git lex session` — Inspect active soul session attestation, genesis SHA, and substrate.
 
 use serde_json::json;
-use crate::require_git_root;
-use crate::soul_md::soul_kit_installed;
+use git_lex::require_git_root;
+use git_lex::soul_md::soul_kit_installed;
 
 pub fn cmd_session(as_json: bool) {
     let root = require_git_root();
@@ -12,8 +12,8 @@ pub fn cmd_session(as_json: bool) {
     }
     let is_soul = true;
 
-    let genesis_sha = crate::git::genesis_sha().unwrap_or_else(|| "none".to_string());
-    let current_head = crate::git::head_commit_sha().unwrap_or_else(|| "none".to_string());
+    let genesis_sha = git_lex::git::genesis_sha().unwrap_or_else(|| "none".to_string());
+    let current_head = git_lex::git::head_commit_sha().unwrap_or_else(|| "none".to_string());
     let soul_name = git_lex::RepoYml::load(&root)
         .name
         .unwrap_or_else(|| "unnamed".to_string());

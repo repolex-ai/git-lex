@@ -63,14 +63,14 @@ const SPINE_BASE: &str = "https://repolex.ai/";
 
 /// Pocket dir for the spine — same shape as `.lex/_ignore/oxigraph` and
 /// `.lex/_ignore/walkcache`.
-pub(crate) fn spine_dir(root: &Path) -> PathBuf {
-    git_lex::layout::spine_dir(root)
+pub fn spine_dir(root: &Path) -> PathBuf {
+    crate::layout::spine_dir(root)
 }
 
-pub(crate) fn cmd_export_spine() {
+pub fn cmd_export_spine() {
     let root = require_git_root();
 
-    let Some(store) = git_lex::open_store_read_only_at(&root) else {
+    let Some(store) = crate::open_store_read_only_at(&root) else {
         // open_store_read_only_at already printed the corrupt/locked case;
         // the None we act on here is the genuinely-missing store.
         eprintln!(
@@ -89,7 +89,7 @@ pub(crate) fn cmd_export_spine() {
 /// The whole export, callable from sync as well as the CLI. Errors are
 /// returned, never exited on — the sync caller demotes them to warnings
 /// because a cache artifact must not fail a sync.
-pub(crate) fn run_export(root: &Path, store: &Store) -> Result<(), String> {
+pub fn run_export(root: &Path, store: &Store) -> Result<(), String> {
     let Some(synced_sha) = newest_synced_commit(store) else {
         return Err(
             "the store holds no synced commits, so there is nothing to export.\n\
@@ -135,7 +135,7 @@ pub(crate) fn run_export(root: &Path, store: &Store) -> Result<(), String> {
 
     // The retired Parquet-era pocket: derived data whose format died
     // (Rob-ruled 2026-08-29). Clean it up once, loudly.
-    let old = git_lex::layout::cottas_dir(root);
+    let old = crate::layout::cottas_dir(root);
     if old.is_dir() && fs::remove_dir_all(&old).is_ok() {
         println!("Cleaned: .lex/_ignore/cottas/ (retired format; the spine replaced it)");
     }
@@ -169,7 +169,7 @@ pub(crate) fn run_export(root: &Path, store: &Store) -> Result<(), String> {
 
 /// Sync's tail-step: every sync, every repo, no gate. Failures demote to
 /// warnings — a cache artifact must never fail a sync.
-pub(crate) fn refresh_after_sync(root: &Path, store: &Store) {
+pub fn refresh_after_sync(root: &Path, store: &Store) {
     if let Err(e) = run_export(root, store) {
         eprintln!("warning: spine not refreshed: {e}");
         eprintln!("(sync itself succeeded; run `git lex export-spine` to retry)");
@@ -186,7 +186,7 @@ fn write_spine_file(
 
     // Longest namespace first, so the most specific binding wins (git2:
     // and md: nest inside git-lex:'s namespace).
-    let mut bindings = git_lex::prefix_bindings_at(Some(root));
+    let mut bindings = crate::prefix_bindings_at(Some(root));
     bindings.sort_by_key(|(_, ns)| std::cmp::Reverse(ns.len()));
 
     let mut used: Vec<usize> = Vec::new();
@@ -252,7 +252,7 @@ fn write_spine_file(
     // Identity header (Rob-ruled 2026-08-29): which soul this file IS, so
     // a cache holding many souls' spines can attribute every fact and
     // reconstruct real file paths (repo + the fileId rows).
-    let ry = git_lex::RepoYml::load(root);
+    let ry = crate::RepoYml::load(root);
     if let Some(sha) = crate::git::genesis_sha() {
         writeln!(out, "# genesis_sha: {}", &sha[..8.min(sha.len())])?;
     }

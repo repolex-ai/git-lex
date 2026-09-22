@@ -12,7 +12,7 @@
 
 use std::fs;
 
-use git_lex::resolve_kit_spec;
+use crate::resolve_kit_spec;
 
 
 /// Escape a string for a Turtle double-quoted literal. Backslash FIRST,
@@ -31,7 +31,7 @@ use crate::ontology::{get_object_properties, get_property_datatypes};
 ///
 /// Returns None if the target tries to escape the repo root (more `..`
 /// segments than the source path can absorb).
-pub(crate) fn normalize_wikilink_path(target: &str, source_dir: &str) -> Option<String> {
+pub fn normalize_wikilink_path(target: &str, source_dir: &str) -> Option<String> {
     // Leading `/` means "from repo root"; otherwise relative to source_dir.
     let combined = if let Some(rest) = target.strip_prefix('/') {
         rest.to_string()
@@ -65,7 +65,7 @@ pub(crate) fn normalize_wikilink_path(target: &str, source_dir: &str) -> Option<
 /// authors an on-disk path containing a space, and the file index holds the
 /// raw filename. An invalid escape (no two hex digits) passes through
 /// unchanged.
-pub(crate) fn percent_decode(s: &str) -> String {
+pub fn percent_decode(s: &str) -> String {
     let bytes = s.as_bytes();
     let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
     let mut i = 0;
@@ -105,7 +105,7 @@ fn one_line(s: &str) -> String {
 /// Recursively flatten a YAML value into dot-notation `key | hasValue | val` lines.
 /// Used by the frontmatter extractor to produce .spo-compatible rows for nested
 /// YAML mappings and sequences.
-pub(crate) fn flatten_yaml(prefix: &str, value: &serde_yaml::Value, lines: &mut Vec<String>) {
+pub fn flatten_yaml(prefix: &str, value: &serde_yaml::Value, lines: &mut Vec<String>) {
     match value {
         serde_yaml::Value::String(s) => {
             lines.push(format!("{} | hasValue | {}", prefix, one_line(s)));
@@ -153,7 +153,7 @@ pub(crate) fn flatten_yaml(prefix: &str, value: &serde_yaml::Value, lines: &mut 
 /// 113 — one extractor, one resolution policy, so the views can never
 /// resolve links differently; the separate sidecar walk this doc once
 /// named is retired).
-pub(crate) fn extract_md_link_lines(
+pub fn extract_md_link_lines(
     tree: &tree_sitter_md::MarkdownTree,
     content: &str,
     relpath_str: &str,
@@ -244,7 +244,7 @@ fn declared_property_iris() -> &'static std::collections::HashMap<String, String
 /// class declares the new one, answer the new name and warn once per file
 /// with the exact line to write. The old name comes back untouched in every
 /// other case, so nothing else changes. TRANSITIONAL — remove with the window.
-pub(crate) fn renamed_date_key<'a>(short: &str, class: &str, prop_name: &'a str, filepath: &std::path::Path) -> &'a str {
+pub fn renamed_date_key<'a>(short: &str, class: &str, prop_name: &'a str, filepath: &std::path::Path) -> &'a str {
     let new_name = match prop_name {
         "dateCreated" => "createdDate",
         "dateUpdated" => "updatedDate",
@@ -349,7 +349,7 @@ fn emit_predicate(lookup_key: &str, prefix_name: &str, prop_name: &str) -> Strin
     }
 }
 
-pub(crate) fn frontmatter_to_turtle(
+pub fn frontmatter_to_turtle(
     filepath: &std::path::Path,
     root: &std::path::Path,
     kit: &str,
@@ -358,20 +358,20 @@ pub(crate) fn frontmatter_to_turtle(
         .map_err(|e| format!("cannot read file: {}", e))?;
 
     // ONE frontmatter parser (review #9): the shared fence rule in lib.rs.
-    let Some(yaml_str) = git_lex::split_frontmatter(&content).0 else {
+    let Some(yaml_str) = crate::split_frontmatter(&content).0 else {
         return Ok(None);
     };
 
     // ONE frontmatter YAML parser (#101): the shared duplicate-key gate in
     // lib.rs. A repeated key used to reach here as a HashMap that had already
     // dropped every value but the last.
-    let yaml = git_lex::parse_frontmatter_map(yaml_str)?;
+    let yaml = crate::parse_frontmatter_map(yaml_str)?;
 
     // Find dot notation keys matching this kit: kit.class.property
     // Use the short kit name (e.g., "soul") not the full spec
     // (e.g., "repolex-ai/git-lex-kit-soul") — frontmatter keys are
     // written as soul.Journal.journalId, not repolex-ai/git-lex-kit-soul.Journal.journalId.
-    let (_, _, short) = git_lex::resolve_kit_spec(kit);
+    let (_, _, short) = crate::resolve_kit_spec(kit);
     let kit_prefix = format!("{}.", short);
     let mut doc_type: Option<String> = None;
     let mut kit_props: Vec<(String, String)> = Vec::new(); // (property_name, value)
@@ -500,7 +500,7 @@ pub(crate) fn frontmatter_to_turtle(
     let mut namespace = crate::ontology::get_kit_namespace(kit);
     if namespace.is_empty() {
         let (_, _, short) = resolve_kit_spec(kit);
-        namespace = git_lex::conventional_kit_namespace(&short);
+        namespace = crate::conventional_kit_namespace(&short);
     }
 
     // Build ObjectProperty set and datatype map for proper literal emission

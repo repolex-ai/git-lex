@@ -6,7 +6,7 @@
 use std::fs;
 use std::process::Command;
 
-use git_lex::find_git_root;
+use crate::find_git_root;
 
 /// Resolve the soul's genesis SHA (three tiers, ordered by cost) and make
 /// sure it is RECORDED. Called ONCE per sync.
@@ -20,7 +20,7 @@ use git_lex::find_git_root;
 /// cross-system contract (Pool's boot-skip reads it). It stops being
 /// written, and repos delete it, ONLY after Pool's read cuts over to
 /// repo.yml (coordinated 3-step, step 2 is Pool's).
-pub(crate) fn ensure_genesis_recorded() -> Option<String> {
+pub fn ensure_genesis_recorded() -> Option<String> {
     let sha = genesis_sha()?;
     if let Err(e) = ensure_repo_yml_genesis(&sha) {
         eprintln!("warning: could not record genesis_sha in .lex/repo.yml: {e}");
@@ -37,14 +37,14 @@ pub(crate) fn ensure_genesis_recorded() -> Option<String> {
 /// The soul's genesis (first-commit) SHA, if resolvable. repo.yml is the
 /// authority; identity.yml is the transition-era fallback; git itself is
 /// the recompute-of-last-resort.
-pub(crate) fn genesis_sha() -> Option<String> {
+pub fn genesis_sha() -> Option<String> {
     sha_from_repo_yml()
         .or_else(sha_from_identity_yml)
         .or_else(sha_from_git)
 }
 
 /// The repository's current HEAD commit SHA, if any.
-pub(crate) fn head_commit_sha() -> Option<String> {
+pub fn head_commit_sha() -> Option<String> {
     let out = Command::new("git")
         .args(["rev-parse", "HEAD"])
         .output()
@@ -63,9 +63,9 @@ pub(crate) fn head_commit_sha() -> Option<String> {
 /// Three cases: canonical key present → no-op; legacy `first_commit:` line
 /// present → rewritten in place to the canonical key (self-migration);
 /// neither → appended.
-pub(crate) fn ensure_repo_yml_genesis(sha: &str) -> std::io::Result<()> {
+pub fn ensure_repo_yml_genesis(sha: &str) -> std::io::Result<()> {
     let Some(root) = find_git_root() else { return Ok(()) };
-    let path = git_lex::layout::repo_yml(&root);
+    let path = crate::layout::repo_yml(&root);
     let existing = fs::read_to_string(&path).unwrap_or_default();
     if existing.lines().any(|l| l.trim_start().starts_with("genesis_sha:")) {
         return Ok(());
@@ -98,7 +98,7 @@ pub(crate) fn ensure_repo_yml_genesis(sha: &str) -> std::io::Result<()> {
 /// is the squaddie's, and the file now says so in its own first lines.
 ///
 /// Text, not a doc-comment, because the audience reads the FILE.
-pub(crate) const REPO_YML_HEADER: &str = "\
+pub const REPO_YML_HEADER: &str = "\
 # these values are set at init, managed by git-lex, DO NOT EDIT
 #
 # What they do, so the file is not a mystery:
@@ -127,8 +127,8 @@ pub(crate) const REPO_YML_HEADER: &str = "\
 ///
 /// Called from kit-update, which runs at every compaction, so the whole
 /// existing fleet converges without anyone doing anything.
-pub(crate) fn ensure_repo_yml_header(root: &std::path::Path) -> std::io::Result<()> {
-    let path = git_lex::layout::repo_yml(root);
+pub fn ensure_repo_yml_header(root: &std::path::Path) -> std::io::Result<()> {
+    let path = crate::layout::repo_yml(root);
     let Ok(existing) = fs::read_to_string(&path) else { return Ok(()) };
     let body = strip_managed_header(&existing);
     let want = format!("{REPO_YML_HEADER}{body}");
@@ -170,13 +170,13 @@ fn strip_managed_header(content: &str) -> &str {
 /// oxigraph rejects it at the model level and SPARQL won't parse `<now>` —
 /// probed Day-50. Absolute-and-identical is the standard shape that delivers
 /// the portability requirement.)
-pub(crate) const GRAPH_BASE: &str = "https://repolex.ai/git-lex/NamedGraph/";
+pub const GRAPH_BASE: &str = "https://repolex.ai/git-lex/NamedGraph/";
 
 /// The a-box (instance) base for soul-repo subjects. Subtexture-wide shape
 /// (Rob, Day-50): `https://repolex.ai/<application>/<Class>/<instanceId>` —
 /// no base word; vocabulary stays under `https://repolex.ai/ontology/...`.
 /// Process-cached a-box base + scaffold-folder prefix, derived once from
-/// repo.yml via `git_lex::resource_base_at` (kit short name, else repo
+/// repo.yml via `crate::resource_base_at` (kit short name, else repo
 /// name; NEVER hardcoded — Rob-ruled 2026-07-28). The scaffold strip
 /// generalizes the old "Soul/" rule: the folder named after the namespace,
 /// capitalized, maps onto the namespace root ("Soul/Journal/x" →
@@ -189,7 +189,7 @@ fn resource_base() -> &'static (String, String) {
     static BASE: std::sync::OnceLock<(String, String)> = std::sync::OnceLock::new();
     BASE.get_or_init(|| {
         let base = find_git_root()
-            .map(|r| git_lex::resource_base_at(&r))
+            .map(|r| crate::resource_base_at(&r))
             .unwrap_or_else(|| "https://repolex.ai/repo".to_string());
         let ns = base.rsplit('/').next().unwrap_or("repo");
         let mut cap = ns.to_string();
@@ -209,7 +209,7 @@ fn resource_base() -> &'static (String, String) {
 /// stripping here (that is a Thing-plane derivation nicety): the path is
 /// the id, verbatim, so `git-lex/File/Soul/Journal/day-1.md` and a
 /// no-kit repo's `git-lex/File/README.md` follow one rule.
-pub(crate) const FILE_BASE: &str = "https://repolex.ai/git-lex/File/";
+pub const FILE_BASE: &str = "https://repolex.ai/git-lex/File/";
 
 /// THE one base every instance address resolves against.
 ///
@@ -222,10 +222,10 @@ pub(crate) const FILE_BASE: &str = "https://repolex.ai/git-lex/File/";
 /// namespace comes from the VALUE — so it must NOT resolve against the
 /// document's own kit base, or a copia Texture referenced from a soul Note
 /// lands under soul and joins to nothing.
-pub(crate) const RESOURCE_ROOT: &str = "https://repolex.ai/";
+pub const RESOURCE_ROOT: &str = "https://repolex.ai/";
 
 /// A File node's IRI from its (already uri-encoded) repo-relative path.
-pub(crate) fn file_iri(encoded_path: &str) -> String {
+pub fn file_iri(encoded_path: &str) -> String {
     format!("{FILE_BASE}{encoded_path}")
 }
 
@@ -234,7 +234,7 @@ pub(crate) fn file_iri(encoded_path: &str) -> String {
 /// 72be113) under the universal instance law — the git-lex application's
 /// NamedGraph objects. The ontology graph's instance name is
 /// `repo-ontology` (renamed from `ontology`, Rob Day-50).
-pub(crate) fn graph_uri(name: &str) -> String {
+pub fn graph_uri(name: &str) -> String {
     format!("{GRAPH_BASE}{name}")
 }
 
@@ -252,7 +252,7 @@ pub(crate) fn graph_uri(name: &str) -> String {
 /// NOTE: file-derived subjects keep their extension (`.md`) — joins are by
 /// filename (nquad.rs wikilink resolution + downstream resolvers exact-match
 /// on it); see the Task-2 spec's ON HOLD ruling before ever changing that.
-pub(crate) fn resource_uri(path: &str) -> String {
+pub fn resource_uri(path: &str) -> String {
     let (base, strip) = resource_base();
     if path.is_empty() {
         return base.clone();
@@ -271,7 +271,7 @@ pub(crate) fn resource_uri(path: &str) -> String {
 /// separation makes the invariant visible.
 fn sha_from_identity_yml() -> Option<String> {
     let root = find_git_root()?;
-    let content = fs::read_to_string(git_lex::layout::identity_yml(&root)).ok()?;
+    let content = fs::read_to_string(crate::layout::identity_yml(&root)).ok()?;
     for line in content.lines() {
         if let Some(rest) = line.trim().strip_prefix("genesis_sha:") {
             let sha = rest.trim();
@@ -287,7 +287,7 @@ fn sha_from_identity_yml() -> Option<String> {
 /// `genesis_sha` first; legacy `first_commit` accepted until the repo's
 /// next sync rewrites it (self-migration in ensure_repo_yml_genesis).
 fn sha_from_repo_yml() -> Option<String> {
-    let yml = git_lex::RepoYml::load(&find_git_root()?);
+    let yml = crate::RepoYml::load(&find_git_root()?);
     let sha = yml.genesis_sha.or(yml.first_commit)?;
     is_valid_sha(&sha).then_some(sha)
 }
@@ -333,7 +333,7 @@ fn write_identity_yml_sha(sha: &str) -> std::io::Result<()> {
         Some(r) => r,
         None => return Ok(()),
     };
-    let path = git_lex::layout::identity_yml(&root);
+    let path = crate::layout::identity_yml(&root);
     if path.exists() {
         let existing = fs::read_to_string(&path).unwrap_or_default();
         match identity_yml_rewrite_decision(&existing, sha) {
@@ -411,7 +411,7 @@ fn is_valid_sha(s: &str) -> bool {
 /// No-op if there's nothing to commit (clean working tree) or if git is
 /// unavailable. Errors are reported but not fatal — the destructive
 /// operation can still proceed; we just won't have a snapshot.
-pub(crate) fn auto_commit_snapshot(reason: &str) {
+pub fn auto_commit_snapshot(reason: &str) {
     // Check if we're in a git repo with commits
     let has_head = Command::new("git").args(["rev-parse", "HEAD"]).output()
         .map(|o| o.status.success()).unwrap_or(false);
@@ -568,7 +568,7 @@ mod repo_yml_header_tests {
         let nanos = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH).unwrap().subsec_nanos();
         let root = std::env::temp_dir().join(format!("gitlex-hdr-{tag}-{}-{nanos}", std::process::id()));
-        fs::create_dir_all(git_lex::layout::lex_dir(&root)).unwrap();
+        fs::create_dir_all(crate::layout::lex_dir(&root)).unwrap();
         root
     }
 
@@ -579,7 +579,7 @@ mod repo_yml_header_tests {
     fn header_prepends_once_and_preserves_everything() {
         let root = tmp_repo("prepend");
         let body = "name: lUX\nagent_name: selkie\nagent_email: selkie@repolex.ai\n\noptional_kits:\n  - repolex-ai/git-lex-kit-copia\n";
-        let path = git_lex::layout::repo_yml(&root);
+        let path = crate::layout::repo_yml(&root);
         fs::write(&path, body).unwrap();
 
         ensure_repo_yml_header(&root).unwrap();
@@ -600,12 +600,12 @@ mod repo_yml_header_tests {
     fn header_is_invisible_to_the_readers() {
         let root = tmp_repo("readers");
         fs::write(
-            git_lex::layout::repo_yml(&root),
+            crate::layout::repo_yml(&root),
             "name: lUX\nkit: repolex-ai/git-lex-kit-soul\nagent_name: selkie\nagent_email: selkie@repolex.ai\n",
         ).unwrap();
         ensure_repo_yml_header(&root).unwrap();
 
-        let yml = git_lex::RepoYml::load(&root);
+        let yml = crate::RepoYml::load(&root);
         assert_eq!(yml.agent_name.as_deref(), Some("selkie"));
         assert_eq!(yml.agent_email.as_deref(), Some("selkie@repolex.ai"));
         assert_eq!(yml.name.as_deref(), Some("lUX"));
@@ -622,7 +622,7 @@ mod repo_yml_header_tests {
     #[test]
     fn an_old_header_is_replaced_not_kept() {
         let root = tmp_repo("converge");
-        let path = git_lex::layout::repo_yml(&root);
+        let path = crate::layout::repo_yml(&root);
         let stale = "# ─────\n# MANAGED BY git-lex — DO NOT EDIT.\n# some wording we since cut\n# ─────\n";
         let body = "name: lUX\nagent_name: selkie\n";
         fs::write(&path, format!("{stale}{body}")).unwrap();
@@ -640,7 +640,7 @@ mod repo_yml_header_tests {
     #[test]
     fn a_squaddies_own_leading_comment_survives() {
         let root = tmp_repo("theirs");
-        let path = git_lex::layout::repo_yml(&root);
+        let path = crate::layout::repo_yml(&root);
         fs::write(&path, "# my own note about this repo\nname: lUX\n").unwrap();
 
         ensure_repo_yml_header(&root).unwrap();
@@ -655,7 +655,7 @@ mod repo_yml_header_tests {
     fn missing_repo_yml_is_left_alone() {
         let root = tmp_repo("missing");
         ensure_repo_yml_header(&root).unwrap();
-        assert!(!git_lex::layout::repo_yml(&root).exists());
+        assert!(!crate::layout::repo_yml(&root).exists());
         fs::remove_dir_all(&root).ok();
     }
 }

@@ -21,7 +21,7 @@ pub mod gemini;
 
 use std::path::Path;
 
-use crate::kit::read_repo_yml_substrates;
+use git_lex::kit::read_repo_yml_substrates;
 
 /// A specific agent harness git-lex knows how to write to.
 ///
@@ -142,7 +142,7 @@ pub fn active_substrates(root: &Path) -> Vec<Substrate> {
     if !detected.is_empty() {
         return detected;
     }
-    if crate::soul_md::soul_kit_installed(root) {
+    if git_lex::soul_md::soul_kit_installed(root) {
         // Back-compat: every pre-multi-substrate soul repo was Claude.
         vec![Substrate::Claude]
     } else {
@@ -170,7 +170,7 @@ pub fn sync_all(root: &Path) {
 pub fn run_substrate_setup(root: &Path, agent_name: Option<&str>) {
     // Kit-owned, substrate-independent, and not gated on identity: the
     // union of every installed kit's `.agents/hooks.json` (#40).
-    let composed = crate::kit::compose_agents_hooks(root);
+    let composed = git_lex::kit::compose_agents_hooks(root);
     if composed.written {
         println!(
             "Composed .agents/hooks.json from {} kit(s): {}",

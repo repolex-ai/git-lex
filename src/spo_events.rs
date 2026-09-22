@@ -22,7 +22,7 @@ use std::process::Command;
 /// retired vocab, counted in DropAccounting — but the write-gate is strict:
 /// nothing outside this set can be WRITTEN anymore. Adding an operator is a
 /// spec revision, not a code change.
-pub(crate) const SPO_OPERATORS_V1: &[&str] = &["hasValue", "linksTo"];
+pub const SPO_OPERATORS_V1: &[&str] = &["hasValue", "linksTo"];
 
 /// Validate one sidecar's full content against the v1 format spec. This is
 /// the round-trip write-gate: it runs at save, AFTER extraction writes the
@@ -44,7 +44,7 @@ pub(crate) const SPO_OPERATORS_V1: &[&str] = &["hasValue", "linksTo"];
 ///     (retired repo-rooted form) names the same path and is normalized at
 ///     emit, so it is tolerated here — the gate polices shape, the emitter
 ///     owns resolution.
-pub(crate) fn validate_sidecar_v1(content: &str) -> Vec<(usize, String)> {
+pub fn validate_sidecar_v1(content: &str) -> Vec<(usize, String)> {
     let mut errors = Vec::new();
     for (idx, line) in content.lines().enumerate() {
         let lineno = idx + 1;
@@ -107,13 +107,13 @@ pub struct WalkCommit {
 // Layer 1: git runner (thin wrappers around shelling out)
 // ════════════════════════════════════════════════════════════════════════════
 
-use git_lex::find_git_root;
+use crate::find_git_root;
 
 /// Collect the walk inputs for a list of SHAs. Any git failure is an ERROR
 /// for the whole walk: a commit whose diff can't be read must stop the
 /// build, not silently contribute nothing (a corrupt object used to shrink
 /// history with exit 0 — adversarial finding 1e).
-pub(crate) fn collect_commits_from_shas(
+pub fn collect_commits_from_shas(
     shas: &[String],
     horizon_start: Option<&str>,
 ) -> Result<Vec<WalkCommit>, String> {
@@ -759,7 +759,7 @@ pub fn cleanup_sidecars_for_staged_changes() -> CleanupReport {
 /// is REQUIRED: only paths under it are sidecars (the diff-tree pathspec
 /// guarantees it), and a prefix-less path is not a sidecar we know how to
 /// attribute.
-pub(crate) fn derive_source_document(sidecar_rel_path: &str) -> Option<String> {
+pub fn derive_source_document(sidecar_rel_path: &str) -> Option<String> {
     let after_extract = sidecar_rel_path.strip_prefix(".lex/extract/")?;
     for suffix in SPO_EXTRACTOR_SUFFIXES {
         let full = format!(".{}.spo", suffix);
@@ -784,8 +784,8 @@ pub(crate) fn derive_source_document(sidecar_rel_path: &str) -> Option<String> {
 /// becomes a staged deletion in THIS save, and the next sync retracts the
 /// orphan's facts honestly. Unknown .spo suffixes are left untouched
 /// (derive_source_document returns None — never guess an attribution).
-pub(crate) fn remove_orphaned_sidecars(root: &std::path::Path) -> Vec<String> {
-    let extract_root = git_lex::layout::extract_dir(root);
+pub fn remove_orphaned_sidecars(root: &std::path::Path) -> Vec<String> {
+    let extract_root = crate::layout::extract_dir(root);
     let mut removed = Vec::new();
     let mut stack = vec![extract_root];
     while let Some(dir) = stack.pop() {
@@ -823,7 +823,7 @@ pub(crate) fn remove_orphaned_sidecars(root: &std::path::Path) -> Vec<String> {
 /// assert/retract events manufactured into the one graph). Absence is
 /// libgit2's NotFound on the path lookup inside a tree that DID resolve; an
 /// unresolvable commit is an error, never an empty read.
-pub(crate) struct SidecarReader {
+pub struct SidecarReader {
     repo: git2::Repository,
     /// commit sha → its root tree (None = the empty tree).
     trees: HashMap<String, Option<git2::Oid>>,
@@ -839,14 +839,14 @@ pub(crate) struct SidecarReader {
 const SIDECAR_DIR_CACHE: usize = 64;
 
 impl SidecarReader {
-    pub(crate) fn open() -> Result<Self, String> {
+    pub fn open() -> Result<Self, String> {
         let root = find_git_root().ok_or("not inside a git repository")?;
         Self::open_at(&root)
     }
 
     /// The reader for the repository at `root` (the walk's own entry point
     /// is [`SidecarReader::open`]; tests hand in a scratch repository).
-    pub(crate) fn open_at(root: &std::path::Path) -> Result<Self, String> {
+    pub fn open_at(root: &std::path::Path) -> Result<Self, String> {
         let repo = git2::Repository::open(root)
             .map_err(|e| format!("open git repository {}: {e}", root.display()))?;
         Ok(SidecarReader { repo, trees: HashMap::new(), dirs: HashMap::new() })
@@ -899,7 +899,7 @@ impl SidecarReader {
     }
 
     /// A sidecar's SPO lines at a commit; empty when the path is absent there.
-    pub(crate) fn lines_at(&mut self, sha: &str, sidecar_path: &str) -> Result<Vec<String>, String> {
+    pub fn lines_at(&mut self, sha: &str, sidecar_path: &str) -> Result<Vec<String>, String> {
         match self.blob_at(sha, sidecar_path)? {
             Some(oid) => self.blob_lines(oid),
             None => Ok(Vec::new()),
@@ -975,12 +975,12 @@ fn read_sidecar_at_commit(sha: &str, sidecar_path: &str) -> Result<Vec<String>, 
 /// considered and backed out — which-repo provenance is a FACT on the Repo
 /// node, not something IRIs carry.) Class-in-path per the universal law; NOT
 /// under NamedGraph/ like the machinery graphs.
-pub(crate) const LEXHISTORY_GRAPH_IRI: &str = "https://repolex.ai/git-lex/LexHistoryGraph";
+pub const LEXHISTORY_GRAPH_IRI: &str = "https://repolex.ai/git-lex/LexHistoryGraph";
 
 /// The statement-lifecycle predicates, declared in git-lex.ttl v0.5+
 /// (kit-base 9e6f4bf): domain git-lex:SpoEvent, range git2:Commit.
-pub(crate) const ONEGRAPH_ASSERTED_IN: &str = "https://repolex.ai/ontology/git-lex/assertedIn";
-pub(crate) const ONEGRAPH_RETRACTED_IN: &str = "https://repolex.ai/ontology/git-lex/retractedIn";
+pub const ONEGRAPH_ASSERTED_IN: &str = "https://repolex.ai/ontology/git-lex/assertedIn";
+pub const ONEGRAPH_RETRACTED_IN: &str = "https://repolex.ai/ontology/git-lex/retractedIn";
 
 /// Build the one-graph N-Quads for a single resolved triple event.
 ///
@@ -989,10 +989,12 @@ pub(crate) const ONEGRAPH_RETRACTED_IN: &str = "https://repolex.ai/ontology/git-
 /// a reified triple-term carrying the commit event. This matches the agreed
 /// Turtle form:
 ///
-///     s p o .                                        # base fact, asserted standalone
-///     <reifier> rdf:reifies         <<( s p o )>> .
-///     <reifier> git-lex:assertedIn  <Commit/SHA> .   (op == '+')
-///     <reifier> git-lex:retractedIn <Commit/SHA> .   (op == '-')
+/// ```text
+/// s p o .                                        # base fact, asserted standalone
+/// <reifier> rdf:reifies         <<( s p o )>> .
+/// <reifier> git-lex:assertedIn  <Commit/SHA> .   (op == '+')
+/// <reifier> git-lex:retractedIn <Commit/SHA> .   (op == '-')
+/// ```
 ///
 /// The standalone base fact is what makes "what is true now" a PLAIN triple
 /// query (`?s ?p ?o`) instead of forcing every reader through the reification.
@@ -1103,7 +1105,7 @@ pub fn onegraph_event(
 /// graph holds only the batches written so far. The CALLER must therefore
 /// write the sync marker (git2 commit ordinals — see sync.rs) only after
 /// this returns Ok, so that a partial graph is never read as a finished one.
-pub(crate) fn onegraph_walk_engine(
+pub fn onegraph_walk_engine(
     commits: &[WalkCommit],
     store: &oxigraph::store::Store,
     one_graph: &str,
@@ -1121,12 +1123,12 @@ pub(crate) fn onegraph_walk_engine(
 /// (measured: 1.26M quads, +3.7 GB), so 200,000 quads is about 600 MB per
 /// batch — small next to the store's own caches, large enough that a
 /// 17M-quad rebuild is under a hundred commits to the store.
-pub(crate) const REBUILD_BATCH_QUADS: usize = 200_000;
+pub const REBUILD_BATCH_QUADS: usize = 200_000;
 
 /// Remove every quad of `graph`, a bounded number per store transaction.
 /// `Store::clear_graph` does the same removal in ONE transaction, whose
 /// memory grows with the graph. Like it, this leaves the graph registered.
-pub(crate) fn clear_graph_in_batches(
+pub fn clear_graph_in_batches(
     store: &oxigraph::store::Store,
     graph: &oxigraph::model::NamedNode,
     batch_quads: usize,
@@ -1201,7 +1203,7 @@ fn write_walk_batch(
 /// The walk, with its reader and batch size handed in (tests drive a
 /// scratch repository and a tiny batch through here).
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn onegraph_walk_engine_with(
+pub fn onegraph_walk_engine_with(
     reader: &mut SidecarReader,
     commits: &[WalkCommit],
     store: &oxigraph::store::Store,
@@ -1656,7 +1658,7 @@ pub(crate) fn onegraph_walk_engine_with(
 
 /// What one walk did: the summary counts, and every subject whose
 /// base-layer (current-state) facts it changed.
-pub(crate) struct WalkOutcome {
+pub struct WalkOutcome {
     pub events_seen: usize,
     pub events_emitted: usize,
     /// Bracketed subject terms (`<iri>`), deduplicated. EMPTY after a full

@@ -28,7 +28,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::exit;
 
-use crate::kit::read_repo_yml_fields;
+use git_lex::kit::read_repo_yml_fields;
 
 /// Find a class directory (e.g., "Skill") under any namespace folder.
 /// Scans top-level directories for a matching subfolder.
@@ -744,7 +744,7 @@ pub(crate) fn setup_substrate_claude(root: &std::path::Path, agent_name: &str) {
     // relative paths); the `~`-form is preferred so committed settings
     // survive a different home dir, and since this converges on every
     // kit-update, a MOVED repo self-heals on its next update.
-    if crate::soul_md::soul_kit_installed(root) {
+    if git_lex::soul_md::soul_kit_installed(root) {
         settings["autoMemoryDirectory"] =
             serde_json::json!(auto_memory_dir_value(root, std::env::var("HOME").ok().as_deref()));
     }

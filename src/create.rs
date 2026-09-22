@@ -4,10 +4,10 @@
 use std::fs;
 use std::process::exit;
 use git_lex::{find_git_root, resolve_kit_spec};
-use crate::git::resource_uri;
+use git_lex::git::resource_uri;
 use crate::kit_cmds;
-use crate::ontology::{self, get_kit_types};
-use crate::kit::kit_config_str;
+use git_lex::ontology::{self, get_kit_types};
+use git_lex::kit::kit_config_str;
 
 // ─── git lex list ──────────────────────────────────────────────
 

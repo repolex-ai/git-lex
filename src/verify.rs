@@ -378,7 +378,7 @@ pub(crate) fn run_verify(store: &Store) -> usize {
         (Ok(paths), Ok(targets)) => {
             let present: std::collections::HashSet<String> = paths
                 .iter()
-                .map(|p| crate::git::file_iri(&crate::nquad::uri_encode_path(p)))
+                .map(|p| git_lex::git::file_iri(&git_lex::nquad::uri_encode_path(p)))
                 .collect();
             let dangling: Vec<&String> =
                 targets.iter().filter(|f| !present.contains(*f)).collect();
@@ -462,7 +462,7 @@ mod select_strings_tests {
         for (i, p) in paths.iter().enumerate() {
             nq.push_str(&format!(
                 "<https://repolex.ai/git-lex/git2/IndexEntry/x/{i}> <https://repolex.ai/ontology/git-lex/git2/path> \"{}\" <https://repolex.ai/git-lex/NamedGraph/filetree/x> .\n",
-                crate::nquad::nq_escape(p)
+                git_lex::nquad::nq_escape(p)
             ));
         }
         let store = Store::new().unwrap();
