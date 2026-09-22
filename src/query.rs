@@ -368,9 +368,8 @@ pub(crate) fn cmd_query(query: String, json: bool) {
             query
         }
     };
-    if !git_lex::gitlexd::client::running() {
-        eprintln!("gitlexd is not running, so there is nothing to query.");
-        eprintln!("Start it with: gitlexd start");
+    if let Err(e) = git_lex::gitlexd::client::ensure_running() {
+        eprintln!("{e}");
         eprintln!("(`git lex direct \"...\"` reads the working tree without gitlexd.)");
         exit(1);
     }

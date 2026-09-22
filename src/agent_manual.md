@@ -44,7 +44,8 @@ committed until the whole save passes.
 - `git lex query <name>` runs a stored query from `.lex/query/<name>.md`.
 - `git lex query` answers from your soul's store through gitlexd: current
   documents, files, commits, and the history of every statement ("when did
-  this change?"). It is tied to the soul your session started in.
+  this change?"). It is tied to the soul your session started in, and
+  starts gitlexd itself if none is running.
 - `git lex direct "<sparql>"` builds a view of the working tree in memory
   instead — unsaved edits included, no history, no gitlexd needed.
 - What else is in the graph, what addresses look like, and queries that run:

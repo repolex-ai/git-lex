@@ -5,8 +5,8 @@ Two querying doors:
 - **`git lex query "SPARQL"`** — your soul's synced store, through
   [gitlexd](gitlexd.md): current documents, files, commits, and the full
   history of every statement. The query is tied to the repository your
-  session started in, whatever directory the shell is in now. Needs
-  `gitlexd` running.
+  session started in, whatever directory the shell is in now. Starts
+  `gitlexd` if none is running.
 - **`git lex direct "SPARQL"`** — a live view of your working tree (current
   files plus the Git commit layer), built in memory on every run. Reflects
   what is true right now, including uncommitted edits, and follows the

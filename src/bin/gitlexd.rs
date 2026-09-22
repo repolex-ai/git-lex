@@ -1,6 +1,6 @@
 //! gitlexd — the git-lex query and sync service.
 //!
-//!   gitlexd          run in the foreground; refuses if one is already up
+//!   gitlexd          run in the foreground; exits if one is already up
 //!   gitlexd start    stop every gitlexd on this machine, then run here
 //!   gitlexd restart  the same as start
 //!   gitlexd stop     stop every gitlexd on this machine and exit
@@ -22,13 +22,10 @@ use std::sync::Arc;
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let code = match args.iter().map(String::as_str).collect::<Vec<_>>().as_slice() {
-        [] => {
-            refuse_if_already_running();
-            serve()
-        }
+        [] => serve(false),
         ["start"] | ["restart"] => {
             stop_all();
-            serve()
+            serve(true)
         }
         ["stop"] => {
             stop_all();
@@ -79,10 +76,32 @@ fn is_worker(pid: u32) -> bool {
         .unwrap_or(false)
 }
 
-fn refuse_if_already_running() {
+/// Take the port. This is the one lock: the operating system lets exactly
+/// one process listen on 127.0.0.1:7880, so whoever binds it is the
+/// gitlexd, and any other copy — started by a terminal or by a
+/// `git lex query` that found nothing running — exits here without ever
+/// opening a store. After `stop` the port can take a moment to free, so a
+/// start that just stopped the others retries for two seconds.
+fn bind_port(after_stop: bool) -> Option<std::net::TcpListener> {
+    let addr = format!("127.0.0.1:{}", gitlexd::PORT);
+    let tries = if after_stop { 20 } else { 1 };
+    let mut last = None;
+    for _ in 0..tries {
+        match std::net::TcpListener::bind(&addr) {
+            Ok(l) => return Some(l),
+            Err(e) => {
+                last = Some(e);
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+        }
+    }
+    let e = last.expect("at least one bind attempt");
     let pids = other_daemons();
     if pids.is_empty() {
-        return;
+        eprintln!("gitlexd: cannot listen on {addr}: {e}");
+        eprintln!("  no gitlexd process exists, so something else holds the port (an old git-lex-serve?).");
+        eprintln!("  lsof -nP -iTCP:{} -sTCP:LISTEN   shows what.", gitlexd::PORT);
+        return None;
     }
     let who = pids.iter().map(|p| p.to_string()).collect::<Vec<_>>().join(", ");
     eprintln!("gitlexd is already running (pid {who}).");
@@ -93,19 +112,20 @@ fn refuse_if_already_running() {
             h["version"].as_str().unwrap_or("?"),
             uptime(h["uptime_secs"].as_u64().unwrap_or(0))
         ),
-        None => eprintln!("  it is not answering on {}, so it may be wedged.", gitlexd::base_url()),
+        None => eprintln!("  it holds the port but is not answering on {}, so it may be starting or wedged.", gitlexd::base_url()),
     }
     eprintln!("  gitlexd restart   stop it and run this build here");
     eprintln!("  gitlexd stop      stop it and leave nothing running");
     eprintln!("  gitlexd status    what it holds right now");
-    std::process::exit(1);
+    None
 }
 
 fn uptime(secs: u64) -> String {
     format!("{}h {:02}m {:02}s", secs / 3600, (secs % 3600) / 60, secs % 60)
 }
 
-fn serve() -> i32 {
+fn serve(after_stop: bool) -> i32 {
+    let Some(listener) = bind_port(after_stop) else { return 1 };
     let daemon = match gitlexd::daemon::Daemon::open() {
         Ok(d) => Arc::new(d),
         Err(e) => {
@@ -136,7 +156,7 @@ fn serve() -> i32 {
             return 1;
         }
     };
-    match rt.block_on(gitlexd::http::serve(daemon)) {
+    match rt.block_on(gitlexd::http::serve(daemon, listener)) {
         Ok(()) => 0,
         Err(e) => {
             eprintln!("gitlexd: {e}");

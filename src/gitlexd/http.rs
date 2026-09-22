@@ -228,12 +228,17 @@ pub fn router(d: Arc<Daemon>) -> Router {
 }
 
 /// Bind and serve until Ctrl-C or SIGTERM.
-pub async fn serve(d: Arc<Daemon>) -> Result<(), String> {
-    let addr = format!("127.0.0.1:{}", super::PORT);
-    let listener = tokio::net::TcpListener::bind(&addr)
-        .await
-        .map_err(|e| format!("cannot listen on {addr}: {e} (is another gitlexd, or an old git-lex-serve, still running?)"))?;
-    d.log(&format!("gitlexd listening on http://{addr} with {} soul(s)", d.souls.len()));
+/// Serve on a port already bound by the caller. The bind happens in the
+/// binary before any store is opened, because the port is the machine-wide
+/// lock: only one process can listen on it, so binding first is what keeps
+/// two gitlexd from ever holding stores at once (goodlux, 2026-09-22).
+pub async fn serve(d: Arc<Daemon>, listener: std::net::TcpListener) -> Result<(), String> {
+    listener
+        .set_nonblocking(true)
+        .map_err(|e| format!("cannot make the listener non-blocking: {e}"))?;
+    let listener = tokio::net::TcpListener::from_std(listener)
+        .map_err(|e| format!("cannot hand the listener to the runtime: {e}"))?;
+    d.log(&format!("gitlexd listening on {} with {} soul(s)", super::base_url(), d.souls.len()));
     d.spawn_loops();
     let app = router(Arc::clone(&d));
     axum::serve(listener, app)

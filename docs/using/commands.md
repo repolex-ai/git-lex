@@ -30,11 +30,12 @@ saved query kept in `.lex/query/` — see [Querying](queries.md#saved-queries).
 
 | Command | What it does |
 |---|---|
+| `gitlexd status` | Whether one is running, and each soul it holds with its synced-to commit |
 | `gitlexd start` | Stop any other gitlexd on this machine, then run in this terminal |
 | `gitlexd stop` | Stop every gitlexd on this machine |
-| `gitlexd status` | Whether one is running, and each soul it holds with its synced-to commit |
 
-See [gitlexd](gitlexd.md).
+`git lex query` starts gitlexd itself when none is running; there is never
+more than one. See [gitlexd](gitlexd.md).
 
 There is also an internal `git lex hook` subcommand — it is the entrypoint Git's
 pre-commit hook calls, not intended for direct use.

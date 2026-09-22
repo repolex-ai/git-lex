@@ -67,7 +67,7 @@ enum Commands {
     /// installed kits are added for you; a pattern with no GRAPH clause
     /// sees every graph.
     ///
-    /// Needs gitlexd running (`gitlexd start`). Without it, `git lex direct`
+    /// Starts gitlexd if none is running. `git lex direct`
     /// reads the working tree on its own.
     ///
     /// Examples:

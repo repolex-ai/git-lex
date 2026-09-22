@@ -5,16 +5,27 @@ store of every git-lex repository the machine knows, keeps each store in
 step with its repository's commits, and answers SPARQL over HTTP on
 localhost. `git lex query` is its client.
 
+Nothing has to be started by hand: `git lex query` starts gitlexd when
+nothing answers on its port, detached from the terminal that ran the
+query, and waits for it to come up. The commands below are for looking
+at it, restarting it on a new build, and stopping it.
+
 ```bash
+gitlexd status    # is one running, and what does it hold
 gitlexd start     # stop any other gitlexd on this machine, then run in this terminal
 gitlexd stop      # stop every gitlexd on this machine
-gitlexd status    # is one running, and what does it hold
 ```
 
 No flags and no configuration file. The repositories come from
 `~/.lex/repos.json`, which every git-lex command writes for the repository
-it runs in; the port is 7880; the log is `~/.lex/logs/gitlexd.log`. A
-terminal starts gitlexd and owns it; there is no launchd job.
+it runs in; the port is 7880; the log is `~/.lex/logs/gitlexd.log`. There
+is no launchd job.
+
+There is never more than one. gitlexd takes its port before it opens any
+store, and the operating system lets exactly one process listen on a port,
+so a second copy, however it was started, exits at once with "gitlexd is
+already running". Two `git lex query` commands that both find nothing
+running both try to start one; one wins the port and both use it.
 
 ## What it does
 
