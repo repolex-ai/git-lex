@@ -18,9 +18,9 @@ Or from a local clone:
 cargo install --path . --locked
 ```
 
-This installs two primary binaries:
+This installs two binaries:
 * `git-lex`: The core command-line utility. Since it is prefixed with `git-`, Git automatically discovers it, allowing you to invoke it as `git lex`.
-* `git-lex-serve`: The server companion for local SPARQL queries and visualization.
+* `gitlexd`: The local service that keeps every git-lex repository's graph synced and answers `git lex query`. See [gitlexd](gitlexd.md).
 
 > [!NOTE]
 > Installing the CLI also registers a man page. You can access help documentation at any time by running `git lex --help` or `man git-lex`.

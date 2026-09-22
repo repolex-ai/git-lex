@@ -20,16 +20,16 @@ use std::path::PathBuf;
 
 use oxigraph::model::Term;
 
-use git_lex::{find_git_root, resolve_kit_spec};
+use crate::{find_git_root, resolve_kit_spec};
 
 // ─── Shape file discovery ────────────────────────────────────
 
 /// A kit's vocabulary TTL (`.lex/ontology/{short}/{short}.ttl`), or None when
 /// the kit is not installed. Installed means listed in repo.yml
-/// (`git_lex::installed_kit_specs`), never "a folder exists".
+/// (`crate::installed_kit_specs`), never "a folder exists".
 fn kit_ttl_path(kit: &str) -> Option<PathBuf> {
     let root = find_git_root()?;
-    let dir = git_lex::installed_kit_ontology_dir(&root, kit)?;
+    let dir = crate::installed_kit_ontology_dir(&root, kit)?;
     let name = dir.file_name()?.to_string_lossy().to_string();
     Some(dir.join(format!("{}.ttl", name)))
 }
@@ -37,7 +37,7 @@ fn kit_ttl_path(kit: &str) -> Option<PathBuf> {
 /// (folder name, vocabulary TTL path) for every installed kit, sorted.
 fn installed_kit_ttls() -> Vec<(String, PathBuf)> {
     let Some(root) = find_git_root() else { return Vec::new() };
-    git_lex::installed_ontology_dirs(&root)
+    crate::installed_ontology_dirs(&root)
         .into_iter()
         .map(|(name, dir)| { let ttl = dir.join(format!("{}.ttl", name)); (name, ttl) })
         .collect()
@@ -46,14 +46,14 @@ fn installed_kit_ttls() -> Vec<(String, PathBuf)> {
 /// Read the generated shapes TTL for an installed kit: only the canonical
 /// `.lex/ontology/{short}/{short}-shapes.ttl`. Empty string when the kit is
 /// not installed or ships no shapes.
-pub(crate) fn read_kit_shapes(kit: &str) -> String {
+pub fn read_kit_shapes(kit: &str) -> String {
     kit_shapes_path(kit).and_then(|p| fs::read_to_string(p).ok()).unwrap_or_default()
 }
 
 /// Every generated shapes TTL of the installed kits. Used by whole-repo
 /// listings.
-pub(crate) fn all_shape_files() -> Vec<PathBuf> {
-    find_git_root().map(|root| git_lex::installed_shape_files(&root)).unwrap_or_default()
+pub fn all_shape_files() -> Vec<PathBuf> {
+    find_git_root().map(|root| crate::installed_shape_files(&root)).unwrap_or_default()
 }
 
 // ─── Parsed shape representation ─────────────────────────────
@@ -122,18 +122,18 @@ fn parse_shape_file(content: &str, short_hint: &str) -> ShapeFile {
     let mut out = ShapeFile::default();
 
     // Kit prefix + namespace come from the file's own declaration — matched
-    // by prefix NAME via the single shared scanner (git_lex::extract_kit_prefix),
+    // by prefix NAME via the single shared scanner (crate::extract_kit_prefix),
     // so a kit's namespace can migrate with a one-line TTL edit and this
     // parser follows. Conventional fallback only when nothing declares.
     // (SPARQL cannot see @prefix declarations — the scanner stays.)
-    match git_lex::extract_kit_prefix(content, short_hint) {
+    match crate::extract_kit_prefix(content, short_hint) {
         Some((name, ns)) => {
             out.prefix_name = name;
             out.namespace = ns;
         }
         None => {
             out.prefix_name = short_hint.to_string();
-            out.namespace = git_lex::conventional_kit_namespace(short_hint);
+            out.namespace = crate::conventional_kit_namespace(short_hint);
         }
     }
 
@@ -170,7 +170,7 @@ fn parse_shape_file(content: &str, short_hint: &str) -> ShapeFile {
                      OPTIONAL { ?prop rdfs:comment ?comment }
                  }
              } ORDER BY ?class ?path";
-    let Ok(oxigraph::sparql::QueryResults::Solutions(sols)) = git_lex::eval_query(&store, q)
+    let Ok(oxigraph::sparql::QueryResults::Solutions(sols)) = crate::eval_query(&store, q)
     else { return out };
 
     const XSD_NS: &str = "http://www.w3.org/2001/XMLSchema#";
@@ -272,7 +272,7 @@ fn parse_kit_shapes(kit: &str) -> std::sync::Arc<ShapeFile> {
 /// [`read_kit_shapes`] will open.
 fn kit_shapes_path(kit: &str) -> Option<PathBuf> {
     let root = find_git_root()?;
-    let dir = git_lex::installed_kit_ontology_dir(&root, kit)?;
+    let dir = crate::installed_kit_ontology_dir(&root, kit)?;
     let name = dir.file_name()?.to_string_lossy().to_string();
     Some(dir.join(format!("{}-shapes.ttl", name)))
 }
@@ -281,7 +281,7 @@ fn kit_shapes_path(kit: &str) -> Option<PathBuf> {
 
 /// Get the TTL prefix name for a kit, preferring the actual prefix declared
 /// in the shapes file. Falls back to a built-in alias, then the short name.
-pub(crate) fn get_kit_prefix_name(kit_name: &str) -> String {
+pub fn get_kit_prefix_name(kit_name: &str) -> String {
     let parsed = parse_kit_shapes(kit_name);
     if !parsed.prefix_name.is_empty() {
         return parsed.prefix_name.clone();
@@ -294,12 +294,12 @@ pub(crate) fn get_kit_prefix_name(kit_name: &str) -> String {
 }
 
 /// Get the namespace IRI declared for the kit prefix in its shapes file.
-pub(crate) fn get_kit_namespace(kit_name: &str) -> String {
+pub fn get_kit_namespace(kit_name: &str) -> String {
     parse_kit_shapes(kit_name).namespace.clone()
 }
 
 /// Property local-names that are object properties (`sh:nodeKind sh:IRI`).
-pub(crate) fn get_object_properties(kit: &str) -> HashSet<String> {
+pub fn get_object_properties(kit: &str) -> HashSet<String> {
     let parsed = parse_kit_shapes(kit);
     let (_, _, prefix) = resolve_kit_spec(kit); // the SHORT kit name — the segment frontmatter keys carry
     let mut out = HashSet::new();
@@ -335,7 +335,7 @@ pub(crate) fn get_object_properties(kit: &str) -> HashSet<String> {
 /// from a naming convention re-derived at the call site. Declare once, derive
 /// the rest. Keys that no kit declares are absent here and fall back to the
 /// old construction, which is what the undeclared-key warning already covers.
-pub(crate) fn get_property_iris_all_kits() -> HashMap<String, String> {
+pub fn get_property_iris_all_kits() -> HashMap<String, String> {
     let mut out = HashMap::new();
     for path in all_shape_files() {
         let Ok(content) = fs::read_to_string(&path) else { continue };
@@ -359,7 +359,7 @@ pub(crate) fn get_property_iris_all_kits() -> HashMap<String, String> {
 
 /// Map of property local-name → full XSD datatype IRI, for typed literals.
 /// Only non-string datatypes are included.
-pub(crate) fn get_property_datatypes(kit: &str) -> HashMap<String, String> {
+pub fn get_property_datatypes(kit: &str) -> HashMap<String, String> {
     let parsed = parse_kit_shapes(kit);
     let (_, _, prefix) = resolve_kit_spec(kit); // the SHORT kit name — the segment frontmatter keys carry
     let mut out = HashMap::new();
@@ -385,7 +385,7 @@ pub(crate) fn get_property_datatypes(kit: &str) -> HashMap<String, String> {
 /// never collide. (The old bare-name pool was last-writer-wins; the
 /// collision it "documented before introducing" arrived with copia:source
 /// v0.15 and silently rewrote soul:source's behavior.)
-pub(crate) fn get_property_datatypes_all_kits() -> HashMap<String, String> {
+pub fn get_property_datatypes_all_kits() -> HashMap<String, String> {
     let mut out = HashMap::new();
     for path in all_shape_files() {
         let Ok(content) = fs::read_to_string(&path) else { continue };
@@ -419,7 +419,7 @@ pub(crate) fn get_property_datatypes_all_kits() -> HashMap<String, String> {
 /// invisible to a `prop_datatypes` membership test and false-warned as
 /// "not declared" on every save (412 warnings in one W4R3Z run,
 /// found 2026-08-01).
-pub(crate) fn get_declared_properties_all_kits() -> std::collections::HashSet<String> {
+pub fn get_declared_properties_all_kits() -> std::collections::HashSet<String> {
     let mut out = std::collections::HashSet::new();
     for path in all_shape_files() {
         let Ok(content) = fs::read_to_string(&path) else { continue };
@@ -442,7 +442,7 @@ pub(crate) fn get_declared_properties_all_kits() -> std::collections::HashSet<St
 /// This is what the emitters consult so predicate/class IRIs follow each
 /// kit's own `@prefix` declaration (namespace migrations = TTL edit only).
 /// Kits with no readable declaration fall back to the conventional pattern.
-pub(crate) fn get_kit_namespaces_all_kits() -> HashMap<String, String> {
+pub fn get_kit_namespaces_all_kits() -> HashMap<String, String> {
     let mut out = HashMap::new();
     for path in all_shape_files() {
         let Ok(content) = fs::read_to_string(&path) else { continue };
@@ -452,8 +452,8 @@ pub(crate) fn get_kit_namespaces_all_kits() -> HashMap<String, String> {
             .unwrap_or("")
             .to_string();
         if short.is_empty() { continue; }
-        let (_, ns) = git_lex::extract_kit_prefix(&content, &short)
-            .unwrap_or_else(|| (short.clone(), git_lex::conventional_kit_namespace(&short)));
+        let (_, ns) = crate::extract_kit_prefix(&content, &short)
+            .unwrap_or_else(|| (short.clone(), crate::conventional_kit_namespace(&short)));
         out.insert(short, ns);
     }
     out
@@ -463,7 +463,7 @@ pub(crate) fn get_kit_namespaces_all_kits() -> HashMap<String, String> {
 /// file. Returns the set of property local-names that are `sh:nodeKind sh:IRI`
 /// (object properties / references), so the extractor can emit them as IRIs
 /// instead of literals.
-pub(crate) fn get_object_properties_all_kits() -> HashSet<String> {
+pub fn get_object_properties_all_kits() -> HashSet<String> {
     let mut out = HashSet::new();
     for path in all_shape_files() {
         let Ok(content) = fs::read_to_string(&path) else { continue };
@@ -489,7 +489,7 @@ pub(crate) fn get_object_properties_all_kits() -> HashSet<String> {
 /// Returns `Vec<(ClassName, Vec<(prop_name, prop_kind, required, comment)>)>`
 /// where `prop_kind` is `"reference"` for object properties, `"string"` for
 /// everything else (consumers only care about reference-vs-other).
-pub(crate) fn get_kit_types(kit: &str) -> Vec<(String, Vec<(String, String, bool, String)>)> {
+pub fn get_kit_types(kit: &str) -> Vec<(String, Vec<(String, String, bool, String)>)> {
     let parsed = parse_kit_shapes(kit);
     parsed.shapes.iter().map(|s| {
         let props = s.props.iter().map(|p| {
@@ -532,7 +532,7 @@ pub(crate) fn get_kit_types(kit: &str) -> Vec<(String, Vec<(String, String, bool
 /// When the kit declares no classes at all (`get_kit_types` empty — e.g. a
 /// kit with only properties, or shapes not yet generated), the segment
 /// passes through with no warning: there is nothing to compare it to.
-pub(crate) fn resolve_class_segment(
+pub fn resolve_class_segment(
     kit: &str,
     class_seg: &str,
     context: &str,
@@ -629,7 +629,7 @@ fn resolve_class_against<S: AsRef<str>>(classes: &[S], class_seg: &str) -> Class
 ///
 /// Parser is intentionally string-level (not a full Turtle parse), same
 /// stanza-scan shape as the type-label lookup below.
-pub(crate) fn get_class_foldered(kit: &str, class_name: &str) -> bool {
+pub fn get_class_foldered(kit: &str, class_name: &str) -> bool {
     let (_, _, short) = resolve_kit_spec(kit);
     let Some(path) = kit_ttl_path(kit) else { return false };
     let content = fs::read_to_string(&path).unwrap_or_default();
@@ -646,7 +646,7 @@ pub(crate) fn get_class_foldered(kit: &str, class_name: &str) -> bool {
 /// they cannot drift apart. A class a kit has retired is simply gone from the
 /// TTL, taking its `foldered` flag with it, so nothing extra is needed to
 /// stop rebuilding its folder.
-pub(crate) fn class_gets_folder(kit: &str, class_name: &str) -> bool {
+pub fn class_gets_folder(kit: &str, class_name: &str) -> bool {
     get_class_foldered(kit, class_name)
 }
 
@@ -656,7 +656,7 @@ pub(crate) fn class_gets_folder(kit: &str, class_name: &str) -> bool {
 /// Two-fallback chain: `rdfs:label` → local-name of the class. Returns a
 /// string in every case; never panics. (The lex-o:okfType head of the old
 /// chain retired with lex-o — Rob's ruling; labels are correct everywhere.)
-pub(crate) fn get_class_type_label(kit: &str, class_name: &str) -> String {
+pub fn get_class_type_label(kit: &str, class_name: &str) -> String {
     let (_, _, short) = resolve_kit_spec(kit);
     let Some(path) = kit_ttl_path(kit) else { return class_name.to_string() };
     let content = fs::read_to_string(&path).unwrap_or_default();
@@ -673,7 +673,7 @@ pub(crate) fn get_class_type_label(kit: &str, class_name: &str) -> String {
 /// emitter for `__<Class>.md`. NEVER enforced: gates no save, raises no
 /// warning, absent from verify — declared law in the property's own
 /// rdfs:comment (kit-base 0.10.3), not merely convention here.
-pub(crate) struct ClassAuthoring {
+pub struct ClassAuthoring {
     pub comment: Option<String>,
     pub guidance: Option<String>,
 }
@@ -682,7 +682,7 @@ pub(crate) struct ClassAuthoring {
 /// kit's source ontology TTL — same read path as `get_class_foldered` and
 /// `get_class_type_label` above: the authored `.ttl`, never the derived
 /// shapes (class annotations don't reach the shapes at all).
-pub(crate) fn get_class_authoring(kit: &str, class_name: &str) -> ClassAuthoring {
+pub fn get_class_authoring(kit: &str, class_name: &str) -> ClassAuthoring {
     let none = ClassAuthoring { comment: None, guidance: None };
     let (_, _, short) = resolve_kit_spec(kit);
     let Some(path) = kit_ttl_path(kit) else { return none };
@@ -704,9 +704,9 @@ fn parse_class_authoring(content: &str, short: &str, class_name: &str) -> ClassA
     let class_iri = format!("{}{}", kit_namespace_of(content, short), class_name);
     // Name-exact resolution only, same trap as parse_class_foldered:
     // extract_kit_prefix's fallback rule could hand back the KIT's prefix.
-    let gitlex_ns = match git_lex::extract_kit_prefix(content, "git-lex") {
+    let gitlex_ns = match crate::extract_kit_prefix(content, "git-lex") {
         Some((name, ns)) if name == "git-lex" => ns,
-        _ => git_lex::conventional_kit_namespace("git-lex"),
+        _ => crate::conventional_kit_namespace("git-lex"),
     };
     let store = match crate::kit::load_ttl_str(content, &format!("{} ontology", short)) {
         Ok(s) => s,
@@ -720,7 +720,7 @@ fn parse_class_authoring(content: &str, short: &str, class_name: &str) -> ClassA
             "SELECT ?v WHERE {{ <{}> <{}> ?v }} ORDER BY ?v LIMIT 1",
             class_iri, predicate
         );
-        if let Ok(oxigraph::sparql::QueryResults::Solutions(sols)) = git_lex::eval_query(&store, &q)
+        if let Ok(oxigraph::sparql::QueryResults::Solutions(sols)) = crate::eval_query(&store, &q)
         {
             for s in sols.flatten() {
                 if let Some(Term::Literal(l)) = s.get("v") {
@@ -763,7 +763,7 @@ fn parse_class_type_label(content: &str, short: &str, class_name: &str) -> Strin
          ORDER BY ?label LIMIT 1",
         class_iri
     );
-    if let Ok(oxigraph::sparql::QueryResults::Solutions(sols)) = git_lex::eval_query(&store, &q) {
+    if let Ok(oxigraph::sparql::QueryResults::Solutions(sols)) = crate::eval_query(&store, &q) {
         for s in sols.flatten() {
             if let Some(Term::Literal(l)) = s.get("label") {
                 return l.value().to_string();
@@ -776,9 +776,9 @@ fn parse_class_type_label(content: &str, short: &str, class_name: &str) -> Strin
 /// Kit namespace declared in TTL content, via the ONE shared `@prefix`
 /// scanner; conventional pattern only when nothing declares.
 fn kit_namespace_of(content: &str, short: &str) -> String {
-    git_lex::extract_kit_prefix(content, short)
+    crate::extract_kit_prefix(content, short)
         .map(|(_name, ns)| ns)
-        .unwrap_or_else(|| git_lex::conventional_kit_namespace(short))
+        .unwrap_or_else(|| crate::conventional_kit_namespace(short))
 }
 
 /// Law-6 reference ranges: property IRI → the range CLASS IRI, for
@@ -797,7 +797,7 @@ fn kit_namespace_of(content: &str, short: &str) -> String {
 /// hold. The special range `git-lex:Thing` (see nquad.rs THING_CLASS_IRI)
 /// means "any Thing, any class" — the value must be the identifier form
 /// `<namespace/Class/id>`, not a bare id (Rob-ruled 2026-08-20).
-pub(crate) fn get_reference_ranges_all_kits() -> HashMap<String, String> {
+pub fn get_reference_ranges_all_kits() -> HashMap<String, String> {
     // Memoized (#90). This reads and regex-parses EVERY installed kit's TTL,
     // and `frontmatter_to_turtle` called it once per file — re-parsing the
     // whole vocabulary set (280KB on a four-kit seat) for every document in
@@ -845,7 +845,7 @@ pub(crate) fn get_reference_ranges_all_kits() -> HashMap<String, String> {
 /// Friend incident), so telling the author it "does not exist" is a lie;
 /// it gets the deprecation teaching instead. Replacement values in the
 /// kit's own namespace are shortened to the local name.
-pub(crate) fn get_deprecated_properties_all_kits() -> HashMap<String, Option<String>> {
+pub fn get_deprecated_properties_all_kits() -> HashMap<String, Option<String>> {
     let mut out = HashMap::new();
     for (short, ttl) in installed_kit_ttls() {
         let Ok(content) = fs::read_to_string(&ttl) else { continue };
@@ -892,7 +892,7 @@ fn parse_deprecated_properties(content: &str, short: &str) -> Vec<(String, Optio
              ?p <http://www.w3.org/2002/07/owl#deprecated> true . \
              OPTIONAL { ?p <http://purl.org/dc/terms/isReplacedBy> ?r } }";
     let mut out = Vec::new();
-    if let Ok(oxigraph::sparql::QueryResults::Solutions(sols)) = git_lex::eval_query(&store, q) {
+    if let Ok(oxigraph::sparql::QueryResults::Solutions(sols)) = crate::eval_query(&store, q) {
         for s in sols.flatten() {
             let Some(Term::NamedNode(p)) = s.get("p") else { continue };
             let Some(prop) = p.as_str().strip_prefix(kit_ns.as_str()) else { continue };
@@ -920,7 +920,7 @@ fn parse_deprecated_properties(content: &str, short: &str) -> Vec<(String, Optio
 /// to report it to the kit owner. This record is read straight from the
 /// ontology TTL instead, and the emitter consults it wherever the shapes
 /// tables miss.
-pub(crate) struct DomainOpenProp {
+pub struct DomainOpenProp {
     /// `owl:ObjectProperty` → values resolve as references, not literals.
     pub is_object: bool,
     /// Full XSD datatype IRI when a non-string `rdfs:range` is declared
@@ -935,7 +935,7 @@ pub(crate) struct DomainOpenProp {
 /// every installed kit ontology TTL. The key deliberately carries no class:
 /// no domain means every class is in scope, so a class-qualified key would
 /// re-invent the restriction the ontology chose not to declare.
-pub(crate) fn get_domain_open_properties_all_kits() -> HashMap<String, DomainOpenProp> {
+pub fn get_domain_open_properties_all_kits() -> HashMap<String, DomainOpenProp> {
     let mut out = HashMap::new();
     for (short, ttl) in installed_kit_ttls() {
         let Ok(content) = fs::read_to_string(&ttl) else { continue };
@@ -967,7 +967,7 @@ fn parse_domain_open_properties(content: &str, short: &str) -> Vec<(String, Doma
              FILTER NOT EXISTS { ?p <http://www.w3.org/2000/01/rdf-schema#domain> ?d } \
              OPTIONAL { ?p <http://www.w3.org/2000/01/rdf-schema#range> ?r } }";
     let mut out = Vec::new();
-    if let Ok(oxigraph::sparql::QueryResults::Solutions(sols)) = git_lex::eval_query(&store, q) {
+    if let Ok(oxigraph::sparql::QueryResults::Solutions(sols)) = crate::eval_query(&store, q) {
         for s in sols.flatten() {
             let (Some(Term::NamedNode(p)), Some(Term::NamedNode(t))) = (s.get("p"), s.get("t")) else { continue };
             let Some(prop) = p.as_str().strip_prefix(kit_ns.as_str()) else { continue };
@@ -1019,7 +1019,7 @@ fn parse_reference_ranges(content: &str, short: &str) -> Vec<(String, String)> {
                 <http://www.w3.org/2002/07/owl#ObjectProperty> ; \
                 <http://www.w3.org/2000/01/rdf-schema#range> ?r }";
     let mut out = Vec::new();
-    if let Ok(oxigraph::sparql::QueryResults::Solutions(sols)) = git_lex::eval_query(&store, q) {
+    if let Ok(oxigraph::sparql::QueryResults::Solutions(sols)) = crate::eval_query(&store, q) {
         for s in sols.flatten() {
             let (Some(Term::NamedNode(p)), Some(Term::NamedNode(r))) = (s.get("p"), s.get("r")) else { continue };
             // Own-namespace FILTER only — the emitted key is the full IRI.
@@ -1048,9 +1048,9 @@ fn parse_class_foldered(content: &str, short: &str, class_name: &str) -> bool {
     // extract_kit_prefix's primary rule is name-exact, so short="git-lex"
     // finds `@prefix git-lex:`; its fallback rule could hand back the KIT's
     // prefix, so only trust a name-exact hit.
-    let gitlex_ns = match git_lex::extract_kit_prefix(content, "git-lex") {
+    let gitlex_ns = match crate::extract_kit_prefix(content, "git-lex") {
         Some((name, ns)) if name == "git-lex" => ns,
-        _ => git_lex::conventional_kit_namespace("git-lex"),
+        _ => crate::conventional_kit_namespace("git-lex"),
     };
     let store = match crate::kit::load_ttl_str(content, &format!("{} ontology", short)) {
         Ok(s) => s,
@@ -1061,7 +1061,7 @@ fn parse_class_foldered(content: &str, short: &str, class_name: &str) -> bool {
     };
     let q = format!("ASK {{ <{}> <{}foldered> true }}", class_iri, gitlex_ns);
     matches!(
-        git_lex::eval_query(&store, &q),
+        crate::eval_query(&store, &q),
         Ok(oxigraph::sparql::QueryResults::Boolean(true))
     )
 }
@@ -1070,7 +1070,7 @@ fn parse_class_foldered(content: &str, short: &str, class_name: &str) -> bool {
 /// Each entry: (prefix_name, class_name, namespace).
 /// Used by `list` / `create` when they need a whole-repo view, not just one
 /// kit.
-pub(crate) fn all_classes() -> Vec<(String, String, String)> {
+pub fn all_classes() -> Vec<(String, String, String)> {
     let mut out = Vec::new();
     for path in all_shape_files() {
         let Ok(content) = fs::read_to_string(&path) else { continue };

@@ -23,7 +23,7 @@ git lex query "SELECT * WHERE { ?s ?p ?o } LIMIT 10"
 * [Commands](using/commands.md) — The complete CLI command reference.
 * [Querying with SPARQL](using/queries.md) — Query your repository, inline or saved, with worked examples.
 * [History](using/history.md) — Query the graph as it stood at any commit.
-* [Serve & Visualize](using/serve-and-viz.md) — A local SPARQL endpoint and an interactive graph explorer.
+* [gitlexd](using/gitlexd.md) — The local service that syncs every repository's graph and answers queries, with its HTTP endpoint.
 * [Exporting the graph](using/export-spine.md) — Write the semantic index as one TSV spine for LLM context caches.
 * [Kits](using/kits.md) — Installing and updating the vocabulary packs that define document types.
 

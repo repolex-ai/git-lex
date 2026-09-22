@@ -1,9 +1,23 @@
-//! Shared utilities for the git-lex crate.
-//!
-//! Used by both `git-lex` (the CLI) and `git-lex-serve` (the server binary).
+//! The git-lex library: the sync engine, the store, the registry, the query
+//! surface. Used by both binaries, `git-lex` (the command line) and `gitlexd`
+//! (the service).
 
 pub mod clock;
+pub mod gitlexd;
 pub mod layout;
+pub mod sync;
+pub mod nquad;
+pub mod ontology;
+pub mod git;
+pub mod kit;
+pub mod resolve;
+pub mod git2_nquads;
+pub mod walkcache;
+pub mod extraction;
+pub mod export_spine;
+pub mod context;
+pub mod spo_events;
+pub mod soul_md;
 
 use oxigraph::store::Store;
 use std::fs;
@@ -119,102 +133,83 @@ pub fn open_store_read_only_at(root: &std::path::Path) -> Option<Store> {
     None
 }
 
-// ── Pan: the soul's media graph, reachable from any query as SERVICE pan: ──
-//
-// pand (repolex-ai/pan) writes a soul's media graph at `.pan/_ignore/oxigraph`
-// (pocket law). git-lex READS it directly — one writer, many readers, the
-// arrangement Pool ran against git-lex's own store for months (Rob,
-// 2026-09-03: not re-raised). One SPARQL query cannot span two oxigraph
-// stores, so the media graph is exposed the standard way: a SPARQL 1.1
-// federated `SERVICE` clause whose endpoint is the pan namespace IRI —
-//
-//     SELECT ?img ?caption WHERE {
-//       SERVICE pan: { ?img a pan:Image ; pan:caption ?caption }
-//     }
-//
-// handled IN PROCESS (no HTTP, no copy): the sub-pattern is evaluated against
-// the pan store opened read-only for that call, so it sees the latest commit
-// and never blocks pand. The `pan:` prefix binds when git-lex-kit-pan is
-// installed (the kit is what tells git-lex the vocabulary); the full IRI
-// works regardless. No `.pan` store → the SERVICE is simply not registered
-// and a query naming it gets oxigraph's "unsupported service" error.
-
-/// The IRI a query names to reach the soul's media graph: `SERVICE pan:`.
-pub const PAN_SERVICE_IRI: &str = "https://repolex.ai/ontology/pan/";
-
-/// Where pand keeps a soul's media graph (pocket law).
-pub fn pan_store_path_at(root: &std::path::Path) -> PathBuf {
-    root.join(".pan").join("_ignore").join("oxigraph")
-}
-
-/// Evaluates `SERVICE pan:` sub-patterns against the soul's media graph.
-struct PanService {
-    path: PathBuf,
-}
-
-#[derive(Debug)]
-struct PanServiceError(String);
-
-impl std::fmt::Display for PanServiceError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "pan service: {}", self.0)
-    }
-}
-
-impl std::error::Error for PanServiceError {}
-
-impl oxigraph::sparql::ServiceHandler for PanService {
-    type Error = PanServiceError;
-
-    fn handle(
-        &self,
-        pattern: &spargebra::algebra::GraphPattern,
-        base_iri: Option<&oxiri::Iri<String>>,
-    ) -> Result<oxigraph::sparql::QuerySolutionIter<'static>, Self::Error> {
-        // The sub-pattern back to SPARQL text (spargebra prints real syntax),
-        // then a normal evaluation on a fresh read-only snapshot of the pan
-        // store. Results are collected so the iterator owns them and the
-        // store handle can close.
-        let query = spargebra::Query::Select {
-            dataset: None,
-            pattern: pattern.clone(),
-            base_iri: base_iri.cloned(),
-        }
-        .to_string();
-        let store = Store::open_read_only(&self.path)
-            .map_err(|e| PanServiceError(format!("open {}: {e}", self.path.display())))?;
-        let results = oxigraph::sparql::SparqlEvaluator::new()
-            .parse_query(&query)
-            .map_err(|e| PanServiceError(format!("parse: {e}")))?
-            .on_store(&store)
-            .execute()
-            .map_err(|e| PanServiceError(format!("eval: {e}")))?;
-        match results {
-            oxigraph::sparql::QueryResults::Solutions(sols) => {
-                let variables: std::sync::Arc<[oxigraph::sparql::Variable]> = sols.variables().to_vec().into();
-                let mut owned = Vec::new();
-                for s in sols {
-                    owned.push(s.map_err(|e| PanServiceError(format!("read: {e}")))?);
-                }
-                Ok(oxigraph::sparql::QuerySolutionIter::new(variables, owned.into_iter().map(Ok)))
-            }
-            _ => Err(PanServiceError("SERVICE sub-pattern did not yield solutions".into())),
+/// Exit with a clean one-line error when run outside a git repository —
+/// a panic + backtrace here is a crash report for a user mistake.
+pub fn require_git_root() -> std::path::PathBuf {
+    match find_git_root() {
+        Some(r) => r,
+        None => {
+            eprintln!("fatal: not a git repository (run this inside a repo)");
+            std::process::exit(1);
         }
     }
 }
 
-/// A `SparqlEvaluator` with the soul's media graph attached as
-/// `SERVICE pan:` when the repo has one. Every git-lex query path builds its
-/// evaluator here so the media graph is reachable from all of them.
-pub fn evaluator_at(root: Option<&std::path::Path>) -> oxigraph::sparql::SparqlEvaluator {
-    let ev = oxigraph::sparql::SparqlEvaluator::new();
-    match root.map(pan_store_path_at).filter(|p| p.is_dir()) {
-        Some(path) => ev.with_service_handler(
-            oxigraph::model::NamedNode::new(PAN_SERVICE_IRI).expect("pan service IRI"),
-            PanService { path },
-        ),
-        None => ev,
+/// Create or open the persistent store, with clean errors (no panics) for
+/// the two user-reachable failures: not-a-repo and a locked/broken store.
+/// Every write path enters here, so this is also where a pre-pocket store
+/// migrates into `.lex/_ignore/` (the ravel pattern: migrate at the top of
+/// every write, loud on action, refuse ambiguity).
+pub fn open_or_create_store() -> Store {
+    let root = require_git_root();
+    if let Err(e) = migrate_legacy_store(&root) {
+        eprintln!("fatal: {e}");
+        std::process::exit(1);
     }
+    let path = crate::store_path_at(&root);
+    if let Err(e) = fs::create_dir_all(&path) {
+        eprintln!("fatal: cannot create store directory {}: {e}", path.display());
+        std::process::exit(1);
+    }
+    match Store::open(&path) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("fatal: cannot open the store at {}: {e}", path.display());
+            eprintln!("(another git-lex write process may hold the lock — is a sync already running?)");
+            std::process::exit(1);
+        }
+    }
+}
+
+/// Move a pre-pocket store (`.git/lex/oxigraph`) into `.lex/_ignore/oxigraph`
+/// (pocket law, Rob 2026-08-05). No-op when there is nothing legacy to move.
+/// Refuses an ambiguous dual layout rather than guessing which store is
+/// current. TRANSITIONAL — dies in ship-prep with `legacy_store_path_at`.
+pub fn migrate_legacy_store(root: &std::path::Path) -> Result<(), String> {
+    let legacy = crate::legacy_store_path_at(root);
+    let pocket = crate::store_path_at(root);
+    if !legacy.exists() {
+        return Ok(());
+    }
+    if pocket.exists() {
+        return Err(format!(
+            "both {} and {} exist — ambiguous store layout, refusing to guess which is current. \
+             The pocket path is canonical: if it is current, delete the legacy dir; \
+             if unsure, delete BOTH and re-run `git lex sync` (the store is derived).",
+            legacy.display(),
+            pocket.display()
+        ));
+    }
+    // Ignore entry FIRST: the pocket must never exist on disk without its
+    // gitignore line, or the store is committable until the next kit-update
+    // (the inverted-82fe1d7 hazard, pointed at ourselves).
+    crate::kit::ensure_engine_gitignore(root);
+    if let Some(parent) = pocket.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|e| format!("cannot create {}: {e}", parent.display()))?;
+    }
+    fs::rename(&legacy, &pocket)
+        .map_err(|e| format!("cannot move store {} → {}: {e}", legacy.display(), pocket.display()))?;
+    println!(
+        "Store migrated into the pocket: {} → {}",
+        legacy.display(),
+        pocket.display()
+    );
+    // The legacy shell (.git/lex/) only ever held the store; drop it if empty.
+    if let Some(shell) = legacy.parent() {
+        let _ = fs::remove_dir(shell);
+    }
+    Ok(())
 }
 
 /// The domain kit spec from `.lex/repo.yml` (None if unset or "none").
@@ -250,14 +245,16 @@ pub fn eval_query_union<'a>(
     eval_query_union_at(find_git_root().as_deref(), store, q)
 }
 
-/// [`eval_query_union`] anchored to an explicit repo root — the root is what
-/// makes the soul's media graph reachable as `SERVICE pan:`.
+/// [`eval_query_union`] anchored to an explicit repo root. The root is not
+/// used by the evaluation itself any more: the in-process `SERVICE pan:`
+/// handler it once attached is gone (cross-store questions are syrinxd's,
+/// goodlux 2026-09-22). Kept so callers that know their root keep saying so.
 pub fn eval_query_union_at<'a>(
-    root: Option<&std::path::Path>,
+    _root: Option<&std::path::Path>,
     store: &'a Store,
     q: &str,
 ) -> Result<oxigraph::sparql::QueryResults<'a>, W3cQueryError> {
-    let mut parsed = evaluator_at(root)
+    let mut parsed = oxigraph::sparql::SparqlEvaluator::new()
         .parse_query(q)
         .map_err(|e| W3cQueryError::Parse(e.to_string()))?;
     parsed.dataset_mut().set_default_graph_as_union();
@@ -792,16 +789,59 @@ fn registry_update(edit: impl FnOnce(&mut Vec<serde_json::Value>)) -> Result<(),
 fn registry_put(repo_path: &std::path::Path) -> Result<(), String> {
     let canonical = registry_key(repo_path);
     let now = registry_now();
+    // The repo's first commit: how gitlexd keys a soul. The path is where
+    // the soul happens to be; a clone or a move keeps this. None until the
+    // repo has a commit; written on the next touch after it does.
+    let genesis = crate::git::genesis_sha_at(repo_path);
     registry_update(move |repos| {
         if let Some(entry) = repos.iter_mut().find(|e| entry_path(e) == Some(canonical.as_str())) {
             // No clock, no write: an old-but-real time beats a null.
             if let Some(t) = now {
                 entry["last_used"] = serde_json::Value::String(t);
             }
+            if let Some(g) = genesis {
+                entry["genesis"] = serde_json::Value::String(g);
+            }
             return;
         }
-        repos.push(serde_json::json!({ "path": canonical, "last_used": now }));
+        repos.push(serde_json::json!({ "path": canonical, "last_used": now, "genesis": genesis }));
     })
+}
+
+/// One registry entry whose repo is still on disk.
+pub struct RegistryEntry {
+    pub path: PathBuf,
+    /// The repo's first commit, when the registry has recorded it.
+    pub genesis: Option<String>,
+    pub last_used: Option<String>,
+}
+
+/// The repos this machine knows, most recently used first, with what the
+/// registry recorded about each. Liveness is decided by the disk: an entry
+/// whose `<path>/.lex` is gone is skipped, not deleted.
+pub fn registry_entries() -> Vec<RegistryEntry> {
+    let Some(reg) = registry_path() else { return Vec::new() };
+    let Ok(text) = fs::read_to_string(&reg) else { return Vec::new() };
+    let Ok(doc) = serde_json::from_str::<serde_json::Value>(&text) else { return Vec::new() };
+    let mut entries: Vec<RegistryEntry> = doc
+        .get("repos")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|e| {
+                    entry_path(e).map(|p| RegistryEntry {
+                        path: PathBuf::from(p),
+                        genesis: e.get("genesis").and_then(|g| g.as_str()).map(String::from),
+                        last_used: e.get("last_used").and_then(|t| t.as_str()).map(String::from),
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    // Most recent first; never-timed entries (folded from the old file) last.
+    entries.sort_by(|a, b| b.last_used.cmp(&a.last_used));
+    entries.retain(|e| crate::layout::lex_dir(&e.path).is_dir());
+    entries
 }
 
 /// The repos this machine knows, most recently used first: every registry
@@ -811,25 +851,7 @@ fn registry_put(repo_path: &std::path::Path) -> Result<(), String> {
 /// line-based file this replaced. Liveness is decided by the disk, per the
 /// registry's own rule: an entry whose `.lex` is gone is skipped, not deleted.
 pub fn registry_repos() -> Vec<PathBuf> {
-    let Some(reg) = registry_path() else { return Vec::new() };
-    let Ok(text) = fs::read_to_string(&reg) else { return Vec::new() };
-    let Ok(doc) = serde_json::from_str::<serde_json::Value>(&text) else { return Vec::new() };
-    let mut entries: Vec<(String, Option<String>)> = doc
-        .get("repos")
-        .and_then(|v| v.as_array())
-        .map(|arr| {
-            arr.iter()
-                .filter_map(|e| entry_path(e).map(|p| (p.to_string(), e.get("last_used").and_then(|t| t.as_str()).map(String::from))))
-                .collect()
-        })
-        .unwrap_or_default();
-    // Most recent first; never-timed entries (folded from the old file) last.
-    entries.sort_by(|a, b| b.1.cmp(&a.1));
-    entries
-        .into_iter()
-        .map(|(p, _)| PathBuf::from(p))
-        .filter(|p| crate::layout::lex_dir(p).is_dir())
-        .collect()
+    registry_entries().into_iter().map(|e| e.path).collect()
 }
 
 /// Stamp this repo as used, now. Called on EVERY git-lex run inside an
@@ -1344,16 +1366,48 @@ pub fn w3c_query_at(
     store: &Store,
     query: &str,
 ) -> Result<W3cQueryOutcome, W3cQueryError> {
+    w3c_query_with(root, store, query, false)
+}
+
+/// [`w3c_query_at`] with the default graph set to the UNION of every named
+/// graph, so a pattern with no GRAPH clause sees the whole store. This is
+/// what gitlexd serves: the store keeps its data in named graphs, and the
+/// strict W3C default (an empty default graph) returned zero rows to every
+/// query that did not know that (goodlux, 2026-09-22: one door, no traps).
+pub fn w3c_query_union_at(
+    root: Option<&std::path::Path>,
+    store: &Store,
+    query: &str,
+) -> Result<W3cQueryOutcome, W3cQueryError> {
+    w3c_query_with(root, store, query, true)
+}
+
+fn w3c_query_with(
+    root: Option<&std::path::Path>,
+    store: &Store,
+    query: &str,
+    union: bool,
+) -> Result<W3cQueryOutcome, W3cQueryError> {
     let prefixed = add_prefixes_at(root, query);
-    let results = evaluator_at(root)
+    // No SERVICE calls: oxigraph would otherwise send a SERVICE pattern over
+    // HTTP to whatever IRI the query names. A soul's query never leaves the
+    // machine; a cross-store question is syrinxd's (service_hint below).
+    let mut parsed = oxigraph::sparql::SparqlEvaluator::new()
+        .without_default_http_service_handler()
         .parse_query(&prefixed)
-        .map_err(|e| W3cQueryError::Parse(e.to_string()))?
+        .map_err(|e| W3cQueryError::Parse(e.to_string()))?;
+    if union {
+        parsed.dataset_mut().set_default_graph_as_union();
+    }
+    let results = parsed
         .on_store(store)
         .execute()
-        .map_err(|e| W3cQueryError::Eval(e.to_string()))?;
+        .map_err(|e| W3cQueryError::Eval(service_hint(e.to_string())))?;
+    // Evaluation is lazy: a failure (a SERVICE, say) surfaces while the
+    // rows are read, so the hint is applied on that path too.
     match results {
         oxigraph::sparql::QueryResults::Solutions(solutions) => Ok(W3cQueryOutcome::Solutions(
-            solutions_to_w3c_json(solutions).map_err(W3cQueryError::Eval)?,
+            solutions_to_w3c_json(solutions).map_err(|e| W3cQueryError::Eval(service_hint(e)))?,
         )),
         oxigraph::sparql::QueryResults::Boolean(b) => Ok(W3cQueryOutcome::Boolean(
             serde_json::json!({ "head": {}, "boolean": b }),
@@ -1361,12 +1415,22 @@ pub fn w3c_query_at(
         oxigraph::sparql::QueryResults::Graph(triples) => {
             let mut out = String::new();
             for t in triples {
-                let t = t.map_err(|e| W3cQueryError::Eval(e.to_string()))?;
+                let t = t.map_err(|e| W3cQueryError::Eval(service_hint(e.to_string())))?;
                 out.push_str(&t.to_string());
                 out.push_str(" .\n");
             }
             Ok(W3cQueryOutcome::Graph(out))
         }
+    }
+}
+
+/// A query that names a SERVICE is asking to cross stores. git-lex no longer
+/// evaluates other stores in process; the one line says where that went.
+fn service_hint(e: String) -> String {
+    if e.to_ascii_lowercase().contains("service") {
+        format!("{e} — git-lex answers for its own store only; a query across stores (pan, ravel) goes to syrinxd")
+    } else {
+        e
     }
 }
 
@@ -1512,6 +1576,28 @@ mod frontmatter_duplicate_key_tests {
         // counting those would name keys that were never repeated.
         let yaml = "note: |\n  first: thing\n  first: thing\n# first: thing\nitems:\n  - first: thing\n  - first: thing\n";
         assert!(repeated_top_level_keys(yaml).is_empty());
+    }
+}
+
+#[cfg(test)]
+mod service_tests {
+    use super::*;
+
+    /// A SERVICE pattern is never sent anywhere: it fails in process, and
+    /// the error says where cross-store questions go.
+    #[test]
+    fn a_service_pattern_stays_on_the_machine_and_names_syrinxd() {
+        let store = Store::new().unwrap();
+        let q = "SELECT ?s WHERE { SERVICE <https://repolex.ai/ontology/pan/> { ?s ?p ?o } }";
+        for outcome in [w3c_query_at(None, &store, q), w3c_query_union_at(None, &store, q)] {
+            match outcome {
+                Err(W3cQueryError::Eval(e)) => {
+                    assert!(e.contains("not supported"), "{e}");
+                    assert!(e.contains("syrinxd"), "{e}");
+                }
+                other => panic!("expected an evaluation error, got {:?}", other.is_ok()),
+            }
+        }
     }
 }
 

@@ -115,10 +115,10 @@ pub(crate) fn heal_content(content: &str, doc_relpath: &str, renames: &RenameMap
                         Some(pos) => (&dest[..pos], &dest[pos..]),
                         None => (dest, ""),
                     };
-                    let target = crate::extraction::percent_decode(path_part);
+                    let target = git_lex::extraction::percent_decode(path_part);
                     if !target.is_empty()
                         && let Some(resolved) =
-                            crate::extraction::normalize_wikilink_path(&target, doc_dir)
+                            git_lex::extraction::normalize_wikilink_path(&target, doc_dir)
                             && let Some((_, new_path)) =
                                 renames.iter().find(|(old, _)| *old == resolved)
                             {

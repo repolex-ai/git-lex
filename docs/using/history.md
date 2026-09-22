@@ -13,20 +13,21 @@ Renaming or moving a file does not churn its facts — a document's identity
 is its `id`, not its path, so a pure move records only the document-to-file
 link changing.
 
-## Where History Answers: `git lex serve sparql`
+## Where History Answers: `git lex query`
 
-History lives in the **synced store**, and only the SPARQL server reads it:
+History lives in the **synced store**, which [gitlexd](gitlexd.md) holds:
 
-- **`git lex serve sparql`** — Yes. A standard SPARQL endpoint over the
+- **`git lex query`** — Yes. It asks gitlexd, which answers from the
   synced store.
-- **`git lex query`** — **No.** It rebuilds a fresh view of your working
+- **`git lex direct`** — **No.** It rebuilds a fresh view of your working
   tree and does not open the synced store, so a history pattern there returns
   zero rows.
 
-At the endpoint, history sits in one named graph and standard SPARQL
-semantics apply: wrap the pattern in
-`GRAPH <https://repolex.ai/git-lex/LexHistoryGraph> { ... }` or you get
-zero rows. The ready-made history queries in [Querying](queries.md) provide templates for this.
+History sits in one named graph,
+`<https://repolex.ai/git-lex/LexHistoryGraph>`; a pattern with no GRAPH
+clause sees it along with everything else, and `GRAPH <…> { ... }` keeps a
+pattern to it. The ready-made history queries in [Querying](queries.md)
+provide templates for this.
 
 ## The Event Model and Joins
 

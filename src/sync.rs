@@ -12,13 +12,13 @@ use std::time::Instant;
 use oxigraph::io::RdfFormat;
 use oxigraph::store::Store;
 
-use git_lex::store_path;
+use crate::store_path;
 
 use crate::git::graph_uri;
 use crate::spo_events;
 use crate::{open_or_create_store, require_git_root};
 
-pub(crate) fn cmd_sync() {
+pub fn cmd_sync() {
     let start = Instant::now();
 
     let root = require_git_root();
@@ -356,6 +356,34 @@ fn rewound_event_commits(store: &Store, root: &std::path::Path) -> Vec<String> {
         .into_iter()
         .filter(|sha| !on_line.contains(sha.as_str()))
         .collect()
+}
+
+/// The commit the store is synced to: the newest commit in its commits
+/// graph, by ordinal. The ordinals are the sync marker (a batched rebuild
+/// writes them last), so a store with none has never completed a sync.
+pub fn synced_marker(store: &Store) -> Option<String> {
+    let q = format!(
+        "SELECT ?sha WHERE {{ GRAPH <{}> {{ \
+           ?c <{SYNC_MARKER_PREDICATE}> ?o ; \
+              <https://repolex.ai/ontology/git-lex/git2/id> ?sha }} \
+         }} ORDER BY DESC(?o) LIMIT 1",
+        graph_uri("commits")
+    );
+    let results = oxigraph::sparql::SparqlEvaluator::new()
+        .parse_query(&q)
+        .ok()?
+        .on_store(store)
+        .execute()
+        .ok()?;
+    match results {
+        oxigraph::sparql::QueryResults::Solutions(sols) => sols.flatten().next().and_then(|s| {
+            s.get("sha").map(|t| match t {
+                oxigraph::model::Term::Literal(l) => l.value().to_string(),
+                other => other.to_string(),
+            })
+        }),
+        _ => None,
+    }
 }
 
 fn resume_point(store: &Store, root: &std::path::Path) -> Option<String> {
@@ -823,8 +851,10 @@ fn materialize_now_view(store: &Store) {
 /// with events SQUARED while the aggregate form grows linearly. Measured
 /// head-to-head on real stores, same answer both ways:
 ///
-///     W4R3Z (24k quads,  7,237 events):   4,322 ms →     139 ms   (31x)
-///     lUX (479k quads, 132,456 events): 844,446 ms →   1,560 ms  (541x)
+/// ```text
+/// W4R3Z (24k quads,  7,237 events):   4,322 ms →     139 ms   (31x)
+/// lUX (479k quads, 132,456 events): 844,446 ms →   1,560 ms  (541x)
+/// ```
 ///
 /// On lUX that one query WAS a one-commit sync: 14m04s of a 14m44s run.
 ///
@@ -1067,7 +1097,7 @@ fn verify_onegraph(store: &Store) {
     // removal — Rob-ruled 2026-07-29: every sync proves the store coherent
     // or aborts; the strongest corruption detector runs on every build).
     let count_q = |q: &str| -> Option<u64> {
-        match git_lex::eval_query(store, q) {
+        match crate::eval_query(store, q) {
             Ok(oxigraph::sparql::QueryResults::Solutions(mut sols)) => sols
                 .next()
                 .and_then(|r| r.ok())
@@ -1156,7 +1186,7 @@ fn git_default_branch(root: &std::path::Path) -> String {
 /// as of the horizon — untouched old documents keep their facts; only the
 /// pre-horizon CHURN is excluded.
 fn resolve_dev_horizon(root: &std::path::Path) -> Option<String> {
-    let date = git_lex::RepoYml::load(root).dev_history_horizon?;
+    let date = crate::RepoYml::load(root).dev_history_horizon?;
     let first = first_commit_on_or_after(root, date.trim());
     if first.is_none() {
         eprintln!("warning: dev_history_horizon '{date}' matches no commit — walking full history");
@@ -1256,7 +1286,7 @@ SELECT (COUNT(DISTINCT ?tt) AS ?n) WHERE { \
     FILTER(?or >= ?oa) } }";
 
     fn count(store: &Store, q: &str) -> u64 {
-        match git_lex::eval_query(store, q) {
+        match crate::eval_query(store, q) {
             Ok(oxigraph::sparql::QueryResults::Solutions(mut sols)) => sols
                 .next()
                 .and_then(|r| r.ok())
@@ -1442,7 +1472,7 @@ mod coherence_query_tests {
     }
 
     fn n(store: &Store, q: &str) -> u64 {
-        match git_lex::eval_query(store, q) {
+        match crate::eval_query(store, q) {
             Ok(oxigraph::sparql::QueryResults::Solutions(mut sols)) => sols
                 .next().and_then(|r| r.ok())
                 .and_then(|r| r.iter().next().map(|(_, t)| t.to_string()))

@@ -34,7 +34,7 @@ pub(crate) fn parse_shacl_hints(shapes_ttl: &str, short: &str) -> HashMap<String
     let (prefix_name, namespace) = git_lex::extract_kit_prefix(shapes_ttl, short)
         .unwrap_or_else(|| (short.to_string(), git_lex::conventional_kit_namespace(short)));
 
-    let store = match crate::kit::load_ttl_str(shapes_ttl, &format!("{} shapes", short)) {
+    let store = match git_lex::kit::load_ttl_str(shapes_ttl, &format!("{} shapes", short)) {
         Ok(s) => s,
         Err(e) => {
             eprintln!("warning: {} — no template hints for kit '{}'", e, short);
@@ -883,8 +883,8 @@ pub(crate) fn generate_shacl_shapes(kit: &str) -> Result<Option<String>, String>
     // its chain walked if the parent was never loaded. Class emission stays
     // namespace-filtered below, so the extra vocabulary resolves parents
     // without leaking other kits' shapes into this file.
-    let Some(store) = crate::kit::load_all_kit_ontologies_into_store(kit)? else { return Ok(None) };
-    let Some(ttl_path) = crate::kit::find_kit_ttl(kit) else { return Ok(None) };
+    let Some(store) = git_lex::kit::load_all_kit_ontologies_into_store(kit)? else { return Ok(None) };
+    let Some(ttl_path) = git_lex::kit::find_kit_ttl(kit) else { return Ok(None) };
     let ttl_content = fs::read_to_string(&ttl_path)
         .map_err(|e| format!("cannot read {}: {}", ttl_path.display(), e))?;
 
@@ -907,7 +907,7 @@ pub(crate) fn build_shacl_shapes(kit: &str) -> Result<Option<PathBuf>, String> {
     let Some(shacl) = generate_shacl_shapes(kit)? else { return Ok(None) };
     let (_, _, short) = resolve_kit_spec(kit);
     // Locate the source TTL so we can drop the shapes file next to it.
-    let Some(source_ttl) = crate::kit::find_kit_ttl(kit) else { return Ok(None) };
+    let Some(source_ttl) = git_lex::kit::find_kit_ttl(kit) else { return Ok(None) };
     let Some(ontology_dir) = source_ttl.parent().map(|p| p.to_path_buf()) else { return Ok(None) };
     fs::create_dir_all(&ontology_dir)
         .map_err(|e| format!("cannot create {}: {}", ontology_dir.display(), e))?;
@@ -946,7 +946,7 @@ t:lookTechnicalScore a owl:DatatypeProperty ;
 "#;
 
     fn shapes_for(ttl: &str) -> String {
-        let store = crate::kit::load_ttl_str(ttl, "test").expect("ttl loads");
+        let store = git_lex::kit::load_ttl_str(ttl, "test").expect("ttl loads");
         generate_shapes_from_store(&store, "t", "https://repolex.ai/ontology/t/", "test")
             .expect("shapes generate")
     }
@@ -1139,7 +1139,7 @@ t:journalId a owl:DatatypeProperty ;
     rdfs:domain t:Journal ;
     rdfs:range xsd:string .
 "###;
-        let store = crate::kit::load_ttl_str(ttl, "test").expect("ttl loads");
+        let store = git_lex::kit::load_ttl_str(ttl, "test").expect("ttl loads");
         let out =
             generate_shapes_from_store(&store, "t", "https://repolex.ai/ontology/t/", "test")
                 .expect("shapes generate");
@@ -1191,7 +1191,7 @@ t:lookTakenOn a owl:DatatypeProperty ;
 "#;
 
     fn hints_for(ttl: &str) -> HashMap<String, String> {
-        let store = crate::kit::load_ttl_str(ttl, "test").expect("ttl loads");
+        let store = git_lex::kit::load_ttl_str(ttl, "test").expect("ttl loads");
         let shapes =
             generate_shapes_from_store(&store, "t", "https://repolex.ai/ontology/t/", "test")
                 .expect("shapes generate");
@@ -1411,7 +1411,7 @@ t:plainName a owl:DatatypeProperty ; rdfs:domain t:Node ; rdfs:range xsd:string 
 "#;
 
     fn shapes_for(ttl: &str) -> String {
-        let store = crate::kit::load_ttl_str(ttl, "test").expect("ttl loads");
+        let store = git_lex::kit::load_ttl_str(ttl, "test").expect("ttl loads");
         generate_shapes_from_store(&store, "t", "https://repolex.ai/ontology/t/", "test")
             .expect("shapes generate")
     }

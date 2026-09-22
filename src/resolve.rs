@@ -198,7 +198,7 @@ pub fn resolve_frontmatter_value(raw: &str) -> ResolveResult {
 /// bare-value warning (2026-08-18, tr1p's report §4) could only report:
 /// under a declared Thing range, the path lane has no correct output, so
 /// accepting the input was the bug.
-pub(crate) fn resolve_thing_reference(raw: &str) -> Result<String, String> {
+pub fn resolve_thing_reference(raw: &str) -> Result<String, String> {
     let trimmed = raw.trim();
     let Some(inner) = trimmed.strip_prefix('<').and_then(|r| r.strip_suffix('>')) else {
         return Err(format!(

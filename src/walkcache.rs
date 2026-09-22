@@ -56,7 +56,7 @@ use std::path::{Path, PathBuf};
 /// One cached document: the identity of what produced its fragment, and
 /// the counters the walk must report without re-doing the work.
 #[derive(Debug, Clone, PartialEq)]
-pub(crate) struct CacheEntry {
+pub struct CacheEntry {
     /// git blob hash of the file's working-tree bytes at cache time.
     pub bytes_hash: String,
     /// git blob hash the INDEX held for this path at cache time
@@ -73,7 +73,7 @@ pub(crate) struct CacheEntry {
     pub sidecars: bool,
 }
 
-pub(crate) struct WalkCache {
+pub struct WalkCache {
     /// Hash over the ontology bytes + the document existence set. A
     /// mismatch invalidates every entry at once.
     pub ctx_hash: String,
@@ -84,12 +84,12 @@ pub(crate) struct WalkCache {
 }
 
 fn cache_dir(root: &Path) -> PathBuf {
-    git_lex::layout::walkcache_dir(root)
+    crate::layout::walkcache_dir(root)
 }
 
 /// git's own blob hash of a byte string — the ONE content-identity
 /// primitive this cache uses (never a home-grown digest).
-pub(crate) fn blob_hash_of(bytes: &[u8]) -> String {
+pub fn blob_hash_of(bytes: &[u8]) -> String {
     git2::Oid::hash_object(git2::ObjectType::Blob, bytes)
         .map(|o| o.to_string())
         .unwrap_or_default()
@@ -118,7 +118,7 @@ fn binary_identity() -> String {
 /// can change a document's output WITHOUT its bytes changing must be in
 /// here; when in doubt, include it — the cost of inclusion is a full walk,
 /// the cost of omission is silently stale derived state.
-pub(crate) fn context_hash(root: &Path, files: &[PathBuf]) -> String {
+pub fn context_hash(root: &Path, files: &[PathBuf]) -> String {
     let mut acc = Vec::new();
     acc.extend_from_slice(binary_identity().as_bytes());
     acc.push(b'\n');
@@ -136,7 +136,7 @@ pub(crate) fn context_hash(root: &Path, files: &[PathBuf]) -> String {
     // Every byte of the installed kits' ontology, path-sorted. Installed
     // means listed in repo.yml, so removing a kit changes this hash even
     // when its folder is still on disk.
-    let ont_files = git_lex::installed_ontology_files(root);
+    let ont_files = crate::installed_ontology_files(root);
     for f in &ont_files {
         acc.extend_from_slice(f.to_string_lossy().as_bytes());
         acc.push(b'\n');
@@ -162,7 +162,7 @@ impl WalkCache {
     /// Load the cache for this context. None = no usable cache (absent,
     /// unreadable, or built under a different context) — the caller runs
     /// a full walk and a fresh cache is written at the end either way.
-    pub(crate) fn load(root: &Path, ctx_hash: &str) -> Option<WalkCache> {
+    pub fn load(root: &Path, ctx_hash: &str) -> Option<WalkCache> {
         let dir = cache_dir(root);
         let manifest = fs::read_to_string(dir.join("manifest.tsv")).ok()?;
         let mut lines = manifest.lines();
@@ -206,7 +206,7 @@ impl WalkCache {
     }
 
     /// An empty cache that will be populated by this run (full-walk path).
-    pub(crate) fn empty(root: &Path, ctx_hash: &str) -> WalkCache {
+    pub fn empty(root: &Path, ctx_hash: &str) -> WalkCache {
         WalkCache {
             ctx_hash: ctx_hash.to_string(),
             entries: HashMap::new(),
@@ -225,7 +225,7 @@ impl WalkCache {
     /// write sidecars (the hook path) skip thousands of fragment reads; a
     /// fragment lost from disk simply misses on the next quad-building run
     /// and is re-extracted — self-healing, never trusted blind.
-    pub(crate) fn hit(
+    pub fn hit(
         &mut self,
         relpath: &str,
         bytes_hash: &str,
@@ -249,7 +249,7 @@ impl WalkCache {
     /// Record a freshly-extracted file. Errors>0 files are the caller's
     /// responsibility to NOT store (loud-every-run contract). `sidecars`
     /// says whether this walk wrote the file's sidecars as well.
-    pub(crate) fn store(
+    pub fn store(
         &mut self,
         relpath: &str,
         bytes_hash: &str,
@@ -282,7 +282,7 @@ impl WalkCache {
     /// entries for vanished files fall away here (self-pruning), and a
     /// half-written manifest is impossible to trust-load because the CTX
     /// header is written first and torn rows fail the parse.
-    pub(crate) fn save(&self) {
+    pub fn save(&self) {
         if fs::create_dir_all(&self.dir).is_err() {
             return;
         }
@@ -342,8 +342,8 @@ mod tests {
     fn tmp_root(tag: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("glx-walkcache-{}-{}", tag, std::process::id()));
         let _ = fs::remove_dir_all(&dir);
-        fs::create_dir_all(git_lex::layout::kit_ontology_dir(&dir, "t")).unwrap();
-        fs::write(git_lex::layout::repo_yml(&dir), "name: x\nkit: repolex-ai/git-lex-kit-t\n").unwrap();
+        fs::create_dir_all(crate::layout::kit_ontology_dir(&dir, "t")).unwrap();
+        fs::write(crate::layout::repo_yml(&dir), "name: x\nkit: repolex-ai/git-lex-kit-t\n").unwrap();
         dir
     }
 
@@ -447,7 +447,7 @@ mod tests {
                 .unwrap_or(0)
         ));
         let _ = fs::remove_dir_all(&root);
-        fs::create_dir_all(git_lex::layout::kit_ontology_dir(&root, "t")).unwrap();
+        fs::create_dir_all(crate::layout::kit_ontology_dir(&root, "t")).unwrap();
         let ctx = context_hash(&root, &[root.join("a.md")]);
 
         // Run 1: two documents seen, two fragments written.

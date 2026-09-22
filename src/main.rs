@@ -1,48 +1,36 @@
 use clap::{Parser, Subcommand};
-use oxigraph::store::Store;
 use std::process::{Command, exit};
 use std::fs;
 
-// Shared utilities (also used by git-lex-serve)
-use git_lex::{find_git_root,
-              registry_remove};
+// Shared utilities from the library (also used by gitlexd)
+use git_lex::{find_git_root, registry_remove, require_git_root, open_or_create_store};
+#[cfg(test)]
+use git_lex::migrate_legacy_store;
+use git_lex::{context, export_spine, sync};
 
 // Frontmatter ObjectProperty value resolver. The rules for what is and isn't
 // allowed in frontmatter values are codified as tests in this module — read
 // the test suite for the definitive spec.
-mod resolve;
 mod heal;
 mod man;
-mod sync;
 mod harness;
-mod git;
 mod hooks;
 mod init;
-mod git2_nquads;
 mod verify;
-mod nquad;
-mod ontology;
 mod shacl;
-mod kit;
 mod kit_cmds;
-mod extraction;
-mod soul_md;
 mod create;
 mod save;
 mod query;
-mod walkcache;
-mod export_spine;
-mod context;
 mod voice;
 mod session;
 
-use crate::git::auto_commit_snapshot;
+use git_lex::git::auto_commit_snapshot;
 
 // .spo event stream — git-aware change detector for .spo sidecars. Used by
 // orphan cleanup (pre-commit hook) and history graph ingest (rebuild +
 // incremental). The full model is documented in docs/history.md and in the
 // module header of src/spo_events.rs itself.
-mod spo_events;
 
 #[derive(Parser)]
 #[command(
@@ -69,25 +57,47 @@ enum Commands {
         #[arg(long)]
         kit: Option<String>,
     },
-    /// Run a SPARQL query over a fresh view of the working tree — your
-    /// files as they are RIGHT NOW (committed or not), plus the git commit
-    /// layer. Common prefixes are injected automatically; queries see the
-    /// union of all graphs by default, so `SELECT * WHERE { ?s ?p ?o }`
-    /// finds everything.
+    /// Ask your soul's graph a SPARQL question, through gitlexd.
     ///
-    /// For history questions ("when did this change?") query the synced
-    /// store via `git lex serve sparql` — the ready-made history query is
-    /// in docs/queries.md. This command does not read the synced store.
+    /// The query goes to the soul your session started in. Nothing to pass
+    /// and nothing to set: the soul is read from the process that started
+    /// the session, whatever directory the shell is in now. The store holds
+    /// everything: current documents, files, commits, and the full history
+    /// of every statement (see docs/using/queries.md). Prefixes for the
+    /// installed kits are added for you; a pattern with no GRAPH clause
+    /// sees every graph.
+    ///
+    /// Starts gitlexd if none is running. `git lex direct`
+    /// reads the working tree on its own.
     ///
     /// Examples:
     ///   git lex query "SELECT * WHERE { ?s ?p ?o } LIMIT 10"
     ///   git lex query "SELECT ?c WHERE { ?c a git2:Commit } LIMIT 5"
     ///   git lex query recent
     ///
-    /// A bare name runs the STORED query saved as .lex/query/<name>.md —
-    /// plain markdown whose first code block is the query; the rest of the
-    /// file is notes. Save your own alongside the starters.
+    /// A bare name runs the STORED query saved as .lex/query/<name>.md in
+    /// the soul — plain markdown whose first code block is the query.
     Query {
+        /// SPARQL text, or the name of a stored query in .lex/query/
+        query: String,
+        /// Emit SPARQL 1.1 JSON Results format on stdout. Suppresses the
+        /// human-readable table and the trailing stats line (stats go to stderr).
+        #[arg(long)]
+        json: bool,
+    },
+    /// Run a SPARQL query over a fresh view of the working tree, built in
+    /// memory — your files as they are RIGHT NOW (committed or not), plus
+    /// the git commit layer. No gitlexd needed. Follows the shell's current
+    /// directory. Common prefixes are injected automatically; queries see
+    /// the union of all graphs by default.
+    ///
+    /// This view has no statement history: for "when did this change?"
+    /// use `git lex query`, which reads the synced store through gitlexd.
+    ///
+    /// Examples:
+    ///   git lex direct "SELECT * WHERE { ?s ?p ?o } LIMIT 10"
+    ///   git lex direct recent
+    Direct {
         /// SPARQL text, or the name of a stored query in .lex/query/
         query: String,
         /// Emit SPARQL 1.1 JSON Results format on stdout. Suppresses the
@@ -108,10 +118,12 @@ enum Commands {
     },
     /// Compile committed history into the persistent store (the one graph)
     ///
+    /// When gitlexd is running it owns this repo's store: sync asks it to
+    /// sync and waits for the result. Otherwise the sync runs here.
     /// Incremental since the last sync; a rewritten history (reset/rebase)
     /// triggers a loud FULL rebuild. Also refreshes the .spo sidecars from
     /// the working tree. Hand-authored `.lex/**/*.nq` files are read by
-    /// `query`, not by sync.
+    /// `direct`, not by sync.
     Sync,
     /// Write the repo's semantic index as one TSV file built for an LLM's
     /// context cache (the neural KV-cache: hold a whole soul's graph
@@ -197,16 +209,6 @@ enum Commands {
         #[arg(long)]
         force: bool,
     },
-    /// Start ONE local server (pure passthrough to git-lex-serve)
-    ///
-    /// Subcommands: `viz` (graph visualizer, port 7878) and `sparql`
-    /// (W3C SPARQL endpoint over the synced store, 7880). Each invocation
-    /// starts exactly one server, e.g. `git lex serve sparql`.
-    Serve {
-        /// Arguments passed through to git-lex-serve
-        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
-        args: Vec<String>,
-    },
     /// Health-check the database (read-only): confirms the kit vocabularies
     /// are loaded, every stored property is declared by an ontology, the
     /// history is well-formed, and current state matches what the history
@@ -271,87 +273,6 @@ pub(crate) use git_lex::BASE_KIT;
 
 // store paths and open_store_read_only come from the git_lex lib
 
-/// Exit with a clean one-line error when run outside a git repository —
-/// a panic + backtrace here is a crash report for a user mistake.
-pub(crate) fn require_git_root() -> std::path::PathBuf {
-    match find_git_root() {
-        Some(r) => r,
-        None => {
-            eprintln!("fatal: not a git repository (run this inside a repo)");
-            exit(1);
-        }
-    }
-}
-
-/// Create or open the persistent store, with clean errors (no panics) for
-/// the two user-reachable failures: not-a-repo and a locked/broken store.
-/// Every write path enters here, so this is also where a pre-pocket store
-/// migrates into `.lex/_ignore/` (the ravel pattern: migrate at the top of
-/// every write, loud on action, refuse ambiguity).
-pub(crate) fn open_or_create_store() -> Store {
-    let root = require_git_root();
-    if let Err(e) = migrate_legacy_store(&root) {
-        eprintln!("fatal: {e}");
-        exit(1);
-    }
-    let path = git_lex::store_path_at(&root);
-    if let Err(e) = fs::create_dir_all(&path) {
-        eprintln!("fatal: cannot create store directory {}: {e}", path.display());
-        exit(1);
-    }
-    match Store::open(&path) {
-        Ok(s) => s,
-        Err(e) => {
-            eprintln!("fatal: cannot open the store at {}: {e}", path.display());
-            eprintln!("(another git-lex write process may hold the lock — is a sync already running?)");
-            exit(1);
-        }
-    }
-}
-
-/// Move a pre-pocket store (`.git/lex/oxigraph`) into `.lex/_ignore/oxigraph`
-/// (pocket law, Rob 2026-08-05). No-op when there is nothing legacy to move.
-/// Refuses an ambiguous dual layout rather than guessing which store is
-/// current. TRANSITIONAL — dies in ship-prep with `legacy_store_path_at`.
-pub(crate) fn migrate_legacy_store(root: &std::path::Path) -> Result<(), String> {
-    let legacy = git_lex::legacy_store_path_at(root);
-    let pocket = git_lex::store_path_at(root);
-    if !legacy.exists() {
-        return Ok(());
-    }
-    if pocket.exists() {
-        return Err(format!(
-            "both {} and {} exist — ambiguous store layout, refusing to guess which is current. \
-             The pocket path is canonical: if it is current, delete the legacy dir; \
-             if unsure, delete BOTH and re-run `git lex sync` (the store is derived).",
-            legacy.display(),
-            pocket.display()
-        ));
-    }
-    // Ignore entry FIRST: the pocket must never exist on disk without its
-    // gitignore line, or the store is committable until the next kit-update
-    // (the inverted-82fe1d7 hazard, pointed at ourselves).
-    kit_cmds::ensure_engine_gitignore(root);
-    if let Some(parent) = pocket.parent() {
-        fs::create_dir_all(parent)
-            .map_err(|e| format!("cannot create {}: {e}", parent.display()))?;
-    }
-    fs::rename(&legacy, &pocket)
-        .map_err(|e| format!("cannot move store {} → {}: {e}", legacy.display(), pocket.display()))?;
-    println!(
-        "Store migrated into the pocket: {} → {}",
-        legacy.display(),
-        pocket.display()
-    );
-    // The legacy shell (.git/lex/) only ever held the store; drop it if empty.
-    if let Some(shell) = legacy.parent() {
-        let _ = fs::remove_dir(shell);
-    }
-    Ok(())
-}
-
-
-
 // ─── main ──────────────────────────────────────────────────────
 
 fn main() {
@@ -383,6 +304,7 @@ fn main() {
         Commands::List { json } => create::cmd_list(json),
         Commands::Save { message, dry_run, no_restamp } => save::cmd_save(&message, dry_run, no_restamp),
         Commands::Query { query, json } => query::cmd_query(query, json),
+        Commands::Direct { query, json } => query::cmd_direct(query, json),
         Commands::Hook { event } => {
             match event.as_str() {
                 "pre-commit" => save::hook_pre_commit(),
@@ -396,20 +318,6 @@ fn main() {
         Commands::KitUpdate { kit } => kit_cmds::cmd_kit_update(kit),
         Commands::KitAdd { kit } => kit_cmds::cmd_kit_add(kit),
         Commands::KitRemove { kit, force } => kit_cmds::cmd_kit_remove(kit, force),
-        Commands::Serve { args } => {
-            let status = Command::new("git-lex-serve")
-                .args(&args)
-                .status();
-            match status {
-                Ok(s) if !s.success() => exit(s.code().unwrap_or(1)),
-                Err(e) => {
-                    eprintln!("Failed to run git-lex-serve: {}", e);
-                    eprintln!("Is it installed? Try: cargo install --path <git-lex-dir>");
-                    exit(1);
-                }
-                _ => {}
-            }
-        }
         Commands::Verify => {
             let store = open_or_create_store();
             let failures = crate::verify::run_verify(&store);
@@ -417,7 +325,7 @@ fn main() {
                 exit(1);
             }
         }
-        Commands::Sync => sync::cmd_sync(),
+        Commands::Sync => cmd_sync(),
         Commands::ExportSpine => export_spine::cmd_export_spine(),
         Commands::Soul { command } => match command {
             SoulCommands::Session { json } => session::cmd_session(json),
@@ -431,6 +339,37 @@ fn main() {
 
 // ─── nuke ──────────────────────────────────────────────────────
 
+
+/// Sync this repo's store. gitlexd, when it runs, is the store's only
+/// writer, so the work is handed to it and waited for; a repo gitlexd does
+/// not hold (registered after it started) syncs here. Without gitlexd the
+/// engine runs in this process, as it always has.
+fn cmd_sync() {
+    let root = require_git_root();
+    if git_lex::gitlexd::client::running()
+        && let Some(genesis) = git_lex::git::genesis_sha_at(&root) {
+            match git_lex::gitlexd::client::sync_and_wait(&genesis) {
+                Ok(state) => {
+                    let to = state["synced_to"].as_str().unwrap_or("(nothing)");
+                    println!(
+                        "Synced by gitlexd to {} in {} ms (log: {}).",
+                        &to[..8.min(to.len())],
+                        state["last_sync_ms"].as_u64().unwrap_or(0),
+                        git_lex::gitlexd::log_path().map(|p| p.display().to_string()).unwrap_or_default()
+                    );
+                    return;
+                }
+                Err(e) if e.starts_with("no soul with first commit") => {
+                    eprintln!("gitlexd is running but does not hold this repo yet (it reads the registry at start; `gitlexd restart` picks it up). Syncing here.");
+                }
+                Err(e) => {
+                    eprintln!("gitlexd could not sync this repo: {e}");
+                    exit(1);
+                }
+            }
+        }
+    sync::cmd_sync();
+}
 
 fn cmd_nuke() {
     let root = require_git_root();

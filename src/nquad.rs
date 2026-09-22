@@ -18,7 +18,7 @@
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::PathBuf;
-use git_lex::find_git_root;
+use crate::find_git_root;
 
 use crate::git::graph_uri;
 
@@ -32,7 +32,7 @@ use crate::resolve;
 /// sidecar diff is the one graph's ONLY event source, so "couldn't write,
 /// carried on" means facts that never happened as far as history is
 /// concerned (review finding A8).
-pub(crate) fn write_sidecar_loud(path: &std::path::Path, content: &str) {
+pub fn write_sidecar_loud(path: &std::path::Path, content: &str) {
     // Already byte-identical → nothing to do. The walk regenerates EVERY
     // sidecar on EVERY run, so on a repo where one file changed this was
     // thousands of writes of bytes already on disk (5,840 of them per sync
@@ -64,7 +64,7 @@ pub(crate) fn write_sidecar_loud(path: &std::path::Path, content: &str) {
 /// fine — that's the desired end state). A stale sidecar that survives
 /// removal keeps its facts alive forever: the sync diff never sees the
 /// lines vanish, so the retraction events never exist (review finding A3).
-pub(crate) fn remove_sidecar_loud(path: &std::path::Path) {
+pub fn remove_sidecar_loud(path: &std::path::Path) {
     if let Err(e) = fs::remove_file(path)
         && e.kind() != std::io::ErrorKind::NotFound {
             eprintln!("fatal: failed to remove stale sidecar {}: {e}", path.display());
@@ -73,7 +73,7 @@ pub(crate) fn remove_sidecar_loud(path: &std::path::Path) {
 }
 
 /// Escape a string for use in N-Quads literals.
-pub(crate) fn nq_escape(s: &str) -> String {
+pub fn nq_escape(s: &str) -> String {
     s.replace('\\', "\\\\")
         .replace('"', "\\\"")
         .replace('\n', "\\n")
@@ -93,13 +93,13 @@ pub(crate) fn nq_escape(s: &str) -> String {
 static AUTHOR_WARNINGS: std::sync::atomic::AtomicUsize =
     std::sync::atomic::AtomicUsize::new(0);
 
-pub(crate) fn bump_author_warning() {
+pub fn bump_author_warning() {
     AUTHOR_WARNINGS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 }
 
 /// How many author-actionable diagnostics this run produced. Read by `save`
 /// AFTER it reports the commit.
-pub(crate) fn author_warning_count() -> usize {
+pub fn author_warning_count() -> usize {
     AUTHOR_WARNINGS.load(std::sync::atomic::Ordering::Relaxed)
 }
 
@@ -135,7 +135,7 @@ fn push_uri_encoded(c: char, out: &mut String) {
 }
 
 /// Percent-encode a path for use in URIs (spaces, special chars, non-ASCII).
-pub(crate) fn uri_encode_path(s: &str) -> String {
+pub fn uri_encode_path(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for c in s.chars() {
         push_uri_encoded(c, &mut out);
@@ -149,7 +149,7 @@ pub(crate) fn uri_encode_path(s: &str) -> String {
 /// mints a DIFFERENT URL (`Caf%25C3%25A9`) than the author wrote. A bare `%`
 /// not followed by two hex digits still encodes, so oxigraph's strict
 /// N-Quads parser never sees a structurally invalid IRI.
-pub(crate) fn uri_encode_url(s: &str) -> String {
+pub fn uri_encode_url(s: &str) -> String {
     let chars: Vec<char> = s.chars().collect();
     let mut out = String::with_capacity(s.len());
     let mut i = 0;
@@ -178,7 +178,7 @@ pub(crate) fn uri_encode_url(s: &str) -> String {
 /// itself begins a new `http(s)://` URL; everything else keeps the plain
 /// comma split. Used by the emitter, the validate path, and the identity
 /// gate — ONE splitter, so validation judges exactly what sync will emit.
-pub(crate) fn split_object_values(object: &str) -> Vec<String> {
+pub fn split_object_values(object: &str) -> Vec<String> {
     let is_url = |s: &str| s.starts_with("http://") || s.starts_with("https://");
     if !is_url(object.trim()) {
         return object
@@ -207,14 +207,14 @@ pub(crate) fn split_object_values(object: &str) -> Vec<String> {
 }
 
 /// Load .lex/*.nq files and return their contents.
-pub(crate) fn load_lex_nquads() -> String {
+pub fn load_lex_nquads() -> String {
     let root = match find_git_root() {
         Some(r) => r,
         None => return String::new(),
     };
 
     let mut nq = String::new();
-    let lex_dir = git_lex::layout::lex_dir(&root);
+    let lex_dir = crate::layout::lex_dir(&root);
 
     // Recursively find all .nq files. `.lex/_ignore/` is machine-local
     // derived state, never hand-written triples: its walk-cache fragments
@@ -256,7 +256,7 @@ pub(crate) fn load_lex_nquads() -> String {
 /// dependency tree is neither read, hashed nor given a File record (#28).
 /// An ignored directory is pruned whole, so its contents are never
 /// listed. Outside a git repository nothing is ignored.
-pub(crate) fn walk_repo_docs(root: &std::path::Path) -> Vec<PathBuf> {
+pub fn walk_repo_docs(root: &std::path::Path) -> Vec<PathBuf> {
     let repo = git2::Repository::discover(root).ok();
     // libgit2 matches a path against the ignore files along it, so it must
     // see the path RELATIVE TO THE WORK TREE — an absolute path finds only
@@ -294,7 +294,7 @@ pub(crate) fn walk_repo_docs(root: &std::path::Path) -> Vec<PathBuf> {
 }
 
 /// Is this a kit-derived `__Class.md` scaffold template?
-pub(crate) fn is_template(path: &std::path::Path) -> bool {
+pub fn is_template(path: &std::path::Path) -> bool {
     path.file_name()
         .map(|n| n.to_string_lossy().starts_with("__"))
         .unwrap_or(false)
@@ -304,7 +304,7 @@ pub(crate) fn is_template(path: &std::path::Path) -> bool {
 /// the slug/path indexes over the repo's documents and the all-kits
 /// ontology tables. Sync used to build the indexes twice per run (once
 /// inside frontmatter generation, again for the history walk).
-pub(crate) struct ResolverContext {
+pub struct ResolverContext {
     pub files: Vec<PathBuf>,
     pub path_index: HashSet<String>,
     pub obj_props: HashSet<String>,
@@ -349,7 +349,7 @@ pub(crate) struct ResolverContext {
 }
 
 impl ResolverContext {
-    pub(crate) fn build(root: &std::path::Path) -> ResolverContext {
+    pub fn build(root: &std::path::Path) -> ResolverContext {
         let files = walk_repo_docs(root);
         let path_index = build_path_index(root, &files);
         ResolverContext {
@@ -372,14 +372,14 @@ impl ResolverContext {
 /// any class in any kit, so the authored value must carry its own namespace
 /// and class — the identifier form `<namespace/Class/id>`, resolved by
 /// `resolve::resolve_thing_reference`, everything else rejected at save.
-pub(crate) const THING_CLASS_IRI: &str = "https://repolex.ai/ontology/git-lex/Thing";
+pub const THING_CLASS_IRI: &str = "https://repolex.ai/ontology/git-lex/Thing";
 
 /// A Thing IRI derived from a range CLASS IRI + a bare target id:
 /// `https://repolex.ai/ontology/copia/Being` + `lux`
 /// → `https://repolex.ai/copia/Being/lux` (universal instance law; the
 /// class's own namespace decides the application, so cross-kit ranges
 /// resolve into the right id-space). Returns the bracketed IRI.
-pub(crate) fn thing_iri_from_range(range_class_iri: &str, id: &str) -> Option<String> {
+pub fn thing_iri_from_range(range_class_iri: &str, id: &str) -> Option<String> {
     let split = range_class_iri.rfind('/')?;
     let (ns, class) = range_class_iri.split_at(split + 1);
     if class.is_empty() {
@@ -406,7 +406,7 @@ pub(crate) fn thing_iri_from_range(range_class_iri: &str, id: &str) -> Option<St
 ///   connection is the derived `fileId` edge (Law 5).
 ///
 /// All IRIs carry angle brackets (ready to print into N-Quads).
-pub(crate) struct FileSubjects {
+pub struct FileSubjects {
     pub file_uri: String,
     pub thing_uri: Option<String>,
     /// (kit short name, canonical class) of the anchoring Thing.
@@ -441,7 +441,7 @@ fn app_base_from_kit_ns(kit_ns: &str) -> String {
 /// hit this constantly, and the warning is the Phase-4 work list.
 /// (Flipping that warning to a save-time reject is the post-migration
 /// step — see the identity model doc §2.3.)
-pub(crate) fn derive_file_subjects(
+pub fn derive_file_subjects(
     spo_lines: &[String],
     relpath_str: &str,
     declared_props: &HashSet<String>,
@@ -608,7 +608,7 @@ pub(crate) fn derive_file_subjects(
     let kit_ns = kit_namespaces
         .get(&kit)
         .cloned()
-        .unwrap_or_else(|| git_lex::conventional_kit_namespace(&kit));
+        .unwrap_or_else(|| crate::conventional_kit_namespace(&kit));
     let thing_uri = format!(
         "<{}{}/{}>",
         app_base_from_kit_ns(&kit_ns),
@@ -629,7 +629,7 @@ pub(crate) fn derive_file_subjects(
 /// namespace and Class are the first two segments, everything after is the
 /// identifier. (File-side subfolders never appear here: the id is the
 /// Thing's address, not the file's path.)
-pub(crate) fn parse_universal_id(raw: &str) -> Result<(String, String, String, String), String> {
+pub fn parse_universal_id(raw: &str) -> Result<(String, String, String, String), String> {
     let trimmed = raw.trim();
     let Some(inner) = trimmed.strip_prefix('<').and_then(|r| r.strip_suffix('>')) else {
         return Err(format!(
@@ -667,7 +667,7 @@ pub(crate) fn parse_universal_id(raw: &str) -> Result<(String, String, String, S
 /// Thing → File). In the one-graph walk these participate in resolved-set
 /// diffing, so a file move produces exactly the honest fileId
 /// retract+assert pair and nothing else.
-pub(crate) fn emit_file_anchor_nquads(
+pub fn emit_file_anchor_nquads(
     subjects: &FileSubjects,
     kit_namespaces: &HashMap<String, String>,
     graph: &str,
@@ -684,7 +684,7 @@ pub(crate) fn emit_file_anchor_nquads(
     let kit_ns = kit_namespaces
         .get(kit)
         .cloned()
-        .unwrap_or_else(|| git_lex::conventional_kit_namespace(kit));
+        .unwrap_or_else(|| crate::conventional_kit_namespace(kit));
     if emitted_types.insert(format!("{}.{}", kit, class)) {
         out.push_str(&format!(
             "{} <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <{}{}> {} .\n",
@@ -704,7 +704,7 @@ pub(crate) fn emit_file_anchor_nquads(
 /// rather than two positional bools: identical adjacent types are how the
 /// emitter's argument-swap bug compiled clean (review #15).
 #[derive(Clone, Copy)]
-pub(crate) struct NowWalkOpts {
+pub struct NowWalkOpts {
     /// Write/refresh the `.fm.spo` and `.md.spo` sidecars (and remove stale
     /// ones). False on the query path — query never touches the tree.
     pub write_sidecars: bool,
@@ -723,7 +723,7 @@ pub(crate) struct NowWalkOpts {
 /// doc once promised are retired (Rob-ruled 2026-08-06 — `[[...]]` in a
 /// body is plain prose).
 /// What one working-tree walk produced.
-pub(crate) struct NowWalk {
+pub struct NowWalk {
     /// The now-graph N-Quads (empty unless `build_nquads`).
     pub nquads: String,
     /// Extraction/resolution errors (the save gate counts these).
@@ -733,7 +733,7 @@ pub(crate) struct NowWalk {
     pub facts: usize,
 }
 
-pub(crate) fn generate_frontmatter_nquads(opts: NowWalkOpts) -> NowWalk {
+pub fn generate_frontmatter_nquads(opts: NowWalkOpts) -> NowWalk {
     let root = match find_git_root() {
         Some(r) => r,
         None => return NowWalk { nquads: String::new(), errors: 0, facts: 0 },
@@ -744,7 +744,7 @@ pub(crate) fn generate_frontmatter_nquads(opts: NowWalkOpts) -> NowWalk {
 
 /// [`generate_frontmatter_nquads`] against a caller-built context — sync
 /// builds ONE `ResolverContext` and shares it with the history walk.
-pub(crate) fn generate_frontmatter_nquads_with(
+pub fn generate_frontmatter_nquads_with(
     root: &std::path::Path,
     ctx: &ResolverContext,
     opts: NowWalkOpts,
@@ -798,7 +798,7 @@ pub(crate) fn generate_frontmatter_nquads_with(
     // resolver trusts bare-slug + full-IRI resolution without range filtering.
 
     // Ensure extract dir exists
-    let extract_dir = git_lex::layout::extract_dir(&root);
+    let extract_dir = crate::layout::extract_dir(&root);
     fs::create_dir_all(&extract_dir).ok();
 
     // The walk cache (incremental-sync spec §4.3, Rob-approved 2026-08-26):
@@ -944,12 +944,12 @@ pub(crate) fn generate_frontmatter_nquads_with(
             let mut spo_lines = Vec::new();
 
             // ONE frontmatter parser (review #9): the shared fence rule in lib.rs.
-            if let (Some(yaml_str), _) = git_lex::split_frontmatter(&content) {
+            if let (Some(yaml_str), _) = crate::split_frontmatter(&content) {
                 // ONE frontmatter YAML parser (#101): the shared duplicate-key
                 // gate in lib.rs. This path used to deserialize into a HashMap,
                 // which accepts a repeated key and keeps only the last value — so
                 // a walk silently re-emitted the same loss the save made.
-                match git_lex::parse_frontmatter_map(yaml_str) {
+                match crate::parse_frontmatter_map(yaml_str) {
                     Ok(yaml) => {
                         for (key_node, value) in &yaml {
                             if let Some(key) = key_node.as_str() {
@@ -1302,7 +1302,7 @@ fn dirty_sidecar_sources(root: &std::path::Path) -> HashSet<String> {
 /// since the `Soul/` scaffold folder maps onto the namespace root).
 /// Returns the suggested bracketed identifier (first segment lowercased,
 /// `.md` dropped — a Thing IRI carries no extension).
-pub(crate) fn bare_kit_reference_suggestion(
+pub fn bare_kit_reference_suggestion(
     val: &str,
     kit_namespaces: &HashMap<String, String>,
     path_index: &HashSet<String>,
@@ -1325,7 +1325,7 @@ pub(crate) fn bare_kit_reference_suggestion(
     Some(format!("{first_lower}/{tail}"))
 }
 
-pub(crate) fn emit_spo_line_nquads(
+pub fn emit_spo_line_nquads(
     line: &str,
     subjects: &FileSubjects,
     graph: &str,
@@ -1455,7 +1455,7 @@ pub(crate) fn emit_spo_line_nquads(
             let kit_ns = kit_namespaces
                 .get(kit_name)
                 .cloned()
-                .unwrap_or_else(|| git_lex::conventional_kit_namespace(kit_name));
+                .unwrap_or_else(|| crate::conventional_kit_namespace(kit_name));
 
             // The line's subject: the Thing anchor when this line's class IS
             // the file's anchoring class; otherwise the File node (kit lines
@@ -1889,7 +1889,7 @@ pub(crate) fn emit_spo_line_nquads(
 /// dangling links. (The slug index that used to live here — lowercase
 /// stem → path, collision-prone by construction — died with the
 /// bare-name resolution rule, Rob-ruled 2026-07-28.)
-pub(crate) fn build_path_index(
+pub fn build_path_index(
     root: &std::path::Path,
     files: &[PathBuf],
 ) -> HashSet<String> {
@@ -1916,7 +1916,7 @@ pub(crate) fn build_path_index(
 /// store rebuild doesn't require a second kit-update.
 /// The graph is cleared first so a kit-update fully refreshes the vocabulary.
 /// LOUD but not fatal on a broken TTL. Returns the number of files loaded.
-pub(crate) fn load_ontology_graph(store: &oxigraph::store::Store) -> usize {
+pub fn load_ontology_graph(store: &oxigraph::store::Store) -> usize {
     let Some(root) = find_git_root() else { return 0 };
     let ontology_graph = match oxigraph::model::NamedNode::new(graph_uri("repo-ontology")) {
         Ok(g) => g,
@@ -1925,7 +1925,7 @@ pub(crate) fn load_ontology_graph(store: &oxigraph::store::Store) -> usize {
     if let Err(e) = store.remove_named_graph(&ontology_graph) {
         author_diag!("warning: failed to clear the repo-ontology graph before reload: {} — retired vocabulary may linger", e);
     }
-    let ttls = git_lex::installed_vocabulary_ttls(&root);
+    let ttls = crate::installed_vocabulary_ttls(&root);
     let mut loaded = 0usize;
     for ttl in &ttls {
         match fs::read(ttl) {
@@ -2523,7 +2523,7 @@ mod sidecar_write_tests {
 /// `resolve_class_segment` already grants and warns about — while kit and
 /// property segments stay exact. Splitting from the RIGHT matters: a kit
 /// segment can itself contain dots (`repolex-ai/git-lex-kit-soul`).
-pub(crate) fn id_key_matches(authored: &str, kit: &str, class: &str, id_prop: &str) -> bool {
+pub fn id_key_matches(authored: &str, kit: &str, class: &str, id_prop: &str) -> bool {
     if authored == format!("{}.{}.{}", kit, class, id_prop) {
         return true;
     }

@@ -32,16 +32,16 @@ Whether you are creating a persistent cognitive memory store for an autonomous a
 
 ## Features
 
-- **Git is the Database**: No background daemons, servers, or external databases to keep running. Your repository is the database, and the graph is derived directly from your committed files and working tree. Does not alter Git usage in any way. 
+- **Git is the Database**: No external database to keep running. Your repository is the database, and the graph is derived directly from your committed files and working tree. Does not alter Git usage in any way. One small local service, `gitlexd`, keeps each repository's graph synced and answers queries; `git lex direct` works without it.
 - **Fast Performance**: Written in Rust and backed by embedded Oxigraph. Git-lex is blazingly fast—many queries run in sub-12ms, making agent tool-call loops and interactive CLI querying virtually instantaneous.
 - **Built for Agents from the Ground Up**: Simple, agent-friendly command-line tooling and interfaces your agents will love. Clean CLI commands, `--json` output flags for reliable machine parsing, pre-commit validation gates that prevent hallucinated schema drift, and `export-spine` to export compact semantic indexes tailored for LLM context caches.
 - **Markdown-First Authoring**: Write natural Markdown notes and link them using standard markdown syntax. Lightweight YAML frontmatter defines typed properties that extract into graph statements automatically.
-- **Standard SPARQL 1.2 Querying**: Query your entire graph with SPARQL over working-tree files (`git lex query`) or explore past revisions with the embedded Oxigraph store.
+- **Standard SPARQL 1.2 Querying**: Query your entire graph, history included, with `git lex query` (through `gitlexd`, backed by the embedded Oxigraph store), or a fresh in-memory view of the working tree with `git lex direct`.
 - **SHACL Pre-Commit Validation**: Prevent broken links, missing fields, and typos before they reach history. The `git lex save` command validates your documents against declarative SHACL shapes at commit time, catching errors early.
 - **Files and Things Duality**: Move, rename, or reorganize files without breaking graph relations. Git-lex distinguishes between the physical file path (File Plane) and the persistent semantic concept (Thing Plane) it expresses.
 - **Temporal History & Provenance**: Powered by RDF 1.2 triple terms, every statement in the graph knows exactly which commit and file asserted or retracted it. Query what was true at any point in your repo's history.
 - **Modular Kit Ecosystem**: Customize your graph's ontology and document scaffolding for specific domains. Install official kits like `soul` for personal and agent memory, or author custom kits with your own shapes and templates.
-- **Local Visualization & SPARQL Endpoint**: Explore your knowledge graph visually in your browser with `git lex serve viz`, or expose a standards-compliant SPARQL endpoint with `git lex serve sparql`.
+- **Local SPARQL Endpoint**: `gitlexd` serves a standards-compliant SPARQL endpoint for every git-lex repository on the machine, on localhost, for any client that speaks HTTP.
 
 ---
 

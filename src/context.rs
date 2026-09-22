@@ -20,7 +20,7 @@ use std::path::{Path, PathBuf};
 /// Where the generated context lives, relative to the repo root. The name and
 /// location are provisional (goodlux, 2026-09-16; issue #19), so they are
 /// spelled here and nowhere else.
-pub(crate) const CONTEXT_FILE: &str = ".lex/COMPACT-ONTOLOGY.md";
+pub const CONTEXT_FILE: &str = ".lex/COMPACT-ONTOLOGY.md";
 
 /// TRANSITIONAL: the file's first name, for one day. `refresh` removes it so
 /// no repo carries both. Delete once the fleet has regenerated.
@@ -72,16 +72,16 @@ struct Model {
 // ─── installed kits ──────────────────────────────────────────
 
 /// (kit spec, ontology folder name) for every installed kit. Which kits are
-/// installed is `git_lex::installed_kit_specs`' answer (repo.yml), like every
+/// installed is `crate::installed_kit_specs`' answer (repo.yml), like every
 /// other reader (#17).
 fn installed_ontologies(root: &Path) -> Vec<(String, String)> {
-    git_lex::installed_kit_specs(root)
+    crate::installed_kit_specs(root)
         .into_iter()
         .map(|spec| {
-            let name = if spec == git_lex::BASE_KIT {
-                git_lex::BASE_ONTOLOGY_FOLDER.to_string()
+            let name = if spec == crate::BASE_KIT {
+                crate::BASE_ONTOLOGY_FOLDER.to_string()
             } else {
-                git_lex::resolve_kit_spec(&spec).2
+                crate::resolve_kit_spec(&spec).2
             };
             (spec, name)
         })
@@ -90,7 +90,7 @@ fn installed_ontologies(root: &Path) -> Vec<(String, String)> {
 
 /// `folder base:` from an installed kit's kit.yml.
 fn folder_base(root: &Path, spec: &str) -> Option<String> {
-    let yml = fs::read_to_string(git_lex::kit_install_dir_for_spec(root, spec).join("kit.yml")).ok()?;
+    let yml = fs::read_to_string(crate::kit_install_dir_for_spec(root, spec).join("kit.yml")).ok()?;
     yml.lines()
         .filter_map(|l| l.trim().strip_prefix("folder base:"))
         .map(|v| v.trim().to_string())
@@ -100,7 +100,7 @@ fn folder_base(root: &Path, spec: &str) -> Option<String> {
 // ─── building the model ──────────────────────────────────────
 
 fn rows(store: &Store, q: &str) -> Vec<BTreeMap<String, Term>> {
-    let Ok(QueryResults::Solutions(sols)) = git_lex::eval_query(store, q) else { return Vec::new() };
+    let Ok(QueryResults::Solutions(sols)) = crate::eval_query(store, q) else { return Vec::new() };
     sols.flatten()
         .map(|s| s.iter().map(|(v, t)| (v.as_str().to_string(), t.clone())).collect())
         .collect()
@@ -133,7 +133,7 @@ fn build_model(root: &Path) -> Model {
     // One in-memory graph: the shapes and vocabularies of the installed kits,
     // nothing else.
     let Ok(store) = Store::new() else { return Model::default() };
-    let files: Vec<PathBuf> = git_lex::installed_ontology_files(root)
+    let files: Vec<PathBuf> = crate::installed_ontology_files(root)
         .into_iter()
         .filter(|p| p.extension().is_some_and(|e| e == "ttl"))
         .collect();
@@ -239,7 +239,7 @@ fn build_model(root: &Path) -> Model {
 
     let prefixes = {
         // The shared binding list spells names with their colon.
-        let mut b: Vec<(String, String)> = git_lex::prefix_bindings_at(Some(root))
+        let mut b: Vec<(String, String)> = crate::prefix_bindings_at(Some(root))
             .into_iter()
             .map(|(n, ns)| (n.trim_end_matches(':').to_string(), ns))
             .collect();
@@ -290,7 +290,7 @@ fn build_model(root: &Path) -> Model {
         });
     }
 
-    let main_kit = installed.iter().map(|(spec, name)| (spec.as_str(), name)).find(|(spec, _)| *spec != git_lex::BASE_KIT).map(|(_, n)| n.clone());
+    let main_kit = installed.iter().map(|(spec, name)| (spec.as_str(), name)).find(|(spec, _)| *spec != crate::BASE_KIT).map(|(_, n)| n.clone());
     Model { prefixes, universals: universals.into_values().collect(), classes, main_kit }
 }
 
@@ -493,7 +493,7 @@ SELECT ?class (COUNT(?d) AS ?n) WHERE {{ ?d git-lex:id ?id ; a ?class }} GROUP B
 }
 
 /// The whole context for a repo: manual, then ontology.
-pub(crate) fn render(root: &Path) -> String {
+pub fn render(root: &Path) -> String {
     let model = build_model(root);
     let kits: Vec<String> = installed_ontologies(root).into_iter().map(|(_, n)| n).collect();
     let head = format!("{}\n\n{}\n{}", MANUAL.trim_end(), query_guide(&model), ONTOLOGY_INTRO);
@@ -506,8 +506,8 @@ pub(crate) fn render(root: &Path) -> String {
 
 /// Regenerate the context file. Writes only when the bytes changed; a failure
 /// is a warning, never a reason for the calling command to fail.
-pub(crate) fn refresh(root: &Path) {
-    if !git_lex::layout::lex_dir(root).is_dir() { return; }
+pub fn refresh(root: &Path) {
+    if !crate::layout::lex_dir(root).is_dir() { return; }
     let path = root.join(CONTEXT_FILE);
     let text = render(root);
     // TRANSITIONAL: drop the generated file under its old name. The next save
@@ -525,8 +525,8 @@ pub(crate) fn refresh(root: &Path) {
 
 /// `git lex --skill`: print the context for the current repo, or the manual
 /// alone outside one.
-pub(crate) fn print_skill() {
-    match git_lex::find_git_root().filter(|r| git_lex::layout::lex_dir(r).is_dir()) {
+pub fn print_skill() {
+    match crate::find_git_root().filter(|r| crate::layout::lex_dir(r).is_dir()) {
         Some(root) => print!("{}", render(&root)),
         None => print!("{MANUAL}"),
     }
@@ -583,7 +583,7 @@ git-lex:foldered a owl:AnnotationProperty .
     fn fake_root(tag: &str, installed: &[&str], leftover: &[&str]) -> PathBuf {
         let root = std::env::temp_dir().join(format!("gl-context-{tag}-{}", std::process::id()));
         let _ = fs::remove_dir_all(&root);
-        let lex = git_lex::layout::lex_dir(&root);
+        let lex = crate::layout::lex_dir(&root);
         let put = |dir: PathBuf, name: &str, body: &str| {
             fs::create_dir_all(&dir).unwrap();
             fs::write(dir.join(name), body).unwrap();

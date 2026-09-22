@@ -2,15 +2,17 @@
 
 Two querying doors:
 
-- **`git lex query "SPARQL"`** — a live view of your working tree (current
-  files plus the Git commit layer). Reflects what is true right now, including
-  uncommitted edits. It is rebuilt from the working tree on every run and
-  does not read the synced store — so **history is invisible here**; a
-  history query returns zero rows, not an error.
-- **`git lex serve sparql`** — a standard W3C SPARQL endpoint over the
-  synced store, which also holds full repository history. Default
-  `http://127.0.0.1:7880/sparql`, Swagger UI at `/swagger-ui`. Run
-  `git lex sync` first to populate the store.
+- **`git lex query "SPARQL"`** — your soul's synced store, through
+  [gitlexd](gitlexd.md): current documents, files, commits, and the full
+  history of every statement. The query is tied to the repository your
+  session started in, whatever directory the shell is in now. Starts
+  `gitlexd` if none is running.
+- **`git lex direct "SPARQL"`** — a live view of your working tree (current
+  files plus the Git commit layer), built in memory on every run. Reflects
+  what is true right now, including uncommitted edits, and follows the
+  shell's current directory. It does not read the synced store — so
+  **history is invisible here**; a history query returns zero rows, not an
+  error. Needs nothing running.
 
 Common prefixes are injected automatically on both doors (`git-lex:`,
 `git2:`, `md:`, `fm:`, `rdf:`, `rdfs:`, `owl:`, `xsd:`, and your kit's —
@@ -36,11 +38,9 @@ missing data, ask the graph what vocabulary it actually uses:
 SELECT DISTINCT ?p WHERE { ?s ?p ?o } ORDER BY ?p
 ```
 
-One semantic difference to know: `git lex query` searches across all its
-graphs, so bare `?s ?p ?o` matches everything. The SPARQL endpoint follows the
-W3C default strictly, and the synced store keeps its data in **named**
-graphs — so a bare pattern there matches almost nothing. Wrap patterns in
-`GRAPH <…> { … }`: current state lives in
+Both doors search across all graphs by default, so a bare `?s ?p ?o`
+matches everything. The store keeps its data in **named** graphs; name one
+with `GRAPH <…> { … }` to keep to it: current state lives in
 `<https://repolex.ai/git-lex/NamedGraph/now>`, history in
 `<https://repolex.ai/git-lex/LexHistoryGraph>`, commits in
 `<https://repolex.ai/git-lex/NamedGraph/commits>`.
@@ -48,10 +48,9 @@ graphs — so a bare pattern there matches almost nothing. Wrap patterns in
 ## Every Named Graph, and Which Door Has It
 
 All graph names share the base `https://repolex.ai/git-lex/NamedGraph/`
-except the history graph, which has its own IRI. "Query door" is
-`git lex query`; "serve door" is the SPARQL endpoint over the synced store.
+except the history graph, which has its own IRI.
 
-| Graph | Holds | Query door | Serve door |
+| Graph | Holds | `git lex direct` | `git lex query` |
 |---|---|---|---|
 | `now` | Current-state facts from your documents | yes | yes |
 | `…/LexHistoryGraph` | Every assertion and retraction ever, with provenance | no | yes |
@@ -73,7 +72,7 @@ SELECT ?property ?range WHERE {
 ```
 
 It lives only in the synced store (it is loaded at `init` and `kit-update`),
-so this query runs on the serve door — `git lex query` returns zero rows
+so this query runs through `git lex query` — `git lex direct` returns zero rows
 for it.
 
 ## Saved Queries
@@ -118,12 +117,12 @@ is available:
 No stored query named 'recnt'. Available: recent, things
 ```
 
-Saved queries run through `git lex query`, so they see the live view of
-the working tree — not the synced store or history.
+Saved queries run through either door: `git lex query <name>` asks the
+soul's store, `git lex direct <name>` the live view of the working tree.
 
 ## Starters
 
-These run with `git lex query`:
+These run on either door:
 
 ```sparql
 # Everything, raw
@@ -144,8 +143,8 @@ SELECT ?c WHERE { ?c a git2:Commit } LIMIT 5
 
 ## History: "When did this change, and who changed it?"
 
-Run against the synced store (`git lex serve sparql`, or any SPARQL client)
-— not `git lex query`. Replace `day-56` with any fragment of the
+Run with `git lex query` (or any SPARQL client against gitlexd) — not
+`git lex direct`, which has no history. Replace `day-56` with any fragment of the
 document's IRI:
 
 ```sparql

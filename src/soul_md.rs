@@ -19,15 +19,15 @@ const SOUL_ID_KEY: &str = "soul.Soul.soulId";
 
 /// Is this a soul repo? True when the repo's domain kit resolves to the
 /// short name `soul`. Optional kits can't make a repo a soul repo.
-pub(crate) fn soul_kit_installed(root: &Path) -> bool {
-    git_lex::RepoYml::load(root)
+pub fn soul_kit_installed(root: &Path) -> bool {
+    crate::RepoYml::load(root)
         .domain_kit()
-        .map(|k| git_lex::resolve_kit_spec(&k).2 == "soul")
+        .map(|k| crate::resolve_kit_spec(&k).2 == "soul")
         .unwrap_or(false)
 }
 
 /// What `heal` did to the root SOUL.md.
-pub(crate) enum HealOutcome {
+pub enum HealOutcome {
     /// Not a soul repo — nothing to do.
     NotSoulRepo,
     /// Soul repo, but no root SOUL.md on disk. Callers decide severity:
@@ -47,7 +47,7 @@ pub(crate) enum HealOutcome {
 
 /// Fill or correct `soul.Soul.soulId:` in the root SOUL.md from the genesis
 /// sha. Returns what happened; writes the file only when the value changes.
-pub(crate) fn heal_soul_id(root: &Path) -> HealOutcome {
+pub fn heal_soul_id(root: &Path) -> HealOutcome {
     heal_soul_id_inner(root, true)
 }
 
@@ -57,7 +57,7 @@ pub(crate) fn heal_soul_id(root: &Path) -> HealOutcome {
 /// change nothing. Healing from inside the probe would mean a dry run edits
 /// the identity file — the one file whose whole point is that it is not
 /// casually rewritten.
-pub(crate) fn preview_soul_id_heal(root: &Path) -> HealOutcome {
+pub fn preview_soul_id_heal(root: &Path) -> HealOutcome {
     heal_soul_id_inner(root, false)
 }
 
@@ -108,7 +108,7 @@ fn heal_soul_id_inner(root: &Path, write: bool) -> HealOutcome {
 /// Fail-loud gate for wake (`sync`) and `save`: a soul repo without its root
 /// SOUL.md has no identity floor. Exits the process with restore
 /// instructions; a no-op for non-soul repos or when the file exists.
-pub(crate) fn require_soul_md(root: &Path) {
+pub fn require_soul_md(root: &Path) {
     if !soul_kit_installed(root) {
         return;
     }
@@ -127,7 +127,7 @@ pub(crate) fn require_soul_md(root: &Path) {
 /// for a fill (empty or absent line).
 ///
 /// Rules, matching the extractor's frontmatter framing (the ONE shared
-/// fence parser, git_lex::split_frontmatter — review #9):
+/// fence parser, crate::split_frontmatter — review #9):
 /// - soulId line present: replace the value, PRESERVING any trailing
 ///   `# comment` (the kit template's "never type it by hand" warning
 ///   survives the fill). serde_yaml strips the comment at read time.
@@ -149,7 +149,7 @@ fn healed_content(content: &str, sha: &str) -> Option<(String, Option<String>)> 
     // can never frame the same file differently. A heal rewrite normalizes
     // the fences themselves to `---\n`; block content and body are spliced
     // byte-exact.
-    let (fm, body) = git_lex::split_frontmatter(content);
+    let (fm, body) = crate::split_frontmatter(content);
     let Some(block) = fm else {
         // Opener with no closer — malformed; extraction would fail loud.
         // Don't compound it by editing.
