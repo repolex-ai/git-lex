@@ -11,7 +11,7 @@ This file is generated. `git lex --skill` prints it fresh.
 git lex list                       # every document class you can create
 git lex create <class> <id>        # new document; the id becomes the filename
 git lex save "what changed — you"  # validate, extract, commit. Use this, not git commit
-git lex query "<sparql>"           # ask the graph; sees unsaved edits too
+git lex query "<sparql>"           # ask your soul's graph, history included
 ```
 
 Add `--json` to `list`, `create` or `query` for structured output.
@@ -42,8 +42,11 @@ committed until the whole save passes.
 - A document is `?d a <kit>:<Class>`. Its properties are the IRIs in the
   ontology section, for example `git-lex:title`.
 - `git lex query <name>` runs a stored query from `.lex/query/<name>.md`.
-- For history ("when did this change?") use `git lex serve sparql`, which
-  serves the synced store. `git lex query` shows the present only.
+- `git lex query` answers from your soul's store through gitlexd: current
+  documents, files, commits, and the history of every statement ("when did
+  this change?"). It is tied to the soul your session started in.
+- `git lex direct "<sparql>"` builds a view of the working tree in memory
+  instead — unsaved edits included, no history, no gitlexd needed.
 - What else is in the graph, what addresses look like, and queries that run:
   the "Querying" section after this manual, written for this repo.
 

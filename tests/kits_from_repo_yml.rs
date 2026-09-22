@@ -117,11 +117,11 @@ fn a_leftover_ontology_folder_has_no_effect() {
     assert!(listing.contains("t:Journal"), "{listing}");
     assert!(!listing.contains("Spook"), "an uninstalled kit's shapes were listed: {listing}");
 
-    let id_pred = git_lex(&root, &["query", "SELECT ?p WHERE { ?s ?p <https://repolex.ai/t/Journal/x> }"]);
+    let id_pred = git_lex(&root, &["direct", "SELECT ?p WHERE { ?s ?p <https://repolex.ai/t/Journal/x> }"]);
     assert!(id_pred.contains("ontology/git-lex/id"), "{id_pred}");
     assert!(!id_pred.contains("ontology/ghost/id"), "`t.Journal.id` was captured: {id_pred}");
 
-    let unbound = git_lex(&root, &["query", "SELECT ?s WHERE { ?s a ghost:Spook }"]);
+    let unbound = git_lex(&root, &["direct", "SELECT ?s WHERE { ?s a ghost:Spook }"]);
     assert!(unbound.contains("ghost:"), "{unbound}");
     assert!(unbound.to_lowercase().contains("prefix"), "ghost: must not be a bound prefix: {unbound}");
     let _ = fs::remove_dir_all(&root);

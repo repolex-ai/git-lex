@@ -292,6 +292,29 @@ fn sha_from_repo_yml() -> Option<String> {
     is_valid_sha(&sha).then_some(sha)
 }
 
+/// The genesis (first-commit) SHA of the repository at `root`, for a caller
+/// whose working directory is somewhere else (the registry, gitlexd).
+/// repo.yml first, then git itself.
+pub fn genesis_sha_at(root: &std::path::Path) -> Option<String> {
+    let yml = crate::RepoYml::load(root);
+    if let Some(sha) = yml.genesis_sha.or(yml.first_commit)
+        && is_valid_sha(&sha) {
+            return Some(sha);
+        }
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(["rev-list", "--max-parents=0", "HEAD"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let raw = String::from_utf8_lossy(&output.stdout);
+    let sha = raw.lines().last()?.trim();
+    is_valid_sha(sha).then(|| sha.to_string())
+}
+
 /// Query git directly for the first commit SHA.
 fn sha_from_git() -> Option<String> {
     let output = Command::new("git")

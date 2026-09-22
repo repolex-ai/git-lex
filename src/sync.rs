@@ -358,6 +358,34 @@ fn rewound_event_commits(store: &Store, root: &std::path::Path) -> Vec<String> {
         .collect()
 }
 
+/// The commit the store is synced to: the newest commit in its commits
+/// graph, by ordinal. The ordinals are the sync marker (a batched rebuild
+/// writes them last), so a store with none has never completed a sync.
+pub fn synced_marker(store: &Store) -> Option<String> {
+    let q = format!(
+        "SELECT ?sha WHERE {{ GRAPH <{}> {{ \
+           ?c <{SYNC_MARKER_PREDICATE}> ?o ; \
+              <https://repolex.ai/ontology/git-lex/git2/id> ?sha }} \
+         }} ORDER BY DESC(?o) LIMIT 1",
+        graph_uri("commits")
+    );
+    let results = oxigraph::sparql::SparqlEvaluator::new()
+        .parse_query(&q)
+        .ok()?
+        .on_store(store)
+        .execute()
+        .ok()?;
+    match results {
+        oxigraph::sparql::QueryResults::Solutions(sols) => sols.flatten().next().and_then(|s| {
+            s.get("sha").map(|t| match t {
+                oxigraph::model::Term::Literal(l) => l.value().to_string(),
+                other => other.to_string(),
+            })
+        }),
+        _ => None,
+    }
+}
+
 fn resume_point(store: &Store, root: &std::path::Path) -> Option<String> {
     // ─── Rewind check FIRST (#107): if the one graph witnessed commits
     // that are no longer on the default branch's line, no resume point is

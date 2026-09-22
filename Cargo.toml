@@ -15,18 +15,13 @@ name = "git-lex"
 path = "src/main.rs"
 
 [[bin]]
-name = "git-lex-serve"
-path = "src/bin/git-lex-serve.rs"
+name = "gitlexd"
+path = "src/bin/gitlexd.rs"
 
 [dependencies]
 clap = { version = "4", features = ["derive", "wrap_help"] }
 clap_mangen = "0.2"
 oxigraph = { version = "0.5.6", features = ["rdf-12"] }
-# Named only to implement oxigraph's ServiceHandler for SERVICE <pan:> (the
-# trait's signature uses these crates' types and oxigraph does not re-export
-# them). Pinned to what oxigraph itself resolves — see Cargo.lock.
-spargebra = "=0.4.6"
-oxiri = "=0.2.11"
 git2 = { version = "0.20", default-features = false, features = ["vendored-openssl"] }
 serde_yaml = "0.9"
 sha2 = "0.10"
@@ -46,8 +41,7 @@ sparql_service = "0.2"
 tree-sitter = "0.26"
 tree-sitter-md = { version = "0.5", features = ["parser"] }
 axum = "0.8"
-utoipa = { version = "5", features = ["axum_extras"] }
 form_urlencoded = "1"
-utoipa-swagger-ui = { version = "9", features = ["axum"] }
-tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
-open = "5"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "signal"] }
+# The git-lex command line talking to gitlexd on localhost: blocking, no TLS.
+ureq = { version = "3", default-features = false, features = ["json"] }

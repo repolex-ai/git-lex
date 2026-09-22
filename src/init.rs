@@ -483,7 +483,7 @@ fn generate_readme_lex(
     doc.push_str(&format!("git lex create <type>    # Create a new document (types: {})\n", type_names.join(", ")));
     doc.push_str("git lex save \"message\"   # Add + commit (extracts automatically)\n");
     doc.push_str("git lex sync              # Build/update the knowledge graph\n");
-    doc.push_str("git lex query \"SPARQL...\" # Query the knowledge graph\n");
+    doc.push_str("git lex query \"SPARQL...\" # Ask the knowledge graph (through gitlexd)\n");
     doc.push_str("```\n\n");
 
     doc.push_str("## Commands\n\n");
@@ -492,9 +492,8 @@ fn generate_readme_lex(
     doc.push_str(&format!("| `git lex create <type>` | Scaffold a new document. Valid types: {} |\n", type_names.join(", ")));
     doc.push_str("| `git lex save \"msg\"` | Stage all changes, commit, extract frontmatter |\n");
     doc.push_str("| `git lex sync` | Build/update the knowledge graph from the commit history |\n");
-    doc.push_str("| `git lex query \"...\"` | SPARQL over the working tree (current files + git layer) |\n");
-    doc.push_str("| `git lex serve viz` | Local web view: activity, graph, history replay |\n");
-    doc.push_str("| `git lex serve sparql` | SPARQL endpoint over the synced store (history queries) |\n\n");
+    doc.push_str("| `git lex query \"...\"` | SPARQL over the synced store through gitlexd (current state and history) |\n");
+    doc.push_str("| `git lex direct \"...\"` | SPARQL over the working tree, in memory (current files + git layer, no gitlexd) |\n\n");
 
     doc.push_str("## Writing Documents\n\n");
     doc.push_str("Documents use YAML frontmatter with flat dot notation: `kit.class.property`\n\n");

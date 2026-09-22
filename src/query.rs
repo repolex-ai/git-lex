@@ -174,8 +174,11 @@ pub(crate) fn run_query(store: &Store, query: &str, store_type: &str, json: bool
 /// door, the same one inline queries use. Returns None when the argument
 /// is not a stored-query name, in which case it runs as SPARQL text.
 fn resolve_stored_query(arg: &str) -> Option<String> {
-    let root = git_lex::find_git_root()?;
-    let path = git_lex::layout::query_dir(&root).join(format!("{}.md", arg));
+    resolve_stored_query_in(&git_lex::find_git_root()?, arg)
+}
+
+fn resolve_stored_query_in(root: &std::path::Path, arg: &str) -> Option<String> {
+    let path = git_lex::layout::query_dir(root).join(format!("{}.md", arg));
     let md = std::fs::read_to_string(&path).ok()?;
     eprintln!("Stored query: .lex/query/{}.md", arg);
     Some(stored_query_text(&md))
@@ -224,11 +227,15 @@ fn stored_query_text(md: &str) -> String {
 /// available instead of handing the name to the SPARQL parser, whose
 /// "parse error at 'recent'" would teach nothing.
 fn stored_query_miss(arg: &str) -> bool {
+    let Some(root) = git_lex::find_git_root() else { return false };
+    stored_query_miss_in(&root, arg)
+}
+
+fn stored_query_miss_in(root: &std::path::Path, arg: &str) -> bool {
     if arg.contains(char::is_whitespace) || arg.contains('{') {
         return false;
     }
-    let Some(root) = git_lex::find_git_root() else { return false };
-    let dir = git_lex::layout::query_dir(&root);
+    let dir = git_lex::layout::query_dir(root);
     let mut names: Vec<String> = std::fs::read_dir(&dir)
         .map(|entries| {
             entries
@@ -257,7 +264,7 @@ fn stored_query_miss(arg: &str) -> bool {
     true
 }
 
-pub(crate) fn cmd_query(query: String, json: bool) {
+pub(crate) fn cmd_direct(query: String, json: bool) {
     // Stored-query resolution first: a name that matches .lex/query/<name>.md
     // runs that file's query; anything else runs as SPARQL text. A name-like
     // miss gets the available list instead of a SPARQL parse error.
@@ -339,6 +346,151 @@ pub(crate) fn cmd_query(query: String, json: bool) {
 /// whatever is or isn't in it; re-running init/kit-update never overwrites
 /// or re-adds. (Soul-kit override — `Soul/Query/` replacing this folder
 /// wholesale — is the kit's move, not built here.)
+// ─── git lex query: the soul's graph, through gitlexd ─────────────────
+
+/// Ask gitlexd for the soul this session is bound to. The soul is resolved
+/// from the process that started the session (gitlexd::session), never from
+/// a flag, a setting or the shell's current directory.
+pub(crate) fn cmd_query(query: String, json: bool) {
+    let soul = match git_lex::gitlexd::session::session_soul() {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("{e}");
+            exit(1);
+        }
+    };
+    let query = match resolve_stored_query_in(&soul.root, &query) {
+        Some(q) => q,
+        None => {
+            if stored_query_miss_in(&soul.root, &query) {
+                exit(1);
+            }
+            query
+        }
+    };
+    if !git_lex::gitlexd::client::running() {
+        eprintln!("gitlexd is not running, so there is nothing to query.");
+        eprintln!("Start it with: gitlexd start");
+        eprintln!("(`git lex direct \"...\"` reads the working tree without gitlexd.)");
+        exit(1);
+    }
+    let start = Instant::now();
+    let response = match git_lex::gitlexd::client::query(&soul.genesis, &query) {
+        Ok(r) => r,
+        Err(e) => {
+            let friendly = e
+                .strip_prefix("SPARQL parse error: ")
+                .and_then(|inner| git_lex::explain_unbound_prefix(&git_lex::add_prefixes_at(Some(&soul.root), &query), inner));
+            if json {
+                eprintln!("{}", serde_json::json!({ "error": "gitlexd", "message": e, "explanation": friendly }));
+            } else if let Some(msg) = friendly {
+                eprintln!("{msg}");
+            } else {
+                eprintln!("{e}");
+            }
+            exit(1);
+        }
+    };
+    let count = if response.content_type.starts_with("application/n-triples") {
+        print!("{}", response.body);
+        response.body.lines().count()
+    } else if json {
+        println!("{}", response.body.trim_end());
+        count_bindings(&response.body)
+    } else {
+        print_w3c_table(&response.body)
+    };
+    eprintln!(
+        "\n{} results in {:.1}ms (gitlexd: soul {} at {})",
+        count,
+        start.elapsed().as_secs_f64() * 1000.0,
+        &soul.genesis[..8.min(soul.genesis.len())],
+        soul.root.display()
+    );
+}
+
+fn count_bindings(body: &str) -> usize {
+    serde_json::from_str::<serde_json::Value>(body)
+        .ok()
+        .map(|v| {
+            if v.get("boolean").is_some() {
+                1
+            } else {
+                v["results"]["bindings"].as_array().map(|b| b.len()).unwrap_or(0)
+            }
+        })
+        .unwrap_or(0)
+}
+
+/// One W3C JSON term as the table shows it: an IRI bare, a literal by its
+/// value, a blank node as `_:x`, a triple term as `<< s p o >>`.
+fn w3c_term_text(t: &serde_json::Value) -> String {
+    match t.get("type").and_then(|x| x.as_str()) {
+        Some("bnode") => format!("_:{}", t["value"].as_str().unwrap_or_default()),
+        Some("triple") => {
+            let inner = &t["value"];
+            format!(
+                "<< {} {} {} >>",
+                w3c_term_text(&inner["subject"]),
+                w3c_term_text(&inner["predicate"]),
+                w3c_term_text(&inner["object"])
+            )
+        }
+        _ => t["value"].as_str().map(str::to_string).unwrap_or_else(|| t["value"].to_string()),
+    }
+}
+
+/// Print a W3C SPARQL JSON result the way `git lex direct` prints its rows.
+/// Returns the row count.
+pub(crate) fn print_w3c_table(body: &str) -> usize {
+    let v: serde_json::Value = match serde_json::from_str(body) {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("gitlexd answered with something that is not a SPARQL result: {e}");
+            exit(1);
+        }
+    };
+    if let Some(b) = v.get("boolean").and_then(|b| b.as_bool()) {
+        println!("{b}");
+        return 1;
+    }
+    let vars: Vec<String> = v["head"]["vars"]
+        .as_array()
+        .map(|a| a.iter().filter_map(|x| x.as_str().map(str::to_string)).collect())
+        .unwrap_or_default();
+    let rows: Vec<Vec<String>> = v["results"]["bindings"]
+        .as_array()
+        .map(|a| {
+            a.iter()
+                .map(|b| vars.iter().map(|var| b.get(var).map(w3c_term_text).unwrap_or_default()).collect())
+                .collect()
+        })
+        .unwrap_or_default();
+    if rows.is_empty() {
+        println!("(No results found)");
+        return 0;
+    }
+    let mut widths: Vec<usize> = vars.iter().map(|v| v.chars().count()).collect();
+    for row in &rows {
+        for (i, val) in row.iter().enumerate() {
+            widths[i] = widths[i].max(val.chars().count());
+        }
+    }
+    let mut header = String::new();
+    for (i, var) in vars.iter().enumerate() {
+        header.push_str(&format!(" {:width$} |", var, width = widths[i]));
+    }
+    println!("|{} \n|{}", header, "-".repeat(header.len().saturating_sub(1)));
+    for row in &rows {
+        let mut line = String::new();
+        for (i, val) in row.iter().enumerate() {
+            line.push_str(&format!(" {:width$} |", val, width = widths[i]));
+        }
+        println!("|{line}");
+    }
+    rows.len()
+}
+
 pub(crate) fn scaffold_default_queries(root: &std::path::Path) {
     let dir = git_lex::layout::query_dir(root);
     if dir.exists() {
@@ -386,6 +538,23 @@ pub(crate) fn scaffold_default_queries(root: &std::path::Path) {
              with `git lex query <name>`, add your own as .lex/query/<name>.md",
             written
         );
+    }
+}
+
+#[cfg(test)]
+mod w3c_table_tests {
+    use super::w3c_term_text;
+
+    #[test]
+    fn every_term_kind_renders_as_direct_prints_it() {
+        let iri = serde_json::json!({"type": "uri", "value": "https://repolex.ai/soul/Journal/day-1"});
+        let lit = serde_json::json!({"type": "literal", "value": "hello", "datatype": "http://www.w3.org/2001/XMLSchema#string"});
+        let bn = serde_json::json!({"type": "bnode", "value": "b0"});
+        let tt = serde_json::json!({"type": "triple", "value": {"subject": iri, "predicate": {"type": "uri", "value": "p"}, "object": lit}});
+        assert_eq!(w3c_term_text(&iri), "https://repolex.ai/soul/Journal/day-1");
+        assert_eq!(w3c_term_text(&lit), "hello");
+        assert_eq!(w3c_term_text(&bn), "_:b0");
+        assert_eq!(w3c_term_text(&tt), "<< https://repolex.ai/soul/Journal/day-1 p hello >>");
     }
 }
 
