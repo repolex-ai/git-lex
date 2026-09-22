@@ -731,6 +731,50 @@ fn entry_path(entry: &serde_json::Value) -> Option<&str> {
     entry.get("path").and_then(|p| p.as_str())
 }
 
+/// Two rows for one directory become one. A row written before a symlink
+/// existed keeps the path as it was typed then; once `~/repos` points at
+/// `/Volumes/f00/repos` (goodlux moved the repos on 2026-09-22), the same
+/// repo is registered under both names. `key` resolves a path the way
+/// `registry_key` does; rows that resolve alike merge into one row at the
+/// resolved path, with the latest `last_used` and whichever `genesis` was
+/// recorded. Keys git-lex does not know about are kept from the row that
+/// was used last. Nothing is dropped: a row whose directory is gone
+/// resolves to itself and stays, per the registry's rule.
+fn fold_same_directory(repos: &mut Vec<serde_json::Value>, key: impl Fn(&str) -> String) {
+    let mut folded: Vec<serde_json::Value> = Vec::new();
+    let mut at: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    for row in repos.drain(..) {
+        let Some(path) = entry_path(&row).map(String::from) else { continue };
+        let k = key(&path);
+        match at.get(&k) {
+            None => {
+                at.insert(k.clone(), folded.len());
+                let mut row = row;
+                row["path"] = serde_json::Value::String(k);
+                folded.push(row);
+            }
+            Some(&i) => {
+                let newer = |a: &serde_json::Value, b: &serde_json::Value| {
+                    a.get("last_used").and_then(|v| v.as_str()) > b.get("last_used").and_then(|v| v.as_str())
+                };
+                let (mut keep, other) = if newer(&row, &folded[i]) { (row, folded[i].clone()) } else { (folded[i].clone(), row) };
+                if keep.get("genesis").and_then(|g| g.as_str()).is_none()
+                    && let Some(g) = other.get("genesis").and_then(|g| g.as_str()) {
+                        keep["genesis"] = serde_json::Value::String(g.to_string());
+                    }
+                if let (Some(k_obj), Some(o_obj)) = (keep.as_object_mut(), other.as_object()) {
+                    for (name, v) in o_obj {
+                        k_obj.entry(name.clone()).or_insert_with(|| v.clone());
+                    }
+                }
+                keep["path"] = serde_json::Value::String(k);
+                folded[i] = keep;
+            }
+        }
+    }
+    *repos = folded;
+}
+
 /// Read, edit, write the registry's `repos` array.
 ///
 /// Read-modify-write on the whole document, so keys git-lex knows nothing
@@ -769,6 +813,7 @@ fn registry_update(edit: impl FnOnce(&mut Vec<serde_json::Value>)) -> Result<(),
         }
 
     edit(&mut repos);
+    fold_same_directory(&mut repos, |p| registry_key(std::path::Path::new(p)));
     repos.sort_by(|a, b| entry_path(a).unwrap_or("").cmp(entry_path(b).unwrap_or("")));
     doc["repos"] = serde_json::Value::Array(repos);
 
@@ -1943,5 +1988,35 @@ mod installed_kits_tests {
         let names: Vec<String> = installed_ontology_dirs(&root).into_iter().map(|(n, _)| n).collect();
         assert_eq!(names, vec!["git-lex"]);
         let _ = fs::remove_dir_all(&root);
+    }
+}
+
+#[cfg(test)]
+mod registry_fold_tests {
+    use super::fold_same_directory;
+    use serde_json::json;
+
+    /// The move: one repo registered under its old home path and again
+    /// under the volume path it now really lives at.
+    #[test]
+    fn rows_for_one_directory_fold_into_one_at_the_resolved_path() {
+        let mut repos = vec![
+            json!({"path": "/Users/x/repos/A", "last_used": "2026-09-22T11:00:00-07:00", "genesis": "aaaa"}),
+            json!({"path": "/Volumes/v/repos/A", "last_used": "2026-09-22T13:00:00-07:00", "browser": {"pinned": true}}),
+            json!({"path": "/Users/x/repos/B", "last_used": "2026-09-22T12:00:00-07:00"}),
+            json!({"path": "/gone/C", "last_used": null}),
+        ];
+        fold_same_directory(&mut repos, |p| match p {
+            "/Users/x/repos/A" | "/Volumes/v/repos/A" => "/Volumes/v/repos/A".to_string(),
+            "/Users/x/repos/B" => "/Volumes/v/repos/B".to_string(),
+            other => other.to_string(),
+        });
+        assert_eq!(repos.len(), 3, "{repos:?}");
+        let a = repos.iter().find(|r| r["path"] == "/Volumes/v/repos/A").expect("A once, at the resolved path");
+        assert_eq!(a["last_used"], "2026-09-22T13:00:00-07:00", "the later time wins");
+        assert_eq!(a["genesis"], "aaaa", "genesis survives from the older row");
+        assert_eq!(a["browser"]["pinned"], true, "a key git-lex does not own survives");
+        assert!(repos.iter().any(|r| r["path"] == "/Volumes/v/repos/B"), "a lone row is re-keyed too");
+        assert!(repos.iter().any(|r| r["path"] == "/gone/C"), "a dead row stays: skipped, not deleted");
     }
 }
