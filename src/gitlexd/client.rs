@@ -38,8 +38,8 @@ pub fn running() -> bool {
 }
 
 /// Make sure a gitlexd is answering, starting one if nothing is. The
-/// daemon is started detached (its own session, no terminal, output only
-/// to its log), so it outlives the git-lex command that started it and
+/// daemon is started detached (its own process group, no terminal, no
+/// output but its own log), so it outlives the git-lex command that started it and
 /// belongs to no terminal; `gitlexd stop` ends it. Two commands starting
 /// one at the same moment cannot produce two daemons: gitlexd binds its
 /// port before it does anything else, and the copy that loses the bind
@@ -56,17 +56,13 @@ pub fn ensure_running() -> Result<(), String> {
             .to_string()
     })?;
     let log = super::log_path();
-    if let Some(dir) = log.as_ref().and_then(|p| p.parent()) {
-        let _ = std::fs::create_dir_all(dir);
-    }
-    let sink = || {
-        log.as_ref()
-            .and_then(|p| std::fs::OpenOptions::new().append(true).create(true).open(p).ok())
-            .map(std::process::Stdio::from)
-            .unwrap_or_else(std::process::Stdio::null)
-    };
+    // The daemon writes its own log; giving it this log as stderr too would
+    // write every line twice (it did, on the first install). Its stderr is
+    // dropped: a copy that lost the port says so to nobody, and that is fine.
     let mut cmd = std::process::Command::new(&exe);
-    cmd.stdin(std::process::Stdio::null()).stdout(sink()).stderr(sink());
+    cmd.stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;

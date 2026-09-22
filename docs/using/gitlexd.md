@@ -7,7 +7,7 @@ localhost. `git lex query` is its client.
 
 Nothing has to be started by hand: `git lex query` starts gitlexd when
 nothing answers on its port, detached from the terminal that ran the
-query, and waits for it to come up. The commands below are for looking
+query (its only output is its log), and waits for it to come up. The commands below are for looking
 at it, restarting it on a new build, and stopping it.
 
 ```bash
