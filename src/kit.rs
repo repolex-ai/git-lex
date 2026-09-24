@@ -2053,26 +2053,35 @@ pub fn ensure_engine_gitignore(root: &Path) {
     report_tracked_engine_paths(root);
 }
 
-/// What `remove_engine_gitignore` did and could not do.
+/// What `remove_engine_gitignore` removed.
 pub struct GitignoreRemoval {
     /// The managed block was present and is gone.
     pub removed_block: bool,
-    /// Lines outside the block that name git-lex's own directories. Not
-    /// removed: git-lex cannot prove it wrote them (an older git-lex did
-    /// write bare lines; a developer of git-lex writes them on purpose).
-    pub leftover: Vec<String>,
+    /// Bare lines naming git-lex's own directories, outside the block,
+    /// that were removed too.
+    pub removed_lines: Vec<String>,
 }
 
-/// The inverse of `ensure_engine_gitignore`, for `git lex nuke`: take the
-/// managed block out of the root `.gitignore` exactly, by its markers,
-/// leaving everything else byte for byte. A file that held nothing but
-/// the block is deleted. Lines outside the block that name `.lex/`,
-/// `.lex/_ignore/` or `.git/lex/` are reported, not touched (git-lex#48,
-/// w3bl0rd, 2026-09-24).
+/// A bare `.gitignore` line that names a git-lex directory: what an older
+/// git-lex wrote without markers, and what nothing else needs.
+fn is_git_lex_ignore_line(line: &str) -> bool {
+    matches!(
+        line.trim(),
+        ".lex" | ".lex/" | "/.lex" | "/.lex/" | ".lex/_ignore" | ".lex/_ignore/" | ".git/lex" | ".git/lex/"
+    )
+}
+
+/// The inverse of `ensure_engine_gitignore`, for `git lex nuke`: every
+/// git-lex line leaves the root `.gitignore`. The managed block goes
+/// exactly, by its markers; bare lines naming `.lex/`, `.lex/_ignore/` or
+/// `.git/lex/` go too (an older git-lex wrote them without markers).
+/// Everything else stays byte for byte, and a file left with nothing is
+/// deleted. A nuked repository has no use for any of these lines, so
+/// none is kept (goodlux, 2026-09-24; git-lex#48).
 pub fn remove_engine_gitignore(root: &Path) -> GitignoreRemoval {
     let gitignore = root.join(".gitignore");
     let Ok(existing) = fs::read_to_string(&gitignore) else {
-        return GitignoreRemoval { removed_block: false, leftover: Vec::new() };
+        return GitignoreRemoval { removed_block: false, removed_lines: Vec::new() };
     };
     let (contents, removed_block) = match (existing.find(ENGINE_GITIGNORE_BEGIN), existing.find(ENGINE_GITIGNORE_END)) {
         (Some(start), Some(end_idx)) if end_idx >= start => {
@@ -2089,20 +2098,23 @@ pub fn remove_engine_gitignore(root: &Path) -> GitignoreRemoval {
         }
         _ => (existing.clone(), false),
     };
-    let leftover: Vec<String> = contents
-        .lines()
-        .map(str::trim)
-        .filter(|l| matches!(*l, ".lex" | ".lex/" | "/.lex/" | ".lex/_ignore" | ".lex/_ignore/" | ".git/lex" | ".git/lex/"))
-        .map(String::from)
-        .collect();
-    if removed_block {
-        if contents.trim().is_empty() {
-            let _ = fs::remove_file(&gitignore);
+    let mut removed_lines = Vec::new();
+    let mut kept = String::with_capacity(contents.len());
+    for line in contents.split_inclusive('\n') {
+        if is_git_lex_ignore_line(line) {
+            removed_lines.push(line.trim().to_string());
         } else {
-            let _ = fs::write(&gitignore, &contents);
+            kept.push_str(line);
         }
     }
-    GitignoreRemoval { removed_block, leftover }
+    if removed_block || !removed_lines.is_empty() {
+        if kept.trim().is_empty() {
+            let _ = fs::remove_file(&gitignore);
+        } else {
+            let _ = fs::write(&gitignore, &kept);
+        }
+    }
+    GitignoreRemoval { removed_block, removed_lines }
 }
 
 /// Print a warning for any git-tracked paths that fall under the engine runtime
@@ -2176,7 +2188,7 @@ mod gitignore_removal_tests {
         std::fs::write(d.join(".gitignore"), &before).unwrap();
         let r = remove_engine_gitignore(&d);
         assert!(r.removed_block);
-        assert!(r.leftover.is_empty(), "{:?}", r.leftover);
+        assert!(r.removed_lines.is_empty(), "{:?}", r.removed_lines);
         assert_eq!(std::fs::read_to_string(d.join(".gitignore")).unwrap(), "target/\n*.log\n");
         let _ = std::fs::remove_dir_all(&d);
     }
@@ -2192,13 +2204,23 @@ mod gitignore_removal_tests {
     }
 
     #[test]
-    fn bare_git_lex_lines_are_reported_not_removed() {
+    fn bare_git_lex_lines_are_removed_and_the_rest_kept() {
         let d = scratch("bare");
-        std::fs::write(d.join(".gitignore"), ".lex/\n.git/lex/\nnode_modules/\n").unwrap();
+        std::fs::write(d.join(".gitignore"), "/target\n.lex/\n.git/lex/\nnode_modules/\n  .lex/_ignore/  \n").unwrap();
         let r = remove_engine_gitignore(&d);
         assert!(!r.removed_block);
-        assert_eq!(r.leftover, vec![".lex/".to_string(), ".git/lex/".to_string()]);
-        assert_eq!(std::fs::read_to_string(d.join(".gitignore")).unwrap(), ".lex/\n.git/lex/\nnode_modules/\n");
+        assert_eq!(r.removed_lines, vec![".lex/".to_string(), ".git/lex/".to_string(), ".lex/_ignore/".to_string()]);
+        assert_eq!(std::fs::read_to_string(d.join(".gitignore")).unwrap(), "/target\nnode_modules/\n");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn a_file_of_only_bare_lines_is_deleted() {
+        let d = scratch("bareonly");
+        std::fs::write(d.join(".gitignore"), ".lex/\n").unwrap();
+        let r = remove_engine_gitignore(&d);
+        assert_eq!(r.removed_lines, vec![".lex/".to_string()]);
+        assert!(!d.join(".gitignore").exists());
         let _ = std::fs::remove_dir_all(&d);
     }
 
@@ -2206,7 +2228,7 @@ mod gitignore_removal_tests {
     fn no_gitignore_is_fine() {
         let d = scratch("none");
         let r = remove_engine_gitignore(&d);
-        assert!(!r.removed_block && r.leftover.is_empty());
+        assert!(!r.removed_block && r.removed_lines.is_empty());
         let _ = std::fs::remove_dir_all(&d);
     }
 }
