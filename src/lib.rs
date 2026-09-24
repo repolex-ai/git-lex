@@ -949,17 +949,24 @@ pub fn registry_add(repo_path: &std::path::Path) {
 }
 
 /// Drop a repo from the registry. No-op if it isn't there.
-pub fn registry_remove(repo_path: &std::path::Path) {
+/// Returns true when a row for this repository was there and is gone.
+pub fn registry_remove(repo_path: &std::path::Path) -> bool {
     let canonical = registry_key(repo_path);
     let target = canonical.clone();
+    let had = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let had_w = std::sync::Arc::clone(&had);
     if let Err(e) = registry_update(move |repos| {
+        let before = repos.len();
         repos.retain(|entry| entry_path(entry) != Some(target.as_str()));
+        had_w.store(repos.len() != before, std::sync::atomic::Ordering::SeqCst);
     }) {
         eprintln!(
             "warning: ~/.lex/repos.json was not updated ({e}) — the entry for \
              {canonical} is still listed; edit that file by hand to drop it"
         );
+        return false;
     }
+    had.load(std::sync::atomic::Ordering::SeqCst)
 }
 
 /// Resolve a kit spec into (org, repo, short_name). Accepts either a short

@@ -211,20 +211,21 @@ pub(crate) fn install_hook() -> std::io::Result<()> {
 
 /// Remove the git-lex managed section from the pre-commit hook.
 /// If the file only contained our section (plus shebang), removes the file entirely.
-pub(crate) fn remove_hook() {
+/// Returns true when a git-lex section was found and removed.
+pub(crate) fn remove_hook() -> bool {
     let dir = match hooks_dir() {
         Some(d) => d,
-        None => return,
+        None => return false,
     };
 
     let hook_path = dir.join("pre-commit");
     let existing = match fs::read_to_string(&hook_path) {
         Ok(s) => s,
-        Err(_) => return,
+        Err(_) => return false,
     };
 
     if !existing.contains(MARKER_START) {
-        return; // nothing to remove
+        return false; // nothing to remove
     }
 
     let cleaned = replace_managed_section(&existing, "");
@@ -248,7 +249,9 @@ pub(crate) fn remove_hook() {
              .git/hooks/pre-commit (or its git-lex section) by hand.",
             hook_path.display()
         );
+        return false;
     }
+    true
 }
 
 /// Replace the managed section between markers with new content.
