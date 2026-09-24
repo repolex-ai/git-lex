@@ -150,8 +150,37 @@ pub fn require_git_root() -> std::path::PathBuf {
 /// Every write path enters here, so this is also where a pre-pocket store
 /// migrates into `.lex/_ignore/` (the ravel pattern: migrate at the top of
 /// every write, loud on action, refuse ambiguity).
+/// Is this repository set up for git-lex? The one fact that says so is
+/// `.lex/repo.yml`, which only `git lex init` writes. Absence is not a
+/// thing to heal: `git lex nuke` deletes `.lex/` on purpose, and a command
+/// that created a store or a repo.yml on its own brought four nuked
+/// repositories back (git-lex#47, w3bl0rd, 2026-09-24).
+pub fn lex_repo_check(root: &std::path::Path) -> Result<(), String> {
+    let yml = crate::layout::repo_yml(root);
+    if yml.is_file() {
+        Ok(())
+    } else {
+        Err(format!(
+            "this repository is not set up for git-lex ({} does not exist). Run: git lex init",
+            yml.display()
+        ))
+    }
+}
+
+/// `lex_repo_check`, or exit 1 with the reason.
+pub fn require_lex_repo(root: &std::path::Path) {
+    if let Err(e) = lex_repo_check(root) {
+        eprintln!("fatal: {e}");
+        std::process::exit(1);
+    }
+}
+
+/// Open the store, creating its directory when the repository is set up
+/// for git-lex and has never synced. Never creates anything in a
+/// repository without `.lex/repo.yml`.
 pub fn open_or_create_store() -> Store {
     let root = require_git_root();
+    require_lex_repo(&root);
     if let Err(e) = migrate_legacy_store(&root) {
         eprintln!("fatal: {e}");
         std::process::exit(1);
@@ -2034,5 +2063,36 @@ pub fn exit_quietly_on_closed_pipe() {
     // thread is spawned, with no handler state to race.
     unsafe {
         libc::signal(libc::SIGPIPE, libc::SIG_DFL);
+    }
+}
+
+#[cfg(test)]
+mod lex_repo_check_tests {
+    use super::lex_repo_check;
+
+    fn scratch(name: &str) -> std::path::PathBuf {
+        let d = std::env::temp_dir().join(format!("git-lex-lex-repo-check-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    #[test]
+    fn a_repository_without_repo_yml_is_refused_and_named() {
+        let dir = scratch("none");
+        let e = lex_repo_check(&dir).unwrap_err();
+        assert!(e.contains("repo.yml"), "{e}");
+        assert!(e.contains("git lex init"), "{e}");
+        assert!(!crate::layout::lex_dir(&dir).exists(), "the check must not create .lex");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_repository_with_repo_yml_passes() {
+        let dir = scratch("some");
+        std::fs::create_dir_all(crate::layout::lex_dir(&dir)).unwrap();
+        std::fs::write(crate::layout::repo_yml(&dir), "name: x\n").unwrap();
+        assert!(lex_repo_check(&dir).is_ok());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -22,6 +22,10 @@ pub fn cmd_sync() {
     let start = Instant::now();
 
     let root = require_git_root();
+    // Set up for git-lex at all? Only `git lex init` may create `.lex/`;
+    // a sync in a repository without it (nuked, or never initialized)
+    // refuses instead of writing a repo.yml and a store of its own.
+    crate::require_lex_repo(&root);
 
     // Identity floor: wake (sync) fails loud on a soul repo missing its
     // root SOUL.md (#29 — restorable via kit-update).
