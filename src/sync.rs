@@ -18,8 +18,39 @@ use crate::git::graph_uri;
 use crate::spo_events;
 use crate::{open_or_create_store, require_git_root};
 
+/// Elapsed time per phase of one sync, printed as one line of the report
+/// so the daemon log carries the split (git-lex#44: on lUX a sync is
+/// 35 s and nothing said where).
+pub struct PhaseClock {
+    last: Instant,
+    phases: Vec<(&'static str, std::time::Duration)>,
+}
+
+impl PhaseClock {
+    pub fn start() -> PhaseClock {
+        PhaseClock { last: Instant::now(), phases: Vec::new() }
+    }
+
+    /// Close the phase that has been running since the last mark.
+    pub fn mark(&mut self, name: &'static str) {
+        let now = Instant::now();
+        self.phases.push((name, now - self.last));
+        self.last = now;
+    }
+
+    /// `open 12 ms · git layer 20 145 ms · ...`, phases in the order they ran.
+    pub fn report(&self) -> String {
+        self.phases
+            .iter()
+            .map(|(n, d)| format!("{n} {} ms", d.as_millis()))
+            .collect::<Vec<_>>()
+            .join(" · ")
+    }
+}
+
 pub fn cmd_sync() {
     let start = Instant::now();
+    let mut clock = PhaseClock::start();
 
     let root = require_git_root();
     // Set up for git-lex at all? Only `git lex init` may create `.lex/`;
@@ -40,6 +71,7 @@ pub fn cmd_sync() {
     // over. IRIs no longer carry it — see git.rs Task-2 IRI families.
     crate::git::ensure_genesis_recorded();
     let store = open_or_create_store();
+    clock.mark("open");
 
     // Get current HEAD commit
     let head_sha = Command::new("git")
@@ -64,14 +96,18 @@ pub fn cmd_sync() {
         );
         // Converge the spine even on the fast path: a no-op when current,
         // and it heals a spine that failed to write on an earlier sync.
+        clock.mark("fast path");
         crate::export_spine::refresh_after_sync(&root, &store);
+        clock.mark("spine");
         crate::context::refresh(&root);
+        println!("  phases: {}", clock.report());
         return;
     }
 
     let onegraph_resume = validated_resume(&root, resume_point(&store, &root));
     // No resume point = the one graph is rebuilt from the first commit.
     let full_rebuild = onegraph_resume.is_none();
+    clock.mark("resume point");
 
     clear_derived_graphs(&store);
     let now_present = store
@@ -79,6 +115,7 @@ pub fn cmd_sync() {
         .unwrap_or(false);
 
     heal_ontology_graph(&store);
+    clock.mark("clear derived + heal ontology");
 
 
     // Regenerate the git2 machinery layer (commits/signatures/refs/filetree).
@@ -88,6 +125,7 @@ pub fn cmd_sync() {
     let mut git_count = 0;
     if !full_rebuild {
         git_count = load_git2_layer(&store, Git2Load::Whole);
+        clock.mark("git layer (whole reload)");
     }
 
     // Extraction: the ONE working-tree walk WRITES both sidecar families
@@ -110,12 +148,14 @@ These are in your WORKING FILES, not history — fix the listed files and the wa
         );
     }
     let fm_count = walk.facts;
+    clock.mark("documents (walk + sidecars)");
 
     // ─── One-graph phase: append new commits' statement events.
     // Shares the SAME resolver context, so one-graph facts resolve
     // identically to now-view facts (and the indexes build once per sync,
     // not twice). ───
     let onegraph = sync_onegraph_walk(&store, &root, onegraph_resume, &resolver_ctx);
+    clock.mark("history (one graph)");
 
     // ─── Stale graph cleanup ───
     // Subsumed by the Phase-1 clear filter: every graph not on the keep-list
@@ -139,12 +179,15 @@ These are in your WORKING FILES, not history — fix the listed files and the wa
     // resume point and rebuilds from the first commit.
     if full_rebuild {
         materialize_now_view_in_batches(&store);
+        clock.mark("now view (full)");
         git_count = load_git2_layer(&store, Git2Load::BatchedMarkerLast);
+        clock.mark("git layer (full, batched)");
     }
 
     // Every sync proves the store coherent or aborts. The proof joins
     // events to commit ordinals, so it follows the git2 layer.
     verify_onegraph(&store);
+    clock.mark("verify");
 
     if !full_rebuild {
         if now_present {
@@ -152,9 +195,11 @@ These are in your WORKING FILES, not history — fix the listed files and the wa
         } else {
             materialize_now_view(&store);
         }
+        clock.mark("now view (refresh)");
     }
 
     store.flush().expect("failed to flush store");
+    clock.mark("flush");
 
     let elapsed = start.elapsed();
 
@@ -170,10 +215,12 @@ These are in your WORKING FILES, not history — fix the listed files and the wa
     // already printed, and any failure here demotes to a warning, so a
     // cache artifact can never fail or mask a sync.
     crate::export_spine::refresh_after_sync(&root, &store);
+    clock.mark("spine");
     // The agent context is a function of the installed kits only; this is
     // the safety net behind kit-add/kit-remove/kit-update. Written only
     // when its bytes change.
     crate::context::refresh(&root);
+    println!("  phases: {}", clock.report());
 }
 
 fn gate_default_branch(root: &std::path::Path) {
@@ -1705,5 +1752,24 @@ mod batched_rebuild_tests {
         let store = build(false);
         now_view_in_batches(&store, 2).unwrap();
         assert_eq!(quads(&store), expected);
+    }
+}
+
+#[cfg(test)]
+mod phase_clock_tests {
+    use super::PhaseClock;
+
+    #[test]
+    fn phases_are_reported_in_order_with_milliseconds() {
+        let mut c = PhaseClock::start();
+        c.mark("open");
+        std::thread::sleep(std::time::Duration::from_millis(12));
+        c.mark("git layer");
+        c.mark("flush");
+        let r = c.report();
+        let names: Vec<&str> = r.split(" · ").map(|p| p.rsplit_once(' ').map(|(a, _)| a.rsplit_once(' ').map(|(n, _)| n).unwrap_or(a)).unwrap_or(p)).collect();
+        assert_eq!(names, ["open", "git layer", "flush"], "{r}");
+        let git_ms: u128 = r.split(" · ").nth(1).unwrap().trim_start_matches("git layer ").trim_end_matches(" ms").parse().unwrap();
+        assert!(git_ms >= 12, "{r}");
     }
 }
