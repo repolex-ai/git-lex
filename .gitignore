@@ -1,12 +1,3 @@
 /target
 .lex/
-.git/lex/
 .DS_Store
-
-# >>> git-lex engine runtime (managed) >>>
-.lex/_ignore/
-.pool/
-.copia/
-.ravel/_ignore/
-.pan/_ignore/
-# <<< git-lex engine runtime (managed) <<<

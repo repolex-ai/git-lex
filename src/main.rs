@@ -421,6 +421,20 @@ fn cmd_nuke() {
     // Remove our section from the pre-commit hook
     hooks::remove_hook();
 
+    // Take git-lex's managed block out of .gitignore; say what it could
+    // not prove it wrote (git-lex#48).
+    let ignore = git_lex::kit::remove_engine_gitignore(&root);
+    if ignore.removed_block {
+        println!("Removed git-lex's managed block from .gitignore.");
+    }
+    if !ignore.leftover.is_empty() {
+        println!(
+            ".gitignore still has {} line(s) naming git-lex directories that git-lex did not write (or cannot prove it wrote): {}. Delete them by hand if they were git-lex's.",
+            ignore.leftover.len(),
+            ignore.leftover.join(", ")
+        );
+    }
+
     // Auto-commit any uncommitted work first so nothing is lost.
     auto_commit_snapshot("pre-nuke");
 
