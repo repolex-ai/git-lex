@@ -117,6 +117,15 @@ pub fn nudge(genesis: &str) {
         .send_empty();
 }
 
+/// Tell gitlexd to drop this soul: close its store and stop watching the
+/// repository. Waits (briefly) for the answer, because the caller is about
+/// to delete the store's directory. A gitlexd that is not running is fine.
+pub fn forget(genesis: &str) {
+    let _ = agent(Duration::from_secs(10))
+        .delete(format!("{}/soul/{genesis}", super::base_url()))
+        .call();
+}
+
 /// Ask gitlexd to sync this soul and wait until it has. Returns the soul's
 /// state as gitlexd reports it.
 pub fn sync_and_wait(genesis: &str) -> Result<serde_json::Value, String> {

@@ -411,6 +411,13 @@ fn cmd_nuke() {
         return;
     }
 
+    // gitlexd first: it holds this store open and syncs on every commit,
+    // and the commits below would otherwise make it recreate `.lex/` in
+    // the repository being cleaned. Nothing to say when it is not running.
+    if let Some(genesis) = git_lex::git::genesis_sha_at(&root) {
+        git_lex::gitlexd::client::forget(&genesis);
+    }
+
     // Remove our section from the pre-commit hook
     hooks::remove_hook();
 

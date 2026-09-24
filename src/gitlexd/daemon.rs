@@ -53,6 +53,9 @@ pub struct Soul {
     requested: AtomicU64,
     completed_tx: watch::Sender<u64>,
     completed_rx: watch::Receiver<u64>,
+    /// Set when the daemon has dropped this soul (its `.lex` is gone, or
+    /// `git lex nuke` said so). The loops exit; nothing syncs it again.
+    gone: std::sync::atomic::AtomicBool,
 }
 
 impl Soul {
@@ -69,6 +72,7 @@ impl Soul {
             requested: AtomicU64::new(0),
             completed_tx,
             completed_rx,
+            gone: std::sync::atomic::AtomicBool::new(false),
         }
     }
 
@@ -154,6 +158,27 @@ impl Daemon {
             d.adopt(entry);
         }
         Ok(d)
+    }
+
+    /// Drop a soul: close its store, take it off the list, end its loops.
+    /// For `git lex nuke` (which deletes `.lex/` and then commits, a commit
+    /// the HEAD watcher would otherwise answer with a sync that recreates
+    /// the store in the cleaned repository), and for a `.lex/` that simply
+    /// vanished. Returns the soul when it was held.
+    pub async fn forget(&self, genesis: &str) -> Option<Arc<Soul>> {
+        let soul = {
+            let mut souls = self.souls.write().unwrap();
+            let i = souls.iter().position(|s| s.genesis == genesis)?;
+            souls.remove(i)
+        };
+        soul.gone.store(true, Ordering::SeqCst);
+        // Waits for a running sync to finish, then closes the store.
+        let mut guard = Arc::clone(&soul.store).write_owned().await;
+        *guard = None;
+        drop(guard);
+        soul.wake.notify_one();
+        self.log(&format!("{} {} dropped (its .lex is gone)", soul.short(), soul.path.display()));
+        Some(soul)
     }
 
     /// A snapshot of the souls held right now.
@@ -255,12 +280,17 @@ impl Daemon {
 
     fn spawn_soul_loops(self: &Arc<Self>, soul: &Arc<Soul>) {
         tokio::spawn(sync_loop(Arc::clone(self), Arc::clone(soul)));
-        tokio::spawn(watch_loop(Arc::clone(soul)));
+        tokio::spawn(watch_loop(Arc::clone(self), Arc::clone(soul)));
     }
 
     /// One sync of one soul, as a worker process. Holds the store's write
     /// lock throughout, so no query reads during it.
     async fn sync_once(&self, soul: &Soul) {
+        if soul.gone.load(Ordering::SeqCst) || !crate::layout::lex_dir(&soul.path).is_dir() {
+            // Never run the engine in a repository git-lex has left: the
+            // engine would create `.lex/` again. The watcher drops it.
+            return;
+        }
         let _permit = self.syncs.acquire().await;
         let mut guard = Arc::clone(&soul.store).write_owned().await;
         soul.status.lock().unwrap().syncing = true;
@@ -339,6 +369,9 @@ fn open_existing(root: &Path) -> Result<Option<Store>, String> {
 async fn sync_loop(d: Arc<Daemon>, soul: Arc<Soul>) {
     loop {
         soul.wake.notified().await;
+        if soul.gone.load(Ordering::SeqCst) {
+            return;
+        }
         loop {
             let target = soul.requested.load(Ordering::SeqCst);
             d.sync_once(&soul).await;
@@ -361,9 +394,16 @@ fn head_sha(root: &Path) -> Option<String> {
 /// a save made while gitlexd was down. A sync is asked for when HEAD is
 /// not what the store is synced to; so the first reading at start is the
 /// catch-up, and a HEAD the nudge already synced asks for nothing.
-async fn watch_loop(soul: Arc<Soul>) {
+async fn watch_loop(d: Arc<Daemon>, soul: Arc<Soul>) {
     let mut last: Option<String> = None;
     loop {
+        if soul.gone.load(Ordering::SeqCst) {
+            return;
+        }
+        if !crate::layout::lex_dir(&soul.path).is_dir() {
+            d.forget(&soul.genesis).await;
+            return;
+        }
         let now = head_sha(&soul.path);
         if now != last {
             last = now.clone();

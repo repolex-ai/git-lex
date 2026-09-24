@@ -17,7 +17,7 @@ use super::daemon::{Daemon, FindError, Soul};
 use axum::extract::{Path as AxPath, Query as AxQuery, State};
 use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, post};
+use axum::routing::{delete, get, post};
 use axum::{Json, Router};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -208,6 +208,23 @@ async fn sync(
     (status, Json(soul_json(&soul))).into_response()
 }
 
+/// `DELETE /soul/{genesis}`: drop the soul. `git lex nuke` sends this
+/// before it deletes `.lex/`, so the daemon closes the store first and
+/// never syncs the repository again.
+async fn forget(State(d): State<Arc<Daemon>>, AxPath(genesis): AxPath<String>) -> Response {
+    let soul = match d.find(&genesis) {
+        Ok(s) => s,
+        Err(FindError::NotFound) => {
+            return (StatusCode::OK, Json(serde_json::json!({ "forgotten": false, "reason": "not held" }))).into_response()
+        }
+        Err(FindError::Ambiguous(all)) => {
+            return err(StatusCode::CONFLICT, format!("{genesis} matches more than one soul: {}", all.join(", ")))
+        }
+    };
+    d.forget(&soul.genesis).await;
+    (StatusCode::OK, Json(serde_json::json!({ "forgotten": true, "genesis": soul.genesis }))).into_response()
+}
+
 async fn souls(State(d): State<Arc<Daemon>>) -> Json<serde_json::Value> {
     Json(serde_json::json!({ "souls": d.souls().iter().map(|s| soul_json(s)).collect::<Vec<_>>() }))
 }
@@ -229,6 +246,7 @@ pub fn router(d: Arc<Daemon>) -> Router {
         .route("/soul/{genesis}/sparql", get(sparql_get).post(sparql_post))
         .route("/soul/{genesis}/info", get(info))
         .route("/soul/{genesis}/sync", post(sync))
+        .route("/soul/{genesis}", delete(forget))
         .route("/souls", get(souls))
         .route("/health", get(health))
         .with_state(d)

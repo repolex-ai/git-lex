@@ -72,6 +72,7 @@ full or an unambiguous prefix.
 | `GET` / `POST /soul/<genesis>/sparql` | The W3C SPARQL 1.1 protocol over that soul's store (SPARQL 1.2 triple terms included). `application/sparql-query`, form `query=`, or JSON `{"query": …}`. SELECT/ASK answer `application/sparql-results+json`; CONSTRUCT/DESCRIBE `application/n-triples`. A pattern with no GRAPH clause sees every graph. |
 | `GET /soul/<genesis>/info` | Synced-to commit, whether a sync is in flight, quad count, the graph inventory, kits. |
 | `POST /soul/<genesis>/sync` | Ask for a sync. Returns `202` at once; with `?wait=1` returns when the sync is done, with the soul's state. |
+| `DELETE /soul/<genesis>` | Drop the soul: close its store and stop watching the repository. `git lex nuke` sends this before deleting `.lex/`. A soul whose `.lex/` vanishes by any other hand is dropped by the watcher on its own. |
 | `GET /souls` | Every soul gitlexd holds: genesis, path, name, synced-to commit, errors. |
 | `GET /health` | gitlexd is up; uptime, pid, number of souls. |
 
