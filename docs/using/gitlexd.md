@@ -11,8 +11,10 @@ query (its only output is its log), and waits for it to come up. The commands be
 at it, restarting it on a new build, and stopping it.
 
 ```bash
+gitlexd           # run in the foreground; exits if one is already up
 gitlexd status    # is one running, and what does it hold
 gitlexd start     # stop any other gitlexd on this machine, then run in this terminal
+gitlexd restart   # stop any other gitlexd on this machine, then run in this terminal
 gitlexd stop      # stop every gitlexd on this machine
 ```
 

@@ -7,7 +7,7 @@ Documents are plain Markdown with YAML frontmatter in dot notation:
 soul.Journal.soulDay: 56
 soul.Journal.earthDate: 2026-07-23
 ---
-Body text. Link other documents with [markdown links](Soul/Note/example.md).
+Body text. Link other documents with [markdown links](/Soul/Note/example.md).
 ```
 
 The pattern is `kit.Class.property`. Class names are case-sensitive and come
@@ -94,8 +94,8 @@ full IRI — the graph never guesses.**
   brackets included, where the namespace comes from the value — or a
   repo-relative path (`source: friend/selkie.md`), or a full IRI.
 - Body text: a standard Markdown link —
-  `[day 56](Soul/Journal/2026-07-23-day-56.md)` — becomes a generic
-  `linksTo` edge. Targets are repo-root-relative; `.md` is added automatically
+  `[day 56](/Soul/Journal/2026-07-23-day-56.md)` — becomes an `md:linksTo`
+  edge between file nodes. Targets are repo-root-relative (starting with `/`); `.md` is added automatically
   when the target has no extension. `[[...]]` is not parsed into edges — it
   remains plain prose.
 - Linking to a file that does not exist yet will not error if created in the

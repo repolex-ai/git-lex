@@ -29,13 +29,15 @@ This installs two binaries:
 
 ## Initializing Your First Repository
 
-The initialization and lifecycle flow follows four basic commands:
+The initialization and lifecycle flow follows basic commands:
 
 ```bash
-git lex init --kit soul     # Initialize git-lex with your choice of domain kit
-git lex create <type> <id>  # Scaffold a new document (e.g. note, journal)
-git lex save "first save"   # Commit changes; extraction + validation run automatically
-git lex sync                # Build and update the synced knowledge graph store
+git lex init --kit soul          # Initialize git-lex with your choice of domain kit
+git lex create note "my-note"    # Scaffold a new document (e.g. note, journal)
+git lex save "first save"        # Commit changes; validation + extraction run automatically
+git lex sync                     # Build and update the synced knowledge graph store
+git lex query "SELECT * WHERE { ?s ?p ?o } LIMIT 10"   # Query via gitlexd (auto-starts if needed)
+git lex direct "SELECT * WHERE { ?s ?p ?o } LIMIT 10"  # Query working tree directly in memory
 ```
 
 ### Initializing (`init`)
@@ -46,17 +48,21 @@ Running `git lex init` configures `git-lex` in the current directory:
 4. It installs the pre-commit Git hooks that enforce graph validation.
 5. If the current directory is not yet a Git repository, it offers to run `git init` automatically.
 
-> [!TIP]
-> Running `git lex init` is safe to run on existing repositories; it will prompt you before refreshing configuration files, preserving your existing notes and custom settings.
+> [!NOTE]
+> **Only `git lex init` creates `.lex/`.** Subcommands such as `sync`, `verify`, and `query` will refuse to run in a repository without `.lex/repo.yml`. Running `git lex init` is safe on existing repositories; it prompts before refreshing configuration files, preserving notes and custom settings.
 
 ### Scaffolding (`create`)
-The `git lex create <type> <id>` command initializes a new Markdown document of the specified class. It generates the required YAML frontmatter structure and prints the location of the new file.
+The `git lex create <type> <id>` command initializes a new Markdown document of the specified class. It generates the required YAML frontmatter structure and prints the location of the new file. Use `--list` to see all creatable classes.
 
 ### Committing (`save`)
-`git lex save "message"` is the unified entrypoint for committing changes. It stages your files, extracts frontmatter attributes into a local triple store, runs validation checks, and commits the result.
+`git lex save "message"` is the unified entrypoint for committing changes. It stages your files, updates timestamps, extracts frontmatter attributes into `.lex/extract/` sidecars, runs SHACL validation checks, commits the result, and nudges `gitlexd` when it is running. Use `--no-restamp` to preserve `updatedDate` during bulk sweeps or mechanical migrations.
 
 ### Syncing (`sync`)
-`git lex sync` processes your Git history, building the offline SPARQL-queryable knowledge graph store.
+`git lex sync` processes your Git history, compiling committed facts and events into the persistent Oxigraph store. When `gitlexd` is running, `sync` hands the work to the daemon and waits for completion. Every sync reports a per-phase elapsed timing breakdown.
+
+### Querying (`query` and `direct`)
+* **`git lex query "<sparql>"`**: Queries your repository's persistent store through `gitlexd`. Includes statement history, full commits, and document facts. Starts `gitlexd` automatically if none is running.
+* **`git lex direct "<sparql>"`**: Queries an ephemeral, in-memory graph of your current working tree (uncommitted edits included). Requires no running daemon, but has no statement history.
 
 ---
 

@@ -19,7 +19,7 @@ This document outlines how `git-lex` handles file moves, renames, and deletions 
 
 Git-lex distinguishes between physical path references and semantic concept references:
 
-1. **Markdown Links (`[text](/Soul/Pursuit/x.md)`):** These links point at physical paths in the File Plane. If the target file is renamed or deleted, the link registers as unresolved but remains visible in the graph.
+1. **Markdown Links (`[text](/Soul/Pursuit/x.md)`):** These links point at physical paths in the File Plane (creating `md:linksTo` edges between files). If the target file is renamed or deleted, the link registers as unresolved but remains visible in the graph.
 2. **Frontmatter References (`relatedToId` / `id`):** These point to stable Things in the Thing Plane. They resolve based on identity and are completely unaffected by file relocations.
 
 ---
@@ -53,4 +53,4 @@ When a document is deleted:
 
 When an identity changes or a document is deleted, its facts are **retracted**, not permanently deleted. 
 
-Because `git-lex` builds its store directly from Git commits, the graph retains a complete audit trail of every assertion and retraction tied to the specific commit and author that introduced it. You can query the historical state of the graph at any commit using `git lex serve sparql`.
+Because `git-lex` builds its store directly from Git commits, the graph retains a complete audit trail of every assertion and retraction tied to the specific commit and author that introduced it. You can query the historical state of the graph at any commit using `git lex query` (or directly via `gitlexd`).

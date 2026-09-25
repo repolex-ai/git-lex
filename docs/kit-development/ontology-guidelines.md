@@ -332,9 +332,9 @@ bridge.** A document has two subject IRIs — `git-lex/File/Soul/Note/x.md` for 
 markdown links, `soul/Note/x` for declared references — and **no direct triple joins
 them**. But `git-lex:fileId` does, in one hop:
 
-```
+```sparql
 SELECT (COUNT(*) AS ?joined) WHERE {
-  ?t1 gl:fileId ?f1 . ?f1 gl:md/linksTo ?f2 . ?t2 gl:fileId ?f2 }
+  ?t1 git-lex:fileId ?f1 . ?f1 md:linksTo ?f2 . ?t2 git-lex:fileId ?f2 }
 ```
 
 Measured across sample repos: 68 body links, 8 declared references, **0 subjects carrying

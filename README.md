@@ -20,6 +20,24 @@ cargo install --git https://github.com/repolex-ai/git-lex --locked
 
 ---
 
+## Quick Start
+
+```bash
+# In an existing Git repo, or initialize a new one:
+git lex init --kit soul          # initialize .lex/ and install a kit (e.g. soul)
+git lex create Note "my-note"    # scaffold a typed document
+git lex save "my first note"     # stage + validate + commit; nudges gitlexd
+git lex sync                     # compile committed history into the persistent store
+
+# Query through gitlexd (starts gitlexd automatically if needed):
+git lex query "SELECT * WHERE { ?s ?p ?o } LIMIT 10"
+
+# Or query a live in-memory view of the working tree without a daemon:
+git lex direct "SELECT * WHERE { ?s ?p ?o } LIMIT 10"
+```
+
+---
+
 ## Why git-lex?
 
 Most knowledge management tools, wikis, and agent memory architectures force you into an awkward split: either you keep notes in simple text files and lose structured, relational querying, or you maintain a complex external database (like Neo4j, vector stores, or triplestores) that drifts out of sync with your files and version control.

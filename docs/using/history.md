@@ -40,16 +40,15 @@ chronicles (an RDF 1.2 triple term), and its commit:
 <event> gl:assertedIn <.../git2/Commit/sha> .   # or gl:retractedIn
 ```
 
-(`gl:` is `https://repolex.ai/ontology/git-lex/` — declare it in your
-query; it is not one of the auto-injected prefixes.)
+(`git-lex:` is auto-injected as `https://repolex.ai/ontology/git-lex/`, so you can write `git-lex:SpoEvent` and `git-lex:assertedIn` without declaring anything. If you prefer `gl:`, declare `PREFIX gl: <https://repolex.ai/ontology/git-lex/>` in your query.)
 
 **Assertion and retraction are separate reified nodes** — one event carries
-`gl:assertedIn`, a different event carries `gl:retractedIn`. To query lifespans, join on the *reified triple*, not on the event:
+`git-lex:assertedIn`, a different event carries `git-lex:retractedIn`. To query lifespans, join on the *reified triple*, not on the event:
 
 ```sparql
 # Matching assertions and retractions
-?e1 rdf:reifies <<( ?s ?p ?o )>> ; gl:assertedIn ?a .
-?e2 rdf:reifies <<( ?s ?p ?o )>> ; gl:retractedIn ?r .
+?e1 rdf:reifies <<( ?s ?p ?o )>> ; git-lex:assertedIn ?a .
+?e2 rdf:reifies <<( ?s ?p ?o )>> ; git-lex:retractedIn ?r .
 ```
 
 Current state remains fast and lightweight: what is true right now is stored as plain
@@ -65,6 +64,8 @@ providing a single, unified timeline of repository state.
 ## Rebuilding
 
 The store is derived, never the source of truth. `sync` normally appends
-incrementally from where it left off; to rebuild from scratch, delete
-`.lex/_ignore/oxigraph` and run `git lex sync` — the whole graph is
+incrementally from where it left off, reporting where the time went phase by phase.
+A rewritten history (such as a git reset or rebase) triggers a loud full rebuild
+automatically. To force a rebuild from scratch by hand, stop `gitlexd`, delete
+`.lex/_ignore/oxigraph`, and run `git lex sync` — the whole graph is
 re-derived from your Git commit history.
