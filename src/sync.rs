@@ -109,7 +109,9 @@ pub fn cmd_sync() {
     let full_rebuild = onegraph_resume.is_none();
     clock.mark("resume point");
 
-    clear_derived_graphs(&store);
+    // An append keeps the commits, refs and repo graphs: the git layer
+    // step below updates them to exactly what a fresh load would hold (#45).
+    clear_derived_graphs(&store, !full_rebuild);
     let now_present = store
         .contains_named_graph(&oxigraph::model::NamedNode::new_unchecked(NOW_GRAPH_IRI))
         .unwrap_or(false);
@@ -119,13 +121,13 @@ pub fn cmd_sync() {
 
 
     // Regenerate the git2 machinery layer (commits/signatures/refs/filetree).
-    // An append loads it here, whole, as it always has. A full rebuild loads
+    // An append loads it here, writing only what changed (#45). A full rebuild loads
     // it AFTER the one graph and the now view (see below): the rebuild
     // writes in batches (#15), and the git2 layer carries the sync marker.
     let mut git_count = 0;
     if !full_rebuild {
-        git_count = load_git2_layer(&store, Git2Load::Whole);
-        clock.mark("git layer (whole reload)");
+        git_count = load_git2_layer(&store, Git2Load::Diffed);
+        clock.mark("git layer (changes only)");
     }
 
     // Extraction: the ONE working-tree walk WRITES both sidecar families
@@ -536,7 +538,8 @@ fn resume_point(store: &Store, root: &std::path::Path) -> Option<String> {
     onegraph_resume
 }
 
-fn clear_derived_graphs(store: &Store) {
+fn clear_derived_graphs(store: &Store, keep_diffed_git_graphs: bool) {
+    let diffed = diffed_git_graph_iris();
     // ─── Phase 1: Clear and regenerate virtual graphs ───
     // Virtual graphs are ephemeral — rebuilt from git every sync.
     // We remove EVERY graph that is not on the keep-list below (the one
@@ -567,6 +570,7 @@ fn clear_derived_graphs(store: &Store) {
         if graph_uri != "https://repolex.ai/git-lex/NamedGraph/repo-ontology"
             && graph_uri != spo_events::LEXHISTORY_GRAPH_IRI
             && graph_uri != NOW_GRAPH_IRI
+            && !(keep_diffed_git_graphs && diffed.contains(graph_uri))
             && let Ok(graph) = oxigraph::model::NamedNode::new(graph_uri) {
                 // remove (not clear): drops the graph's registration too, so a
                 // one-time legacy name (urn:soul:*) doesn't linger as an empty
@@ -677,8 +681,11 @@ const SYNC_MARKER_PREDICATE: &str = "https://repolex.ai/ontology/git-lex/git2/or
 
 /// How the git2 layer goes into the store.
 enum Git2Load {
-    /// One transaction — an append's load, unchanged.
-    Whole,
+    /// An append's load (#45): one transaction that leaves the commits, refs
+    /// and repo graphs exactly as a whole reload would, but writes only the
+    /// quads that differ. Every file-tree entry's address carries the HEAD
+    /// commit, so the file tree is still replaced whole.
+    Diffed,
     /// A full rebuild's load: bounded batches, the sync marker last (#15).
     /// One transaction held the whole layer in memory at about 3 KB a quad
     /// (measured: 1.03M quads, +2.9 GB), most of it the file tree.
@@ -689,11 +696,9 @@ enum Git2Load {
 /// it. Returns the number of quads.
 fn load_git2_layer(store: &Store, how: Git2Load) -> usize {
     match how {
-        Git2Load::Whole => {
+        Git2Load::Diffed => {
             let git_nq = crate::git2_nquads::generate_git2_nquads();
-            store
-                .load_from_reader(RdfFormat::NQuads, Cursor::new(git_nq.as_bytes()))
-                .expect("failed to load git triples");
+            load_git2_diffed(store, &git_nq).expect("failed to load git triples");
             git_nq.lines().count()
         }
         Git2Load::BatchedMarkerLast => {
@@ -702,6 +707,74 @@ fn load_git2_layer(store: &Store, how: Git2Load) -> usize {
             loader.finish().expect("failed to load git triples")
         }
     }
+}
+
+/// The git2 graphs an append updates in place instead of reloading: the
+/// ones whose addresses do not change with every commit.
+fn diffed_git_graph_iris() -> [String; 3] {
+    [graph_uri("commits"), graph_uri("refs"), graph_uri("repo")]
+}
+
+/// Load freshly generated git2 N-Quads so the store ends exactly as if the
+/// diffed graphs had been removed and the text loaded whole (#45): in the
+/// commits, refs and repo graphs, quads the text no longer has are removed
+/// and only new ones are written; every other graph in the text (the file
+/// tree) is written as it comes.
+///
+/// Stale quads go first, in one transaction, then everything new in one
+/// bulk text load (the per-quad transaction path is several times slower
+/// at this size). Killed in between, the store has lost some stale facts
+/// and gained nothing: never two ordinals for one commit, and the next sync
+/// computes the same difference again.
+fn load_git2_diffed(store: &Store, git_nq: &str) -> Result<(), String> {
+    use oxigraph::io::RdfParser;
+    use oxigraph::model::{NamedNodeRef, Quad};
+    use std::collections::HashMap;
+
+    let diffed: Vec<String> = diffed_git_graph_iris().iter().map(|g| format!("<{g}>")).collect();
+    // Every line the producer writes ends in its graph: `... <graph> .`
+    fn graph_of(line: &str) -> Option<&str> {
+        line.trim_end().strip_suffix(" .").and_then(|l| l.rsplit_once(' ')).map(|(_, g)| g)
+    }
+    let mut fresh = String::with_capacity(git_nq.len());
+    let mut wanted: HashMap<Quad, &str> = HashMap::new();
+    for line in git_nq.lines().filter(|l| !l.trim().is_empty()) {
+        if graph_of(line).is_some_and(|g| diffed.iter().any(|d| d == g)) {
+            let q = RdfParser::from_format(RdfFormat::NQuads)
+                .for_reader(Cursor::new(line.as_bytes()))
+                .next()
+                .ok_or_else(|| format!("empty git2 line: {line}"))?
+                .map_err(|e| e.to_string())?;
+            wanted.insert(q, line);
+        } else {
+            fresh.push_str(line);
+            fresh.push('\n');
+        }
+    }
+    let mut stale: Vec<Quad> = Vec::new();
+    for g in diffed_git_graph_iris() {
+        let graph = NamedNodeRef::new_unchecked(&g);
+        for q in store.quads_for_pattern(None, None, None, Some(graph.into())) {
+            let q = q.map_err(|e| e.to_string())?;
+            if wanted.remove(&q).is_none() {
+                stale.push(q);
+            }
+        }
+    }
+    if !stale.is_empty() {
+        let mut txn = store.start_transaction().map_err(|e| e.to_string())?;
+        for q in &stale {
+            txn.remove(q);
+        }
+        txn.commit().map_err(|e| e.to_string())?;
+    }
+    for line in wanted.values() {
+        fresh.push_str(line);
+        fresh.push('\n');
+    }
+    store
+        .load_from_reader(RdfFormat::NQuads, Cursor::new(fresh.as_bytes()))
+        .map_err(|e| e.to_string())
 }
 
 /// Is this N-Quads line a sync-marker quad? (`<s> <p> o <g> .` — the
@@ -917,8 +990,9 @@ fn materialize_now_view(store: &Store) {
 ///     Dead both ways — including maxAssert == maxRetract, i.e. asserted
 ///     and retracted in the SAME commit, which both forms treat as dead.
 ///   - Never asserted → neither form counts it (both are driven by asserts).
-/// The derived-count query [`history_counts`] replaced in verify (#49);
-/// the tests keep it as the oracle the one-pass count must agree with.
+///
+/// Verify no longer runs this query: [`history_counts`] replaced it (#49),
+/// and the tests keep it as the oracle the one-pass count must agree with.
 #[cfg(test)]
 const DERIVED_COUNT_Q: &str = "\
 PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> \
@@ -1962,5 +2036,80 @@ mod phase_clock_tests {
         assert_eq!(names, ["open", "git layer", "flush"], "{r}");
         let git_ms: u128 = r.split(" · ").nth(1).unwrap().trim_start_matches("git layer ").trim_end_matches(" ms").parse().unwrap();
         assert!(git_ms >= 12, "{r}");
+    }
+}
+
+/// An append's git layer writes only what changed (#45). The store it
+/// leaves must be the one a clear-and-reload leaves, quad for quad.
+#[cfg(test)]
+mod diffed_git_load_tests {
+    use super::*;
+    use std::collections::HashSet;
+
+    fn g(name: &str) -> String {
+        graph_uri(name)
+    }
+
+    fn all_quads(store: &Store) -> HashSet<String> {
+        store.iter().map(|q| q.unwrap().to_string()).collect()
+    }
+
+    fn store_with(nq: &str) -> Store {
+        let store = Store::new().unwrap();
+        store.load_from_reader(RdfFormat::NQuads, Cursor::new(nq.as_bytes())).unwrap();
+        store
+    }
+
+    #[test]
+    fn diffed_load_equals_clear_and_reload() {
+        let (c, r, repo) = (g("commits"), g("refs"), g("repo"));
+        let (ft_old, ft_new) = (g("filetree/aaa"), g("filetree/bbb"));
+        let lh = spo_events::LEXHISTORY_GRAPH_IRI;
+        let int = "^^<http://www.w3.org/2001/XMLSchema#integer>";
+        // Before: two commits, a file link from the old HEAD, one branch, and
+        // the old HEAD's file tree. Plus history, which the git load never touches.
+        let before = format!(
+            "<https://ex/c1> <https://ex/ord> \"1\"{int} <{c}> .\n\
+             <https://ex/c2> <https://ex/ord> \"2\"{int} <{c}> .\n\
+             <https://ex/c2> <https://ex/file> <https://ex/aaa/x.md> <{c}> .\n\
+             <https://ex/main> <https://ex/target> <https://ex/c2> <{r}> .\n\
+             <https://ex/repo> <https://ex/name> \"old\" <{repo}> .\n\
+             <https://ex/aaa/x.md> <https://ex/path> \"x.md\" <{ft_old}> .\n\
+             <https://ex/e1> <https://ex/assertedIn> <https://ex/c1> <{lh}> .\n"
+        );
+        // After: a third commit, the numbering shifted (a fetch can do that),
+        // the file link and the branch moved, the repo fact changed, a new tree.
+        let after = format!(
+            "<https://ex/c1> <https://ex/ord> \"1\"{int} <{c}> .\n\
+             <https://ex/c2> <https://ex/ord> \"3\"{int} <{c}> .\n\
+             <https://ex/c3> <https://ex/ord> \"2\"{int} <{c}> .\n\
+             <https://ex/c3> <https://ex/file> <https://ex/bbb/x.md> <{c}> .\n\
+             <https://ex/main> <https://ex/target> <https://ex/c3> <{r}> .\n\
+             <https://ex/repo> <https://ex/name> \"new\" <{repo}> .\n\
+             <https://ex/bbb/x.md> <https://ex/path> \"x.md\" <{ft_new}> .\n"
+        );
+
+        let diffed = store_with(&before);
+        clear_derived_graphs(&diffed, true);
+        load_git2_diffed(&diffed, &after).unwrap();
+
+        let reloaded = store_with(&before);
+        clear_derived_graphs(&reloaded, false);
+        reloaded.load_from_reader(RdfFormat::NQuads, Cursor::new(after.as_bytes())).unwrap();
+
+        assert_eq!(all_quads(&diffed), all_quads(&reloaded));
+        // And the old file tree is gone, not just emptied of the new quads.
+        assert!(!all_quads(&diffed).iter().any(|q| q.contains("filetree/aaa")));
+    }
+
+    /// Nothing changed: the load is a no-op, and still equals a reload.
+    #[test]
+    fn unchanged_layer_stays_identical() {
+        let c = g("commits");
+        let nq = format!("<https://ex/c1> <https://ex/ord> \"1\" <{c}> .\n");
+        let diffed = store_with(&nq);
+        clear_derived_graphs(&diffed, true);
+        load_git2_diffed(&diffed, &nq).unwrap();
+        assert_eq!(all_quads(&diffed), all_quads(&store_with(&nq)));
     }
 }
