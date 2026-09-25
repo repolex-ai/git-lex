@@ -18,7 +18,7 @@ Common prefixes are injected automatically on both doors (`git-lex:`,
 `git2:`, `md:`, `fm:`, `rdf:`, `rdfs:`, `owl:`, `xsd:`, and your kit's —
 e.g. `soul:`).
 
-Two common pitfalls that can produce zero rows without an error:
+Three common pitfalls that can produce zero rows without an error:
 
 - **Every repolex namespace ends in a slash, never a hash.** `git-lex/`,
   `soul/`, `copia/` — a hand-typed `PREFIX gl: <…/git-lex#>` is
@@ -30,6 +30,12 @@ Two common pitfalls that can produce zero rows without an error:
   git-lex vocabulary — query them as `git-lex:relatedToId`. Only
   class-specific keys (`soulDay`, `explorationStatus`, …) live under
   the kit's namespace. The key path does not name the emitted IRI.
+- **Markdown body links use `md:linksTo` and connect File to File.** There is no
+  `gl:linksTo`; markdown links emit as `md:linksTo` (full IRI
+  `https://repolex.ai/ontology/git-lex/md/linksTo`, under the auto-injected `md:` prefix).
+  Crucially, body links connect physical `git-lex:File` nodes (`?fromFile md:linksTo ?toFile`).
+  To find the document expressing that file, hop across the bridge with `git-lex:fileId`
+  (`?doc git-lex:fileId ?file`).
 
 When a query returns zero rows and you suspect an IRI mismatch rather than
 missing data, ask the graph what vocabulary it actually uses:
@@ -134,8 +140,14 @@ SELECT ?doc ?type WHERE { ?doc a ?type } LIMIT 20
 # Documents of one class (any kit class works the same way)
 SELECT ?s WHERE { ?s a soul:Note }
 
-# Which documents link to which — markdown links become md:linksTo edges
-SELECT ?from ?to WHERE { ?from md:linksTo ?to } LIMIT 20
+# Which files link to which — markdown links become md:linksTo edges
+SELECT ?fromFile ?toFile WHERE { ?fromFile md:linksTo ?toFile } LIMIT 20
+
+# Which documents link to a specific file (bridging File plane to Thing plane)
+SELECT ?doc ?fromFile WHERE {
+  ?fromFile md:linksTo <https://repolex.ai/git-lex/File/Soul/Note/example.md> .
+  OPTIONAL { ?doc git-lex:fileId ?fromFile }
+}
 
 # Commits
 SELECT ?c WHERE { ?c a git2:Commit } LIMIT 5

@@ -6,10 +6,12 @@ cargo install --git https://github.com/repolex-ai/git-lex --locked
 
 # In an existing Git repo, or create a new one:
 mkdir my-graph && cd my-graph && git init
-git lex init                     # initialize .lex/ in the repo
-git lex create Memory "first"    # scaffold a typed document
-git lex save "my first memory"   # extract + SHACL-validate + commit
-git lex query "SELECT * WHERE { ?s ?p ?o } LIMIT 10"
+git lex init --kit soul          # initialize .lex/ in the repo with a domain kit
+git lex create Note "first"      # scaffold a typed document
+git lex save "my first note"     # extract + SHACL-validate + commit; nudges gitlexd
+git lex sync                     # compile committed history into the persistent store
+git lex query "SELECT * WHERE { ?s ?p ?o } LIMIT 10"  # query via gitlexd (auto-starts if needed)
+git lex direct "SELECT * WHERE { ?s ?p ?o } LIMIT 10" # query working tree in memory
 ```
 
 ---
@@ -33,4 +35,5 @@ git lex query "SELECT * WHERE { ?s ?p ?o } LIMIT 10"
 * [Kit Ontology Design](kit-development/kit-ontology.md) — Classes, enums, and property shapes.
 * [Ontology Guidelines](kit-development/ontology-guidelines.md) — Naming conventions, identifier rules, and reference properties.
 * [Hook Authoring](kit-development/hook-authoring.md) — Pre-commit gates and post-tool lifecycle hooks.
+* [Harness-Specific Features](kit-development/harness-specific-features.md) — Multi-substrate integration, frontmatter dialects, and harness hook translation (Claude Code, Google Antigravity, Hermes).
 * [Engine Runtime Dirs](kit-development/engine-runtime-dirs.md) — The `_ignore/` pocket law: committed vs. untracked directories.

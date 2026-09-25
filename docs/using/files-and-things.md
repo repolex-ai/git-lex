@@ -15,7 +15,7 @@ Soul/Journal/day-7.md  →  git-lex/File/Soul/Journal/day-7.md
 Because the path serves as the identifier, a File node represents a physical location rather than a persistent concept. If you rename the file, the old address is deleted from the current state, and a new address node is created.
 
 File-plane metadata includes:
-* Raw links extracted from your Markdown prose (`linksTo` edges)
+* Raw links extracted from your Markdown prose (`md:linksTo` edges)
 * Incidental, untyped frontmatter properties
 * Git commit metadata (author, timestamps)
 
@@ -114,7 +114,7 @@ These properties serve separate roles:
 #### Timestamps (`createdDate` and `updatedDate`)
 Both properties are parsed as XML schema `xsd:dateTime` values representing a precise timestamp rather than a plain calendar date (`YYYY-MM-DD`). 
 * You should not edit these values manually.
-* `git lex save` automatically stamps `updatedDate` on every commit, and initializes `createdDate` if it is the document's first save.
+* `git lex save` automatically writes `updatedDate` on every commit, and initializes `createdDate` if it is the document's first save. (Use `git lex save --no-restamp` to suppress bumping `updatedDate` during bulk sweeps or mechanical migrations).
 * If a document is moved or migrated from an external location, the `createdDate` property preserves its original creation timestamp, which would otherwise be lost in Git history.
 
 #### Cross-Namespace References
