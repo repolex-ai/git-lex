@@ -917,6 +917,9 @@ fn materialize_now_view(store: &Store) {
 ///     Dead both ways — including maxAssert == maxRetract, i.e. asserted
 ///     and retracted in the SAME commit, which both forms treat as dead.
 ///   - Never asserted → neither form counts it (both are driven by asserts).
+/// The derived-count query [`history_counts`] replaced in verify (#49);
+/// the tests keep it as the oracle the one-pass count must agree with.
+#[cfg(test)]
 const DERIVED_COUNT_Q: &str = "\
 PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> \
 PREFIX gl: <https://repolex.ai/ontology/git-lex/> \
@@ -1081,6 +1084,171 @@ fn sync_onegraph_walk(store: &Store, root: &std::path::Path, resume_sha: Option<
 /// Type the one graph for discovery, then prove the store coherent — every
 /// sync, or the sync aborts. Reads the commits graph, so it runs after the
 /// git2 layer is loaded.
+/// The base-layer fact count verify compares with the derived count. MINUS
+/// anti-join (2026-08-26 rewrite; oracle in coherence_query_tests): one hash
+/// anti-join on ?s instead of a correlated NOT EXISTS probe per triple (479k
+/// on lUX). Equivalent because the right side binds exactly the shared ?s.
+const BASE_COUNT_Q: &str = "SELECT (COUNT(*) AS ?n) WHERE { GRAPH <https://repolex.ai/git-lex/LexHistoryGraph> { \
+   ?s ?p ?o . \
+   FILTER(?p != <http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies>) \
+   MINUS { ?s a <https://repolex.ai/ontology/git-lex/SpoEvent> } } }";
+
+/// What verify reads from the history graph's events (#49).
+#[derive(Debug, PartialEq)]
+struct HistoryCounts {
+    /// SpoEvents with more than one statement, more than one assert or
+    /// retract, or both directions.
+    integrity_bad: u64,
+    /// Distinct commits that events name and the commits graph lacks.
+    dangling: u64,
+    /// Statements whose latest assert (by commit ordinal) is later than
+    /// their latest retract: the facts the history derives as current.
+    derived_live: u64,
+}
+
+/// Verify's integrity, dangling-commit and derived-count checks in one pass
+/// over three predicates of the history graph and the commit ordinals.
+///
+/// Each count equals its SPARQL formulation (the oracles in
+/// `derived_count_tests` and `coherence_query_tests`). `derived_live` is
+/// exact for integrity-clean events, which is the only case verify reads it
+/// in: an integrity failure aborts first.
+fn history_counts(store: &Store) -> Result<HistoryCounts, String> {
+    use oxigraph::model::{GraphNameRef, NamedNodeRef, NamedOrBlankNode, NamedOrBlankNodeRef, Term};
+    use std::collections::{HashMap, HashSet};
+
+    const XSD_INTEGER: &str = "http://www.w3.org/2001/XMLSchema#integer";
+    let lh = GraphNameRef::from(NamedNodeRef::new_unchecked(spo_events::LEXHISTORY_GRAPH_IRI));
+    let cg = GraphNameRef::from(NamedNodeRef::new_unchecked("https://repolex.ai/git-lex/NamedGraph/commits"));
+    let reifies = NamedNodeRef::new_unchecked("http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies");
+    let asserted_in = NamedNodeRef::new_unchecked(spo_events::ONEGRAPH_ASSERTED_IN);
+    let retracted_in = NamedNodeRef::new_unchecked(spo_events::ONEGRAPH_RETRACTED_IN);
+    let ordinal_p = NamedNodeRef::new_unchecked(SYNC_MARKER_PREDICATE);
+
+    // Commit → its ordinal (the largest, if a commit somehow has two: the
+    // SPARQL took MAX over every pairing). An ordinal that is not an
+    // xsd:integer is kept as None: the commit is still present for the
+    // dangling check, and the derived count refuses to guess its order.
+    let mut ordinal: HashMap<Term, Option<i64>> = HashMap::new();
+    for q in store.quads_for_pattern(None, Some(ordinal_p), None, Some(cg)) {
+        let q = q.map_err(|e| e.to_string())?;
+        let v = match &q.object {
+            Term::Literal(lit) if lit.datatype().as_str() == XSD_INTEGER => lit.value().parse::<i64>().ok(),
+            _ => None,
+        };
+        let slot = ordinal.entry(Term::from(q.subject)).or_insert(v);
+        *slot = match (*slot, v) {
+            (Some(a), Some(b)) => Some(a.max(b)),
+            _ => None,
+        };
+    }
+    let order_of = |c: &Term| -> Result<Option<i64>, String> {
+        match ordinal.get(c) {
+            None => Ok(None),
+            Some(Some(o)) => Ok(Some(*o)),
+            Some(None) => Err(format!("commit {c} has an ordinal that is not an xsd:integer")),
+        }
+    };
+
+    // The three predicate scans are independent; each decodes a few hundred
+    // thousand quads on a large soul (lUX: 390k events), so they run side by
+    // side. Per scan: subject → (the object seen, how many objects).
+    type Scan<V> = Result<HashMap<NamedOrBlankNode, (V, u32)>, String>;
+    let scan_directions = |pred: NamedNodeRef<'_>| -> Scan<Term> {
+        let mut out: HashMap<NamedOrBlankNode, (Term, u32)> = HashMap::new();
+        for q in store.quads_for_pattern(None, Some(pred), None, Some(lh)) {
+            let q = q.map_err(|e| e.to_string())?;
+            let slot = out.entry(q.subject).or_insert((q.object, 0));
+            slot.1 += 1;
+        }
+        Ok(out)
+    };
+    // Statements are triple terms; each distinct one gets a small number.
+    let scan_statements = || -> Scan<u32> {
+        let mut ids: HashMap<Term, u32> = HashMap::new();
+        let mut out: HashMap<NamedOrBlankNode, (u32, u32)> = HashMap::new();
+        for q in store.quads_for_pattern(None, Some(reifies), None, Some(lh)) {
+            let q = q.map_err(|e| e.to_string())?;
+            let next = ids.len() as u32;
+            let id = *ids.entry(q.object).or_insert(next);
+            let slot = out.entry(q.subject).or_insert((id, 0));
+            slot.1 += 1;
+        }
+        Ok(out)
+    };
+    let (statements, asserted, retracted) = std::thread::scope(|sc| {
+        let st = sc.spawn(scan_statements);
+        let re = sc.spawn(|| scan_directions(retracted_in));
+        let asr = scan_directions(asserted_in);
+        (
+            st.join().unwrap_or_else(|_| Err("statement scan panicked".into())),
+            asr,
+            re.join().unwrap_or_else(|_| Err("retraction scan panicked".into())),
+        )
+    });
+    let (statements, asserted, retracted) = (statements?, asserted?, retracted?);
+
+    // Integrity: distinct events with two statements, two asserts, two
+    // retracts, or both directions.
+    let mut bad: HashSet<&NamedOrBlankNode> = HashSet::new();
+    bad.extend(statements.iter().filter(|(_, (_, n))| *n > 1).map(|(e, _)| e));
+    bad.extend(asserted.iter().filter(|(e, (_, n))| *n > 1 || retracted.contains_key(*e)).map(|(e, _)| e));
+    bad.extend(retracted.iter().filter(|(_, (_, n))| *n > 1).map(|(e, _)| e));
+    let integrity_bad = bad.len() as u64;
+
+    // Dangling: a named commit with no quad at all in the commits graph.
+    let named: HashSet<&Term> = asserted.values().chain(retracted.values()).map(|(c, _)| c).collect();
+    let mut dangling = 0u64;
+    for c in named {
+        if ordinal.contains_key(c) {
+            continue;
+        }
+        let present = match c {
+            Term::NamedNode(n) => store
+                .quads_for_pattern(Some(NamedOrBlankNodeRef::from(n.as_ref())), None, None, Some(cg))
+                .next()
+                .is_some(),
+            Term::BlankNode(b) => store
+                .quads_for_pattern(Some(NamedOrBlankNodeRef::from(b.as_ref())), None, None, Some(cg))
+                .next()
+                .is_some(),
+            _ => false, // a literal or triple term can be no commit's subject
+        };
+        if !present {
+            dangling += 1;
+        }
+    }
+
+    // Derived: per statement, the latest assert against the latest retract,
+    // counting only events whose commit has an ordinal (the SPARQL joined on
+    // it). Live when asserted and never retracted after.
+    let mut latest: HashMap<u32, (Option<i64>, Option<i64>)> = HashMap::new();
+    for (event, (stmt, _)) in &statements {
+        if let Some((c, _)) = asserted.get(event)
+            && let Some(o) = order_of(c)?
+        {
+            let slot = &mut latest.entry(*stmt).or_default().0;
+            *slot = Some(slot.map_or(o, |m| m.max(o)));
+        }
+        if let Some((c, _)) = retracted.get(event)
+            && let Some(o) = order_of(c)?
+        {
+            let slot = &mut latest.entry(*stmt).or_default().1;
+            *slot = Some(slot.map_or(o, |m| m.max(o)));
+        }
+    }
+    let derived_live = latest
+        .values()
+        .filter(|(a, r)| match (a, r) {
+            (Some(_), None) => true,
+            (Some(a), Some(r)) => r < a,
+            _ => false,
+        })
+        .count() as u64;
+
+    Ok(HistoryCounts { integrity_bad, dangling, derived_live })
+}
+
 fn verify_onegraph(store: &Store) {
     // Discovery typing (default graph, idempotent): the graph's NamedGraph
     // object, dual-typed — the store does no inference, so both the class and
@@ -1095,58 +1263,6 @@ fn verify_onegraph(store: &Store) {
         std::process::exit(1);
     }
 
-    // Structural integrity (runs EVERY build): each SpoEvent has exactly one
-    // statement (rdf:reifies) and exactly one direction. A violation means a
-    // 16-hex id collision or an emitter bug — LOUD, never silently deduped.
-    // Aggregate arms (2026-08-26 rewrite; oracle in integrity_query_tests):
-    // "more than one X" as GROUP BY ?e HAVING(COUNT > 1) instead of a
-    // pairwise self-join per arm — same COUNT(DISTINCT ?e), one scan per
-    // arm. The store dedups quads, so COUNT(?t) counts DISTINCT objects by
-    // construction.
-    let integrity = format!(
-        "SELECT (COUNT(DISTINCT ?e) AS ?bad) WHERE {{ \
-           {{ GRAPH <{g}> {{ ?e <https://repolex.ai/ontology/git-lex/assertedIn> ?a ; \
-                             <https://repolex.ai/ontology/git-lex/retractedIn> ?r }} }} \
-           UNION \
-           {{ SELECT ?e WHERE {{ GRAPH <{g}> {{ ?e <http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies> ?t }} }} GROUP BY ?e HAVING(COUNT(?t) > 1) }} \
-           UNION \
-           {{ SELECT ?e WHERE {{ GRAPH <{g}> {{ ?e <https://repolex.ai/ontology/git-lex/assertedIn> ?c }} }} GROUP BY ?e HAVING(COUNT(?c) > 1) }} \
-           UNION \
-           {{ SELECT ?e WHERE {{ GRAPH <{g}> {{ ?e <https://repolex.ai/ontology/git-lex/retractedIn> ?d }} }} GROUP BY ?e HAVING(COUNT(?d) > 1) }} \
-        }}",
-        g = spo_events::LEXHISTORY_GRAPH_IRI
-    );
-    // The check itself failing to run is ALSO a failure — an unverified graph
-    // must not report a successful sync (`unwrap_or(0)` here used to turn a
-    // broken query into a silent pass).
-    let bad = oxigraph::sparql::SparqlEvaluator::new()
-        .parse_query(&integrity)
-        .ok()
-        .and_then(|q| q.on_store(store).execute().ok())
-        .and_then(|r| match r {
-            oxigraph::sparql::QueryResults::Solutions(mut sols) => sols
-                .next()
-                .and_then(|s| s.ok())
-                .and_then(|s| s.get("bad").map(|t| t.to_string())),
-            _ => None,
-        })
-        .and_then(|v| v.split('"').nth(1).and_then(|n| n.parse::<u64>().ok()));
-    match bad {
-        None => {
-            eprintln!("ERROR: one-graph integrity check could not run (query failed) — the graph is unverified.");
-            std::process::exit(1);
-        }
-        Some(bad) if bad > 0 => {
-            eprintln!(
-                "ERROR: one-graph integrity check FAILED — {bad} SpoEvent node(s) violate one-statement/one-direction (16-hex id collision or emitter bug). The graph is NOT trustworthy until this is resolved."
-            );
-            std::process::exit(1);
-        }
-        _ => {}
-    }
-    // ── Commit joins + state-parity (promoted from `verify` before its
-    // removal — Rob-ruled 2026-07-29: every sync proves the store coherent
-    // or aborts; the strongest corruption detector runs on every build).
     let count_q = |q: &str| -> Option<u64> {
         match crate::eval_query(store, q) {
             Ok(oxigraph::sparql::QueryResults::Solutions(mut sols)) => sols
@@ -1157,29 +1273,40 @@ fn verify_onegraph(store: &Store) {
             _ => None,
         }
     };
-    // DISTINCT-first (2026-08-26 rewrite; oracle in coherence_query_tests):
-    // the NOT EXISTS probe runs once per DISTINCT commit (~2k) instead of
-    // once per event binding (~265k on lUX).
-    let dangling = count_q(
-        "SELECT (COUNT(*) AS ?n) WHERE { \
-           { SELECT DISTINCT ?c WHERE { \
-               GRAPH <https://repolex.ai/git-lex/LexHistoryGraph> { \
-                 { ?e <https://repolex.ai/ontology/git-lex/assertedIn> ?c } UNION \
-                 { ?e <https://repolex.ai/ontology/git-lex/retractedIn> ?c } } } } \
-           FILTER NOT EXISTS { GRAPH <https://repolex.ai/git-lex/NamedGraph/commits> { ?c ?p ?o } } \
-        }",
-    );
-    // MINUS anti-join (2026-08-26 rewrite; oracle in coherence_query_tests):
-    // one hash anti-join on ?s instead of a correlated NOT EXISTS probe per
-    // triple (479k on lUX). Equivalent because the right side binds exactly
-    // the shared ?s and nothing else.
-    let base_count = count_q(
-        "SELECT (COUNT(*) AS ?n) WHERE { GRAPH <https://repolex.ai/git-lex/LexHistoryGraph> { \
-           ?s ?p ?o . \
-           FILTER(?p != <http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies>) \
-           MINUS { ?s a <https://repolex.ai/ontology/git-lex/SpoEvent> } } }",
-    );
-    let derived_count = count_q(DERIVED_COUNT_Q);
+    // Three of the four checks come from ONE pass over the history graph's
+    // event predicates (#49): structural integrity, dangling commits and the
+    // derived fact count. Same checks, same answers as the SPARQL they
+    // replace (kept in the tests as oracles); on lUX the three queries took
+    // about 8 s of every sync. The check failing to RUN is itself a failure:
+    // an unverified graph must not report a successful sync. The fourth
+    // check, the base-fact count (a SPARQL anti-join), runs alongside it.
+    let (counts, base_count) = std::thread::scope(|sc| {
+        let pass = sc.spawn(|| history_counts(store));
+        let base = count_q(BASE_COUNT_Q);
+        (pass.join().unwrap_or_else(|_| Err("the one-pass check panicked".into())), base)
+    });
+    let counts = match counts {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("ERROR: store coherence checks could not run ({e}) — the graph is unverified.");
+            std::process::exit(1);
+        }
+    };
+    // Structural integrity (runs EVERY build): each SpoEvent has exactly one
+    // statement (rdf:reifies) and exactly one direction. A violation means a
+    // 16-hex id collision or an emitter bug — LOUD, never silently deduped.
+    if counts.integrity_bad > 0 {
+        eprintln!(
+            "ERROR: one-graph integrity check FAILED — {} SpoEvent node(s) violate one-statement/one-direction (16-hex id collision or emitter bug). The graph is NOT trustworthy until this is resolved.",
+            counts.integrity_bad
+        );
+        std::process::exit(1);
+    }
+    // ── Commit joins + state-parity (promoted from `verify` before its
+    // removal — Rob-ruled 2026-07-29: every sync proves the store coherent
+    // or aborts; the strongest corruption detector runs on every build).
+    let dangling = Some(counts.dangling);
+    let derived_count = Some(counts.derived_live);
     match (dangling, base_count, derived_count) {
         (Some(0), Some(b), Some(d)) if b == d => {}
         (None, _, _) | (_, None, _) | (_, _, None) => {
@@ -1388,6 +1515,8 @@ SELECT (COUNT(DISTINCT ?tt) AS ?n) WHERE { \
         let old = count(&store, OLD_DERIVED_COUNT_Q);
         assert_eq!(new, old, "rewrite disagrees with the oracle on {events:?}");
         assert_eq!(new, expected_live, "wrong live count for {events:?}");
+        let pass = history_counts(&store).expect("one-pass counts failed");
+        assert_eq!(pass.derived_live, new, "one-pass derived count disagrees with the oracle on {events:?}");
     }
 
     #[test]
@@ -1538,6 +1667,68 @@ mod coherence_query_tests {
         let nw = n(store, new);
         assert_eq!(nw, o, "{what}: rewrite disagrees with oracle");
         assert_eq!(nw, expected, "{what}: wrong count");
+        // Verify reads integrity and dangling from the one-pass counts (#49).
+        let pass = super::history_counts(store).expect("one-pass counts failed");
+        if what.starts_with("dangling") {
+            assert_eq!(pass.dangling, nw, "{what}: one-pass count disagrees with oracle");
+        }
+        if what.starts_with("integrity") {
+            assert_eq!(pass.integrity_bad, nw, "{what}: one-pass count disagrees with oracle");
+        }
+    }
+
+    /// Random histories, checked against the SPARQL oracles: integrity on
+    /// every population, dangling and the derived count on clean ones (the
+    /// only case verify reads them in — an integrity failure aborts first).
+    #[test]
+    fn one_pass_counts_agree_with_sparql_on_random_histories() {
+        let mut seed: u64 = 0x9e37_79b9_7f4a_7c15;
+        let mut next = |m: u64| -> u64 {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed % m
+        };
+        for round in 0..300 {
+            let dirty = round % 3 == 0;
+            let commits = 1 + next(6);
+            let mut nq = String::new();
+            // Most commits carry an ordinal; some carry only a summary (in the
+            // graph, no ordinal); a few are missing from the commits graph.
+            for c in 0..commits {
+                match next(10) {
+                    0 => {}
+                    1 => nq.push_str(&format!("<https://ex/c{c}> <{GL}git2/summary> \"s\" <{CG}> .\n")),
+                    _ => nq.push_str(&format!(
+                        "<https://ex/c{c}> <{GL}git2/ordinalDerived> \"{}\"^^<http://www.w3.org/2001/XMLSchema#integer> <{CG}> .\n",
+                        1 + next(5)
+                    )),
+                }
+            }
+            for e in 0..next(12) {
+                let stmt = next(4);
+                nq.push_str(&format!(
+                    "<https://ex/e{e}> <{RDF}reifies> <<( <https://ex/s{stmt}> <https://ex/p> \"v{stmt}\" )>> <{LH}> .\n"
+                ));
+                let dir = if next(2) == 0 { "assertedIn" } else { "retractedIn" };
+                nq.push_str(&format!("<https://ex/e{e}> <{GL}{dir}> <https://ex/c{}> <{LH}> .\n", next(commits + 1)));
+                if dirty && next(4) == 0 {
+                    let extra = match next(3) {
+                        0 => format!("<https://ex/e{e}> <{RDF}reifies> <<( <https://ex/x{e}> <https://ex/p> \"w\" )>> <{LH}> .\n"),
+                        1 => format!("<https://ex/e{e}> <{GL}assertedIn> <https://ex/c{}> <{LH}> .\n", next(commits + 1)),
+                        _ => format!("<https://ex/e{e}> <{GL}retractedIn> <https://ex/c{}> <{LH}> .\n", next(commits + 1)),
+                    };
+                    nq.push_str(&extra);
+                }
+            }
+            let store = store_from(&nq);
+            let pass = super::history_counts(&store).expect("one-pass counts failed");
+            assert_eq!(pass.integrity_bad, n(&store, &new_integrity()), "integrity, round {round}:\n{nq}");
+            if pass.integrity_bad == 0 {
+                assert_eq!(pass.dangling, n(&store, &new_dangling()), "dangling, round {round}:\n{nq}");
+                assert_eq!(pass.derived_live, n(&store, super::DERIVED_COUNT_Q), "derived, round {round}:\n{nq}");
+            }
+        }
     }
 
     #[test]
