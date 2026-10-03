@@ -86,3 +86,24 @@ curl -X POST http://127.0.0.1:7880/soul/495d8c70/sparql \
 
 gitlexd answers for its own stores only. A query that names a `SERVICE`
 gets an error; a question across stores (pan, ravel) is for syrinxd.
+
+### Web pages on this machine
+
+A web page served from this machine can query gitlexd straight from the
+browser: any page whose address is `http://localhost:<port>`,
+`http://127.0.0.1:<port>` or `http://[::1]:<port>` (https too). gitlexd
+answers the browser's permission check and marks its replies readable by
+that page. Serve the page from a local web server (`python3 -m http.server`
+is enough); a page opened straight from disk is refused, because a browser
+reports its origin as `null`, the same as a sandboxed frame on any website.
+
+Everything else is refused with `403` before any route runs:
+
+- a page from any other website, so a site on the internet cannot read a
+  soul or start a sync through your browser;
+- a request addressed to any name other than `127.0.0.1:7880`,
+  `localhost:7880` or `[::1]:7880`, which stops an outside domain that
+  points itself at 127.0.0.1.
+
+Programs that are not browsers (curl, `git lex query`, git-lex-ui's server)
+send no origin and are unaffected.
