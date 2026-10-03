@@ -782,6 +782,7 @@ dependencies = [
  "shacl_validation",
  "sparql_service",
  "tokio",
+ "tower",
  "tree-sitter",
  "tree-sitter-md",
  "ureq",

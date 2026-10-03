@@ -46,3 +46,6 @@ form_urlencoded = "1"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "signal"] }
 # The git-lex command line talking to gitlexd on localhost: blocking, no TLS.
 ureq = { version = "3", default-features = false, features = ["json"] }
+
+[dev-dependencies]
+tower = { version = "0.5", features = ["util"] }

@@ -14,8 +14,9 @@
 //! graph to fall into.
 
 use super::daemon::{Daemon, FindError, Soul};
-use axum::extract::{Path as AxPath, Query as AxQuery, State};
-use axum::http::{header, HeaderMap, StatusCode};
+use axum::extract::{Path as AxPath, Query as AxQuery, Request, State};
+use axum::middleware::{self, Next};
+use axum::http::{header, HeaderMap, HeaderValue, Method, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, post};
 use axum::{Json, Router};
@@ -250,6 +251,99 @@ pub fn router(d: Arc<Daemon>) -> Router {
         .route("/souls", get(souls))
         .route("/health", get(health))
         .with_state(d)
+        .layer(middleware::from_fn(local_only))
+}
+
+/// The Host values gitlexd answers to: its own address, by any of the three
+/// names this machine gives itself. Anything else is refused, which stops
+/// DNS rebinding: an outside website that points its own domain name at
+/// 127.0.0.1 still sends its own name as the Host, and gets nothing.
+fn is_local_host(host: &str) -> bool {
+    let port = super::PORT;
+    [format!("127.0.0.1:{port}"), format!("localhost:{port}"), format!("[::1]:{port}")]
+        .iter()
+        .any(|h| h == host)
+}
+
+/// A web page served from this machine: `http` or `https`, host `localhost`,
+/// `127.0.0.1` or `[::1]`, any port or none. `null` (a page opened straight
+/// from disk, or a sandboxed frame on any site) is not local.
+fn is_local_origin(origin: &str) -> bool {
+    let Some(rest) = origin.strip_prefix("http://").or_else(|| origin.strip_prefix("https://")) else {
+        return false;
+    };
+    let (host, port) = match rest.strip_prefix("[::1]") {
+        Some(after) => ("[::1]", after),
+        None => match rest.split_once(':') {
+            Some((h, p)) => (h, &rest[h.len()..][..1 + p.len()]),
+            None => (rest, ""),
+        },
+    };
+    let port_ok = port.is_empty()
+        || (port.len() > 1 && port.starts_with(':') && port[1..].bytes().all(|b| b.is_ascii_digit()));
+    port_ok && matches!(host, "localhost" | "127.0.0.1" | "[::1]")
+}
+
+/// In front of every route: gitlexd serves this machine and nothing else.
+///
+/// - A request must be addressed to gitlexd itself (see `is_local_host`).
+/// - A request with no `Origin` (curl, `git lex query`, another program such
+///   as git-lex-ui's server) passes as before.
+/// - A web page served from localhost on any port may read the answers: the
+///   reply carries `Access-Control-Allow-Origin` for it, and the browser's
+///   preflight (`OPTIONS`) is answered here. This is what lets one shared UI
+///   layer (git-lex-ui, Pan's and Ravel's views) query gitlexd straight from
+///   the browser (goodlux, 2026-10-03).
+/// - Any other website is refused outright, before any route runs, so a page
+///   on the internet cannot even trigger a sync through the user's browser.
+async fn local_only(req: Request, next: Next) -> Response {
+    let host = req
+        .headers()
+        .get(header::HOST)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_string();
+    if !is_local_host(&host) {
+        let port = super::PORT;
+        return (
+            StatusCode::FORBIDDEN,
+            format!(
+                "gitlexd answers only requests addressed to 127.0.0.1:{port} or localhost:{port}; \
+                 this one was addressed to {host:?}. Use http://127.0.0.1:{port}/ as the address.\n"
+            ),
+        )
+            .into_response();
+    }
+    let Some(origin) = req.headers().get(header::ORIGIN).and_then(|v| v.to_str().ok()).map(str::to_string)
+    else {
+        return next.run(req).await;
+    };
+    if !is_local_origin(&origin) {
+        return (
+            StatusCode::FORBIDDEN,
+            format!(
+                "gitlexd answers web pages served from this machine only. This page's origin is {origin:?}. \
+                 Serve the page from http://localhost:<port> (for example `python3 -m http.server`) \
+                 and load it from there.\n"
+            ),
+        )
+            .into_response();
+    }
+    let allow = HeaderValue::from_str(&origin).unwrap_or_else(|_| HeaderValue::from_static("null"));
+    let mut resp = if req.method() == Method::OPTIONS {
+        let mut r = StatusCode::NO_CONTENT.into_response();
+        let h = r.headers_mut();
+        h.insert(header::ACCESS_CONTROL_ALLOW_METHODS, HeaderValue::from_static("GET, POST"));
+        h.insert(header::ACCESS_CONTROL_ALLOW_HEADERS, HeaderValue::from_static("Content-Type, Accept"));
+        h.insert(header::ACCESS_CONTROL_MAX_AGE, HeaderValue::from_static("600"));
+        r
+    } else {
+        next.run(req).await
+    };
+    let h = resp.headers_mut();
+    h.insert(header::ACCESS_CONTROL_ALLOW_ORIGIN, allow);
+    h.insert(header::VARY, HeaderValue::from_static("Origin"));
+    resp
 }
 
 /// Bind and serve until Ctrl-C or SIGTERM.
@@ -292,5 +386,87 @@ async fn shutdown_signal() {
     tokio::select! {
         _ = ctrl_c => {},
         _ = term => {},
+    }
+}
+
+
+#[cfg(test)]
+mod local_only_tests {
+    use super::*;
+    use axum::body::Body;
+    use tower::ServiceExt;
+
+    fn app() -> Router {
+        Router::new()
+            .route("/health", get(|| async { "ok" }))
+            .route("/soul/{g}/sparql", get(|| async { "rows" }).post(|| async { "rows" }))
+            .layer(middleware::from_fn(local_only))
+    }
+
+    async fn send(method: &str, path: &str, host: Option<&str>, origin: Option<&str>) -> Response {
+        let mut b = axum::http::Request::builder().method(method).uri(path);
+        if let Some(h) = host {
+            b = b.header(header::HOST, h);
+        }
+        if let Some(o) = origin {
+            b = b.header(header::ORIGIN, o);
+        }
+        app().oneshot(b.body(Body::empty()).unwrap()).await.unwrap()
+    }
+
+    fn acao(r: &Response) -> Option<&str> {
+        r.headers().get(header::ACCESS_CONTROL_ALLOW_ORIGIN).and_then(|v| v.to_str().ok())
+    }
+
+    #[test]
+    fn local_origins_and_hosts() {
+        for o in ["http://localhost:5173", "http://127.0.0.1:8080", "https://localhost", "http://[::1]:3000", "http://localhost"] {
+            assert!(is_local_origin(o), "{o} should be local");
+        }
+        for o in ["null", "http://evil.com", "http://localhost.evil.com", "http://127.0.0.1.nip.io:80", "http://localhost:", "http://localhost:80x", "file://", "http://[::1]x", "ftp://localhost"] {
+            assert!(!is_local_origin(o), "{o} should not be local");
+        }
+        assert!(is_local_host("127.0.0.1:7880") && is_local_host("localhost:7880") && is_local_host("[::1]:7880"));
+        assert!(!is_local_host("evil.com:7880") && !is_local_host("127.0.0.1") && !is_local_host(""));
+    }
+
+    #[tokio::test]
+    async fn programs_without_an_origin_pass_unchanged() {
+        let r = send("GET", "/health", Some("127.0.0.1:7880"), None).await;
+        assert_eq!(r.status(), StatusCode::OK);
+        assert!(acao(&r).is_none());
+    }
+
+    #[tokio::test]
+    async fn a_localhost_page_may_read() {
+        let r = send("GET", "/health", Some("127.0.0.1:7880"), Some("http://localhost:5173")).await;
+        assert_eq!(r.status(), StatusCode::OK);
+        assert_eq!(acao(&r), Some("http://localhost:5173"));
+    }
+
+    #[tokio::test]
+    async fn the_browser_preflight_is_answered() {
+        let r = send("OPTIONS", "/soul/abc/sparql", Some("localhost:7880"), Some("http://127.0.0.1:8000")).await;
+        assert_eq!(r.status(), StatusCode::NO_CONTENT);
+        assert_eq!(acao(&r), Some("http://127.0.0.1:8000"));
+        assert_eq!(r.headers().get(header::ACCESS_CONTROL_ALLOW_METHODS).unwrap(), "GET, POST");
+    }
+
+    #[tokio::test]
+    async fn other_websites_are_refused_before_any_route_runs() {
+        for o in ["http://evil.com", "null"] {
+            let r = send("POST", "/soul/abc/sparql", Some("127.0.0.1:7880"), Some(o)).await;
+            assert_eq!(r.status(), StatusCode::FORBIDDEN, "{o}");
+            assert!(acao(&r).is_none());
+        }
+    }
+
+    #[tokio::test]
+    async fn a_request_addressed_elsewhere_is_refused() {
+        // DNS rebinding: an outside domain pointed at 127.0.0.1 keeps its own Host.
+        let r = send("GET", "/health", Some("rebind.evil.com:7880"), Some("http://rebind.evil.com:7880")).await;
+        assert_eq!(r.status(), StatusCode::FORBIDDEN);
+        let r = send("GET", "/health", None, None).await;
+        assert_eq!(r.status(), StatusCode::FORBIDDEN);
     }
 }
