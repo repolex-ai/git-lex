@@ -104,13 +104,13 @@ pub fn cmd_sync() {
         return;
     }
 
-    let onegraph_resume = validated_resume(&root, resume_point(&store, &root));
+    let onegraph_resume = validated_resume(&root, resume_point(&store, &root, &head_sha), &head_sha);
     // No resume point = the one graph is rebuilt from the first commit.
     let full_rebuild = onegraph_resume.is_none();
     clock.mark("resume point");
 
-    // An append keeps the commits, refs and repo graphs: the git layer
-    // step below updates them to exactly what a fresh load would hold (#45).
+    // An append keeps the git layer's graphs: the git layer step after the
+    // walk updates them to exactly what a fresh load would hold (#45).
     clear_derived_graphs(&store, !full_rebuild);
     let now_present = store
         .contains_named_graph(&oxigraph::model::NamedNode::new_unchecked(NOW_GRAPH_IRI))
@@ -120,15 +120,7 @@ pub fn cmd_sync() {
     clock.mark("clear derived + heal ontology");
 
 
-    // Regenerate the git2 machinery layer (commits/signatures/refs/filetree).
-    // An append loads it here, writing only what changed (#45). A full rebuild loads
-    // it AFTER the one graph and the now view (see below): the rebuild
-    // writes in batches (#15), and the git2 layer carries the sync marker.
     let mut git_count = 0;
-    if !full_rebuild {
-        git_count = load_git2_layer(&store, Git2Load::Diffed);
-        clock.mark("git layer (changes only)");
-    }
 
     // Extraction: the ONE working-tree walk WRITES both sidecar families
     // (.fm.spo + .md.spo — the one graph's source) and derives the
@@ -156,8 +148,20 @@ These are in your WORKING FILES, not history — fix the listed files and the wa
     // Shares the SAME resolver context, so one-graph facts resolve
     // identically to now-view facts (and the indexes build once per sync,
     // not twice). ───
-    let onegraph = sync_onegraph_walk(&store, &root, onegraph_resume, &resolver_ctx);
+    let onegraph = sync_onegraph_walk(&store, &root, onegraph_resume, &resolver_ctx, &head_sha);
     clock.mark("history (one graph)");
+
+    // Regenerate the git2 machinery layer (commits/signatures/refs/filetree)
+    // for the HEAD this sync resolved at its start. An append loads it here,
+    // AFTER the walk, writing only what changed (#45): the commit ordinals
+    // are the sync marker, so HEAD's ordinal lands only once its events are
+    // in. Killed before this point, the next sync resumes from the previous
+    // commit and walks the same range again. A full rebuild loads it after
+    // the now view (below): it writes in batches (#15), marker last.
+    if !full_rebuild {
+        git_count = load_git2_layer(&store, Git2Load::Diffed, &head_sha, &root);
+        clock.mark("git layer (changes only)");
+    }
 
     // ─── Stale graph cleanup ───
     // Subsumed by the Phase-1 clear filter: every graph not on the keep-list
@@ -182,7 +186,7 @@ These are in your WORKING FILES, not history — fix the listed files and the wa
     if full_rebuild {
         materialize_now_view_in_batches(&store);
         clock.mark("now view (full)");
-        git_count = load_git2_layer(&store, Git2Load::BatchedMarkerLast);
+        git_count = load_git2_layer(&store, Git2Load::BatchedMarkerLast, &head_sha, &root);
         clock.mark("git layer (full, batched)");
     }
 
@@ -335,7 +339,7 @@ fn fast_path_hit(store: &Store, root: &std::path::Path, head_sha: &str) -> bool 
         // synced" over a one graph still carrying the rewound-away
         // commits' events. Fall through; resume_point prints the loud
         // line and forces the full rebuild.
-        return rewound_event_commits(store, root).is_empty();
+        return rewound_event_commits(store, root, head_sha).is_empty();
     }
     false
 }
@@ -364,7 +368,7 @@ fn fast_path_hit(store: &Store, root: &std::path::Path, head_sha: &str) -> bool 
 /// returns empty (no forced rebuild): the sync phases run their own
 /// rev-list with a loud exit, so a broken repo fails there, not silently
 /// here.
-fn rewound_event_commits(store: &Store, root: &std::path::Path) -> Vec<String> {
+fn rewound_event_commits(store: &Store, root: &std::path::Path, head_sha: &str) -> Vec<String> {
     let q = format!(
         "SELECT DISTINCT ?c WHERE {{ GRAPH <{}> {{ \
            {{ ?e <{}> ?c }} UNION {{ ?e <{}> ?c }} }} }}",
@@ -395,7 +399,7 @@ fn rewound_event_commits(store: &Store, root: &std::path::Path) -> Vec<String> {
         return Vec::new();
     }
     let out = Command::new("git")
-        .args(["rev-list", "HEAD"])
+        .args(["rev-list", head_sha])
         .current_dir(root)
         .output();
     let Ok(out) = out else { return Vec::new() };
@@ -439,7 +443,7 @@ pub fn synced_marker(store: &Store) -> Option<String> {
     }
 }
 
-fn resume_point(store: &Store, root: &std::path::Path) -> Option<String> {
+fn resume_point(store: &Store, root: &std::path::Path, head_sha: &str) -> Option<String> {
     // ─── Rewind check FIRST (#107): if the one graph witnessed commits
     // that are no longer on the default branch's line, no resume point is
     // valid — the graph describes a history the branch no longer has, and
@@ -447,7 +451,7 @@ fn resume_point(store: &Store, root: &std::path::Path) -> Option<String> {
     // rebuild (the walk engine clears the one graph when resume is None),
     // so the store equals what a fresh clone would derive from the line
     // that exists now.
-    let rewound = rewound_event_commits(store, root);
+    let rewound = rewound_event_commits(store, root, head_sha);
     if !rewound.is_empty() {
         println!(
             "One graph: history rewind detected — {} commit(s) it witnessed are no longer \
@@ -463,12 +467,11 @@ fn resume_point(store: &Store, root: &std::path::Path) -> Option<String> {
     // commits graph that is an ANCESTOR OF HEAD. No stored marker
     // (Rob-ruled): the persisted commit data IS the marker — a no-change
     // commit still lands in the commits graph, so "newest in store" is the
-    // true high-water mark. The ancestor gate matters (review-HIGH): the
-    // commits graph is built from ALL refs (branches, tags, remotes —
-    // git2_nquads push_glob("*")) while the walk covers only HEAD's line;
-    // taking the bare max ordinal let a feature-branch or fetched-ahead
-    // remote tip become the resume point, silently skipping the HEAD
-    // commits between the fork and now.
+    // true high-water mark. The ancestor gate is belt and braces: the
+    // commits graph holds only HEAD's line, but a store synced before that
+    // (built from every ref) can still carry a feature-branch or
+    // fetched-ahead remote tip until its first sync on this build, and
+    // taking the bare max ordinal would make that tip the resume point.
     let onegraph_resume: Option<String> = {
         let q = format!(
             "SELECT ?sha WHERE {{ GRAPH <{}> {{ \
@@ -479,7 +482,7 @@ fn resume_point(store: &Store, root: &std::path::Path) -> Option<String> {
         );
         let is_head_ancestor = |sha: &str| -> bool {
             std::process::Command::new("git")
-                .args(["merge-base", "--is-ancestor", sha, "HEAD"])
+                .args(["merge-base", "--is-ancestor", sha, head_sha])
                 .current_dir(root)
                 .status()
                 .map(|s| s.success())
@@ -694,73 +697,125 @@ enum Git2Load {
 
 /// Regenerate the git2 layer (commits/signatures/refs/filetree) and load
 /// it. Returns the number of quads.
-fn load_git2_layer(store: &Store, how: Git2Load) -> usize {
-    match how {
+fn load_git2_layer(store: &Store, how: Git2Load, head_sha: &str, root: &std::path::Path) -> usize {
+    let previous = match how {
+        Git2Load::Diffed => previous_git_layer(root, store),
+        Git2Load::BatchedMarkerLast => None,
+    };
+    forget_git_layer_copy(root);
+    let git_nq = crate::git2_nquads::generate_git2_nquads_at(Some(head_sha));
+    let count = match how {
         Git2Load::Diffed => {
-            let git_nq = crate::git2_nquads::generate_git2_nquads();
-            load_git2_diffed(store, &git_nq).expect("failed to load git triples");
+            load_git2_diffed(store, &git_nq, previous.as_deref()).expect("failed to load git triples");
             git_nq.lines().count()
         }
         Git2Load::BatchedMarkerLast => {
             let mut loader = MarkerLastLoader::new(store, spo_events::REBUILD_BATCH_QUADS);
-            crate::git2_nquads::emit_git2_nquads(&mut loader);
+            crate::git2_nquads::NqSink::push_str(&mut loader, &git_nq);
             loader.finish().expect("failed to load git triples")
         }
-    }
+    };
+    keep_git_layer_copy(root, head_sha, &git_nq);
+    count
 }
 
-/// The git2 graphs an append updates in place instead of reloading: the
-/// ones whose addresses do not change with every commit.
-fn diffed_git_graph_iris() -> [String; 3] {
-    [graph_uri("commits"), graph_uri("refs"), graph_uri("repo")]
+/// The git2 graphs an append updates in place instead of reloading: all of
+/// them, since no address in the layer changes with every commit.
+fn diffed_git_graph_iris() -> [String; 4] {
+    [graph_uri("commits"), graph_uri("refs"), graph_uri("repo"), graph_uri("filetree")]
 }
 
 /// Load freshly generated git2 N-Quads so the store ends exactly as if the
-/// diffed graphs had been removed and the text loaded whole (#45): in the
-/// commits, refs and repo graphs, quads the text no longer has are removed
-/// and only new ones are written; every other graph in the text (the file
-/// tree) is written as it comes.
+/// diffed graphs had been removed and the text loaded whole (#45): quads
+/// the text no longer has are removed and only new ones are written. A
+/// graph in the text that is not diffed is written as it comes.
+///
+/// `previous` is the text this function loaded last time, when that is
+/// known to be what the store holds ([`previous_git_layer`]). The
+/// difference is then taken between the two texts, line by line; without
+/// it, the store's diffed graphs are read back and compared quad by quad,
+/// about 2 s on lUX's 417k git quads against milliseconds for the text.
 ///
 /// Stale quads go first, in one transaction, then everything new in one
 /// bulk text load (the per-quad transaction path is several times slower
 /// at this size). Killed in between, the store has lost some stale facts
 /// and gained nothing: never two ordinals for one commit, and the next sync
 /// computes the same difference again.
-fn load_git2_diffed(store: &Store, git_nq: &str) -> Result<(), String> {
+fn load_git2_diffed(store: &Store, git_nq: &str, previous: Option<&str>) -> Result<(), String> {
     use oxigraph::io::RdfParser;
     use oxigraph::model::{NamedNodeRef, Quad};
-    use std::collections::HashMap;
+    use std::collections::HashSet;
 
     let diffed: Vec<String> = diffed_git_graph_iris().iter().map(|g| format!("<{g}>")).collect();
     // Every line the producer writes ends in its graph: `... <graph> .`
-    fn graph_of(line: &str) -> Option<&str> {
-        line.trim_end().strip_suffix(" .").and_then(|l| l.rsplit_once(' ')).map(|(_, g)| g)
-    }
+    let is_diffed = |line: &str| -> bool {
+        line.trim_end()
+            .strip_suffix(" .")
+            .and_then(|l| l.rsplit_once(' '))
+            .is_some_and(|(_, g)| diffed.iter().any(|d| d == g))
+    };
+    let quad_lines = |text: &'_ str| -> Vec<String> {
+        text.lines()
+            .filter(|l| !l.trim().is_empty() && !l.starts_with('#'))
+            .map(str::to_string)
+            .collect()
+    };
     let mut fresh = String::with_capacity(git_nq.len());
-    let mut wanted: HashMap<Quad, &str> = HashMap::new();
-    for line in git_nq.lines().filter(|l| !l.trim().is_empty()) {
-        if graph_of(line).is_some_and(|g| diffed.iter().any(|d| d == g)) {
-            let q = RdfParser::from_format(RdfFormat::NQuads)
-                .for_reader(Cursor::new(line.as_bytes()))
-                .next()
-                .ok_or_else(|| format!("empty git2 line: {line}"))?
-                .map_err(|e| e.to_string())?;
-            wanted.insert(q, line);
+    let mut wanted_lines: HashSet<String> = HashSet::new();
+    for line in quad_lines(git_nq) {
+        if is_diffed(&line) {
+            wanted_lines.insert(line);
         } else {
-            fresh.push_str(line);
+            fresh.push_str(&line);
             fresh.push('\n');
         }
     }
-    let mut stale: Vec<Quad> = Vec::new();
-    for g in diffed_git_graph_iris() {
-        let graph = NamedNodeRef::new_unchecked(&g);
-        for q in store.quads_for_pattern(None, None, None, Some(graph.into())) {
-            let q = q.map_err(|e| e.to_string())?;
-            if wanted.remove(&q).is_none() {
-                stale.push(q);
+    let parse = |text: &str| -> Result<Vec<Quad>, String> {
+        RdfParser::from_format(RdfFormat::NQuads)
+            .for_reader(Cursor::new(text.as_bytes()))
+            .map(|q| q.map_err(|e| e.to_string()))
+            .collect()
+    };
+
+    let stale: Vec<Quad> = match previous {
+        Some(prev) => {
+            let mut stale_text = String::new();
+            for line in quad_lines(prev) {
+                if is_diffed(&line) && !wanted_lines.remove(&line) {
+                    stale_text.push_str(&line);
+                    stale_text.push('\n');
+                }
             }
+            for line in &wanted_lines {
+                fresh.push_str(line);
+                fresh.push('\n');
+            }
+            parse(&stale_text)?
         }
-    }
+        None => {
+            let mut wanted_text = String::new();
+            for line in &wanted_lines {
+                wanted_text.push_str(line);
+                wanted_text.push('\n');
+            }
+            let mut wanted: HashSet<Quad> = parse(&wanted_text)?.into_iter().collect();
+            let mut stale = Vec::new();
+            for g in diffed_git_graph_iris() {
+                let graph = NamedNodeRef::new_unchecked(&g);
+                for q in store.quads_for_pattern(None, None, None, Some(graph.into())) {
+                    let q = q.map_err(|e| e.to_string())?;
+                    if !wanted.remove(&q) {
+                        stale.push(q);
+                    }
+                }
+            }
+            // What is left is new. oxigraph prints a quad as N-Quads.
+            for q in &wanted {
+                fresh.push_str(&format!("{q} .\n"));
+            }
+            stale
+        }
+    };
     if !stale.is_empty() {
         let mut txn = store.start_transaction().map_err(|e| e.to_string())?;
         for q in &stale {
@@ -768,13 +823,35 @@ fn load_git2_diffed(store: &Store, git_nq: &str) -> Result<(), String> {
         }
         txn.commit().map_err(|e| e.to_string())?;
     }
-    for line in wanted.values() {
-        fresh.push_str(line);
-        fresh.push('\n');
-    }
     store
         .load_from_reader(RdfFormat::NQuads, Cursor::new(fresh.as_bytes()))
         .map_err(|e| e.to_string())
+}
+
+/// The first line of the git layer copy: which commit it was generated at.
+const GIT_LAYER_COPY_HEAD: &str = "# git-lex git layer at ";
+
+/// The git layer text the store was last loaded from, kept beside the
+/// store so the next append can diff text instead of reading the store
+/// back. Trusted only when it was written for the commit the store says it
+/// is synced to; every load deletes it first and writes it again only once
+/// the store holds it, so a sync killed in between leaves no copy, and the
+/// next one takes the slow, exact path.
+fn previous_git_layer(root: &std::path::Path, store: &Store) -> Option<String> {
+    let text = std::fs::read_to_string(crate::layout::git_layer_copy(root)).ok()?;
+    let head = text.lines().next()?.strip_prefix(GIT_LAYER_COPY_HEAD)?;
+    (synced_marker(store).as_deref() == Some(head)).then_some(text)
+}
+
+fn forget_git_layer_copy(root: &std::path::Path) {
+    let _ = std::fs::remove_file(crate::layout::git_layer_copy(root));
+}
+
+/// Keep the text the store now holds. A failed write only costs the next
+/// sync the slow path.
+fn keep_git_layer_copy(root: &std::path::Path, head_sha: &str, git_nq: &str) {
+    let text = format!("{GIT_LAYER_COPY_HEAD}{head_sha}\n{git_nq}");
+    let _ = std::fs::write(crate::layout::git_layer_copy(root), text);
 }
 
 /// Is this N-Quads line a sync-marker quad? (`<s> <p> o <g> .` — the
@@ -1022,7 +1099,7 @@ struct OnegraphPhase {
 /// ref). Never walk past it — fall back to a full rebuild. Decided here,
 /// before any store write, because a full rebuild orders its writes
 /// differently from an append (see cmd_sync).
-fn validated_resume(root: &std::path::Path, resume_sha: Option<String>) -> Option<String> {
+fn validated_resume(root: &std::path::Path, resume_sha: Option<String>, head_sha: &str) -> Option<String> {
     let sha = resume_sha?;
     let commit_exists = Command::new("git")
         .args(["cat-file", "-e", &format!("{sha}^{{commit}}")])
@@ -1033,7 +1110,7 @@ fn validated_resume(root: &std::path::Path, resume_sha: Option<String>) -> Optio
     let is_ancestor_of_head = commit_exists
         && Command::new("git")
             .current_dir(root)
-            .args(["merge-base", "--is-ancestor", &sha, "HEAD"])
+            .args(["merge-base", "--is-ancestor", &sha, head_sha])
             .status()
             .map(|st| st.success())
             .unwrap_or(false);
@@ -1049,7 +1126,7 @@ fn validated_resume(root: &std::path::Path, resume_sha: Option<String>) -> Optio
 /// The one-graph walk: append the new commits' statement events (or, with
 /// no resume point, rebuild the graph from the first commit). `resume_sha`
 /// has been through [`validated_resume`].
-fn sync_onegraph_walk(store: &Store, root: &std::path::Path, resume_sha: Option<String>, ctx: &crate::nquad::ResolverContext) -> OnegraphPhase {
+fn sync_onegraph_walk(store: &Store, root: &std::path::Path, resume_sha: Option<String>, ctx: &crate::nquad::ResolverContext, head_sha: &str) -> OnegraphPhase {
     let one_graph_uri = format!("<{}>", spo_events::LEXHISTORY_GRAPH_IRI);
 
     // A rev-list failure must NOT read as "no new commits" — that would make
@@ -1084,9 +1161,9 @@ fn sync_onegraph_walk(store: &Store, root: &std::path::Path, resume_sha: Option<
     let (mut shas, full_rebuild) = match &resume_sha {
         Some(sha) => {
             let exclude = format!("^{sha}");
-            (rev_list(&[exclude.as_str(), "HEAD"]), false)
+            (rev_list(&[exclude.as_str(), head_sha]), false)
         }
-        None => (rev_list(&["HEAD"]), true),
+        None => (rev_list(&[head_sha]), true),
     };
 
     // DEV-ONLY horizon (see resolve_dev_horizon): on a full rebuild, drop
@@ -1900,7 +1977,7 @@ mod batched_rebuild_tests {
             nq.push_str(&format!("{c} <{G2}summary> \"a | b <{G2}ordinalDerived> c\" <{CG}> .\n"));
         }
         for path in ["x.md", "y.md"] {
-            let e = format!("<https://repolex.ai/git-lex/git2/IndexEntry/ccc/{path}>");
+            let e = format!("<https://repolex.ai/git-lex/git2/IndexEntry/{path}>");
             nq.push_str(&format!("{e} <{RDF}type> <{G2}IndexEntry> <{FT}> .\n"));
             nq.push_str(&format!("{e} <{G2}path> \"{path}\" <{FT}> .\n"));
             nq.push_str(&format!("<https://repolex.ai/git-lex/git2/Commit/ccc> <{G2}file> {e} <{CG}> .\n"));
@@ -1963,7 +2040,7 @@ mod batched_rebuild_tests {
         assert_eq!(marker_quads(&store), 0);
         let nowhere = std::path::Path::new("/nonexistent-git-lex-test-root");
         assert!(!fast_path_hit(&store, nowhere, "ccc"), "HEAD has facts, but no ordinal: not synced");
-        assert_eq!(resume_point(&store, nowhere), None);
+        assert_eq!(resume_point(&store, nowhere, "ccc"), None);
 
         // Finished, the marker is there.
         let mut loader = MarkerLastLoader::new(&store, 1);
@@ -2089,17 +2166,20 @@ mod diffed_git_load_tests {
              <https://ex/bbb/x.md> <https://ex/path> \"x.md\" <{ft_new}> .\n"
         );
 
-        let diffed = store_with(&before);
-        clear_derived_graphs(&diffed, true);
-        load_git2_diffed(&diffed, &after).unwrap();
-
         let reloaded = store_with(&before);
         clear_derived_graphs(&reloaded, false);
         reloaded.load_from_reader(RdfFormat::NQuads, Cursor::new(after.as_bytes())).unwrap();
 
-        assert_eq!(all_quads(&diffed), all_quads(&reloaded));
-        // And the old file tree is gone, not just emptied of the new quads.
-        assert!(!all_quads(&diffed).iter().any(|q| q.contains("filetree/aaa")));
+        // Both ways of finding the difference: reading the store back, and
+        // comparing against the text loaded last time.
+        for previous in [None, Some(before.as_str())] {
+            let diffed = store_with(&before);
+            clear_derived_graphs(&diffed, true);
+            load_git2_diffed(&diffed, &after, previous).unwrap();
+            assert_eq!(all_quads(&diffed), all_quads(&reloaded), "previous text: {}", previous.is_some());
+            // And the old file tree is gone, not just emptied of the new quads.
+            assert!(!all_quads(&diffed).iter().any(|q| q.contains("filetree/aaa")));
+        }
     }
 
     /// Nothing changed: the load is a no-op, and still equals a reload.
@@ -2107,9 +2187,76 @@ mod diffed_git_load_tests {
     fn unchanged_layer_stays_identical() {
         let c = g("commits");
         let nq = format!("<https://ex/c1> <https://ex/ord> \"1\" <{c}> .\n");
-        let diffed = store_with(&nq);
-        clear_derived_graphs(&diffed, true);
-        load_git2_diffed(&diffed, &nq).unwrap();
-        assert_eq!(all_quads(&diffed), all_quads(&store_with(&nq)));
+        for previous in [None, Some(nq.as_str())] {
+            let diffed = store_with(&nq);
+            clear_derived_graphs(&diffed, true);
+            load_git2_diffed(&diffed, &nq, previous).unwrap();
+            assert_eq!(all_quads(&diffed), all_quads(&store_with(&nq)));
+        }
+    }
+
+    /// The file tree is one graph addressed by path (goodlux, 2026-10-03):
+    /// a commit that changes one file rewrites that file's entry only, the
+    /// store still ends exactly as a reload leaves it, and a store from
+    /// before the change loses its per-commit `filetree/<sha>` graph.
+    #[test]
+    fn file_tree_updates_by_path() {
+        let (c, ft) = (g("commits"), g("filetree"));
+        let legacy = g("filetree/aaa");
+        let e = |p: &str| format!("<https://repolex.ai/git-lex/git2/IndexEntry/{p}>");
+        let tree = |head: &str, y_blob: &str| {
+            let mut nq = String::new();
+            for (p, blob) in [("x.md", "b1"), ("y.md", y_blob), ("z.md", "b3")] {
+                nq.push_str(&format!("{} <https://ex/path> \"{p}\" <{ft}> .\n", e(p)));
+                nq.push_str(&format!("{} <https://ex/id> \"{blob}\" <{ft}> .\n", e(p)));
+                nq.push_str(&format!("<https://ex/{head}> <https://ex/file> {} <{c}> .\n", e(p)));
+            }
+            nq
+        };
+        let before = format!(
+            "{}<https://ex/old/x.md> <https://ex/path> \"x.md\" <{legacy}> .\n",
+            tree("c1", "b2")
+        );
+        let after = tree("c2", "b2-edited");
+
+        let reloaded = store_with(&before);
+        clear_derived_graphs(&reloaded, false);
+        reloaded.load_from_reader(RdfFormat::NQuads, Cursor::new(after.as_bytes())).unwrap();
+
+        for previous in [None, Some(before.as_str())] {
+            let diffed = store_with(&before);
+            clear_derived_graphs(&diffed, true);
+            // Only y.md's id changed, so of the file tree's six quads, one
+            // goes and one comes; the three commit links move to the new HEAD.
+            load_git2_diffed(&diffed, &after, previous).unwrap();
+            assert_eq!(all_quads(&diffed), all_quads(&reloaded));
+            assert!(!all_quads(&diffed).iter().any(|q| q.contains("filetree/aaa")));
+            assert!(all_quads(&diffed).iter().any(|q| q.contains("b2-edited")));
+            assert!(!all_quads(&diffed).iter().any(|q| q.contains("\"b2\"")));
+        }
+    }
+
+    /// The copy of the git layer is trusted only for the commit the store
+    /// is synced to; anything else, or no copy, takes the exact slow path.
+    #[test]
+    fn git_layer_copy_is_trusted_only_at_the_synced_commit() {
+        let root = std::env::temp_dir().join(format!("glx-gitcopy-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(crate::layout::ignore_dir(&root)).unwrap();
+        let c = g("commits");
+        let int = "^^<http://www.w3.org/2001/XMLSchema#integer>";
+        let layer = format!(
+            "<https://repolex.ai/git-lex/git2/Commit/aaa> <{SYNC_MARKER_PREDICATE}> \"1\"{int} <{c}> .\n\
+             <https://repolex.ai/git-lex/git2/Commit/aaa> <https://repolex.ai/ontology/git-lex/git2/id> \"aaa\" <{c}> .\n"
+        );
+        let store = store_with(&layer);
+        assert!(previous_git_layer(&root, &store).is_none(), "no copy");
+        keep_git_layer_copy(&root, "aaa", &layer);
+        assert!(previous_git_layer(&root, &store).is_some(), "copy at the synced commit");
+        keep_git_layer_copy(&root, "bbb", &layer);
+        assert!(previous_git_layer(&root, &store).is_none(), "copy at another commit");
+        forget_git_layer_copy(&root);
+        assert!(previous_git_layer(&root, &store).is_none());
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

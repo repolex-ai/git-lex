@@ -16,6 +16,7 @@
 //!   _ignore/          derived, never committed:
 //!     oxigraph/         the store
 //!     walkcache/        the walk's fragment cache
+//!     git-layer.nq      the git layer text the store was last loaded from
 //!     spine/            the exported spine
 //!     cottas/           where the spine used to be
 //! ```
@@ -86,6 +87,11 @@ pub fn ignore_dir(root: &Path) -> PathBuf {
 /// `.lex/_ignore/oxigraph/` — the store.
 pub fn store_dir(root: &Path) -> PathBuf {
     ignore_dir(root).join("oxigraph")
+}
+
+/// `.lex/_ignore/git-layer.nq`
+pub fn git_layer_copy(root: &Path) -> PathBuf {
+    ignore_dir(root).join("git-layer.nq")
 }
 
 /// `.lex/_ignore/walkcache/`

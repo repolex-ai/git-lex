@@ -20,9 +20,10 @@
 //! Layers emitted, and their named graphs (same graph names as the old layer):
 //!   repo             — the managed-repo node (git-lex:Repo ⊑ git2:Repository,
 //!                      genesisSha + repo.yml facts per git-lex.ttl v0.6)
-//!   commits          — git2:Commit + per-commit git2:Signature records
+//!   commits          — git2:Commit + per-commit git2:Signature records, for
+//!                      the commits on HEAD's line (the default branch)
 //!   refs             — git2:Branch / git2:Tag
-//!   filetree/<head>  — git2:IndexEntry per file at HEAD + git2:Blob nodes
+//!   filetree         — git2:IndexEntry per file at HEAD + git2:Blob nodes
 //!
 //! Signature records are PER COMMIT (Rob-ruled: git2's exact structure; no
 //! invented person-node dedup — an authors rollup, if ever wanted, is a
@@ -158,13 +159,21 @@ impl NqSink for String {
 /// returns N-Quads text (the same text `git lex query` serializes and sync
 /// loads into oxigraph — one producer, two sinks).
 pub fn generate_git2_nquads() -> String {
+    generate_git2_nquads_at(None)
+}
+
+/// [`generate_git2_nquads`] for the commit `head` instead of whatever HEAD
+/// points at when the read happens. Sync resolves HEAD once and passes it
+/// here, so a commit landing mid-sync cannot put one commit in the git
+/// layer and another in the history walk.
+pub fn generate_git2_nquads_at(head: Option<&str>) -> String {
     let mut nq = String::new();
-    emit_git2_nquads(&mut nq);
+    emit_git2_nquads_at(&mut nq, head);
     nq
 }
 
-/// [`generate_git2_nquads`], written to `nq` as it is produced.
-pub fn emit_git2_nquads(nq: &mut impl NqSink) {
+/// [`generate_git2_nquads_at`], written to `nq` as it is produced.
+pub fn emit_git2_nquads_at(nq: &mut impl NqSink, head: Option<&str>) {
     let Some(git_root) = find_git_root() else {
         return; // not a git repo — nothing to emit
     };
@@ -174,6 +183,10 @@ pub fn emit_git2_nquads(nq: &mut impl NqSink) {
             eprintln!("warning: git2 could not open the repository — git layer will be EMPTY: {e}");
             return;
         }
+    };
+    let head_oid = match head {
+        Some(sha) => git2::Oid::from_str(sha).ok(),
+        None => repo.head().ok().and_then(|h| h.target()),
     };
 
     // ---- repo graph: the ONE managed-repository node --------------------
@@ -248,8 +261,11 @@ pub fn emit_git2_nquads(nq: &mut impl NqSink) {
         }
     }
 
-    // ---- commits graph: every commit reachable from any ref (old layer's
-    // `git log --all`), plus HEAD for the detached case. ------------------
+    // ---- commits graph: the commits on HEAD's line, exactly the commits the
+    // history walk covers (goodlux, 2026-10-03: main only, no branches).
+    // Other branches, tags and remote-tracking refs stay out: a commit that
+    // `git fetch` brought in would otherwise carry an ordinal, and so read
+    // as synced, before any walk covered it. ------------------------------
     {
         let graph = format!("<{}>", graph_uri("commits"));
         let mut walk = match repo.revwalk() {
@@ -259,8 +275,9 @@ pub fn emit_git2_nquads(nq: &mut impl NqSink) {
                 return;
             }
         };
-        let _ = walk.push_glob("*"); // all refs (branches, tags, remotes)
-        let _ = walk.push_head(); // detached HEAD safety
+        if let Some(oid) = head_oid {
+            let _ = walk.push(oid);
+        }
         // Topological, oldest-first: parents always precede children, so the
         // enumeration position IS the commit's ordinal (1 = genesis).
         let _ = walk.set_sorting(git2::Sort::TOPOLOGICAL | git2::Sort::REVERSE);
@@ -336,14 +353,17 @@ pub fn emit_git2_nquads(nq: &mut impl NqSink) {
         }
     }
 
-    // ---- filetree/<head> graph: every file at HEAD as a git2:IndexEntry,
-    // each joined to its content git2:Blob. (git2.ttl: entries materialized
-    // from the commit's tree — the flat committed-files view, never the
-    // mutable staging index.) --------------------------------------------
-    if let Ok(head) = repo.head()
-        && let Some(head_oid) = head.target() {
+    // ---- filetree graph: every file at HEAD as a git2:IndexEntry, each
+    // joined to its content git2:Blob. (git2.ttl: entries materialized from
+    // the commit's tree — the flat committed-files view, never the mutable
+    // staging index.) Only HEAD's tree is ever kept, so neither the graph
+    // name nor an entry's address carries the commit: an entry is addressed
+    // by its path, and a sync rewrites only the files that changed. Which
+    // commit the tree belongs to is HEAD's `git2:file` links (goodlux,
+    // 2026-10-03). -------------------------------------------------------
+    if let Some(head_oid) = head_oid {
             let head_sha = head_oid.to_string();
-            let graph = format!("<{}>", graph_uri(&format!("filetree/{head_sha}")));
+            let graph = format!("<{}>", graph_uri("filetree"));
             let commits_graph = format!("<{}>", graph_uri("commits"));
             let cu = format!("<{}>", git2_uri(&format!("Commit/{head_sha}")));
             if let Ok(tree) = repo.find_commit(head_oid).and_then(|c| c.tree()) {
@@ -357,7 +377,7 @@ pub fn emit_git2_nquads(nq: &mut impl NqSink) {
                     let blob_oid = entry.id();
                     let eu = format!(
                         "<{}>",
-                        git2_uri(&format!("IndexEntry/{head_sha}/{}", encode_path(&path)))
+                        git2_uri(&format!("IndexEntry/{}", encode_path(&path)))
                     );
                     nq.push_str(&format!("{eu} {RDF_TYPE} <{GIT2_NS}IndexEntry> {graph} .\n"));
                     nq.push_str(&format!("{eu} <{GIT2_NS}path> \"{}\" {graph} .\n", nq_escape(&path)));
@@ -429,12 +449,12 @@ mod tests {
     }
 
     /// Parity: the library walk must see exactly the commits `git rev-list
-    /// --all` sees. Shell git is GROUND TRUTH in tests only — production code
-    /// never shells out.
+    /// HEAD` sees — HEAD's line, the commits the history walk covers. Shell
+    /// git is GROUND TRUTH in tests only — production code never shells out.
     #[test]
     fn commit_count_matches_git_cli() {
         let out = std::process::Command::new("git")
-            .args(["rev-list", "--all", "--count"])
+            .args(["rev-list", "HEAD", "--count"])
             .output()
             .expect("git CLI available for test ground truth");
         if !out.status.success() {
@@ -448,7 +468,7 @@ mod tests {
             .count();
         assert_eq!(
             typed_commits, expected,
-            "git2 revwalk commit count must match `git rev-list --all --count`"
+            "git2 revwalk commit count must match `git rev-list HEAD --count`"
         );
     }
 

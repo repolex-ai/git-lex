@@ -60,10 +60,10 @@ except the history graph, which has its own IRI.
 |---|---|---|---|
 | `now` | Current-state facts from your documents | yes | yes |
 | `…/LexHistoryGraph` | Every assertion and retraction ever, with provenance | no | yes |
-| `commits` | One node per commit: sha, author, time, message | yes | yes |
+| `commits` | One node per commit on the default branch: sha, author, time, message. The newest commit also links to every file in it (`git2:file`) | yes | yes |
 | `refs` | Branches and tags, and the commit each points at | yes | yes |
 | `repo` | The repository itself: genesis sha, and the facts from `.lex/repo.yml` (name, kit, version, agent, created) | yes | yes |
-| `filetree/<sha>` | Every file at one commit, as index entries. There is only ever one such graph | the current HEAD | the last synced commit |
+| `filetree` | Every file at the newest commit, as index entries addressed by path (`git2/IndexEntry/<path>`) | the current HEAD | the last synced commit |
 | `repo-ontology` | The installed kits' schema, queryable | no | yes |
 
 The `repo-ontology` graph contains the ontology of every installed kit, loaded as data. It answers queries like "what fields can a Journal carry?" without reading TTL files directly:
