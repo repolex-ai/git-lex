@@ -49,7 +49,7 @@ Running `git lex init` configures `git-lex` in the current directory:
 5. If the current directory is not yet a Git repository, it offers to run `git init` automatically.
 
 > [!NOTE]
-> **Only `git lex init` creates `.lex/`.** Subcommands such as `sync`, `verify`, and `query` will refuse to run in a repository without `.lex/repo.yml`. Running `git lex init` is safe on existing repositories; it prompts before refreshing configuration files, preserving notes and custom settings.
+> **Only `git lex init` creates `.lex/`.** Subcommands such as `sync` and `query` will refuse to run in a repository without `.lex/repo.yml`. Running `git lex init` is safe on existing repositories; it prompts before refreshing configuration files, preserving notes and custom settings.
 
 ### Scaffolding (`create`)
 The `git lex create <type> <id>` command initializes a new Markdown document of the specified class. It generates the required YAML frontmatter structure and prints the location of the new file. Use `--list` to see all creatable classes.

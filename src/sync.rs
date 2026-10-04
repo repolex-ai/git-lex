@@ -193,7 +193,7 @@ These are in your WORKING FILES, not history — fix the listed files and the wa
     // Every sync proves the store coherent or aborts. The proof joins
     // events to commit ordinals, so it follows the git2 layer.
     verify_onegraph(&store);
-    clock.mark("verify");
+    clock.mark("store check");
 
     if !full_rebuild {
         if now_present {
@@ -1400,6 +1400,10 @@ fn history_counts(store: &Store) -> Result<HistoryCounts, String> {
     Ok(HistoryCounts { integrity_bad, dangling, derived_live })
 }
 
+/// What to type when the end-of-sync check finds a broken store: the same
+/// steps as "Rebuilding" in docs/using/history.md.
+const REBUILD_HINT: &str = "To rebuild the store from your git history: run `gitlexd stop`, delete .lex/_ignore/oxigraph, then run `git lex sync`.";
+
 fn verify_onegraph(store: &Store) {
     // Discovery typing (default graph, idempotent): the graph's NamedGraph
     // object, dual-typed — the store does no inference, so both the class and
@@ -1439,7 +1443,7 @@ fn verify_onegraph(store: &Store) {
     let counts = match counts {
         Ok(c) => c,
         Err(e) => {
-            eprintln!("ERROR: store coherence checks could not run ({e}) — the graph is unverified.");
+            eprintln!("ERROR: the store check at the end of sync could not run ({e}), so this sync is not trusted. Run `git lex sync` again. If it fails the same way: {REBUILD_HINT}");
             std::process::exit(1);
         }
     };
@@ -1448,28 +1452,29 @@ fn verify_onegraph(store: &Store) {
     // 16-hex id collision or an emitter bug — LOUD, never silently deduped.
     if counts.integrity_bad > 0 {
         eprintln!(
-            "ERROR: one-graph integrity check FAILED — {} SpoEvent node(s) violate one-statement/one-direction (16-hex id collision or emitter bug). The graph is NOT trustworthy until this is resolved.",
+            "ERROR: the store's history is damaged: {} history record(s) do not name exactly one fact, or do not say whether it was added or removed. This comes from a bug in git-lex, not from your files. {REBUILD_HINT}",
             counts.integrity_bad
         );
         std::process::exit(1);
     }
-    // ── Commit joins + state-parity (promoted from `verify` before its
-    // removal — Rob-ruled 2026-07-29: every sync proves the store coherent
-    // or aborts; the strongest corruption detector runs on every build).
+    // ── Commit joins + state-parity (moved here from the `git lex verify`
+    // command, since removed — goodlux-ruled 2026-07-29: every sync proves the
+    // store coherent or aborts; the strongest corruption detector runs on
+    // every build).
     let dangling = Some(counts.dangling);
     let derived_count = Some(counts.derived_live);
     match (dangling, base_count, derived_count) {
         (Some(0), Some(b), Some(d)) if b == d => {}
         (None, _, _) | (_, None, _) | (_, _, None) => {
-            eprintln!("ERROR: store coherence checks could not run — the graph is unverified.");
+            eprintln!("ERROR: the store check at the end of sync could not run, so this sync is not trusted. Run `git lex sync` again. If it fails the same way: {REBUILD_HINT}");
             std::process::exit(1);
         }
         (Some(dg), _, _) if dg > 0 => {
-            eprintln!("ERROR: {dg} history event commit(s) missing from the commits graph — the store is incoherent.");
+            eprintln!("ERROR: the store's history names {dg} commit(s) that are missing from its list of commits. This comes from a bug in git-lex, not from your files. {REBUILD_HINT}");
             std::process::exit(1);
         }
         (_, Some(b), Some(d)) => {
-            eprintln!("ERROR: current state ({b} facts) disagrees with what the history derives ({d}) — the store is corrupt. Delete .lex/_ignore/oxigraph and re-run `git lex sync` to rebuild.");
+            eprintln!("ERROR: the store's current facts ({b}) do not match what replaying its history gives ({d}). This comes from a bug in git-lex, not from your files. {REBUILD_HINT}");
             std::process::exit(1);
         }
     }

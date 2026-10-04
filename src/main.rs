@@ -3,7 +3,7 @@ use std::process::{Command, exit};
 use std::fs;
 
 // Shared utilities from the library (also used by gitlexd)
-use git_lex::{find_git_root, registry_remove, require_git_root, open_or_create_store};
+use git_lex::{find_git_root, registry_remove, require_git_root};
 #[cfg(test)]
 use git_lex::migrate_legacy_store;
 use git_lex::{context, export_spine, sync};
@@ -16,7 +16,6 @@ mod man;
 mod harness;
 mod hooks;
 mod init;
-mod verify;
 mod shacl;
 mod kit_cmds;
 mod create;
@@ -209,14 +208,6 @@ enum Commands {
         #[arg(long)]
         force: bool,
     },
-    /// Health-check the database (read-only): confirms the kit vocabularies
-    /// are loaded, every stored property is declared by an ontology, the
-    /// history is well-formed, and current state matches what the history
-    /// says it should be. Exits non-zero on any failure.
-    ///
-    /// Temporary command: it exists to confirm store rebuilds during the
-    /// v1 migration and will be removed in a later release.
-    Verify,
     /// Soul-specific commands (identity, session attestation, and sovereign voice)
     Soul {
         #[command(subcommand)]
@@ -319,13 +310,6 @@ fn main() {
         Commands::KitUpdate { kit } => kit_cmds::cmd_kit_update(kit),
         Commands::KitAdd { kit } => kit_cmds::cmd_kit_add(kit),
         Commands::KitRemove { kit, force } => kit_cmds::cmd_kit_remove(kit, force),
-        Commands::Verify => {
-            let store = open_or_create_store();
-            let failures = crate::verify::run_verify(&store);
-            if failures > 0 {
-                exit(1);
-            }
-        }
         Commands::Sync => cmd_sync(),
         Commands::ExportSpine => export_spine::cmd_export_spine(),
         Commands::Soul { command } => match command {

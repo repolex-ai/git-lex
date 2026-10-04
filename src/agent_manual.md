@@ -59,4 +59,3 @@ committed until the whole save passes.
   `.lex/repo.yml` lists the installed kits; `.lex/ontology/` holds their
   vocabularies; `.lex/query/` is the one place for your own stored queries.
 - `git lex kit-update` refreshes kits and repairs generated files.
-  `git lex verify` health-checks the graph.

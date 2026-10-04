@@ -95,7 +95,7 @@ This is delivered two ways: `git lex create` shows it, and it is written into
 the class's `__Plant.md` template for anyone writing files without calling
 `create`. **It does not land in the document**, so nobody has to delete it.
 
-**It is never enforced** — no gate, no warning, nothing in `verify`. A document
+**It is never enforced** — no gate, no warning, no check. A document
 that ignores its guidance is a perfectly valid document. The moment guidance can
 fail something, it stops being help and becomes one more gate to satisfy.
 

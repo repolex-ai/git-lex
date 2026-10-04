@@ -5,7 +5,7 @@ page), and every subcommand answers `--help` too.
 
 | Command | What it does |
 |---|---|
-| `git lex init [<dir>] [--kit <kit>]` | Set up git-lex in a repository (offers Git initialization if needed; base kit always installed). Only `init` creates `.lex/` — `sync`, `verify`, and `query` refuse in a repository without `.lex/repo.yml`. |
+| `git lex init [<dir>] [--kit <kit>]` | Set up git-lex in a repository (offers Git initialization if needed; base kit always installed). Only `init` creates `.lex/` — `sync` and `query` refuse in a repository without `.lex/repo.yml`. |
 | `git lex create <type> [id] [--list] [--json]` | Scaffold a new document of a kit type; `--list` lists creatable classes. |
 | `git lex save ["msg"] [--dry-run] [--no-restamp]` | Stage, validate, extract, commit; `--dry-run` runs every gate, commits nothing; `--no-restamp` preserves `updatedDate` on existing documents during mechanical sweeps. Nudges `gitlexd` after committing. |
 | `git lex sync` | Compile committed history into the persistent store (Oxigraph). Handed to `gitlexd` when running (waits for result); prints a per-phase elapsed timing breakdown. Refuses without `.lex/repo.yml`. |
@@ -17,7 +17,6 @@ page), and every subcommand answers `--help` too.
 | `git lex kit-add <kit>` | Add an optional kit (`scope: optional` in `kit.yml`). |
 | `git lex kit-update [<kit>]` | Refresh kits (no argument = all installed kits). Re-fetches, converges files, reconciles hooks, mirrors ontologies, and regenerates SHACL shapes and templates. |
 | `git lex kit-remove <kit> [--force]` | Remove an optional kit (prompts before deleting content folders unless `--force`). |
-| `git lex verify` | Health-check the synced store (vocabulary declared, history well-formed, current state matches history). Refuses without `.lex/repo.yml`. |
 | `git lex nuke` | Remove git-lex from a repository: tells `gitlexd` to drop the soul, removes `.lex/`, cleans every git-lex line from `.gitignore`, sweeps leftovers, commits and pushes the removal. Preserves content files and Git history. |
 | `git lex soul session [--json]` | Inspect active session attestation, genesis SHA, verified substrate, and session hash. |
 | `git lex soul voice [<msg>] [--list]` | Attach or read sovereign voice reflections on the commit tree via `git notes` (`refs/notes/soul/voice`). |
