@@ -167,7 +167,7 @@ pub fn sync_all(root: &Path) {
 /// exactly how triplication bites. `agent_name`: Some(name) when the
 /// caller just collected it (init — repo.yml may not carry the line yet);
 /// None reads .lex/repo.yml.
-pub fn run_substrate_setup(root: &Path, agent_name: Option<&str>) {
+pub fn run_substrate_setup(root: &Path, agent_name: Option<&str>) -> git_lex::Outcome {
     // Kit-owned, substrate-independent, and not gated on identity: the
     // union of every installed kit's `.agents/hooks.json` (#40).
     let composed = git_lex::kit::compose_agents_hooks(root);
@@ -202,17 +202,18 @@ pub fn run_substrate_setup(root: &Path, agent_name: Option<&str>) {
              \x20   agent_name: <your-name>\n\
              then re-run `git lex kit-update`."
         );
-        return;
+        return Ok(());
     }
     for substrate in active_substrates(root) {
         match substrate {
-            Substrate::Claude => claude::setup_substrate_claude(root, &name),
+            Substrate::Claude => claude::setup_substrate_claude(root, &name)?,
             Substrate::Gemini => gemini::setup_substrate_gemini(root, &name),
             Substrate::Hermes => {
                 // Per-substrate identity injection not yet implemented.
             }
         }
     }
+    Ok(())
 }
 
 #[cfg(test)]

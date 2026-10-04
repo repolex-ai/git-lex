@@ -52,8 +52,15 @@ fn worker(path: &str) -> i32 {
         eprintln!("cannot enter {path}: {e}");
         return 1;
     }
-    git_lex::sync::cmd_sync();
-    0
+    match git_lex::sync::cmd_sync() {
+        Ok(()) => 0,
+        Err(failure) => {
+            if !failure.message.is_empty() {
+                eprintln!("{}", failure.message);
+            }
+            failure.code
+        }
+    }
 }
 
 /// Every gitlexd process on this machine except this one and its workers.

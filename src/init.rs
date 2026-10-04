@@ -7,7 +7,8 @@
 
 use std::collections::HashMap;
 use std::fs;
-use std::process::{Command, exit};
+use std::process::Command;
+use git_lex::{Failure, Outcome};
 
 use git_lex::{find_git_root, registry_add, resolve_kit_spec};
 
@@ -27,15 +28,14 @@ use crate::BASE_KIT;
 // Kit ontologies are fetched from GitHub at init time — no embedded fallback.
 
 
-pub(crate) fn cmd_init(directory: Option<String>, kit: Option<String>) {
+pub(crate) fn cmd_init(directory: Option<String>, kit: Option<String>) -> Outcome {
     // Follow git convention: `git lex init [<directory>]`
     // If a directory is given, cd into it (creating it if necessary).
     if let Some(ref dir) = directory {
         let path = std::path::Path::new(dir);
         if !path.exists()
             && let Err(e) = fs::create_dir_all(path) {
-                eprintln!("fatal: cannot create {}: {e}", path.display());
-                exit(1);
+                return Err(Failure::new(format!("fatal: cannot create {}: {e}", path.display())));
             }
         std::env::set_current_dir(path).expect("failed to cd into directory");
     }
@@ -52,12 +52,11 @@ pub(crate) fn cmd_init(directory: Option<String>, kit: Option<String>) {
                 let status = Command::new("git").args(["init"]).status();
                 match status {
                     Ok(s) if s.success() => { println!(); }
-                    _ => { eprintln!("fatal: failed to initialize git repository"); exit(1); }
+                    _ => return Err(Failure::new("fatal: failed to initialize git repository")),
                 }
                 cwd
             } else {
-                eprintln!("Aborted.");
-                exit(1);
+                return Err(Failure::new("Aborted."));
             }
         }
     };
@@ -94,7 +93,7 @@ pub(crate) fn cmd_init(directory: Option<String>, kit: Option<String>) {
         let input = input.trim().to_lowercase();
         if input != "y" && input != "yes" {
             println!("Aborted.");
-            return;
+            return Ok(());
         }
 
         // Auto-commit any uncommitted work before the destructive step.
@@ -114,7 +113,7 @@ pub(crate) fn cmd_init(directory: Option<String>, kit: Option<String>) {
     // by the scaffold installer below — no hardcoded ontology block needed.
 
     // Install kit(s) — extracted step, see fn doc.
-    fetch_kits(&lex_dir, kit_name, &kit_spec, &org, &repo);
+    fetch_kits(&lex_dir, kit_name, &kit_spec, &org, &repo)?;
 
     // Create the machine-local pocket for derived data (oxigraph store, etc.)
     // — gitignored via the managed engine block below, never committed.
@@ -165,7 +164,7 @@ pub(crate) fn cmd_init(directory: Option<String>, kit: Option<String>) {
     // if the user ran init once without --kit and then runs again with
     // --kit X, the kit: field needs to change from "none" to the new spec.
     let repo_yml_path = lex_dir.join("repo.yml");
-    write_repo_yml(&repo_yml_path, &root, &kit_spec);
+    write_repo_yml(&repo_yml_path, &root, &kit_spec)?;
 
     // README
     let readme_path = lex_dir.join("README.md");
@@ -203,9 +202,7 @@ pub(crate) fn cmd_init(directory: Option<String>, kit: Option<String>) {
         Ok(Some(shapes_path)) => println!("SHACL shapes generated: {}", shapes_path.file_name().unwrap_or_default().to_string_lossy()),
         Ok(None) => {} // kit ships no ontology — nothing to generate
         Err(e) => {
-            eprintln!("fatal: SHACL shapes generation failed for '{}': {}", kit_name, e);
-            eprintln!("       a broken kit ontology must not install silently — validation would be skipped and object properties would degrade to literals");
-            exit(1);
+            return Err(Failure::new([format!("fatal: SHACL shapes generation failed for '{}': {}", kit_name, e), String::from("       a broken kit ontology must not install silently — validation would be skipped and object properties would degrade to literals")].join("\n")));
         }
     }
 
@@ -266,10 +263,7 @@ pub(crate) fn cmd_init(directory: Option<String>, kit: Option<String>) {
                     updated.push_str(&format!("{}: {}\n", k, v));
                 }
             }
-            fs::write(&repo_yml_path, &updated).unwrap_or_else(|e| {
-                eprintln!("fatal: could not persist init variables to .lex/repo.yml: {}", e);
-                exit(1);
-            });
+            fs::write(&repo_yml_path, &updated).map_err(|e| Failure::new(format!("fatal: could not persist init variables to .lex/repo.yml: {}", e)))?;
         }
 
         // Scaffold files already installed above (before type folder creation).
@@ -303,7 +297,7 @@ pub(crate) fn cmd_init(directory: Option<String>, kit: Option<String>) {
         harness::run_substrate_setup(
             &root,
             if agent_name.is_empty() { None } else { Some(&agent_name) },
-        );
+        )?;
     }
 
     // Print summary
@@ -322,9 +316,7 @@ pub(crate) fn cmd_init(directory: Option<String>, kit: Option<String>) {
     match hooks::install_hook() {
         Ok(()) => println!("Installed pre-commit hook (extract + validate on commit)"),
         Err(e) => {
-            eprintln!("fatal: could not install the pre-commit hook: {}", e);
-            eprintln!("       commits would silently skip extraction + validation — fix and re-run init");
-            exit(1);
+            return Err(Failure::new([format!("fatal: could not install the pre-commit hook: {}", e), String::from("       commits would silently skip extraction + validation — fix and re-run init")].join("\n")));
         }
     }
 
@@ -336,14 +328,15 @@ pub(crate) fn cmd_init(directory: Option<String>, kit: Option<String>) {
 
     // Genesis identity: repo.yml genesis_sha + SOUL.md soulId fill,
     // committed as "git lex identity" — extracted step, see fn doc.
-    record_identity(&root, &repo_yml_path);
+    record_identity(&root, &repo_yml_path)?;
 
     // t-box: load installed kit ontologies into the persistent ontology
     // graph (the shared lifecycle helper — review #11).
-    crate::kit_cmds::reload_ontology_graph();
+    crate::kit_cmds::reload_ontology_graph()?;
 
     // Register this repo in the machine-level registry (~/.lex/repos)
     registry_add(&root);
+    Ok(())
 }
 
 // ─── init steps (extracted from cmd_init — review #12: the 582-line
@@ -354,7 +347,7 @@ pub(crate) fn cmd_init(directory: Option<String>, kit: Option<String>) {
 /// kit (when different). Any fetch failure aborts init — partial kit
 /// state is worse than none, and the only failure mode here is
 /// network/auth.
-fn fetch_kits(lex_dir: &std::path::Path, kit_name: &str, kit_spec: &str, org: &str, repo: &str) {
+fn fetch_kits(lex_dir: &std::path::Path, kit_name: &str, kit_spec: &str, org: &str, repo: &str) -> Outcome {
     let lex_kit_root = lex_dir.join("kit");
     let _ = fs::remove_dir_all(&lex_kit_root);
 
@@ -363,12 +356,10 @@ fn fetch_kits(lex_dir: &std::path::Path, kit_name: &str, kit_spec: &str, org: &s
     let base_dir = lex_kit_root.join(&base_org).join(&base_repo);
     fs::create_dir_all(&base_dir).ok();
     println!("Downloading base kit {}/{}...", base_org, base_repo);
-    if fetch_kit_from_github(BASE_KIT, &base_dir) {
+    if fetch_kit_from_github(BASE_KIT, &base_dir)? {
         println!("Base kit installed.");
     } else {
-        eprintln!("Failed to fetch base kit from GitHub.");
-        eprintln!("Check network access to https://github.com/{}/{}", base_org, base_repo);
-        exit(1);
+        return Err(Failure::new([String::from("Failed to fetch base kit from GitHub."), format!("Check network access to https://github.com/{}/{}", base_org, base_repo)].join("\n")));
     }
 
     // Install the domain kit (if different from base).
@@ -376,14 +367,13 @@ fn fetch_kits(lex_dir: &std::path::Path, kit_name: &str, kit_spec: &str, org: &s
     if kit_spec != format!("{}/{}", base_org, base_repo) {
         fs::create_dir_all(&kit_dir).ok();
         println!("Downloading additional kit {}/{}...", org, repo);
-        if fetch_kit_from_github(kit_name, &kit_dir) {
+        if fetch_kit_from_github(kit_name, &kit_dir)? {
             println!("Additional kit installed.");
         } else {
-            eprintln!("Failed to fetch kit '{}' from GitHub.", kit_name);
-            eprintln!("Check that https://github.com/{}/{} exists and you have network access.", org, repo);
-            exit(1);
+            return Err(Failure::new([format!("Failed to fetch kit '{}' from GitHub.", kit_name), format!("Check that https://github.com/{}/{} exists and you have network access.", org, repo)].join("\n")));
         }
     }
+    Ok(())
 }
 
 /// init step: create repo.yml if missing (three keys: name/kit/created —
@@ -391,7 +381,7 @@ fn fetch_kits(lex_dir: &std::path::Path, kit_name: &str, kit_spec: &str, org: &s
 /// law, Rob-ruled 2026-08-08), or rewrite just the `kit:` line of an
 /// existing one so a re-init with --kit X rebinds without touching any
 /// other field.
-fn write_repo_yml(repo_yml_path: &std::path::Path, root: &std::path::Path, kit_spec: &str) {
+fn write_repo_yml(repo_yml_path: &std::path::Path, root: &std::path::Path, kit_spec: &str) -> Outcome {
     if !repo_yml_path.exists() {
         let repo_name = root.file_name()
             .map(|n| n.to_string_lossy().to_string())
@@ -400,10 +390,7 @@ fn write_repo_yml(repo_yml_path: &std::path::Path, root: &std::path::Path, kit_s
         fs::write(repo_yml_path, format!(
             "{}name: {}\nkit: {}\ncreated: {}\n",
             git_lex::git::REPO_YML_HEADER, repo_name, kit_spec, today
-        )).unwrap_or_else(|e| {
-            eprintln!("fatal: could not write .lex/repo.yml: {}", e);
-            exit(1);
-        });
+        )).map_err(|e| Failure::new(format!("fatal: could not write .lex/repo.yml: {}", e)))?;
     } else if let Ok(existing) = fs::read_to_string(repo_yml_path) {
         let mut updated_lines: Vec<String> = Vec::new();
         let mut saw_kit_line = false;
@@ -420,11 +407,9 @@ fn write_repo_yml(repo_yml_path: &std::path::Path, root: &std::path::Path, kit_s
         }
         let mut content = updated_lines.join("\n");
         if !content.ends_with('\n') { content.push('\n'); }
-        fs::write(repo_yml_path, content).unwrap_or_else(|e| {
-            eprintln!("fatal: could not update .lex/repo.yml kit binding: {}", e);
-            exit(1);
-        });
+        fs::write(repo_yml_path, content).map_err(|e| Failure::new(format!("fatal: could not update .lex/repo.yml kit binding: {}", e)))?;
     }
+    Ok(())
 }
 
 /// init step: create the kit's class folders (gated per class on the
@@ -594,7 +579,7 @@ fn commit_setup_and_content() {
 /// repo.yml), fills soul.Soul.soulId in SOUL.md (#29), and commits both
 /// as "git lex identity" — loudly on failure (#50): identity is the
 /// anchor engines join on.
-fn record_identity(root: &std::path::Path, repo_yml_path: &std::path::Path) {
+fn record_identity(root: &std::path::Path, repo_yml_path: &std::path::Path) -> Outcome {
     let first_sha = git_lex::git::genesis_sha().unwrap_or_default();
 
     if !first_sha.is_empty() {
@@ -602,8 +587,7 @@ fn record_identity(root: &std::path::Path, repo_yml_path: &std::path::Path) {
         let mut identity_paths: Vec<&str> = Vec::new();
         if !existing.contains("genesis_sha:") && !existing.contains("first_commit:") {
             if let Err(e) = git_lex::git::ensure_repo_yml_genesis(&first_sha) {
-                eprintln!("fatal: could not record genesis_sha identity in .lex/repo.yml: {}", e);
-                exit(1);
+                return Err(Failure::new(format!("fatal: could not record genesis_sha identity in .lex/repo.yml: {}", e)));
             }
             identity_paths.push(".lex/repo.yml");
             println!("Identity: {}", first_sha);
@@ -638,4 +622,5 @@ fn record_identity(root: &std::path::Path, repo_yml_path: &std::path::Path) {
             }
         }
     }
+    Ok(())
 }

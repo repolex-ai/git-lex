@@ -106,19 +106,17 @@ fn heal_soul_id_inner(root: &Path, write: bool) -> HealOutcome {
 }
 
 /// Fail-loud gate for wake (`sync`) and `save`: a soul repo without its root
-/// SOUL.md has no identity floor. Exits the process with restore
-/// instructions; a no-op for non-soul repos or when the file exists.
-pub fn require_soul_md(root: &Path) {
-    if !soul_kit_installed(root) {
-        return;
+/// SOUL.md has no identity floor. Fails with restore instructions; a no-op
+/// for non-soul repos or when the file exists.
+pub fn require_soul_md(root: &Path) -> crate::Outcome {
+    if !soul_kit_installed(root) || root.join("SOUL.md").is_file() {
+        return Ok(());
     }
-    if root.join("SOUL.md").is_file() {
-        return;
-    }
-    eprintln!("fatal: root SOUL.md is missing — this is a soul repo and SOUL.md is its identity floor.");
-    eprintln!("Restore it: `git lex kit-update` reinstalls the template when the file is missing");
-    eprintln!("(an existing SOUL.md is never overwritten), then fills soulId from the genesis sha.");
-    std::process::exit(1);
+    Err(crate::Failure::new(
+        "fatal: root SOUL.md is missing — this is a soul repo and SOUL.md is its identity floor.\n\
+         Restore it: `git lex kit-update` reinstalls the template when the file is missing\n\
+         (an existing SOUL.md is never overwritten), then fills soulId from the genesis sha.",
+    ))
 }
 
 /// Pure transform. Returns `None` when the content already carries the

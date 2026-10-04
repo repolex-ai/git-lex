@@ -1,7 +1,8 @@
 //! `git lex save` + the pre-commit gates — identity resolution, validation,
 //! extraction. Extracted from main.rs (#39, task #92).
 
-use std::process::{Command, exit};
+use std::process::Command;
+use git_lex::{Failure, Outcome};
 use std::time::Instant;
 use git_lex::get_kit;
 use git_lex::nquad;
@@ -75,17 +76,17 @@ fn resolve_agent_identity(root: &std::path::Path) -> Option<(String, String)> {
     None
 }
 
-pub(crate) fn cmd_save(message: &str, dry_run: bool, no_restamp: bool) {
+pub(crate) fn cmd_save(message: &str, dry_run: bool, no_restamp: bool) -> Outcome {
     if no_restamp {
         unsafe {
             std::env::set_var("GIT_LEX_NO_RESTAMP", "1");
         }
     }
-    let root = require_git_root();
+    let root = require_git_root()?;
 
     // Identity floor: a soul repo without its root SOUL.md must not save
     // (fail-loud, #29 — the file is restorable via kit-update).
-    soul_md::require_soul_md(&root);
+    soul_md::require_soul_md(&root)?;
 
     // ...and the file EXISTING is not the same as its identity being right.
     // soulId is derived from the genesis sha and the code says so twice — the
@@ -136,9 +137,7 @@ pub(crate) fn cmd_save(message: &str, dry_run: bool, no_restamp: bool) {
             ),
             Ok(false) => {}
             Err(e) => {
-                eprintln!("fatal: cannot install the pre-commit save gate: {e}");
-                eprintln!("Saving without it would commit with NO validation, cleanup, or identity gate — refusing.");
-                exit(1);
+                return Err(Failure::new([format!("fatal: cannot install the pre-commit save gate: {e}"), String::from("Saving without it would commit with NO validation, cleanup, or identity gate — refusing.")].join("\n")));
             }
         }
     }
@@ -153,17 +152,7 @@ pub(crate) fn cmd_save(message: &str, dry_run: bool, no_restamp: bool) {
     let (author_name, author_email) = match resolve_agent_identity(&root) {
         Some(id) => id,
         None => {
-            eprintln!("fatal: no agent identity configured.");
-            eprintln!();
-            eprintln!("Couldn't resolve an author identity from any of:");
-            eprintln!("  - agent_name: / agent_email: in .lex/repo.yml (the simplest fix:");
-            eprintln!("    add those two lines there and save again)");
-            eprintln!("  - GIT_AUTHOR_NAME / GIT_AUTHOR_EMAIL in the environment");
-            eprintln!("  - {}/.claude/settings.json", root.display());
-            eprintln!();
-            eprintln!("Agent repos: `git lex kit-update` refreshes identity; squad repos get");
-            eprintln!("env vars injected by your agent session's settings.");
-            exit(1);
+            return Err(Failure::new([String::from("fatal: no agent identity configured."), String::new(), String::from("Couldn't resolve an author identity from any of:"), String::from("  - agent_name: / agent_email: in .lex/repo.yml (the simplest fix:"), String::from("    add those two lines there and save again)"), String::from("  - GIT_AUTHOR_NAME / GIT_AUTHOR_EMAIL in the environment"), format!("  - {}/.claude/settings.json", root.display()), String::new(), String::from("Agent repos: `git lex kit-update` refreshes identity; squad repos get"), String::from("env vars injected by your agent session's settings.")].join("\n")));
         }
     };
     let author = format!("{} <{}>", author_name, author_email);
@@ -179,10 +168,9 @@ pub(crate) fn cmd_save(message: &str, dry_run: bool, no_restamp: bool) {
     // a real save stages deletions before the hook, so its sidecar cleanup
     // sees them; the probe stages nothing and skips that pass.
     if dry_run {
-        cmd_extract();
-        if !cmd_validate() {
-            eprintln!("DRY RUN: a real `git lex save` would FAIL validation in {}.", root.display());
-            exit(1);
+        cmd_extract()?;
+        if !cmd_validate()? {
+            return Err(Failure::new(format!("DRY RUN: a real `git lex save` would FAIL validation in {}.", root.display())));
         }
         println!(
             "DRY RUN: all save gates pass in {} — a real save would proceed [as {}].",
@@ -190,7 +178,7 @@ pub(crate) fn cmd_save(message: &str, dry_run: bool, no_restamp: bool) {
             author
         );
         println!("(nothing was committed; derived sidecars under .lex/extract/ may have been refreshed)");
-        return;
+        return Ok(());
     }
 
     // Sync skills/subagents into every active substrate's harness. The
@@ -227,8 +215,7 @@ pub(crate) fn cmd_save(message: &str, dry_run: bool, no_restamp: bool) {
         .args(["add", "-A"])
         .status();
     if !status.map(|s| s.success()).unwrap_or(false) {
-        eprintln!("fatal: git add failed");
-        exit(1);
+        return Err(Failure::new("fatal: git add failed"));
     }
 
     // Markdown link healing (Rob-ruled 2026-08-14, lifecycle spec ruling
@@ -251,10 +238,7 @@ pub(crate) fn cmd_save(message: &str, dry_run: bool, no_restamp: bool) {
         }
         Ok(_) => {}
         Err(e) => {
-            eprintln!("fatal: markdown link healing failed: {e}");
-            eprintln!("A staged rename may leave dangling links if this save proceeds — refusing.");
-            eprintln!("fatal: git commit was not attempted — NOTHING WAS COMMITTED.");
-            exit(1);
+            return Err(Failure::new([format!("fatal: markdown link healing failed: {e}"), String::from("A staged rename may leave dangling links if this save proceeds — refusing."), String::from("fatal: git commit was not attempted — NOTHING WAS COMMITTED.")].join("\n")));
         }
     }
 
@@ -268,7 +252,7 @@ pub(crate) fn cmd_save(message: &str, dry_run: bool, no_restamp: bool) {
         // "nothing to save" while the intended repo sat modified — the bare
         // message was a null signal indistinguishable from a clean save).
         println!("Nothing to save (no changes) in {}", root.display());
-        return;
+        return Ok(());
     }
 
     let status = Command::new("git")
@@ -327,25 +311,24 @@ pub(crate) fn cmd_save(message: &str, dry_run: bool, no_restamp: bool) {
         _ => {
             // An agent that doesn't know the transaction failed will assume
             // success and move on — say it in the final line, loudly.
-            eprintln!("fatal: git commit failed — NOTHING WAS COMMITTED.");
-            eprintln!("The gate output above names each blocking file and its fix; fix and save again.");
-            exit(1);
+            return Err(Failure::new([String::from("fatal: git commit failed — NOTHING WAS COMMITTED."), String::from("The gate output above names each blocking file and its fix; fix and save again.")].join("\n")));
         }
     }
+    Ok(())
 }
 
 
 /// Returns true if all files pass, false if any violations found.
-pub(crate) fn cmd_validate() -> bool {
+pub(crate) fn cmd_validate() -> Outcome<bool> {
     let start = Instant::now();
 
-    let root = require_git_root();
+    let root = require_git_root()?;
 
     let kit = match get_kit() {
         Some(k) => k,
         None => {
             println!("No kit configured — nothing to validate.");
-            return true;
+            return Ok(true);
         }
     };
 
@@ -377,17 +360,17 @@ pub(crate) fn cmd_validate() -> bool {
         match crate::shacl::generate_shacl_shapes(&kit) {
             Ok(None) => {
                 println!("Kit '{}' declares no document classes — nothing to validate.", kit);
-                return true;
+                return Ok(true);
             }
             Ok(Some(_)) => {
                 eprintln!("fatal: kit '{}' is configured but its SHACL shapes are not installed — validation cannot run.", kit);
                 eprintln!("Fix: `git lex kit-update` (reinstalls the kit's ontology and shapes), then retry.");
-                return false;
+                return Ok(false);
             }
             Err(e) => {
                 eprintln!("fatal: kit '{}' ontology is broken ({e}) — validation cannot run.", kit);
                 eprintln!("Fix the kit TTL (or `git lex kit-update` for a fresh copy), then retry.");
-                return false;
+                return Ok(false);
             }
         }
     }
@@ -421,19 +404,19 @@ pub(crate) fn cmd_validate() -> bool {
         &mut shapes_ttl.as_bytes(), "shapes", &RDFFormat::Turtle, None, &ReaderMode::Lax,
     ) {
         Ok(g) => g,
-        Err(e) => return shapes_broken("Turtle parse failed", &e),
+        Err(e) => return Ok(shapes_broken("Turtle parse failed", &e)),
     };
     let shapes_rdf = match RdfData::from_graph(shapes_graph) {
         Ok(d) => d,
-        Err(e) => return shapes_broken("graph load failed", &e),
+        Err(e) => return Ok(shapes_broken("graph load failed", &e)),
     };
     let shapes_schema = match ShaclParser::new(shapes_rdf).parse() {
         Ok(s) => s,
-        Err(e) => return shapes_broken("SHACL parse failed", &e),
+        Err(e) => return Ok(shapes_broken("SHACL parse failed", &e)),
     };
     let compiled_shapes = match ShaclSchemaIR::compile(&shapes_schema) {
         Ok(c) => c,
-        Err(e) => return shapes_broken("schema compile failed", &e),
+        Err(e) => return Ok(shapes_broken("schema compile failed", &e)),
     };
 
     let mut total_files = 0;
@@ -528,12 +511,12 @@ pub(crate) fn cmd_validate() -> bool {
     if total_violations == 0 {
         eprintln!("Validated {} files in {:.1}ms — all pass ✓",
             total_files, elapsed.as_secs_f64() * 1000.0);
-        true
+        Ok(true)
     } else {
         eprintln!("Validated {} files in {:.1}ms — {} violation(s) in {} file(s)",
             total_files, elapsed.as_secs_f64() * 1000.0,
             total_violations, failed_files.len());
-        false
+        Ok(false)
     }
 }
 
@@ -577,17 +560,17 @@ fn unstaged_extracts(root: &std::path::Path) -> Vec<String> {
 /// Stamps machine-maintained dates, runs sidecar cleanup, frontmatter
 /// extraction, markdown link extraction, stages artifacts, then SHACL
 /// validates. Exits non-zero if anything fails.
-pub(crate) fn hook_pre_commit() {
+pub(crate) fn hook_pre_commit() -> Outcome {
     // Phase 0: machine-maintained dates (git-lex:updatedDate, Rob-ruled
     // 2026-08-26). BEFORE extraction, so the stamped value reaches the
     // sidecar and both land in the same commit. Lives in the hook, not in
     // cmd_save, so `git lex save` and a plain `git commit` behave
     // identically — one door's documents must not date-drift from the
     // other's.
-    stamp_dates_for_staged_changes();
+    stamp_dates_for_staged_changes()?;
 
     // Phase 1: extraction
-    cmd_extract();
+    cmd_extract()?;
 
     // Stage extraction artifacts. A failed add would let the commit land
     // with sidecars that no longer match the .md content — the history
@@ -599,7 +582,7 @@ pub(crate) fn hook_pre_commit() {
     // committed, so no committed-sidecar divergence is possible. Skip
     // staging rather than fatal on `git add` refusing an ignored path,
     // which broke every commit in such repos (2026-08-04).
-    let root = git_lex::require_git_root();
+    let root = git_lex::require_git_root()?;
     let lex_ignored = Command::new("git").args(["check-ignore", "-q", ".lex"])
         .current_dir(&root)
         .status()
@@ -612,8 +595,7 @@ pub(crate) fn hook_pre_commit() {
             .status()
             .map(|s| s.success()).unwrap_or(false);
         if !staged {
-            eprintln!("fatal: failed to stage extraction artifacts (.lex/extract/)");
-            exit(1);
+            return Err(Failure::new("fatal: failed to stage extraction artifacts (.lex/extract/)"));
         }
         // ...and check that it took. `git add` reporting success is not the
         // same as the index holding what is on disk: on lUX, 12,102 extract
@@ -642,15 +624,15 @@ pub(crate) fn hook_pre_commit() {
             if out_of_sync.len() > 10 {
                 eprintln!("  ...and {} more", out_of_sync.len() - 10);
             }
-            eprintln!("Run `git add .lex/extract/` and save again; if it happens twice, report it.");
-            exit(1);
+            return Err(Failure::new("Run `git add .lex/extract/` and save again; if it happens twice, report it."));
         }
     }
 
     // Phase 2: SHACL validation
-    if !cmd_validate() {
-        exit(1);
+    if !cmd_validate()? {
+        return Err(Failure::new(""));
     }
+    Ok(())
 }
 
 /// Detect active runtime substrate for stamping documents on save.
@@ -847,11 +829,11 @@ fn is_substantive_doc_change(old_content: &str, new_content: &str) -> bool {
 ///   values are unchanged from HEAD, e.g. key migrations or pure file moves).
 ///
 /// Stamped files are re-staged so the commit carries the stamped bytes.
-fn stamp_dates_for_staged_changes() {
-    let root = git_lex::require_git_root();
+fn stamp_dates_for_staged_changes() -> Outcome {
+    let root = git_lex::require_git_root()?;
     let runtime_sub = detect_runtime_substrate(&root);
     // Never guess a date into a permanent record: no clock, no stamp.
-    let Some(now) = local_datetime_now() else { return };
+    let Some(now) = local_datetime_now() else { return Ok(()) };
 
     let no_restamp = std::env::var("GIT_LEX_NO_RESTAMP")
         .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
@@ -861,7 +843,7 @@ fn stamp_dates_for_staged_changes() {
         .args(["diff", "--cached", "--name-status", "-M", "--", "*.md"])
         .current_dir(&root)
         .output();
-    let Ok(out) = out else { return };
+    let Ok(out) = out else { return Ok(()) };
     let listing = String::from_utf8_lossy(&out.stdout).to_string();
 
     let repo = git2::Repository::open(&root).ok();
@@ -934,8 +916,7 @@ fn stamp_dates_for_staged_changes() {
     // committed sidecar and document disagree forever. Fail the commit
     // instead, same posture as staging .lex/extract/ below.
     if let Err(e) = stage_paths(&root, &to_stage) {
-        eprintln!("fatal: could not stage the {} document(s) whose dates were just written: {e}", to_stage.len());
-        exit(1);
+        return Err(Failure::new(format!("fatal: could not stage the {} document(s) whose dates were just written: {e}", to_stage.len())));
     }
     if stamped > 0 {
         if born > 0 {
@@ -945,6 +926,7 @@ fn stamp_dates_for_staged_changes() {
             println!("Wrote updatedDate: {} into {} document(s)", now, stamped);
         }
     }
+    Ok(())
 }
 
 /// The two date keys. There is no second spelling of either.
@@ -1130,7 +1112,7 @@ fn stamp_frontmatter_dates(
     Some(out)
 }
 
-pub(crate) fn cmd_extract() {
+pub(crate) fn cmd_extract() -> Outcome {
     let start = Instant::now();
 
     // Clean up .spo sidecars for .md files that are being deleted or
@@ -1158,8 +1140,7 @@ pub(crate) fn cmd_extract() {
             // An orphan sidecar left behind here keeps its facts alive in
             // the graph forever (the sync diff never sees the lines vanish).
             // Fail the commit; fix the state and retry.
-            eprintln!("fatal: sidecar cleanup failed — see errors above");
-            exit(1);
+            return Err(Failure::new("fatal: sidecar cleanup failed — see errors above"));
         }
     }
 
@@ -1175,11 +1156,11 @@ pub(crate) fn cmd_extract() {
     let (extraction_errors, extract_ctx) = match &ctx_root {
         Some(root) => {
             let ctx = nquad::ResolverContext::build(root);
-            let errs = nquad::generate_frontmatter_nquads_with(root, &ctx, walk_opts).errors;
+            let errs = nquad::generate_frontmatter_nquads_with(root, &ctx, walk_opts)?.errors;
             (errs, Some(ctx))
         }
         None => {
-            let errs = generate_frontmatter_nquads(walk_opts).errors;
+            let errs = generate_frontmatter_nquads(walk_opts)?.errors;
             (errs, None)
         }
     };
@@ -1236,14 +1217,11 @@ pub(crate) fn cmd_extract() {
     eprintln!("Extracted in {:.1}ms", elapsed.as_secs_f64() * 1000.0);
 
     if gate_errors > 0 {
-        eprintln!(
-            "fatal: sidecar write-gate: {} error(s) across {} sidecar file(s). \
+        return Err(Failure::new(format!("fatal: sidecar write-gate: {} error(s) across {} sidecar file(s). \
              An out-of-spec sidecar means the extractor produced output the \
              format spec forbids — a git-lex bug unless the message names \
              damage in the sidecar file itself. Report it.",
-            gate_errors, gate_files
-        );
-        std::process::exit(1);
+            gate_errors, gate_files)));
     }
     eprintln!("Sidecar gate: {} file(s) conform to the v1 format ✓", gate_files);
 
@@ -1288,8 +1266,7 @@ pub(crate) fn cmd_extract() {
             }
         }
         if id_errors > 0 {
-            eprintln!("fatal: identity gate: {} id collision(s)", id_errors);
-            std::process::exit(1);
+            return Err(Failure::new(format!("fatal: identity gate: {} id collision(s)", id_errors)));
         }
         eprintln!("Identity gate: {} Thing id(s) unique ✓", owners.len());
 
@@ -1364,15 +1341,14 @@ pub(crate) fn cmd_extract() {
             }
         }
         if ref_errors > 0 {
-            eprintln!("fatal: identity gate: {} dangling reference(s)", ref_errors);
-            std::process::exit(1);
+            return Err(Failure::new(format!("fatal: identity gate: {} dangling reference(s)", ref_errors)));
         }
     }
 
     if extraction_errors > 0 {
-        eprintln!("fatal: {} frontmatter error(s) — fix before committing", extraction_errors);
-        std::process::exit(1);
+        return Err(Failure::new(format!("fatal: {} frontmatter error(s) — fix before committing", extraction_errors)));
     }
+    Ok(())
 }
 
 #[cfg(test)]

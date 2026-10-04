@@ -26,7 +26,7 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::exit;
+use git_lex::{Failure, Outcome};
 
 use git_lex::kit::read_repo_yml_fields;
 
@@ -294,7 +294,7 @@ fn kit_shipped_deploy_names(
 ) -> Option<std::collections::HashSet<String>> {
     let mut names = std::collections::HashSet::new();
     let lex_kit = git_lex::layout::kits_dir(root);
-    for spec in crate::kit_cmds::collect_kits_for_update(root, None) {
+    for spec in git_lex::installed_kit_specs(root) {
         let (org, repo, _) = git_lex::resolve_kit_spec(&spec);
         let kit_dir = lex_kit.join(&org).join(&repo);
         if !kit_dir.exists() {
@@ -652,14 +652,11 @@ fn hook_event_for(filename: &str) -> Result<Option<&'static str>, String> {
 /// across machines via git — checking identity in keeps it traveling with
 /// the repo. Anyone running a Claude Code session in this soul commits as
 /// this soul, which is the correct semantics: the soul *is* the agent.
-pub(crate) fn setup_substrate_claude(root: &std::path::Path, agent_name: &str) {
+pub(crate) fn setup_substrate_claude(root: &std::path::Path, agent_name: &str) -> Outcome {
     let settings_path = root.join(".claude").join("settings.json");
     if let Err(e) = fs::create_dir_all(settings_path.parent().unwrap()) {
-        eprintln!(
-            "ERROR: could not create .claude/ under {}: {e} — substrate setup cannot proceed.",
-            root.display()
-        );
-        std::process::exit(1);
+        return Err(Failure::new(format!("ERROR: could not create .claude/ under {}: {e} — substrate setup cannot proceed.",
+            root.display())));
     }
 
     let mut settings: serde_json::Value = if settings_path.exists() {
@@ -670,31 +667,25 @@ pub(crate) fn setup_substrate_claude(root: &std::path::Path, agent_name: &str) {
         match serde_json::from_str(&content) {
             Ok(v) => v,
             Err(e) => {
-                eprintln!(
-                    "ERROR: {} exists but is not valid JSON ({e}).\n\
+                return Err(Failure::new(format!("ERROR: {} exists but is not valid JSON ({e}).\n\
                      Refusing to overwrite it — that would wipe your hand-authored \
                      settings. Fix the JSON (or move the file aside), then re-run \
                      `git lex kit-update`.",
-                    settings_path.display()
-                );
-                std::process::exit(1);
+                    settings_path.display())));
             }
         }
     } else {
         serde_json::json!({})
     };
     // A value of the wrong shape is the user's too: report it, never replace it.
-    let wrong_shape = |msg: String| -> ! {
-        eprintln!(
-            "ERROR: in {}, {msg}.\n\
+    let wrong_shape = |msg: String| -> Failure {
+        Failure::new(format!("ERROR: in {}, {msg}.\n\
              Refusing to replace it — that would wipe a value you wrote. Give it \
              the shape above (or remove it), then re-run `git lex kit-update`.",
-            settings_path.display()
-        );
-        std::process::exit(1);
+            settings_path.display()))
     };
     if !settings.is_object() {
-        wrong_shape(wrong_shape_msg("the file as a whole", &settings, "an object, like {}"));
+        return Err(wrong_shape(wrong_shape_msg("the file as a whole", &settings, "an object, like {}")));
     }
 
     // Kit-managed banner. JSON has no comments, but Claude Code ignores unknown
@@ -728,7 +719,7 @@ pub(crate) fn setup_substrate_claude(root: &std::path::Path, agent_name: &str) {
         .unwrap_or_else(|| format!("{}@lex.local", agent_name.to_lowercase()));
     let env = match settings_block(&mut settings, "env", r#"an object, like {"NAME": "value"}"#) {
         Ok(env) => env,
-        Err(msg) => wrong_shape(msg),
+        Err(msg) => return Err(wrong_shape(msg)),
     };
     env.insert("GIT_AUTHOR_NAME".to_string(), serde_json::json!(agent_name));
     env.insert("GIT_AUTHOR_EMAIL".to_string(), serde_json::json!(email));
@@ -769,8 +760,7 @@ pub(crate) fn setup_substrate_claude(root: &std::path::Path, agent_name: &str) {
                 Ok(Some(event)) => event,
                 Ok(None) => continue, // not a hook script / dotfile
                 Err(msg) => {
-                    eprintln!("error: {}", msg);
-                    exit(1);
+                    return Err(Failure::new(format!("error: {}", msg)));
                 }
             };
             let cmd = format!(
@@ -778,7 +768,7 @@ pub(crate) fn setup_substrate_claude(root: &std::path::Path, agent_name: &str) {
                 name
             );
             if let Err(msg) = register_hook_in_settings(&mut settings, event, &cmd) {
-                wrong_shape(msg);
+                return Err(wrong_shape(msg));
             }
         }
     }
@@ -793,14 +783,11 @@ pub(crate) fn setup_substrate_claude(root: &std::path::Path, agent_name: &str) {
             println!("Claude Code: identity and hooks written to .claude/settings.json");
         }
         Err(e) => {
-            eprintln!(
-                "ERROR: could not write {}: {e}\n\
+            return Err(Failure::new(format!("ERROR: could not write {}: {e}\n\
                  Identity env and hook registrations did NOT land — commits may \
                  attribute to the wrong author and kit hooks will not fire. Fix the \
                  underlying problem (permissions/disk), then re-run `git lex kit-update`.",
-                settings_path.display()
-            );
-            std::process::exit(1);
+                settings_path.display())));
         }
     }
 
@@ -834,6 +821,7 @@ pub(crate) fn setup_substrate_claude(root: &std::path::Path, agent_name: &str) {
             );
         }
     }
+    Ok(())
 }
 
 /// The git author/committer env keys in a `.claude/settings.local.json`

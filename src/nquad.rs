@@ -18,7 +18,7 @@
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::PathBuf;
-use crate::find_git_root;
+use crate::{find_git_root, Failure, Outcome};
 
 use crate::git::graph_uri;
 
@@ -27,12 +27,12 @@ use crate::ontology::{get_kit_namespaces_all_kits, get_object_properties_all_kit
                        get_property_datatypes_all_kits};
 use crate::resolve;
 
-/// Write a sidecar (or its `.meta`) file, failing the process on error.
+/// Write a sidecar (or its `.meta`) file; failing to is a command failure.
 /// A silently unwritten sidecar is a permanent history gap: the committed
 /// sidecar diff is the one graph's ONLY event source, so "couldn't write,
 /// carried on" means facts that never happened as far as history is
 /// concerned (review finding A8).
-pub fn write_sidecar_loud(path: &std::path::Path, content: &str) {
+pub fn write_sidecar_loud(path: &std::path::Path, content: &str) -> Outcome {
     // Already byte-identical → nothing to do. The walk regenerates EVERY
     // sidecar on EVERY run, so on a repo where one file changed this was
     // thousands of writes of bytes already on disk (5,840 of them per sync
@@ -47,29 +47,28 @@ pub fn write_sidecar_loud(path: &std::path::Path, content: &str) {
     // instead of being silently mistaken for "unchanged".
     if let Ok(existing) = fs::read_to_string(path)
         && existing == content {
-            return;
+            return Ok(());
         }
     if let Some(parent) = path.parent()
         && let Err(e) = fs::create_dir_all(parent) {
-            eprintln!("fatal: failed to create sidecar dir {}: {e}", parent.display());
-            std::process::exit(1);
+            return Err(Failure::new(format!("fatal: failed to create sidecar dir {}: {e}", parent.display())));
         }
-    if let Err(e) = fs::write(path, content) {
-        eprintln!("fatal: failed to write sidecar {}: {e}", path.display());
-        std::process::exit(1);
-    }
+    fs::write(path, content)
+        .map_err(|e| Failure::new(format!("fatal: failed to write sidecar {}: {e}", path.display())))
 }
 
 /// Remove a stale sidecar, failing the process on error (already-gone is
 /// fine — that's the desired end state). A stale sidecar that survives
 /// removal keeps its facts alive forever: the sync diff never sees the
 /// lines vanish, so the retraction events never exist (review finding A3).
-pub fn remove_sidecar_loud(path: &std::path::Path) {
-    if let Err(e) = fs::remove_file(path)
-        && e.kind() != std::io::ErrorKind::NotFound {
-            eprintln!("fatal: failed to remove stale sidecar {}: {e}", path.display());
-            std::process::exit(1);
-        }
+pub fn remove_sidecar_loud(path: &std::path::Path) -> Outcome {
+    match fs::remove_file(path) {
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(Failure::new(format!(
+            "fatal: failed to remove stale sidecar {}: {e}",
+            path.display()
+        ))),
+        _ => Ok(()),
+    }
 }
 
 /// Escape a string for use in N-Quads literals.
@@ -733,10 +732,10 @@ pub struct NowWalk {
     pub facts: usize,
 }
 
-pub fn generate_frontmatter_nquads(opts: NowWalkOpts) -> NowWalk {
+pub fn generate_frontmatter_nquads(opts: NowWalkOpts) -> Outcome<NowWalk> {
     let root = match find_git_root() {
         Some(r) => r,
-        None => return NowWalk { nquads: String::new(), errors: 0, facts: 0 },
+        None => return Ok(NowWalk { nquads: String::new(), errors: 0, facts: 0 }),
     };
     let ctx = ResolverContext::build(&root);
     generate_frontmatter_nquads_with(&root, &ctx, opts)
@@ -748,7 +747,7 @@ pub fn generate_frontmatter_nquads_with(
     root: &std::path::Path,
     ctx: &ResolverContext,
     opts: NowWalkOpts,
-) -> NowWalk {
+) -> Outcome<NowWalk> {
     let root = root.to_path_buf();
 
     // The "now" graph is the canonical view of current state: extracted
@@ -979,9 +978,9 @@ pub fn generate_frontmatter_nquads_with(
             if opts.write_sidecars {
                 if !spo_lines.is_empty() {
                     let spo_content = spo_lines.join("\n") + "\n";
-                    write_sidecar_loud(&spo_path, &spo_content);
+                    write_sidecar_loud(&spo_path, &spo_content)?;
                 } else if spo_path.exists() {
-                    remove_sidecar_loud(&spo_path);
+                    remove_sidecar_loud(&spo_path)?;
                 }
             }
 
@@ -1005,10 +1004,10 @@ pub fn generate_frontmatter_nquads_with(
                             let md_path =
                                 extract_dir.join(format!("{}.md.spo", relpath_str));
                             if !md_lines.is_empty() {
-                                write_sidecar_loud(&md_path, &(md_lines.join("\n") + "\n"));
+                                write_sidecar_loud(&md_path, &(md_lines.join("\n") + "\n"))?;
                                 total_links += md_lines.len();
                             } else if md_path.exists() {
-                                remove_sidecar_loud(&md_path);
+                                remove_sidecar_loud(&md_path)?;
                             }
                         }
                     }
@@ -1125,7 +1124,7 @@ pub fn generate_frontmatter_nquads_with(
     // (Rob-ruled 2026-08-06). git-lex reads no wikilinks anywhere; a
     // bracketed name in a commit subject is prose.
 
-    NowWalk { nquads: nq, errors: total_errors, facts: total_facts }
+    Ok(NowWalk { nquads: nq, errors: total_errors, facts: total_facts })
 }
 
 /// Files handed to the parallel half of the walk at once — bounds how many
@@ -2476,7 +2475,7 @@ mod sidecar_write_tests {
     fn writes_when_absent() {
         let d = tmp("absent");
         let p = d.join("a.fm.spo");
-        write_sidecar_loud(&p, "one | hasValue | 1\n");
+        write_sidecar_loud(&p, "one | hasValue | 1\n").unwrap();
         assert_eq!(std::fs::read_to_string(&p).unwrap(), "one | hasValue | 1\n");
         std::fs::remove_dir_all(&d).unwrap();
     }
@@ -2489,7 +2488,7 @@ mod sidecar_write_tests {
         let d = tmp("differs");
         let p = d.join("a.fm.spo");
         std::fs::write(&p, "old | hasValue | 1\n").unwrap();
-        write_sidecar_loud(&p, "new | hasValue | 2\n");
+        write_sidecar_loud(&p, "new | hasValue | 2\n").unwrap();
         assert_eq!(std::fs::read_to_string(&p).unwrap(), "new | hasValue | 2\n");
         std::fs::remove_dir_all(&d).unwrap();
     }
@@ -2502,10 +2501,10 @@ mod sidecar_write_tests {
         let d = tmp("identical");
         let p = d.join("a.fm.spo");
         let body = "same | hasValue | 1\n";
-        write_sidecar_loud(&p, body);
+        write_sidecar_loud(&p, body).unwrap();
         let before = std::fs::metadata(&p).unwrap().modified().unwrap();
         std::thread::sleep(std::time::Duration::from_millis(20));
-        write_sidecar_loud(&p, body);
+        write_sidecar_loud(&p, body).unwrap();
         let after = std::fs::metadata(&p).unwrap().modified().unwrap();
         assert_eq!(before, after, "identical content must not re-write the file");
         assert_eq!(std::fs::read_to_string(&p).unwrap(), body);
@@ -2518,7 +2517,7 @@ mod sidecar_write_tests {
     fn creates_missing_parent_dirs() {
         let d = tmp("nested");
         let p = d.join("deep/deeper/a.fm.spo");
-        write_sidecar_loud(&p, "x | hasValue | 1\n");
+        write_sidecar_loud(&p, "x | hasValue | 1\n").unwrap();
         assert!(p.exists());
         std::fs::remove_dir_all(&d).unwrap();
     }

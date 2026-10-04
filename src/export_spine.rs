@@ -67,23 +67,19 @@ pub fn spine_dir(root: &Path) -> PathBuf {
     crate::layout::spine_dir(root)
 }
 
-pub fn cmd_export_spine() {
-    let root = require_git_root();
+pub fn cmd_export_spine() -> crate::Outcome {
+    let root = require_git_root()?;
 
     let Some(store) = crate::open_store_read_only_at(&root) else {
         // open_store_read_only_at already printed the corrupt/locked case;
         // the None we act on here is the genuinely-missing store.
-        eprintln!(
+        return Err(crate::Failure::new(
             "fatal: no synced store to export.\n\
-             Type: git lex sync — then re-run this command."
-        );
-        std::process::exit(1);
+             Type: git lex sync — then re-run this command.",
+        ));
     };
 
-    if let Err(e) = run_export(&root, &store) {
-        eprintln!("fatal: {e}");
-        std::process::exit(1);
-    }
+    run_export(&root, &store).map_err(|e| crate::Failure::new(format!("fatal: {e}")))
 }
 
 /// The whole export, callable from sync as well as the CLI. Errors are

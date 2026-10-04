@@ -529,7 +529,7 @@ pub fn remote_kit_sha(kit_spec: &str) -> Option<String> {
 /// reader should not go looking for it.
 ///
 /// Returns true on success (and if at least one file was extracted).
-pub fn fetch_kit_from_github(kit_spec: &str, target_dir: &std::path::Path) -> bool {
+pub fn fetch_kit_from_github(kit_spec: &str, target_dir: &std::path::Path) -> crate::Outcome<bool> {
     let (org, repo, _) = resolve_kit_spec(kit_spec);
     let url = format!(
         "https://github.com/{}/{}/archive/refs/heads/main.tar.gz",
@@ -570,7 +570,7 @@ pub fn fetch_kit_from_github(kit_spec: &str, target_dir: &std::path::Path) -> bo
                 .map(|entries| entries.count() > 0)
                 .unwrap_or(false);
             if !has_files {
-                return false;
+                return Ok(false);
             }
 
             // IDENTITY CHECK — the fetch succeeding does not mean you got the
@@ -640,14 +640,14 @@ pub fn fetch_kit_from_github(kit_spec: &str, target_dir: &std::path::Path) -> bo
                                     target_dir.display(), e
                                 );
                             }
-                            // Exit here rather than returning false: every
+                            // Fail here rather than returning false: every
                             // caller's failure branch blames the network and
                             // tells you to check the repo exists. Both are
                             // false here — the repo exists and the fetch
                             // worked. A precise diagnosis followed by a wrong
                             // one is the disease this check was written to
                             // cure, so the precise one gets the last word.
-                            std::process::exit(1);
+                            return Err(crate::Failure::new(""));
                         }
                 }
                 Err(_) => {
@@ -663,9 +663,9 @@ pub fn fetch_kit_from_github(kit_spec: &str, target_dir: &std::path::Path) -> bo
                     );
                 }
             }
-            true
+            Ok(true)
         }
-        _ => false,
+        _ => Ok(false),
     }
 }
 
@@ -1324,10 +1324,10 @@ pub enum KitFetchOutcome {
 ///
 /// On `ScopeMismatch`, the fetched dir is left on disk (caller can inspect
 /// or clean up). On `FetchFailed`, the dir is removed.
-pub fn fetch_and_validate_optional_kit(kit_spec: &str) -> KitFetchOutcome {
+pub fn fetch_and_validate_optional_kit(kit_spec: &str) -> crate::Outcome<KitFetchOutcome> {
     let root = match find_git_root() {
         Some(r) => r,
-        None => return KitFetchOutcome::FetchFailed,
+        None => return Ok(KitFetchOutcome::FetchFailed),
     };
     let (org, repo, _) = resolve_kit_spec(kit_spec);
     let kit_dir = crate::layout::kit_dir(&root, &org, &repo);
@@ -1335,19 +1335,19 @@ pub fn fetch_and_validate_optional_kit(kit_spec: &str) -> KitFetchOutcome {
     // Clean any prior state so the fetch is fresh.
     let _ = fs::remove_dir_all(&kit_dir);
     if fs::create_dir_all(&kit_dir).is_err() {
-        return KitFetchOutcome::FetchFailed;
+        return Ok(KitFetchOutcome::FetchFailed);
     }
 
-    if !fetch_kit_from_github(kit_spec, &kit_dir) {
+    if !fetch_kit_from_github(kit_spec, &kit_dir)? {
         let _ = fs::remove_dir_all(&kit_dir);
-        return KitFetchOutcome::FetchFailed;
+        return Ok(KitFetchOutcome::FetchFailed);
     }
 
     let scope = read_kit_scope(&kit_dir);
     if scope != KitScope::Optional {
-        return KitFetchOutcome::ScopeMismatch(scope);
+        return Ok(KitFetchOutcome::ScopeMismatch(scope));
     }
-    KitFetchOutcome::Ready(kit_dir)
+    Ok(KitFetchOutcome::Ready(kit_dir))
 }
 
 /// Remove a kit's on-disk install dir (`.lex/kit/{org}/{repo}/`). Does NOT

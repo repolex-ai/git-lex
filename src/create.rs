@@ -2,10 +2,9 @@
 //! scaffolding. Extracted from main.rs (#39, task #92).
 
 use std::fs;
-use std::process::exit;
+use git_lex::{Failure, Outcome};
 use git_lex::{find_git_root, resolve_kit_spec};
 use git_lex::git::resource_uri;
-use crate::kit_cmds;
 use git_lex::ontology::{self, get_kit_types};
 use git_lex::kit::kit_config_str;
 
@@ -72,7 +71,7 @@ fn resolve_doctype_across_kits(
 ) -> Result<(String, String, Vec<(String, String, bool, String)>), DoctypeError> {
     // Build the full installed-kit list, same order as kit-update: base,
     // domain, then optionals (alphabetical).
-    let installed = kit_cmds::collect_kits_for_update(root, None);
+    let installed = git_lex::installed_kit_specs(root);
 
     // Detect kit-prefixed form: `innerworld/place` or `copia.place`. The kit-short is the
     // last segment of the kit spec (innerworld in repolex-ai/git-lex-kit-innerworld).
@@ -142,30 +141,29 @@ pub(crate) fn cmd_create(
     instance_id: Option<&str>,
     list: bool,
     json: bool,
-) {
+) -> Outcome {
     if list || doctype.is_none() {
         cmd_list(json);
-        return;
+        return Ok(());
     }
     let doctype = doctype.unwrap();
     // Emit an error in the right format, then exit. Used for all failure
     // paths so --json consumers don't have to parse human text.
-    let fail = |code: &str, msg: String| -> ! {
+    let fail = |code: &str, msg: String| -> Failure {
         if json {
             let out = serde_json::json!({"ok": false, "error": code, "message": msg});
-            eprintln!("{}", serde_json::to_string(&out).unwrap());
+            Failure::new(serde_json::to_string(&out).unwrap())
         } else {
-            eprintln!("{}", msg);
+            Failure::new(msg)
         }
-        exit(1);
     };
 
-    // Not require_git_root() here: cmd_create's failure paths are all
+    // Not require_git_root()? here: cmd_create's failure paths are all
     // JSON-aware via `fail` (--json consumers get structured errors), but
     // the message text matches require_git_root's canonical wording.
     let root = match find_git_root() {
         Some(r) => r,
-        None => fail("not-a-repo", "fatal: not a git repository (run this inside a repo)".to_string()),
+        None => return Err(fail("not-a-repo", "fatal: not a git repository (run this inside a repo)".to_string())),
     };
 
     // Resolve the doctype across base + domain + all installed optional kits.
@@ -187,17 +185,17 @@ pub(crate) fn cmd_create(
                 Some(ref k) => format!("Unknown document type '{}' in kit '{}'.", requested, k),
                 None => format!("Unknown document type '{}'.", requested),
             };
-            fail("unknown-doctype", format!("{} Valid types:\n{}", prefix_hint, kit_lines.join("\n")));
+            return Err(fail("unknown-doctype", format!("{} Valid types:\n{}", prefix_hint, kit_lines.join("\n"))));
         }
         Err(DoctypeError::Ambiguous { requested, hints }) => {
-            fail(
+            return Err(fail(
                 "ambiguous-doctype",
                 format!(
                     "Document type '{}' is defined in multiple kits. Use one of: {}",
                     requested,
                     hints.join(", ")
                 ),
-            );
+            ));
         }
     };
 
@@ -230,11 +228,11 @@ pub(crate) fn cmd_create(
     };
 
     if filepath.exists() {
-        fail("exists", format!(
+        return Err(fail("exists", format!(
             "File already exists: {} — pick a different id, or edit the \
              existing file (create never overwrites). Nothing was created.",
             display_path
-        ));
+        )));
     }
 
     // Auto-generate agent email for Agent type
@@ -383,6 +381,7 @@ pub(crate) fn cmd_create(
         println!();
         println!("→ File created: {}  (edit this file, not a new one)", display_path);
     }
+    Ok(())
 }
 
 /// `Journal` → `journal`. Splits on the first CHARACTER, so an empty name or

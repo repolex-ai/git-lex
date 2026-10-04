@@ -26,6 +26,46 @@ use std::process::Command;
 
 pub const KIT_GITHUB_ORG: &str = "repolex-ai";
 
+/// A command that could not finish: what to tell the person, and the exit
+/// status. Commands return this instead of exiting, so their error paths
+/// can be tested in-process and other programs can call them; the two
+/// binaries' `main` functions are the only places that print it and exit
+/// (#33).
+#[derive(Debug, Clone, PartialEq)]
+pub struct Failure {
+    /// Printed to stderr as is; empty when everything was already said.
+    pub message: String,
+    pub code: i32,
+}
+
+impl Failure {
+    /// Exit status 1, the status almost every failure has.
+    pub fn new(message: impl Into<String>) -> Failure {
+        Failure { message: message.into(), code: 1 }
+    }
+
+    pub fn with_code(message: impl Into<String>, code: i32) -> Failure {
+        Failure { message: message.into(), code }
+    }
+
+    /// Print the message (if any) and exit with the code. For `main` only.
+    pub fn exit(self) -> ! {
+        if !self.message.is_empty() {
+            eprintln!("{}", self.message);
+        }
+        std::process::exit(self.code)
+    }
+}
+
+impl std::fmt::Display for Failure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+/// What a command returns.
+pub type Outcome<T = ()> = Result<T, Failure>;
+
 /// Find the root of the current git repo.
 ///
 /// Memoized per working directory (#90). This shells out to `git rev-parse`,
@@ -133,16 +173,10 @@ pub fn open_store_read_only_at(root: &std::path::Path) -> Option<Store> {
     None
 }
 
-/// Exit with a clean one-line error when run outside a git repository —
-/// a panic + backtrace here is a crash report for a user mistake.
-pub fn require_git_root() -> std::path::PathBuf {
-    match find_git_root() {
-        Some(r) => r,
-        None => {
-            eprintln!("fatal: not a git repository (run this inside a repo)");
-            std::process::exit(1);
-        }
-    }
+/// A clean one-line error when run outside a git repository — a panic +
+/// backtrace here is a crash report for a user mistake.
+pub fn require_git_root() -> Outcome<std::path::PathBuf> {
+    find_git_root().ok_or_else(|| Failure::new("fatal: not a git repository (run this inside a repo)"))
 }
 
 /// Create or open the persistent store, with clean errors (no panics) for
@@ -167,37 +201,29 @@ pub fn lex_repo_check(root: &std::path::Path) -> Result<(), String> {
     }
 }
 
-/// `lex_repo_check`, or exit 1 with the reason.
-pub fn require_lex_repo(root: &std::path::Path) {
-    if let Err(e) = lex_repo_check(root) {
-        eprintln!("fatal: {e}");
-        std::process::exit(1);
-    }
+/// `lex_repo_check`, as a failure with the reason.
+pub fn require_lex_repo(root: &std::path::Path) -> Outcome {
+    lex_repo_check(root).map_err(|e| Failure::new(format!("fatal: {e}")))
 }
 
 /// Open the store, creating its directory when the repository is set up
 /// for git-lex and has never synced. Never creates anything in a
 /// repository without `.lex/repo.yml`.
-pub fn open_or_create_store() -> Store {
-    let root = require_git_root();
-    require_lex_repo(&root);
-    if let Err(e) = migrate_legacy_store(&root) {
-        eprintln!("fatal: {e}");
-        std::process::exit(1);
-    }
+pub fn open_or_create_store() -> Outcome<Store> {
+    let root = require_git_root()?;
+    require_lex_repo(&root)?;
+    migrate_legacy_store(&root).map_err(|e| Failure::new(format!("fatal: {e}")))?;
     let path = crate::store_path_at(&root);
-    if let Err(e) = fs::create_dir_all(&path) {
-        eprintln!("fatal: cannot create store directory {}: {e}", path.display());
-        std::process::exit(1);
-    }
-    match Store::open(&path) {
-        Ok(s) => s,
-        Err(e) => {
-            eprintln!("fatal: cannot open the store at {}: {e}", path.display());
-            eprintln!("(another git-lex write process may hold the lock — is a sync already running?)");
-            std::process::exit(1);
-        }
-    }
+    fs::create_dir_all(&path).map_err(|e| {
+        Failure::new(format!("fatal: cannot create store directory {}: {e}", path.display()))
+    })?;
+    Store::open(&path).map_err(|e| {
+        Failure::new(format!(
+            "fatal: cannot open the store at {}: {e}\n\
+             (another git-lex write process may hold the lock — is a sync already running?)",
+            path.display()
+        ))
+    })
 }
 
 /// Move a pre-pocket store (`.git/lex/oxigraph`) into `.lex/_ignore/oxigraph`

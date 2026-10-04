@@ -7,7 +7,7 @@
 
 use std::fs;
 use std::path::Path;
-use std::process::exit;
+use git_lex::{Failure, Outcome};
 
 use git_lex::{find_git_root, resolve_kit_spec};
 
@@ -31,16 +31,16 @@ use git_lex::{open_or_create_store, require_git_root, BASE_KIT};
 /// Fetch a single kit into its install dir. Caller decides whether to
 /// remove-and-replace (cleanest for update) or skip-if-present.
 /// Returns true on success.
-fn fetch_kit_for_update(kit_spec: &str) -> bool {
+fn fetch_kit_for_update(kit_spec: &str) -> Outcome<bool> {
     let root = match find_git_root() {
         Some(r) => r,
-        None => return false,
+        None => return Ok(false),
     };
     let (org, repo, _) = resolve_kit_spec(kit_spec);
     let kit_dir = git_lex::layout::kit_dir(&root, &org, &repo);
     let _ = fs::remove_dir_all(&kit_dir);
     if fs::create_dir_all(&kit_dir).is_err() {
-        return false;
+        return Ok(false);
     }
     fetch_kit_from_github(kit_spec, &kit_dir)
 }
@@ -49,10 +49,11 @@ fn fetch_kit_for_update(kit_spec: &str) -> bool {
 /// repo.yml's). kit-add and kit-remove both change what a shared parent class
 /// carries, so every kit's shapes are rebuilt with the new set in view. Class
 /// folders are created only for `new_kit`, the kit being added.
-fn regenerate_installed_kits(root: &std::path::Path, new_kit: Option<&str>) {
+fn regenerate_installed_kits(root: &std::path::Path, new_kit: Option<&str>) -> Outcome {
     for spec in git_lex::installed_kit_specs(root) {
-        regenerate_kit_artifacts(&spec, root, new_kit == Some(spec.as_str()));
+        regenerate_kit_artifacts(&spec, root, new_kit == Some(spec.as_str()))?;
     }
+    Ok(())
 }
 
 /// Regenerate one kit's derived artifacts: SHACL shapes, class folders +
@@ -60,15 +61,13 @@ fn regenerate_installed_kits(root: &std::path::Path, new_kit: Option<&str>) {
 ///
 /// Used by both `cmd_kit_update` (in a loop over all kits) and
 /// `cmd_kit_add` (single-kit). Stays silent if the kit has no types.
-fn regenerate_kit_artifacts(kit_name: &str, root: &std::path::Path, create_folders: bool) {
+fn regenerate_kit_artifacts(kit_name: &str, root: &std::path::Path, create_folders: bool) -> Outcome {
     match build_shacl_shapes(kit_name) {
         Ok(Some(shapes_path)) => println!("  SHACL shapes regenerated: {}",
             shapes_path.file_name().unwrap_or_default().to_string_lossy()),
         Ok(None) => {} // kit ships no ontology — nothing to regenerate
         Err(e) => {
-            eprintln!("fatal: SHACL shapes generation failed for '{}': {}", kit_name, e);
-            eprintln!("       a broken kit ontology must not install silently — fix the kit TTL and re-run");
-            exit(1);
+            return Err(Failure::new([format!("fatal: SHACL shapes generation failed for '{}': {}", kit_name, e), String::from("       a broken kit ontology must not install silently — fix the kit TTL and re-run")].join("\n")));
         }
     }
 
@@ -154,6 +153,7 @@ fn regenerate_kit_artifacts(kit_name: &str, root: &std::path::Path, create_folde
     if templates_updated > 0 {
         println!("  {} class template(s) regenerated.", templates_updated);
     }
+    Ok(())
 }
 
 /// True when `dir` itself, or ANYTHING beneath it, is a symlink — or when
@@ -202,7 +202,7 @@ fn folder_is_scaffold_only(dir: &Path, class_name: &str) -> bool {
 /// folder base — those must never be reaped.
 fn folders_declared_by_installed_kits(root: &Path) -> std::collections::HashSet<std::path::PathBuf> {
     let mut declared = std::collections::HashSet::new();
-    for kit in collect_kits_for_update(root, None) {
+    for kit in git_lex::installed_kit_specs(root) {
         let base = kit_config_str(&kit, "folder base");
         for (type_name, _) in &get_kit_types(&kit) {
             if !ontology::class_gets_folder(&kit, type_name) {
@@ -342,10 +342,10 @@ pub(crate) fn emit_class_templates(kit_name: &str, root: &std::path::Path, creat
 ///
 /// If `target` is provided, returns only that one kit (still validated
 /// against installed-kit list — refuses to update a kit that isn't here).
-pub(crate) fn collect_kits_for_update(root: &std::path::Path, target: Option<&str>) -> Vec<String> {
+pub(crate) fn collect_kits_for_update(root: &std::path::Path, target: Option<&str>) -> Outcome<Vec<String>> {
     let all = git_lex::installed_kit_specs(root);
     match target {
-        None => all,
+        None => Ok(all),
         Some(t) => {
             // Exact match against installed list. Allow short or long form by
             // resolving both sides to canonical (org, repo) tuples.
@@ -357,21 +357,19 @@ pub(crate) fn collect_kits_for_update(root: &std::path::Path, target: Option<&st
                 })
                 .collect();
             if matched.is_empty() {
-                eprintln!("Kit '{}' is not installed in this repo. Use `git lex kit-add` first.", t);
-                exit(1);
+                return Err(Failure::new(format!("Kit '{}' is not installed in this repo. Use `git lex kit-add` first.", t)));
             }
-            matched
+            Ok(matched)
         }
     }
 }
 
-pub(crate) fn cmd_kit_update(kit_arg: Option<String>) {
-    let root = require_git_root();
+pub(crate) fn cmd_kit_update(kit_arg: Option<String>) -> Outcome {
+    let root = require_git_root()?;
     let lex_dir = git_lex::layout::lex_dir(&root);
 
     if !lex_dir.exists() {
-        eprintln!("Not a git-lex repo. Run 'git lex init' first.");
-        exit(1);
+        return Err(Failure::new("Not a git-lex repo. Run 'git lex init' first."));
     }
 
     // TWO SCOPES, and they are NOT the same one (#102). Keeping them as two
@@ -399,8 +397,8 @@ pub(crate) fn cmd_kit_update(kit_arg: Option<String>) {
     // THE RULE: an argument may narrow what you FETCH; it must never narrow
     // what you REBUILD. Same scope leak as #28, which was this command
     // reaping hooks from a partial kit set.
-    let kits_to_fetch = collect_kits_for_update(&root, kit_arg.as_deref());
-    let all_installed_kits = collect_kits_for_update(&root, None);
+    let kits_to_fetch = collect_kits_for_update(&root, kit_arg.as_deref())?;
+    let all_installed_kits = collect_kits_for_update(&root, None)?;
 
     // Fetch every kit fresh. Bail on any fetch failure — partial state is
     // worse than no state, and the only way to fail here is network/auth
@@ -421,10 +419,8 @@ pub(crate) fn cmd_kit_update(kit_arg: Option<String>) {
         let remote = remote_kit_sha(spec);
 
         println!("Updating kit '{}/{}' from GitHub...", org, repo);
-        if !fetch_kit_for_update(spec) {
-            eprintln!("Failed to fetch kit '{}' from GitHub.", spec);
-            eprintln!("Check network access to https://github.com/{}/{}", org, repo);
-            exit(1);
+        if !fetch_kit_for_update(spec)? {
+            return Err(Failure::new([format!("Failed to fetch kit '{}' from GitHub.", spec), format!("Check network access to https://github.com/{}/{}", org, repo)].join("\n")));
         }
 
         match (&before, &remote) {
@@ -532,7 +528,7 @@ pub(crate) fn cmd_kit_update(kit_arg: Option<String>) {
     // no-agent_name branch is LOUD (a silent skip of the thing that makes
     // hooks FIRE is exactly the R11 ghost; found by w3bl0rd's flinch-audit
     // on the convergence rollout, Day 50 — #67).
-    harness::run_substrate_setup(&root, None);
+    harness::run_substrate_setup(&root, None)?;
 
     // Converge the managed-by header onto .lex/repo.yml (Rob-ruled
     // 2026-08-22). Runs here because kit-update runs at every compaction,
@@ -566,7 +562,7 @@ pub(crate) fn cmd_kit_update(kit_arg: Option<String>) {
     for spec in &all_installed_kits {
         let (org, repo, _) = resolve_kit_spec(spec);
         println!("Regenerating artifacts for '{}/{}'...", org, repo);
-        regenerate_kit_artifacts(spec, &root, true);
+        regenerate_kit_artifacts(spec, &root, true)?;
     }
 
     // Converge the git pre-commit hook to the current managed section.
@@ -576,9 +572,7 @@ pub(crate) fn cmd_kit_update(kit_arg: Option<String>) {
     match hooks::install_hook() {
         Ok(()) => println!("Pre-commit hook: converged to current version."),
         Err(e) => {
-            eprintln!("ERROR: could not refresh the pre-commit hook: {e}");
-            eprintln!("`git lex save` may fail until the hook is fixed.");
-            exit(1);
+            return Err(Failure::new([format!("ERROR: could not refresh the pre-commit hook: {e}"), String::from("`git lex save` may fail until the hook is fixed.")].join("\n")));
         }
     }
 
@@ -601,8 +595,9 @@ pub(crate) fn cmd_kit_update(kit_arg: Option<String>) {
              kits_to_fetch.len(), all_installed_kits.len());
 
     // t-box refresh: kit vocab may have changed.
-    reload_ontology_graph();
+    reload_ontology_graph()?;
     git_lex::context::refresh(&root);
+    Ok(())
 }
 
 /// kit-update step: file-level hook reap (twin of the registration reap).
@@ -621,7 +616,7 @@ fn reap_stale_hooks(root: &Path) {
     let lex_dir = git_lex::layout::lex_dir(root);
     let mut kit_hook_names: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut reap_safe = true;
-    for spec in collect_kits_for_update(root, None) {
+    for spec in git_lex::installed_kit_specs(root) {
         let (org, repo, _) = resolve_kit_spec(&spec);
         let kit_dir = lex_dir.join("kit").join(&org).join(&repo);
         if !kit_dir.exists() {
@@ -799,10 +794,11 @@ fn converge_ontology_mirror(root: &Path) {
 /// (it stays put across syncs). ONE helper for the three lifecycle moments
 /// that change kit vocab — init, kit-add, kit-update; the block used to be
 /// tripled verbatim (review #11).
-pub(crate) fn reload_ontology_graph() {
-    let store = open_or_create_store();
+pub(crate) fn reload_ontology_graph() -> Outcome {
+    let store = open_or_create_store()?;
     let n = git_lex::nquad::load_ontology_graph(&store);
     println!("Ontology graph: {} kit ttl file(s) loaded", n);
+    Ok(())
 }
 
 // ─── kit-add ─────────────────────────────────────────────────────
@@ -810,12 +806,11 @@ pub(crate) fn reload_ontology_graph() {
 /// Add an optional kit to the repo. Validates `scope: optional`, installs
 /// scaffold via the drift-handler, creates class folders + templates, and
 /// records the kit in `repo.yml`'s `optional_kits:` list.
-pub(crate) fn cmd_kit_add(kit_spec: String) {
-    let root = require_git_root();
+pub(crate) fn cmd_kit_add(kit_spec: String) -> Outcome {
+    let root = require_git_root()?;
     let lex_dir = git_lex::layout::lex_dir(&root);
     if !lex_dir.exists() {
-        eprintln!("Not a git-lex repo. Run 'git lex init' first.");
-        exit(1);
+        return Err(Failure::new("Not a git-lex repo. Run 'git lex init' first."));
     }
     let (org, repo, _) = resolve_kit_spec(&kit_spec);
     let canonical_spec = format!("{}/{}", org, repo);
@@ -828,31 +823,26 @@ pub(crate) fn cmd_kit_add(kit_spec: String) {
             o == org && r == repo
         });
     if already_present {
-        eprintln!("Kit '{}' is already installed. Use `git lex kit-update {}` to refresh it.", canonical_spec, canonical_spec);
-        exit(1);
+        return Err(Failure::new(format!("Kit '{}' is already installed. Use `git lex kit-update {}` to refresh it.", canonical_spec, canonical_spec)));
     }
 
     // Also refuse if it's the domain or base kit — those install via init,
     // not kit-add.
     if canonical_spec == BASE_KIT {
-        eprintln!("Kit '{}' is the base kit — installed implicitly by `git lex init`. Cannot kit-add.", canonical_spec);
-        exit(1);
+        return Err(Failure::new(format!("Kit '{}' is the base kit — installed implicitly by `git lex init`. Cannot kit-add.", canonical_spec)));
     }
     if let Some(domain) = git_lex::RepoYml::load(&root).domain_kit() {
         let (d_org, d_repo, _) = resolve_kit_spec(&domain);
         if d_org == org && d_repo == repo {
-            eprintln!("Kit '{}' is this repo's domain kit. Cannot kit-add a domain kit.", canonical_spec);
-            exit(1);
+            return Err(Failure::new(format!("Kit '{}' is this repo's domain kit. Cannot kit-add a domain kit.", canonical_spec)));
         }
     }
 
     println!("Fetching '{}' from GitHub...", canonical_spec);
-    let kit_dir = match fetch_and_validate_optional_kit(&canonical_spec) {
+    let kit_dir = match fetch_and_validate_optional_kit(&canonical_spec)? {
         KitFetchOutcome::Ready(p) => p,
         KitFetchOutcome::FetchFailed => {
-            eprintln!("Failed to fetch kit '{}' from GitHub.", canonical_spec);
-            eprintln!("Check that https://github.com/{}/{} exists and is reachable.", org, repo);
-            exit(1);
+            return Err(Failure::new([format!("Failed to fetch kit '{}' from GitHub.", canonical_spec), format!("Check that https://github.com/{}/{} exists and is reachable.", org, repo)].join("\n")));
         }
         KitFetchOutcome::ScopeMismatch(found_scope) => {
             eprintln!(
@@ -860,7 +850,7 @@ pub(crate) fn cmd_kit_add(kit_spec: String) {
                 canonical_spec, found_scope, canonical_spec
             );
             // Leave the fetched dir for inspection but back out of the install.
-            exit(1);
+            return Err(Failure::new(""));
         }
     };
     println!("Kit fetched at {}.", kit_dir.strip_prefix(&root).unwrap_or(&kit_dir).display());
@@ -870,9 +860,7 @@ pub(crate) fn cmd_kit_add(kit_spec: String) {
     // that is already listed.
     let repo_yml = lex_dir.join("repo.yml");
     if let Err(e) = append_optional_kit(&repo_yml, &canonical_spec) {
-        eprintln!("fatal: could not record '{}' in .lex/repo.yml: {}", canonical_spec, e);
-        eprintln!("The kit was fetched but NOT installed. Fix the file and run `git lex kit-add {}` again.", canonical_spec);
-        exit(1);
+        return Err(Failure::new([format!("fatal: could not record '{}' in .lex/repo.yml: {}", canonical_spec, e), format!("The kit was fetched but NOT installed. Fix the file and run `git lex kit-add {}` again.", canonical_spec)].join("\n")));
     }
     println!("Recorded '{}' under optional_kits in .lex/repo.yml.", canonical_spec);
 
@@ -903,7 +891,7 @@ pub(crate) fn cmd_kit_add(kit_spec: String) {
     // kit-update. The new kit's class folders are created on disk
     // immediately — discoverability.
     println!("Regenerating artifacts for '{}/{}' and the kits already installed...", org, repo);
-    regenerate_installed_kits(&root, Some(&canonical_spec));
+    regenerate_installed_kits(&root, Some(&canonical_spec))?;
 
     // Register the kit's hooks (and reap any orphans) in the substrate
     // config. install_scaffold_files_from_skip_existing above copies the
@@ -913,13 +901,14 @@ pub(crate) fn cmd_kit_add(kit_spec: String) {
     // (the pool-kit gap, Day 50; #67; review #11). Identity is per-repo,
     // not per-kit, so it re-derives the whole hook set from all installed
     // kits — exactly the convergent behavior we want.
-    harness::run_substrate_setup(&root, None);
+    harness::run_substrate_setup(&root, None)?;
 
     println!("Kit '{}' added.", canonical_spec);
 
     // t-box: the new kit's ontology joins the persistent ontology graph.
-    reload_ontology_graph();
+    reload_ontology_graph()?;
     git_lex::context::refresh(&root);
+    Ok(())
 }
 
 // ─── kit-remove ──────────────────────────────────────────────────
@@ -927,26 +916,23 @@ pub(crate) fn cmd_kit_add(kit_spec: String) {
 /// Remove an optional kit. Scrubs from repo.yml's optional_kits list and
 /// deletes `.lex/kit/{org}/{repo}/`. Asks before deleting content folders
 /// (e.g. `Innerworld/`) unless --force.
-pub(crate) fn cmd_kit_remove(kit_spec: String, force: bool) {
-    let root = require_git_root();
+pub(crate) fn cmd_kit_remove(kit_spec: String, force: bool) -> Outcome {
+    let root = require_git_root()?;
     let lex_dir = git_lex::layout::lex_dir(&root);
     if !lex_dir.exists() {
-        eprintln!("Not a git-lex repo. Run 'git lex init' first.");
-        exit(1);
+        return Err(Failure::new("Not a git-lex repo. Run 'git lex init' first."));
     }
     let (org, repo, _) = resolve_kit_spec(&kit_spec);
     let canonical_spec = format!("{}/{}", org, repo);
 
     // Refuse to remove the base or domain kit.
     if canonical_spec == BASE_KIT {
-        eprintln!("Cannot remove the base kit.");
-        exit(1);
+        return Err(Failure::new("Cannot remove the base kit."));
     }
     if let Some(domain) = git_lex::RepoYml::load(&root).domain_kit() {
         let (d_org, d_repo, _) = resolve_kit_spec(&domain);
         if d_org == org && d_repo == repo {
-            eprintln!("Cannot remove the domain kit ('{}'). To switch domain kits, re-init.", canonical_spec);
-            exit(1);
+            return Err(Failure::new(format!("Cannot remove the domain kit ('{}'). To switch domain kits, re-init.", canonical_spec)));
         }
     }
 
@@ -959,8 +945,7 @@ pub(crate) fn cmd_kit_remove(kit_spec: String, force: bool) {
             o == org && r == repo
         });
     if !in_optionals {
-        eprintln!("Kit '{}' is not in optional_kits. Nothing to remove.", canonical_spec);
-        exit(0);
+        return Err(Failure::with_code(format!("Kit '{}' is not in optional_kits. Nothing to remove.", canonical_spec), 0));
     }
 
     // Identify the kit's content folder for the prompt. read folder_base
@@ -993,8 +978,7 @@ pub(crate) fn cmd_kit_remove(kit_spec: String, force: bool) {
     // Scrub repo.yml.
     let repo_yml = lex_dir.join("repo.yml");
     if let Err(e) = remove_optional_kit(&repo_yml, &canonical_spec) {
-        eprintln!("Failed to update repo.yml: {}", e);
-        exit(1);
+        return Err(Failure::new(format!("Failed to update repo.yml: {}", e)));
     }
 
     // Delete the kit install dir.
@@ -1026,12 +1010,13 @@ pub(crate) fn cmd_kit_remove(kit_spec: String, force: bool) {
         && let Err(e) = fs::remove_dir_all(&ont_dir) {
             eprintln!("Warning: failed to delete {}: {}", ont_dir.strip_prefix(&root).unwrap_or(&ont_dir).display(), e);
         }
-    regenerate_installed_kits(&root, None);
-    harness::run_substrate_setup(&root, None);
-    reload_ontology_graph();
+    regenerate_installed_kits(&root, None)?;
+    harness::run_substrate_setup(&root, None)?;
+    reload_ontology_graph()?;
 
     println!("Kit '{}' removed.", canonical_spec);
     git_lex::context::refresh(&root);
+    Ok(())
 }
 
 #[cfg(test)]
@@ -1337,16 +1322,16 @@ mod update_scope_tests {
     fn an_argument_narrows_the_fetch_but_never_the_rebuild() {
         let root = tmp_repo("narrow", THREE_KITS);
 
-        let rebuild = collect_kits_for_update(&root, None);
+        let rebuild = collect_kits_for_update(&root, None).unwrap();
         assert!(rebuild.len() >= 3, "expected base+soul+copia, got {:?}", rebuild);
 
         // Narrowing to one kit narrows fetching...
-        let fetch = collect_kits_for_update(&root, Some("repolex-ai/git-lex-kit-copia"));
+        let fetch = collect_kits_for_update(&root, Some("repolex-ai/git-lex-kit-copia")).unwrap();
         assert_eq!(fetch.len(), 1, "fetch scope should narrow: {:?}", fetch);
 
         // ...and the rebuild scope, taken the way cmd_kit_update takes it,
         // is unchanged and still covers every installed kit.
-        let rebuild_again = collect_kits_for_update(&root, None);
+        let rebuild_again = collect_kits_for_update(&root, None).unwrap();
         assert_eq!(rebuild, rebuild_again);
         for kit in &rebuild {
             assert!(
@@ -1366,7 +1351,7 @@ mod update_scope_tests {
     #[test]
     fn base_kit_is_always_rebuilt() {
         let root = tmp_repo("base", THREE_KITS);
-        let rebuild = collect_kits_for_update(&root, None);
+        let rebuild = collect_kits_for_update(&root, None).unwrap();
         assert!(
             rebuild.iter().any(|k| k == BASE_KIT),
             "base kit missing from rebuild scope: {:?}",

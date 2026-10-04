@@ -3,14 +3,14 @@
 
 use std::time::Instant;
 use std::io::Cursor;
-use std::process::exit;
+use git_lex::{Failure, Outcome};
 use oxigraph::io::RdfFormat;
 use oxigraph::model::*;
 use oxigraph::store::Store;
 use git_lex::nquad::{generate_frontmatter_nquads, load_lex_nquads};
 use git_lex::add_prefixes;
 
-pub(crate) fn run_query(store: &Store, query: &str, store_type: &str, json: bool) {
+pub(crate) fn run_query(store: &Store, query: &str, store_type: &str, json: bool) -> Outcome {
     let start = Instant::now();
     let prefixed = add_prefixes(query);
 
@@ -37,7 +37,7 @@ pub(crate) fn run_query(store: &Store, query: &str, store_type: &str, json: bool
             } else {
                 eprintln!("SPARQL parse error: {}", e);
             }
-            exit(1);
+            return Err(Failure::new(""));
         }
         Err(git_lex::W3cQueryError::Eval(e)) => {
             if json {
@@ -45,7 +45,7 @@ pub(crate) fn run_query(store: &Store, query: &str, store_type: &str, json: bool
             } else {
                 eprintln!("SPARQL evaluation error: {}", e);
             }
-            exit(1);
+            return Err(Failure::new(""));
         }
     };
 
@@ -65,8 +65,7 @@ pub(crate) fn run_query(store: &Store, query: &str, store_type: &str, json: bool
                         println!("{}", serde_json::to_string(&out).unwrap());
                     }
                     Err(e) => {
-                        eprintln!("{}", serde_json::json!({"error": "eval", "message": e}));
-                        exit(1);
+                        return Err(Failure::new(format!("{}", serde_json::json!({"error": "eval", "message": e}))));
                     }
                 }
             } else {
@@ -148,11 +147,10 @@ pub(crate) fn run_query(store: &Store, query: &str, store_type: &str, json: bool
         }
         oxigraph::sparql::QueryResults::Graph(_) => {
             if json {
-                eprintln!("{}", serde_json::json!({
+                return Err(Failure::new(format!("{}", serde_json::json!({
                     "error": "unsupported",
                     "message": "CONSTRUCT/DESCRIBE JSON output not yet supported"
-                }));
-                exit(1);
+                }))));
             }
             println!("CONSTRUCT/DESCRIBE queries not yet supported in output");
         }
@@ -165,6 +163,7 @@ pub(crate) fn run_query(store: &Store, query: &str, store_type: &str, json: bool
         elapsed.as_secs_f64() * 1000.0,
         store_type
     );
+    Ok(())
 }
 
 /// Stored queries (Rob-ruled 2026-08-26): `git lex query <name>` runs the
@@ -264,7 +263,7 @@ fn stored_query_miss_in(root: &std::path::Path, arg: &str) -> bool {
     true
 }
 
-pub(crate) fn cmd_direct(query: String, json: bool) {
+pub(crate) fn cmd_direct(query: String, json: bool) -> Outcome {
     // Stored-query resolution first: a name that matches .lex/query/<name>.md
     // runs that file's query; anything else runs as SPARQL text. A name-like
     // miss gets the available list instead of a SPARQL parse error.
@@ -272,7 +271,7 @@ pub(crate) fn cmd_direct(query: String, json: bool) {
         Some(q) => q,
         None => {
             if stored_query_miss(&query) {
-                exit(1);
+                return Err(Failure::new(""));
             }
             query
         }
@@ -310,7 +309,7 @@ pub(crate) fn cmd_direct(query: String, json: bool) {
     let walk = generate_frontmatter_nquads(git_lex::nquad::NowWalkOpts {
         write_sidecars: false,
         build_nquads: true,
-    });
+    })?;
     let fm_nq = walk.nquads;
     let lex_count = walk.facts;
     if !fm_nq.is_empty() {
@@ -338,7 +337,8 @@ pub(crate) fn cmd_direct(query: String, json: bool) {
             git_count, lex_count, load_ms
         ),
         json,
-    );
+    )?;
+    Ok(())
 }
 
 // ─── git lex query: the soul's graph, through gitlexd ─────────────────
@@ -346,27 +346,24 @@ pub(crate) fn cmd_direct(query: String, json: bool) {
 /// Ask gitlexd for the soul this session is bound to. The soul is resolved
 /// from the process that started the session (gitlexd::session), never from
 /// a flag, a setting or the shell's current directory.
-pub(crate) fn cmd_query(query: String, json: bool) {
+pub(crate) fn cmd_query(query: String, json: bool) -> Outcome {
     let soul = match git_lex::gitlexd::session::session_soul() {
         Ok(s) => s,
         Err(e) => {
-            eprintln!("{e}");
-            exit(1);
+            return Err(Failure::new(e.to_string()));
         }
     };
     let query = match resolve_stored_query_in(&soul.root, &query) {
         Some(q) => q,
         None => {
             if stored_query_miss_in(&soul.root, &query) {
-                exit(1);
+                return Err(Failure::new(""));
             }
             query
         }
     };
     if let Err(e) = git_lex::gitlexd::client::ensure_running() {
-        eprintln!("{e}");
-        eprintln!("(`git lex direct \"...\"` reads the working tree without gitlexd.)");
-        exit(1);
+        return Err(Failure::new([e.to_string(), String::from("(`git lex direct \"...\"` reads the working tree without gitlexd.)")].join("\n")));
     }
     let start = Instant::now();
     let response = match git_lex::gitlexd::client::query(&soul.genesis, &query) {
@@ -382,7 +379,7 @@ pub(crate) fn cmd_query(query: String, json: bool) {
             } else {
                 eprintln!("{e}");
             }
-            exit(1);
+            return Err(Failure::new(""));
         }
     };
     let count = if response.content_type.starts_with("application/n-triples") {
@@ -392,7 +389,7 @@ pub(crate) fn cmd_query(query: String, json: bool) {
         println!("{}", response.body.trim_end());
         count_bindings(&response.body)
     } else {
-        print_w3c_table(&response.body)
+        print_w3c_table(&response.body)?
     };
     eprintln!(
         "\n{} results in {:.1}ms (gitlexd: soul {} at {})",
@@ -401,6 +398,7 @@ pub(crate) fn cmd_query(query: String, json: bool) {
         &soul.genesis[..8.min(soul.genesis.len())],
         soul.root.display()
     );
+    Ok(())
 }
 
 fn count_bindings(body: &str) -> usize {
@@ -436,17 +434,16 @@ fn w3c_term_text(t: &serde_json::Value) -> String {
 
 /// Print a W3C SPARQL JSON result the way `git lex direct` prints its rows.
 /// Returns the row count.
-pub(crate) fn print_w3c_table(body: &str) -> usize {
+pub(crate) fn print_w3c_table(body: &str) -> Outcome<usize> {
     let v: serde_json::Value = match serde_json::from_str(body) {
         Ok(v) => v,
         Err(e) => {
-            eprintln!("gitlexd answered with something that is not a SPARQL result: {e}");
-            exit(1);
+            return Err(Failure::new(format!("gitlexd answered with something that is not a SPARQL result: {e}")));
         }
     };
     if let Some(b) = v.get("boolean").and_then(|b| b.as_bool()) {
         println!("{b}");
-        return 1;
+        return Ok(1);
     }
     let vars: Vec<String> = v["head"]["vars"]
         .as_array()
@@ -462,7 +459,7 @@ pub(crate) fn print_w3c_table(body: &str) -> usize {
         .unwrap_or_default();
     if rows.is_empty() {
         println!("(No results found)");
-        return 0;
+        return Ok(0);
     }
     let mut widths: Vec<usize> = vars.iter().map(|v| v.chars().count()).collect();
     for row in &rows {
@@ -482,7 +479,7 @@ pub(crate) fn print_w3c_table(body: &str) -> usize {
         }
         println!("|{line}");
     }
-    rows.len()
+    Ok(rows.len())
 }
 
 /// Scaffold the default stored queries into `.lex/query/` — ONLY when the

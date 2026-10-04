@@ -16,7 +16,7 @@ use crate::store_path;
 
 use crate::git::graph_uri;
 use crate::spo_events;
-use crate::{open_or_create_store, require_git_root};
+use crate::{open_or_create_store, require_git_root, Failure, Outcome};
 
 /// Elapsed time per phase of one sync, printed as one line of the report
 /// so the daemon log carries the split (git-lex#44: on lUX a sync is
@@ -48,21 +48,21 @@ impl PhaseClock {
     }
 }
 
-pub fn cmd_sync() {
+pub fn cmd_sync() -> Outcome {
     let start = Instant::now();
     let mut clock = PhaseClock::start();
 
-    let root = require_git_root();
+    let root = require_git_root()?;
     // Set up for git-lex at all? Only `git lex init` may create `.lex/`;
     // a sync in a repository without it (nuked, or never initialized)
     // refuses instead of writing a repo.yml and a store of its own.
-    crate::require_lex_repo(&root);
+    crate::require_lex_repo(&root)?;
 
     // Identity floor: wake (sync) fails loud on a soul repo missing its
     // root SOUL.md (#29 — restorable via kit-update).
-    crate::soul_md::require_soul_md(&root);
+    crate::soul_md::require_soul_md(&root)?;
 
-    gate_default_branch(&root);
+    gate_default_branch(&root)?;
 
 
     // Identity: resolve + record the genesis SHA ONCE per sync. Authority
@@ -70,7 +70,7 @@ pub fn cmd_sync() {
     // identity.yml still written for Pool's boot-skip until its read cuts
     // over. IRIs no longer carry it — see git.rs Task-2 IRI families.
     crate::git::ensure_genesis_recorded();
-    let store = open_or_create_store();
+    let store = open_or_create_store()?;
     clock.mark("open");
 
     // Get current HEAD commit
@@ -84,7 +84,7 @@ pub fn cmd_sync() {
 
     if head_sha.is_empty() {
         println!("No commits yet. Nothing to sync.");
-        return;
+        return Ok(());
     }
 
     if fast_path_hit(&store, &root, &head_sha) {
@@ -101,7 +101,7 @@ pub fn cmd_sync() {
         clock.mark("spine");
         crate::context::refresh(&root);
         println!("  phases: {}", clock.report());
-        return;
+        return Ok(());
     }
 
     let onegraph_resume = validated_resume(&root, resume_point(&store, &root, &head_sha), &head_sha);
@@ -133,7 +133,7 @@ pub fn cmd_sync() {
         &root,
         &resolver_ctx,
         crate::nquad::NowWalkOpts { write_sidecars: true, build_nquads: false },
-    );
+    )?;
     let fm_errors = walk.errors;
     if fm_errors > 0 {
         eprintln!(
@@ -148,7 +148,7 @@ These are in your WORKING FILES, not history — fix the listed files and the wa
     // Shares the SAME resolver context, so one-graph facts resolve
     // identically to now-view facts (and the indexes build once per sync,
     // not twice). ───
-    let onegraph = sync_onegraph_walk(&store, &root, onegraph_resume, &resolver_ctx, &head_sha);
+    let onegraph = sync_onegraph_walk(&store, &root, onegraph_resume, &resolver_ctx, &head_sha)?;
     clock.mark("history (one graph)");
 
     // Regenerate the git2 machinery layer (commits/signatures/refs/filetree)
@@ -159,7 +159,7 @@ These are in your WORKING FILES, not history — fix the listed files and the wa
     // commit and walks the same range again. A full rebuild loads it after
     // the now view (below): it writes in batches (#15), marker last.
     if !full_rebuild {
-        git_count = load_git2_layer(&store, Git2Load::Diffed, &head_sha, &root);
+        git_count = load_git2_layer(&store, Git2Load::Diffed, &head_sha, &root)?;
         clock.mark("git layer (changes only)");
     }
 
@@ -184,9 +184,9 @@ These are in your WORKING FILES, not history — fix the listed files and the wa
     // point before that, the store has no marker: the next sync finds no
     // resume point and rebuilds from the first commit.
     if full_rebuild {
-        materialize_now_view_in_batches(&store);
+        materialize_now_view_in_batches(&store)?;
         clock.mark("now view (full)");
-        git_count = load_git2_layer(&store, Git2Load::BatchedMarkerLast, &head_sha, &root);
+        git_count = load_git2_layer(&store, Git2Load::BatchedMarkerLast, &head_sha, &root)?;
         clock.mark("git layer (full, batched)");
     }
 
@@ -194,19 +194,21 @@ These are in your WORKING FILES, not history — fix the listed files and the wa
     // events to commit ordinals, so it follows the git2 layer. A full
     // rebuild proves the whole store; an append proves the statements it
     // changed (goodlux, 2026-10-04).
-    verify_onegraph(&store, (!full_rebuild).then_some(&onegraph.changed_statements));
+    verify_onegraph(&store, (!full_rebuild).then_some(&onegraph.changed_statements))?;
     clock.mark("store check");
 
     if !full_rebuild {
         if now_present {
-            refresh_now_view(&store, &onegraph.changed_subjects);
+            refresh_now_view(&store, &onegraph.changed_subjects)?;
         } else {
-            materialize_now_view(&store);
+            materialize_now_view(&store)?;
         }
         clock.mark("now view (refresh)");
     }
 
-    store.flush().expect("failed to flush store");
+    store
+        .flush()
+        .map_err(|e| Failure::new(format!("ERROR: failed to write the store to disk: {e}")))?;
     clock.mark("flush");
 
     let elapsed = start.elapsed();
@@ -229,9 +231,10 @@ These are in your WORKING FILES, not history — fix the listed files and the wa
     // when its bytes change.
     crate::context::refresh(&root);
     println!("  phases: {}", clock.report());
+    Ok(())
 }
 
-fn gate_default_branch(root: &std::path::Path) {
+fn gate_default_branch(root: &std::path::Path) -> Outcome {
     // ══ DESIGN DECISION (Rob-ruled 2026-07-28): git-lex tracks the DEFAULT
     // BRANCH, full stop. The semantic history is the history of the project
     // as a whole — branches earn their place in it by merging, which is
@@ -251,17 +254,15 @@ fn gate_default_branch(root: &std::path::Path) {
     let current = git_current_branch(root);
     let default = git_default_branch(root);
     match &current {
-        Some(b) if *b == default => {}
-        Some(b) => {
-            eprintln!("sync tracks the default branch ('{default}') only — you are on '{b}'.");
-            eprintln!("git-lex records the project's merged history; merge your branch, then sync.");
-            std::process::exit(1);
-        }
-        None => {
-            eprintln!("sync tracks the default branch ('{default}') only — HEAD is detached.");
-            eprintln!("check out '{default}' and re-run.");
-            std::process::exit(1);
-        }
+        Some(b) if *b == default => Ok(()),
+        Some(b) => Err(Failure::new(format!(
+            "sync tracks the default branch ('{default}') only — you are on '{b}'.\n\
+             git-lex records the project's merged history; merge your branch, then sync."
+        ))),
+        None => Err(Failure::new(format!(
+            "sync tracks the default branch ('{default}') only — HEAD is detached.\n\
+             check out '{default}' and re-run."
+        ))),
     }
 }
 
@@ -629,13 +630,10 @@ const NOW_GRAPH_IRI: &str = "https://repolex.ai/git-lex/NamedGraph/now";
 /// subject (no SpoEvent subjects, no rdf:reifies), so the view for every
 /// subject the walk did not change is already right, and each changed
 /// subject's facts are replaced with its current base-layer facts.
-fn refresh_now_view(store: &Store, subjects: &std::collections::HashSet<String>) {
+fn refresh_now_view(store: &Store, subjects: &std::collections::HashSet<String>) -> Outcome {
     use oxigraph::model::{GraphNameRef, NamedNodeRef, NamedOrBlankNodeRef, Quad};
-    let fail = |e: String| -> ! {
-        // A stale now view silently lies to every downstream consumer.
-        eprintln!("ERROR: now-view refresh failed: {e}");
-        std::process::exit(1);
-    };
+    // A stale now view silently lies to every downstream consumer.
+    let fail = |e: String| Failure::new(format!("ERROR: now-view refresh failed: {e}"));
     let now = NamedNodeRef::new_unchecked(NOW_GRAPH_IRI);
     let one = NamedNodeRef::new_unchecked(spo_events::LEXHISTORY_GRAPH_IRI);
     let rdf_type = NamedNodeRef::new_unchecked("http://www.w3.org/1999/02/22-rdf-syntax-ns#type");
@@ -644,34 +642,35 @@ fn refresh_now_view(store: &Store, subjects: &std::collections::HashSet<String>)
     for term in subjects {
         let iri = term.trim_start_matches('<').trim_end_matches('>');
         let Ok(subject) = NamedNodeRef::new(iri) else {
-            fail(format!("changed subject is not an IRI: {term}"));
+            return Err(fail(format!("changed subject is not an IRI: {term}")));
         };
         let subject_ref = NamedOrBlankNodeRef::from(subject);
         let stale: Vec<Quad> = store
             .quads_for_pattern(Some(subject_ref), None, None, Some(GraphNameRef::from(now)))
             .collect::<Result<_, _>>()
-            .unwrap_or_else(|e| fail(e.to_string()));
+            .map_err(|e| fail(e.to_string()))?;
         for q in &stale {
-            store.remove(q).unwrap_or_else(|e| fail(e.to_string()));
+            store.remove(q).map_err(|e| fail(e.to_string()))?;
         }
         let is_event = store
             .contains(oxigraph::model::QuadRef::new(subject_ref, rdf_type, spo_event, one))
-            .unwrap_or_else(|e| fail(e.to_string()));
+            .map_err(|e| fail(e.to_string()))?;
         if is_event {
             continue;
         }
         let current: Vec<Quad> = store
             .quads_for_pattern(Some(subject_ref), None, None, Some(GraphNameRef::from(one)))
             .collect::<Result<_, _>>()
-            .unwrap_or_else(|e| fail(e.to_string()));
+            .map_err(|e| fail(e.to_string()))?;
         for q in current {
             if q.predicate.as_ref() == reifies {
                 continue;
             }
             let copy = Quad::new(q.subject, q.predicate, q.object, now);
-            store.insert(&copy).unwrap_or_else(|e| fail(e.to_string()));
+            store.insert(&copy).map_err(|e| fail(e.to_string()))?;
         }
     }
+    Ok(())
 }
 
 /// The sync marker: git2 commit ordinals in the commits graph.
@@ -686,10 +685,8 @@ const SYNC_MARKER_PREDICATE: &str = "https://repolex.ai/ontology/git-lex/git2/or
 
 /// How the git2 layer goes into the store.
 enum Git2Load {
-    /// An append's load (#45): one transaction that leaves the commits, refs
-    /// and repo graphs exactly as a whole reload would, but writes only the
-    /// quads that differ. Every file-tree entry's address carries the HEAD
-    /// commit, so the file tree is still replaced whole.
+    /// An append's load (#45): leaves every git graph exactly as a whole
+    /// reload would, but writes only the quads that differ.
     Diffed,
     /// A full rebuild's load: bounded batches, the sync marker last (#15).
     /// One transaction held the whole layer in memory at about 3 KB a quad
@@ -699,7 +696,7 @@ enum Git2Load {
 
 /// Regenerate the git2 layer (commits/signatures/refs/filetree) and load
 /// it. Returns the number of quads.
-fn load_git2_layer(store: &Store, how: Git2Load, head_sha: &str, root: &std::path::Path) -> usize {
+fn load_git2_layer(store: &Store, how: Git2Load, head_sha: &str, root: &std::path::Path) -> Outcome<usize> {
     let previous = match how {
         Git2Load::Diffed => previous_git_layer(root, store),
         Git2Load::BatchedMarkerLast => None,
@@ -708,17 +705,18 @@ fn load_git2_layer(store: &Store, how: Git2Load, head_sha: &str, root: &std::pat
     let git_nq = crate::git2_nquads::generate_git2_nquads_at(Some(head_sha));
     let count = match how {
         Git2Load::Diffed => {
-            load_git2_diffed(store, &git_nq, previous.as_deref()).expect("failed to load git triples");
+            load_git2_diffed(store, &git_nq, previous.as_deref())
+                .map_err(|e| Failure::new(format!("ERROR: failed to load the git layer: {e}")))?;
             git_nq.lines().count()
         }
         Git2Load::BatchedMarkerLast => {
             let mut loader = MarkerLastLoader::new(store, spo_events::REBUILD_BATCH_QUADS);
             crate::git2_nquads::NqSink::push_str(&mut loader, &git_nq);
-            loader.finish().expect("failed to load git triples")
+            loader.finish().map_err(|e| Failure::new(format!("ERROR: failed to load the git layer: {e}")))?
         }
     };
     keep_git_layer_copy(root, head_sha, &git_nq);
-    count
+    Ok(count)
 }
 
 /// The git2 graphs an append updates in place instead of reloading: all of
@@ -967,13 +965,11 @@ impl crate::git2_nquads::NqSink for MarkerLastLoader<'_> {
 /// base-layer quad of the one graph — not an SpoEvent's, not `rdf:reifies`.
 /// Not all-or-nothing, so only a full rebuild may use it: there the sync
 /// marker is still unwritten, and a partial view is never read as finished.
-fn materialize_now_view_in_batches(store: &Store) {
-    now_view_in_batches(store, spo_events::REBUILD_BATCH_QUADS).unwrap_or_else(|e| {
-        // A stale now view silently lies to every downstream consumer
-        // (Syrinx, viz, agents) — fail the sync.
-        eprintln!("ERROR: now-view materialization failed: {e}");
-        std::process::exit(1);
-    })
+fn materialize_now_view_in_batches(store: &Store) -> Outcome {
+    // A stale now view silently lies to every downstream consumer (Syrinx,
+    // viz, agents) — fail the sync.
+    now_view_in_batches(store, spo_events::REBUILD_BATCH_QUADS)
+        .map_err(|e| Failure::new(format!("ERROR: now-view materialization failed: {e}")))
 }
 
 fn now_view_in_batches(store: &Store, batch_quads: usize) -> Result<(), String> {
@@ -1019,22 +1015,16 @@ fn now_view_in_batches(store: &Store, batch_quads: usize) -> Result<(), String> 
     store.extend(batch).map_err(|e| e.to_string())
 }
 
-fn materialize_now_view(store: &Store) {
+fn materialize_now_view(store: &Store) -> Outcome {
     let update = "PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>              PREFIX gl: <https://repolex.ai/ontology/git-lex/>              DROP SILENT GRAPH <https://repolex.ai/git-lex/NamedGraph/now> ;              INSERT { GRAPH <https://repolex.ai/git-lex/NamedGraph/now> { ?s ?p ?o } }              WHERE { GRAPH <https://repolex.ai/git-lex/LexHistoryGraph> { ?s ?p ?o .                        FILTER NOT EXISTS { ?s a gl:SpoEvent }                        FILTER(?p != rdf:reifies) } }";
-    match oxigraph::sparql::SparqlEvaluator::new().parse_update(update) {
-        Ok(u) => {
-            if let Err(e) = u.on_store(store).execute() {
-                // A stale now view silently lies to every downstream
-                // consumer (Syrinx, viz, agents) — fail the sync.
-                eprintln!("ERROR: now-view materialization failed: {e}");
-                std::process::exit(1);
-            }
-        }
-        Err(e) => {
-            eprintln!("ERROR: now-view update did not parse (binary bug): {e}");
-            std::process::exit(1);
-        }
-    }
+    let u = oxigraph::sparql::SparqlEvaluator::new()
+        .parse_update(update)
+        .map_err(|e| Failure::new(format!("ERROR: now-view update did not parse (binary bug): {e}")))?;
+    // A stale now view silently lies to every downstream consumer (Syrinx,
+    // viz, agents) — fail the sync.
+    u.on_store(store)
+        .execute()
+        .map_err(|e| Failure::new(format!("ERROR: now-view materialization failed: {e}")))
 }
 
 
@@ -1130,44 +1120,40 @@ fn validated_resume(root: &std::path::Path, resume_sha: Option<String>, head_sha
 /// The one-graph walk: append the new commits' statement events (or, with
 /// no resume point, rebuild the graph from the first commit). `resume_sha`
 /// has been through [`validated_resume`].
-fn sync_onegraph_walk(store: &Store, root: &std::path::Path, resume_sha: Option<String>, ctx: &crate::nquad::ResolverContext, head_sha: &str) -> OnegraphPhase {
+fn sync_onegraph_walk(store: &Store, root: &std::path::Path, resume_sha: Option<String>, ctx: &crate::nquad::ResolverContext, head_sha: &str) -> Outcome<OnegraphPhase> {
     let one_graph_uri = format!("<{}>", spo_events::LEXHISTORY_GRAPH_IRI);
 
     // A rev-list failure must NOT read as "no new commits" — that would make
     // sync print "up to date" over a range it never walked. Fail the sync.
-    let rev_list = |range: &[&str]| -> Vec<String> {
+    let rev_list = |range: &[&str]| -> Outcome<Vec<String>> {
         let mut args = vec!["rev-list", "--topo-order", "--reverse"];
         args.extend_from_slice(range);
         let out = Command::new("git")
             .args(&args)
             .current_dir(root)
             .output()
-            .unwrap_or_else(|e| {
-                eprintln!("ERROR: git rev-list spawn failed: {e}");
-                std::process::exit(1);
-            });
+            .map_err(|e| Failure::new(format!("ERROR: git rev-list spawn failed: {e}")))?;
         if !out.status.success() {
-            eprintln!(
+            return Err(Failure::new(format!(
                 "ERROR: git rev-list {:?} failed ({}): {}",
                 range,
                 out.status,
                 String::from_utf8_lossy(&out.stderr).trim()
-            );
-            std::process::exit(1);
+            )));
         }
-        String::from_utf8_lossy(&out.stdout)
+        Ok(String::from_utf8_lossy(&out.stdout)
             .lines()
             .map(|l| l.trim().to_string())
             .filter(|l| !l.is_empty())
-            .collect()
+            .collect())
     };
 
     let (mut shas, full_rebuild) = match &resume_sha {
         Some(sha) => {
             let exclude = format!("^{sha}");
-            (rev_list(&[exclude.as_str(), head_sha]), false)
+            (rev_list(&[exclude.as_str(), head_sha])?, false)
         }
-        None => (rev_list(&[head_sha]), true),
+        None => (rev_list(&[head_sha])?, true),
     };
 
     // DEV-ONLY horizon (see resolve_dev_horizon): on a full rebuild, drop
@@ -1192,9 +1178,10 @@ fn sync_onegraph_walk(store: &Store, root: &std::path::Path, resume_sha: Option<
         let commits = match spo_events::collect_commits_from_shas(&shas, horizon_start.as_deref()) {
             Ok(c) => c,
             Err(e) => {
-                eprintln!("ERROR: could not read commit diffs: {e}");
-                eprintln!("Sync aborted; the one graph was not updated. A failing diff usually means repository corruption — run `git fsck`.");
-                std::process::exit(1);
+                return Err(Failure::new(format!(
+                    "ERROR: could not read commit diffs: {e}\n\
+                     Sync aborted; the one graph was not updated. A failing diff usually means repository corruption — run `git fsck`."
+                )));
             }
         };
 
@@ -1211,16 +1198,18 @@ fn sync_onegraph_walk(store: &Store, root: &std::path::Path, resume_sha: Option<
                 // A rebuild writes in batches, so the graph holds the part
                 // built before the failure. It carries no sync marker (the
                 // git2 layer is not loaded yet), so the next sync rebuilds.
-                eprintln!("ERROR: one-graph rebuild failed: {e}");
-                eprintln!("Sync aborted part-way through a full rebuild: the store is INCOMPLETE until a sync succeeds. Fix the cause and re-run `git lex sync` — it will rebuild from the first commit again.");
-                std::process::exit(1);
+                return Err(Failure::new(format!(
+                    "ERROR: one-graph rebuild failed: {e}\n\
+                     Sync aborted part-way through a full rebuild: the store is INCOMPLETE until a sync succeeds. Fix the cause and re-run `git lex sync` — it will rebuild from the first commit again."
+                )));
             }
             Err(e) => {
                 // An append loads its events once, at the end of the walk,
                 // so nothing of this commit range was written.
-                eprintln!("ERROR: one-graph build failed: {e}");
-                eprintln!("Sync aborted; the one graph was not updated for this commit range. Fix the cause and re-run `git lex sync`.");
-                std::process::exit(1);
+                return Err(Failure::new(format!(
+                    "ERROR: one-graph build failed: {e}\n\
+                     Sync aborted; the one graph was not updated for this commit range. Fix the cause and re-run `git lex sync`."
+                )));
             }
         };
         println!(
@@ -1235,7 +1224,7 @@ fn sync_onegraph_walk(store: &Store, root: &std::path::Path, resume_sha: Option<
     } else {
         println!("One graph: up to date.");
     }
-    OnegraphPhase { changed_subjects, changed_statements }
+    Ok(OnegraphPhase { changed_subjects, changed_statements })
 }
 
 /// Type the one graph for discovery, then prove the store coherent — every
@@ -1412,7 +1401,7 @@ const REBUILD_HINT: &str = "To rebuild the store from your git history: run `git
 
 /// `scope`: None proves the whole store (a full rebuild); Some proves just
 /// these statements (an append: what its walk asserted or retracted).
-fn verify_onegraph(store: &Store, scope: Option<&std::collections::HashSet<String>>) {
+fn verify_onegraph(store: &Store, scope: Option<&std::collections::HashSet<String>>) -> Outcome {
     // Discovery typing (default graph, idempotent): the graph's NamedGraph
     // object, dual-typed — the store does no inference, so both the class and
     // its NamedGraph parent are stated explicitly.
@@ -1422,34 +1411,29 @@ fn verify_onegraph(store: &Store, scope: Option<&std::collections::HashSet<Strin
         g = spo_events::LEXHISTORY_GRAPH_IRI
     );
     if let Err(e) = store.load_from_reader(RdfFormat::NQuads, Cursor::new(typing.as_bytes())) {
-        eprintln!("ERROR: one-graph discovery typing failed to load: {e}");
-        std::process::exit(1);
+        return Err(Failure::new(format!("ERROR: one-graph discovery typing failed to load: {e}")));
     }
 
     if let Some(statements) = scope {
         let checks = match statement_checks(store, statements) {
             Ok(c) => c,
             Err(e) => {
-                eprintln!("ERROR: the store check at the end of sync could not run ({e}), so this sync is not trusted. Run `git lex sync` again. If it fails the same way: {REBUILD_HINT}");
-                std::process::exit(1);
+                return Err(Failure::new(format!("ERROR: the store check at the end of sync could not run ({e}), so this sync is not trusted. Run `git lex sync` again. If it fails the same way: {REBUILD_HINT}")));
             }
         };
         if checks.integrity_bad > 0 {
-            eprintln!(
+            return Err(Failure::new(format!(
                 "ERROR: the store's history is damaged: {} history record(s) for the facts this save changed do not name exactly one fact, or do not say whether it was added or removed. This comes from a bug in git-lex, not from your files. {REBUILD_HINT}",
                 checks.integrity_bad
-            );
-            std::process::exit(1);
+            )));
         }
         if checks.dangling > 0 {
-            eprintln!("ERROR: the store's history names {} commit(s) that are missing from its list of commits. This comes from a bug in git-lex, not from your files. {REBUILD_HINT}", checks.dangling);
-            std::process::exit(1);
+            return Err(Failure::new(format!("ERROR: the store's history names {} commit(s) that are missing from its list of commits. This comes from a bug in git-lex, not from your files. {REBUILD_HINT}", checks.dangling)));
         }
         if checks.mismatched > 0 {
-            eprintln!("ERROR: {} of the {} fact(s) this save changed are stored as current when their history says they are not, or the other way round. This comes from a bug in git-lex, not from your files. {REBUILD_HINT}", checks.mismatched, statements.len());
-            std::process::exit(1);
+            return Err(Failure::new(format!("ERROR: {} of the {} fact(s) this save changed are stored as current when their history says they are not, or the other way round. This comes from a bug in git-lex, not from your files. {REBUILD_HINT}", checks.mismatched, statements.len())));
         }
-        return;
+        return Ok(());
     }
 
     let count_q = |q: &str| -> Option<u64> {
@@ -1477,19 +1461,17 @@ fn verify_onegraph(store: &Store, scope: Option<&std::collections::HashSet<Strin
     let counts = match counts {
         Ok(c) => c,
         Err(e) => {
-            eprintln!("ERROR: the store check at the end of sync could not run ({e}), so this sync is not trusted. Run `git lex sync` again. If it fails the same way: {REBUILD_HINT}");
-            std::process::exit(1);
+            return Err(Failure::new(format!("ERROR: the store check at the end of sync could not run ({e}), so this sync is not trusted. Run `git lex sync` again. If it fails the same way: {REBUILD_HINT}")));
         }
     };
     // Structural integrity (runs EVERY build): each SpoEvent has exactly one
     // statement (rdf:reifies) and exactly one direction. A violation means a
     // 16-hex id collision or an emitter bug — LOUD, never silently deduped.
     if counts.integrity_bad > 0 {
-        eprintln!(
+        return Err(Failure::new(format!(
             "ERROR: the store's history is damaged: {} history record(s) do not name exactly one fact, or do not say whether it was added or removed. This comes from a bug in git-lex, not from your files. {REBUILD_HINT}",
             counts.integrity_bad
-        );
-        std::process::exit(1);
+        )));
     }
     // ── Commit joins + state-parity (moved here from the `git lex verify`
     // command, since removed — goodlux-ruled 2026-07-29: every sync proves the
@@ -1500,18 +1482,16 @@ fn verify_onegraph(store: &Store, scope: Option<&std::collections::HashSet<Strin
     match (dangling, base_count, derived_count) {
         (Some(0), Some(b), Some(d)) if b == d => {}
         (None, _, _) | (_, None, _) | (_, _, None) => {
-            eprintln!("ERROR: the store check at the end of sync could not run, so this sync is not trusted. Run `git lex sync` again. If it fails the same way: {REBUILD_HINT}");
-            std::process::exit(1);
+            return Err(Failure::new(format!("ERROR: the store check at the end of sync could not run, so this sync is not trusted. Run `git lex sync` again. If it fails the same way: {REBUILD_HINT}")));
         }
         (Some(dg), _, _) if dg > 0 => {
-            eprintln!("ERROR: the store's history names {dg} commit(s) that are missing from its list of commits. This comes from a bug in git-lex, not from your files. {REBUILD_HINT}");
-            std::process::exit(1);
+            return Err(Failure::new(format!("ERROR: the store's history names {dg} commit(s) that are missing from its list of commits. This comes from a bug in git-lex, not from your files. {REBUILD_HINT}")));
         }
         (_, Some(b), Some(d)) => {
-            eprintln!("ERROR: the store's current facts ({b}) do not match what replaying its history gives ({d}). This comes from a bug in git-lex, not from your files. {REBUILD_HINT}");
-            std::process::exit(1);
+            return Err(Failure::new(format!("ERROR: the store's current facts ({b}) do not match what replaying its history gives ({d}). This comes from a bug in git-lex, not from your files. {REBUILD_HINT}")));
         }
     }
+    Ok(())
 }
 
 /// What the store check finds for a set of statements (#49).
@@ -2350,7 +2330,7 @@ mod batched_rebuild_tests {
             store
         };
         let whole = build(true);
-        materialize_now_view(&whole);
+        materialize_now_view(&whole).unwrap();
         let expected = quads(&whole);
         assert_eq!(expected.iter().filter(|q| q.ends_with(&format!("<{NOW_GRAPH_IRI}>"))).count(), 14);
 

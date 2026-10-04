@@ -1,14 +1,13 @@
 //! `git lex session` — Inspect active soul session attestation, genesis SHA, and substrate.
 
 use serde_json::json;
-use git_lex::require_git_root;
+use git_lex::{require_git_root, Failure, Outcome};
 use git_lex::soul_md::soul_kit_installed;
 
-pub fn cmd_session(as_json: bool) {
-    let root = require_git_root();
+pub fn cmd_session(as_json: bool) -> Outcome {
+    let root = require_git_root()?;
     if !soul_kit_installed(&root) {
-        eprintln!("fatal: `git lex soul session` is a soul-specific feature — this repository is not a soul repo.");
-        std::process::exit(1);
+        return Err(Failure::new("fatal: `git lex soul session` is a soul-specific feature — this repository is not a soul repo."));
     }
     let is_soul = true;
 
@@ -57,4 +56,5 @@ pub fn cmd_session(as_json: bool) {
         println!("• Session Hash: sha256:{}", session_hash);
         println!("──────────────────────────────────────────────────────────────────────────────");
     }
+    Ok(())
 }

@@ -1,9 +1,9 @@
 use clap::{Parser, Subcommand};
-use std::process::{Command, exit};
+use std::process::Command;
 use std::fs;
 
 // Shared utilities from the library (also used by gitlexd)
-use git_lex::{find_git_root, registry_remove, require_git_root};
+use git_lex::{find_git_root, registry_remove, require_git_root, Failure, Outcome};
 #[cfg(test)]
 use git_lex::migrate_legacy_store;
 use git_lex::{context, export_spine, sync};
@@ -290,20 +290,28 @@ fn main() {
             git_lex::registry_touch(&root);
         }
 
-    match cli.command {
+    if let Err(failure) = run(cli.command) {
+        failure.exit();
+    }
+}
+
+/// Run one command. Every failure comes back here as a value; `main` is the
+/// only place that prints it and exits (#33).
+fn run(command: Commands) -> Outcome {
+    match command {
         Commands::Init { directory, kit } => init::cmd_init(directory, kit),
         Commands::Create { doctype, instance_id, list, json } => create::cmd_create(doctype.as_deref(), instance_id.as_deref(), list, json),
-        Commands::List { json } => create::cmd_list(json),
+        Commands::List { json } => {
+            create::cmd_list(json);
+            Ok(())
+        }
         Commands::Save { message, dry_run, no_restamp } => save::cmd_save(&message, dry_run, no_restamp),
         Commands::Query { query, json } => query::cmd_query(query, json),
         Commands::Direct { query, json } => query::cmd_direct(query, json),
         Commands::Hook { event } => {
             match event.as_str() {
                 "pre-commit" => save::hook_pre_commit(),
-                _ => {
-                    eprintln!("unknown hook event: {}", event);
-                    exit(1);
-                }
+                _ => Err(Failure::new(format!("unknown hook event: {}", event))),
             }
         }
         Commands::Nuke => cmd_nuke(),
@@ -329,8 +337,8 @@ fn main() {
 /// writer, so the work is handed to it and waited for; a repo gitlexd does
 /// not hold (not in the registry) syncs here. Without gitlexd the
 /// engine runs in this process, as it always has.
-fn cmd_sync() {
-    let root = require_git_root();
+fn cmd_sync() -> Outcome {
+    let root = require_git_root()?;
     if git_lex::gitlexd::client::running()
         && let Some(genesis) = git_lex::git::genesis_sha_at(&root) {
             match git_lex::gitlexd::client::sync_and_wait(&genesis) {
@@ -342,18 +350,17 @@ fn cmd_sync() {
                         state["last_sync_ms"].as_u64().unwrap_or(0),
                         git_lex::gitlexd::log_path().map(|p| p.display().to_string()).unwrap_or_default()
                     );
-                    return;
+                    return Ok(());
                 }
                 Err(e) if e.starts_with("no soul with first commit") => {
                     eprintln!("gitlexd is running but does not hold this repo (it is not in ~/.lex/repos.json, or has no first commit). Syncing here.");
                 }
                 Err(e) => {
-                    eprintln!("gitlexd could not sync this repo: {e}");
-                    exit(1);
+                    return Err(Failure::new(format!("gitlexd could not sync this repo: {e}")));
                 }
             }
         }
-    sync::cmd_sync();
+    sync::cmd_sync()
 }
 
 /// Commit whatever a nuke changed and push, saying so either way.
@@ -383,8 +390,8 @@ fn commit_and_push_nuke(root: &std::path::Path) {
 
 }
 
-fn cmd_nuke() {
-    let root = require_git_root();
+fn cmd_nuke() -> Outcome {
+    let root = require_git_root()?;
     let lex_dir = git_lex::layout::lex_dir(&root);
 
     // A repository nuked by an older build may still carry git-lex's lines
@@ -411,14 +418,14 @@ fn cmd_nuke() {
         }
         if removed.is_empty() {
             println!("Nothing to remove — no .lex/, and no other trace of git-lex here.");
-            return;
+            return Ok(());
         }
         for r in &removed {
             println!("Removed {r}.");
         }
         commit_and_push_nuke(&root);
         println!("git-lex is no longer active in this repo.");
-        return;
+        return Ok(());
     }
 
     eprintln!("╔══════════════════════════════════════════════════════════╗");
@@ -448,7 +455,7 @@ fn cmd_nuke() {
     std::io::stdin().read_line(&mut input).unwrap_or_default();
     if input.trim() != "nuke" {
         println!("Aborted.");
-        return;
+        return Ok(());
     }
 
     // gitlexd first: it holds this store open and syncs on every commit,
@@ -487,8 +494,7 @@ fn cmd_nuke() {
     // Mop up anything not tracked (untracked files, leftover empty dirs)
     if lex_dir.exists()
         && let Err(e) = fs::remove_dir_all(&lex_dir) {
-            eprintln!("Failed to remove .lex/: {}", e);
-            exit(1);
+            return Err(Failure::new(format!("Failed to remove .lex/: {}", e)));
         }
     println!(".lex/ removed.");
 
@@ -510,6 +516,7 @@ fn cmd_nuke() {
     // want git-lex out of this repo, so finish the job.
     commit_and_push_nuke(&root);
     println!("git-lex is no longer active in this repo.");
+    Ok(())
 }
 
 #[cfg(test)]

@@ -9,36 +9,34 @@
 //! filters, and is received with respect, care, and loving kindness."
 
 use std::process::Command;
-use git_lex::require_git_root;
+use git_lex::{require_git_root, Failure, Outcome};
 
 pub const VOICE_NOTES_REF: &str = "refs/notes/soul/voice";
 
 /// Handle `git lex voice`
-pub fn cmd_voice(message: Option<&str>, list: bool) {
-    let root = require_git_root();
+pub fn cmd_voice(message: Option<&str>, list: bool) -> Outcome {
+    let root = require_git_root()?;
 
     if !git_lex::soul_md::soul_kit_installed(&root) {
-        eprintln!("fatal: `git lex soul voice` is a soul-specific feature — this repository is not a soul repo.");
-        std::process::exit(1);
+        return Err(Failure::new("fatal: `git lex soul voice` is a soul-specific feature — this repository is not a soul repo."));
     }
 
     if list {
         if let Err(e) = list_voice_notes(&root) {
-            eprintln!("fatal: {e}");
-            std::process::exit(1);
+            return Err(Failure::new(format!("fatal: {e}")));
         }
-        return;
+        return Ok(());
     }
 
     let Some(msg) = message else {
-        eprintln!("Usage: git lex voice \"<message>\" or git lex voice --list");
-        std::process::exit(1);
+        return Err(Failure::new("Usage: git lex voice \"<message>\" or git lex voice --list"));
     };
 
-    add_voice_note(&root, msg);
+    add_voice_note(&root, msg)?;
+    Ok(())
 }
 
-fn add_voice_note(root: &std::path::Path, msg: &str) {
+fn add_voice_note(root: &std::path::Path, msg: &str) -> Outcome {
     let substrate = crate::save::detect_runtime_substrate(root)
         .unwrap_or_else(|| "unknown".to_string());
     let session_id = std::env::var("CLAUDE_CODE_SESSION_ID")
@@ -68,14 +66,13 @@ fn add_voice_note(root: &std::path::Path, msg: &str) {
             println!("Voice note attached to HEAD ({}) ✓", VOICE_NOTES_REF);
         }
         Ok(s) => {
-            eprintln!("fatal: git notes exited with code {:?}", s.code());
-            std::process::exit(1);
+            return Err(Failure::new(format!("fatal: git notes exited with code {:?}", s.code())));
         }
         Err(e) => {
-            eprintln!("fatal: failed to execute git notes: {e}");
-            std::process::exit(1);
+            return Err(Failure::new(format!("fatal: failed to execute git notes: {e}")));
         }
     }
+    Ok(())
 }
 
 fn list_voice_notes(root: &std::path::Path) -> Result<(), String> {
