@@ -804,18 +804,21 @@ pub fn generate_frontmatter_nquads_with(
     // The walk cache (incremental-sync spec §4.3, Rob-approved 2026-08-26):
     // per-file finished fragments keyed on CONTENT IDENTITY (working-tree
     // blob hash + index blob hash), under a context hash that carries the
-    // two total gates — the installed ontology's bytes and the document
-    // existence set. Either gate trips → the context hash changes → the
-    // cache refuses to load → this run IS the full walk, which is exactly
-    // today's behavior. GIT_LEX_FULL_WALK=1 forces that path by hand.
-    let ctx_hash = crate::walkcache::context_hash(&root, files);
+    // total gates — the binary and the installed ontology's bytes. Either
+    // trips → the cache refuses to load → this run IS the full walk.
+    // Documents added or removed since the cache was written re-extract
+    // only the documents that mention them (see walkcache.rs).
+    // GIT_LEX_FULL_WALK=1 forces the full walk by hand.
+    let ctx_hash = crate::walkcache::context_hash(&root);
+    let rel_files = crate::walkcache::relative_files(&root, files);
     let force_full = std::env::var_os("GIT_LEX_FULL_WALK").is_some();
     let mut cache = if force_full {
-        crate::walkcache::WalkCache::empty(&root, &ctx_hash)
+        crate::walkcache::WalkCache::empty(&root, &ctx_hash, &rel_files)
     } else {
-        crate::walkcache::WalkCache::load(&root, &ctx_hash)
-            .unwrap_or_else(|| crate::walkcache::WalkCache::empty(&root, &ctx_hash))
+        crate::walkcache::WalkCache::load(&root, &ctx_hash, &rel_files)
+            .unwrap_or_else(|| crate::walkcache::WalkCache::empty(&root, &ctx_hash, &rel_files))
     };
+    let changed_names = cache.changed_names().to_vec();
     // The tampered-sidecar belt: a sidecar dirty in git while its source
     // file is unchanged means the on-disk sidecar diverged from what the
     // last commit pinned — send its source through the full pipeline so
@@ -866,7 +869,7 @@ pub fn generate_frontmatter_nquads_with(
                 WalkJob { filepath, relpath_str, blob_hash, cached, is_md }
             })
             .collect();
-        let prepared = parallel_map(&jobs, cores, |parser, job| prepare_walk_file(parser, job, &md_index));
+        let prepared = parallel_map(&jobs, cores, |parser, job| prepare_walk_file(parser, job, &md_index, &changed_names));
 
         for (job, prep) in jobs.into_iter().zip(prepared) {
             let WalkJob { filepath, relpath_str, blob_hash, .. } = job;
@@ -1171,10 +1174,13 @@ fn md_link_lines(
 
 /// Read, hash and (when it must be extracted) markdown-parse one document.
 /// Touches nothing shared and prints nothing.
+/// A cached document that mentions a document added or removed since
+/// (`changed_names`) is extracted again.
 fn prepare_walk_file(
     parser: &mut tree_sitter_md::MarkdownParser,
     job: &WalkJob,
     md_index: &HashSet<String>,
+    changed_names: &[String],
 ) -> PreparedFile {
     let content = match fs::read_to_string(job.filepath) {
         Ok(c) => c,
@@ -1185,6 +1191,7 @@ fn prepare_walk_file(
         .cached
         .as_ref()
         .is_some_and(|(bh, ih)| *bh == bytes_hash && *ih == job.blob_hash)
+        && !crate::walkcache::WalkCache::mentions_changed_file(changed_names, &content)
     {
         return PreparedFile::Unchanged { bytes_hash };
     }

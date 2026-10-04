@@ -27,17 +27,29 @@
 //!   - the installed ontology (every byte under `.lex/ontology/`) — a kit
 //!     change can alter every document's output without touching any
 //!     document;
-//!   - the document existence set (the sorted file list) — a link fact
-//!     exists only while its target exists, so an add/delete/rename
-//!     changes OTHER files' output;
 //!   - the git-lex binary itself — an upgrade can change every fragment,
 //!     and a cache written by the old binary would otherwise keep serving
 //!     the old output (and skip rewriting the sidecars history is built
 //!     from). Identified by the executable's path, size and modification
 //!     time: any install changes it, and reading it costs one stat.
 //!
-//! Any gate changes → the context hash changes → the whole cache is
+//! Either gate changes → the context hash changes → the whole cache is
 //! invalid → full walk, exactly the uncached behavior.
+//!
+//! **The document existence set is a partial gate.** A link fact exists
+//! only while its target exists, so an add, delete or rename changes OTHER
+//! files' output. It used to be a total gate, and since almost every save
+//! on a large soul adds a file, the cache almost never loaded: lUX re-read
+//! all 13,000 documents on every save. Now the cache keeps the file list
+//! it was built against (`files.tsv`, its hash in the manifest header), and
+//! a file that came or went invalidates only the documents whose bytes
+//! mention its name. Every way a document can reach another one by path —
+//! a markdown link (relative or root-relative, with or without `.md`,
+//! percent-encoded or not) or a frontmatter path value — spells out the
+//! target's file name, so a document that does not contain that name
+//! cannot resolve differently. The check is on the longest run of
+//! URL-safe characters in the name, which every encoding of it keeps
+//! verbatim.
 //!
 //! **What is never cached:** a file whose extraction produced errors.
 //! Errors must stay loud on every run; caching one would let a broken
@@ -74,10 +86,17 @@ pub struct CacheEntry {
 }
 
 pub struct WalkCache {
-    /// Hash over the ontology bytes + the document existence set. A
-    /// mismatch invalidates every entry at once.
+    /// Hash over the binary identity + the ontology bytes. A mismatch
+    /// invalidates every entry at once.
     pub ctx_hash: String,
     pub entries: HashMap<String, CacheEntry>,
+    /// This run's document list (repo-relative, sorted), written back as
+    /// the list the next run compares against.
+    files: Vec<String>,
+    /// For each document added or removed since the cache was written: the
+    /// part of its name a reference to it must contain. A cached document
+    /// whose bytes contain any of these is re-extracted.
+    changed_names: Vec<String>,
     dir: PathBuf,
     /// Entries proven or refreshed this run — written back on save.
     fresh: HashMap<String, CacheEntry>,
@@ -113,26 +132,15 @@ fn binary_identity() -> String {
     format!("{}\t{}\t{}", exe.to_string_lossy(), meta.len(), mtime)
 }
 
-/// The context hash: binary identity + ontology bytes + sorted document
-/// list. Anything that
-/// can change a document's output WITHOUT its bytes changing must be in
+/// The context hash: binary identity + ontology bytes. Anything that can
+/// change EVERY document's output without its bytes changing must be in
 /// here; when in doubt, include it — the cost of inclusion is a full walk,
-/// the cost of omission is silently stale derived state.
-pub fn context_hash(root: &Path, files: &[PathBuf]) -> String {
+/// the cost of omission is silently stale derived state. (The document
+/// list is the partial gate: see [`WalkCache::load`].)
+pub fn context_hash(root: &Path) -> String {
     let mut acc = Vec::new();
     acc.extend_from_slice(binary_identity().as_bytes());
     acc.push(b'\n');
-    // Document existence set, sorted for determinism.
-    let mut rels: Vec<String> = files
-        .iter()
-        .filter_map(|p| p.strip_prefix(root).ok())
-        .map(|p| p.to_string_lossy().to_string())
-        .collect();
-    rels.sort();
-    for r in &rels {
-        acc.extend_from_slice(r.as_bytes());
-        acc.push(b'\n');
-    }
     // Every byte of the installed kits' ontology, path-sorted. Installed
     // means listed in repo.yml, so removing a kit changes this hash even
     // when its folder is still on disk.
@@ -158,19 +166,66 @@ fn collect_files(dir: &Path, out: &mut Vec<PathBuf>) {
     }
 }
 
+/// The repo-relative, sorted document list.
+pub fn relative_files(root: &Path, files: &[PathBuf]) -> Vec<String> {
+    let mut rels: Vec<String> = files
+        .iter()
+        .filter_map(|p| p.strip_prefix(root).ok())
+        .map(|p| p.to_string_lossy().to_string())
+        .collect();
+    rels.sort();
+    rels
+}
+
+/// The part of a document's name that every reference to it by path must
+/// contain: the longest run of URL-safe characters in its file name with
+/// any extension dropped (a link may leave `.md` off, and percent-encoding
+/// leaves URL-safe characters as they are). None when the name has no such
+/// run, and so no safe way to tell who might mention it.
+fn reference_needle(rel: &str) -> Option<String> {
+    let name = rel.rsplit('/').next().unwrap_or(rel);
+    let stem = match name.rsplit_once('.') {
+        Some((stem, _)) if !stem.is_empty() => stem,
+        _ => name,
+    };
+    stem.split(|c: char| !(c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | '~')))
+        .max_by_key(|run| run.len())
+        .filter(|run| !run.is_empty())
+        .map(str::to_string)
+}
+
 impl WalkCache {
     /// Load the cache for this context. None = no usable cache (absent,
     /// unreadable, or built under a different context) — the caller runs
     /// a full walk and a fresh cache is written at the end either way.
-    pub fn load(root: &Path, ctx_hash: &str) -> Option<WalkCache> {
+    ///
+    /// `files` is this run's document list ([`relative_files`]). Documents
+    /// added or removed since the cache was written are compared by name:
+    /// see the module notes and [`WalkCache::mentions_changed_file`].
+    pub fn load(root: &Path, ctx_hash: &str, files: &[String]) -> Option<WalkCache> {
         let dir = cache_dir(root);
         let manifest = fs::read_to_string(dir.join("manifest.tsv")).ok()?;
         let mut lines = manifest.lines();
         let head = lines.next()?;
-        let stored_ctx = head.strip_prefix("CTX\t")?;
+        let (stored_ctx, stored_files_hash) = head.strip_prefix("CTX\t")?.split_once("\tFILES\t")?;
         if stored_ctx != ctx_hash {
             return None;
         }
+        // The list the manifest was written against, proven by its hash: a
+        // list from any other run would compute the wrong difference.
+        let stored_files = fs::read(dir.join("files.tsv")).ok()?;
+        if blob_hash_of(&stored_files) != stored_files_hash {
+            return None;
+        }
+        let stored_files = String::from_utf8(stored_files).ok()?;
+        let before: std::collections::HashSet<&str> = stored_files.lines().collect();
+        let now: std::collections::HashSet<&str> = files.iter().map(String::as_str).collect();
+        let mut changed_names = Vec::new();
+        for rel in before.symmetric_difference(&now) {
+            changed_names.push(reference_needle(rel)?);
+        }
+        changed_names.sort();
+        changed_names.dedup();
         let mut entries = HashMap::new();
         for line in lines {
             let mut cols = line.split('\t');
@@ -200,19 +255,35 @@ impl WalkCache {
         Some(WalkCache {
             ctx_hash: ctx_hash.to_string(),
             entries,
+            files: files.to_vec(),
+            changed_names,
             dir,
             fresh: HashMap::new(),
         })
     }
 
     /// An empty cache that will be populated by this run (full-walk path).
-    pub fn empty(root: &Path, ctx_hash: &str) -> WalkCache {
+    pub fn empty(root: &Path, ctx_hash: &str, files: &[String]) -> WalkCache {
         WalkCache {
             ctx_hash: ctx_hash.to_string(),
             entries: HashMap::new(),
+            files: files.to_vec(),
+            changed_names: Vec::new(),
             dir: cache_dir(root),
             fresh: HashMap::new(),
         }
+    }
+
+    /// The names of documents added or removed since the cache was written.
+    pub fn changed_names(&self) -> &[String] {
+        &self.changed_names
+    }
+
+    /// Does this document's text mention a document that came or went? Its
+    /// cached output may then be wrong (a link that now resolves, or no
+    /// longer does), so it must be extracted again.
+    pub fn mentions_changed_file(changed_names: &[String], content: &str) -> bool {
+        changed_names.iter().any(|n| content.contains(n.as_str()))
     }
 
     fn frag_path(&self, relpath: &str) -> PathBuf {
@@ -286,7 +357,18 @@ impl WalkCache {
         if fs::create_dir_all(&self.dir).is_err() {
             return;
         }
-        let mut out = format!("CTX\t{}\n", self.ctx_hash);
+        // The document list first, then the manifest that names its hash: a
+        // run killed in between leaves a manifest whose hash no longer
+        // matches, and the next run walks in full.
+        let mut list = String::new();
+        for f in &self.files {
+            list.push_str(f);
+            list.push('\n');
+        }
+        if fs::write(self.dir.join("files.tsv"), &list).is_err() {
+            return;
+        }
+        let mut out = format!("CTX\t{}\tFILES\t{}\n", self.ctx_hash, blob_hash_of(list.as_bytes()));
         let mut rels: Vec<&String> = self.fresh.keys().collect();
         rels.sort();
         for rel in rels {
@@ -351,23 +433,24 @@ mod tests {
     #[test]
     fn uninstalled_kit_folder_is_not_in_context() {
         let root = tmp_root("ghost");
-        let files = vec![root.join("a.md")];
-        let before = context_hash(&root, &files);
+        let before = context_hash(&root);
         fs::create_dir_all(root.join(".lex/ontology/ghost")).unwrap();
         fs::write(root.join(".lex/ontology/ghost/ghost.ttl"), "ghost:anything").unwrap();
-        assert_eq!(before, context_hash(&root, &files));
+        assert_eq!(before, context_hash(&root));
         let _ = fs::remove_dir_all(&root);
     }
 
     #[test]
     fn roundtrip_hit_after_save() {
         let root = tmp_root("roundtrip");
-        let ctx = context_hash(&root, &[root.join("a.md")]);
-        let mut c = WalkCache::empty(&root, &ctx);
+        let ctx = context_hash(&root);
+        let files = vec!["a.md".to_string()];
+        let mut c = WalkCache::empty(&root, &ctx, &files);
         c.store("a.md", "bh1", "ih1", "<s> <p> <o> <g> .\n", 2, true);
         c.save();
 
-        let mut loaded = WalkCache::load(&root, &ctx).expect("cache loads");
+        let mut loaded = WalkCache::load(&root, &ctx, &files).expect("cache loads");
+        assert!(loaded.changed_names().is_empty());
         let (frag, entry) = loaded.hit("a.md", "bh1", "ih1", true).expect("hit");
         assert_eq!(frag, "<s> <p> <o> <g> .\n");
         assert_eq!(entry.links, 2);
@@ -381,44 +464,34 @@ mod tests {
     #[test]
     fn context_mismatch_refuses_to_load() {
         let root = tmp_root("ctx");
-        let ctx = context_hash(&root, &[root.join("a.md")]);
-        let c = WalkCache::empty(&root, &ctx);
+        let ctx = context_hash(&root);
+        let c = WalkCache::empty(&root, &ctx, &[]);
         c.save();
-        assert!(WalkCache::load(&root, "different").is_none());
+        assert!(WalkCache::load(&root, "different", &[]).is_none());
         let _ = fs::remove_dir_all(&root);
     }
 
     #[test]
     fn ontology_byte_change_changes_context() {
         let root = tmp_root("ont");
-        let files = vec![root.join("a.md")];
-        let before = context_hash(&root, &files);
+        let before = context_hash(&root);
         fs::write(root.join(".lex/ontology/t/t.ttl"), "t:changed").unwrap();
-        assert_ne!(before, context_hash(&root, &files), "gate 2: ontology bytes");
-        let _ = fs::remove_dir_all(&root);
-    }
-
-    #[test]
-    fn existence_set_change_changes_context() {
-        let root = tmp_root("exist");
-        let one = context_hash(&root, &[root.join("a.md")]);
-        let two = context_hash(&root, &[root.join("a.md"), root.join("b.md")]);
-        assert_ne!(one, two, "gate 3: the document existence set");
+        assert_ne!(before, context_hash(&root), "gate 2: ontology bytes");
         let _ = fs::remove_dir_all(&root);
     }
 
     #[test]
     fn unproven_entries_prune_on_save() {
         let root = tmp_root("prune");
-        let ctx = context_hash(&root, &[]);
-        let mut c = WalkCache::empty(&root, &ctx);
+        let ctx = context_hash(&root);
+        let mut c = WalkCache::empty(&root, &ctx, &[]);
         c.store("keep.md", "b", "i", "x\n", 0, true);
         c.save();
         // Next run proves nothing, stores one new file.
-        let mut c2 = WalkCache::load(&root, &ctx).unwrap();
+        let mut c2 = WalkCache::load(&root, &ctx, &[]).unwrap();
         c2.store("only.md", "b", "i", "y\n", 0, true);
         c2.save();
-        let c3 = WalkCache::load(&root, &ctx).unwrap();
+        let c3 = WalkCache::load(&root, &ctx, &[]).unwrap();
         assert!(c3.entries.contains_key("only.md"));
         assert!(!c3.entries.contains_key("keep.md"), "vanished files fall away");
         let _ = fs::remove_dir_all(&root);
@@ -448,10 +521,10 @@ mod tests {
         ));
         let _ = fs::remove_dir_all(&root);
         fs::create_dir_all(crate::layout::kit_ontology_dir(&root, "t")).unwrap();
-        let ctx = context_hash(&root, &[root.join("a.md")]);
+        let ctx = context_hash(&root);
 
         // Run 1: two documents seen, two fragments written.
-        let mut c = WalkCache::empty(&root, &ctx);
+        let mut c = WalkCache::empty(&root, &ctx, &[]);
         c.store("a.md", "bh-a", "ih-a", "<x> <y> <z> .\n", 0, true);
         c.store("b.md", "bh-b", "ih-b", "<p> <q> <r> .\n", 0, true);
         c.save();
@@ -459,7 +532,7 @@ mod tests {
         assert!(root.join(".lex/_ignore/walkcache/frag/b.md.nq").exists());
 
         // Run 2: b.md is gone from disk, so the walk never sees it.
-        let mut c2 = WalkCache::empty(&root, &ctx);
+        let mut c2 = WalkCache::empty(&root, &ctx, &[]);
         c2.store("a.md", "bh-a", "ih-a", "<x> <y> <z> .\n", 0, true);
         c2.save();
 
@@ -478,14 +551,69 @@ mod tests {
     #[test]
     fn sidecar_flag_survives_the_manifest() {
         let root = tmp_root("sidecar-flag");
-        let mut c = WalkCache::empty(&root, "ctx");
+        let mut c = WalkCache::empty(&root, "ctx", &[]);
         c.store("q.md", "b", "i", "<s> <p> <o> <g> .\n", 0, false);
         c.store("s.md", "b", "i", "<s> <p> <o> <g> .\n", 0, true);
         c.save();
 
-        let mut loaded = WalkCache::load(&root, "ctx").expect("manifest loads");
+        let mut loaded = WalkCache::load(&root, "ctx", &[]).expect("manifest loads");
         assert!(!loaded.hit("q.md", "b", "i", false).unwrap().1.sidecars);
         assert!(loaded.hit("s.md", "b", "i", false).unwrap().1.sidecars);
         let _ = fs::remove_dir_all(&root);
+    }
+
+    /// A document that came or went no longer throws the cache away: the
+    /// cache loads, and names what changed, so only the documents that
+    /// mention it are extracted again.
+    #[test]
+    fn added_and_removed_files_name_what_changed() {
+        let root = tmp_root("existence");
+        let ctx = context_hash(&root);
+        let before = vec!["Soul/Note/a.md".to_string(), "Soul/Note/gone.md".to_string()];
+        let mut c = WalkCache::empty(&root, &ctx, &before);
+        c.store("Soul/Note/a.md", "bh1", "ih1", "", 0, true);
+        c.save();
+
+        let now = vec!["Soul/Note/a.md".to_string(), "Soul/Journal/day-9.md".to_string()];
+        let mut loaded = WalkCache::load(&root, &ctx, &now).expect("an added file keeps the cache");
+        assert_eq!(loaded.changed_names(), ["day-9".to_string(), "gone".to_string()]);
+        assert!(loaded.hit("Soul/Note/a.md", "bh1", "ih1", false).is_some());
+
+        let names = loaded.changed_names().to_vec();
+        // Every way a document can point at the new one spells its name.
+        for text in [
+            "see [day 9](/Soul/Journal/day-9.md)",
+            "see [day 9](../Journal/day-9)",
+            "related: Soul/Journal/day-9.md",
+            "[gone](gone.md#top)",
+        ] {
+            assert!(WalkCache::mentions_changed_file(&names, text), "{text}");
+        }
+        assert!(!WalkCache::mentions_changed_file(&names, "see [a](/Soul/Note/a.md)"));
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// A manifest whose file list does not match the hash it recorded (a
+    /// run killed between the two writes) is not trusted at all.
+    #[test]
+    fn mismatched_file_list_is_a_full_walk() {
+        let root = tmp_root("torn");
+        let ctx = context_hash(&root);
+        let files = vec!["a.md".to_string()];
+        let c = WalkCache::empty(&root, &ctx, &files);
+        c.save();
+        fs::write(cache_dir(&root).join("files.tsv"), "a.md\nb.md\n").unwrap();
+        assert!(WalkCache::load(&root, &ctx, &files).is_none());
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn reference_needles() {
+        assert_eq!(reference_needle("Soul/Note/day-9.md").as_deref(), Some("day-9"));
+        assert_eq!(reference_needle("img/photo.png").as_deref(), Some("photo"));
+        // Percent-encoding keeps URL-safe runs verbatim: the longest one.
+        assert_eq!(reference_needle("Notes/my long title.md").as_deref(), Some("title"));
+        assert_eq!(reference_needle("README").as_deref(), Some("README"));
+        assert_eq!(reference_needle("Notes/日本.md"), None);
     }
 }
