@@ -191,8 +191,10 @@ These are in your WORKING FILES, not history — fix the listed files and the wa
     }
 
     // Every sync proves the store coherent or aborts. The proof joins
-    // events to commit ordinals, so it follows the git2 layer.
-    verify_onegraph(&store);
+    // events to commit ordinals, so it follows the git2 layer. A full
+    // rebuild proves the whole store; an append proves the statements it
+    // changed (goodlux, 2026-10-04).
+    verify_onegraph(&store, (!full_rebuild).then_some(&onegraph.changed_statements));
     clock.mark("store check");
 
     if !full_rebuild {
@@ -1089,6 +1091,8 @@ SELECT (COUNT(*) AS ?n) WHERE { \
 /// What the one-graph walk did, for the now-view step after it.
 struct OnegraphPhase {
     changed_subjects: std::collections::HashSet<String>,
+    /// Statements this append asserted or retracted (empty on a rebuild).
+    changed_statements: std::collections::HashSet<String>,
 }
 
 /// The resume point, or None when it cannot be resumed from.
@@ -1183,6 +1187,7 @@ fn sync_onegraph_walk(store: &Store, root: &std::path::Path, resume_sha: Option<
             }
 
     let mut changed_subjects = std::collections::HashSet::new();
+    let mut changed_statements = std::collections::HashSet::new();
     if !shas.is_empty() {
         let commits = match spo_events::collect_commits_from_shas(&shas, horizon_start.as_deref()) {
             Ok(c) => c,
@@ -1226,10 +1231,11 @@ fn sync_onegraph_walk(store: &Store, root: &std::path::Path, resume_sha: Option<
             outcome.events_emitted
         );
         changed_subjects = outcome.changed_subjects;
+        changed_statements = outcome.changed_statements;
     } else {
         println!("One graph: up to date.");
     }
-    OnegraphPhase { changed_subjects }
+    OnegraphPhase { changed_subjects, changed_statements }
 }
 
 /// Type the one graph for discovery, then prove the store coherent — every
@@ -1404,7 +1410,9 @@ fn history_counts(store: &Store) -> Result<HistoryCounts, String> {
 /// steps as "Rebuilding" in docs/using/history.md.
 const REBUILD_HINT: &str = "To rebuild the store from your git history: run `gitlexd stop`, delete .lex/_ignore/oxigraph, then run `git lex sync`.";
 
-fn verify_onegraph(store: &Store) {
+/// `scope`: None proves the whole store (a full rebuild); Some proves just
+/// these statements (an append: what its walk asserted or retracted).
+fn verify_onegraph(store: &Store, scope: Option<&std::collections::HashSet<String>>) {
     // Discovery typing (default graph, idempotent): the graph's NamedGraph
     // object, dual-typed — the store does no inference, so both the class and
     // its NamedGraph parent are stated explicitly.
@@ -1416,6 +1424,32 @@ fn verify_onegraph(store: &Store) {
     if let Err(e) = store.load_from_reader(RdfFormat::NQuads, Cursor::new(typing.as_bytes())) {
         eprintln!("ERROR: one-graph discovery typing failed to load: {e}");
         std::process::exit(1);
+    }
+
+    if let Some(statements) = scope {
+        let checks = match statement_checks(store, statements) {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("ERROR: the store check at the end of sync could not run ({e}), so this sync is not trusted. Run `git lex sync` again. If it fails the same way: {REBUILD_HINT}");
+                std::process::exit(1);
+            }
+        };
+        if checks.integrity_bad > 0 {
+            eprintln!(
+                "ERROR: the store's history is damaged: {} history record(s) for the facts this save changed do not name exactly one fact, or do not say whether it was added or removed. This comes from a bug in git-lex, not from your files. {REBUILD_HINT}",
+                checks.integrity_bad
+            );
+            std::process::exit(1);
+        }
+        if checks.dangling > 0 {
+            eprintln!("ERROR: the store's history names {} commit(s) that are missing from its list of commits. This comes from a bug in git-lex, not from your files. {REBUILD_HINT}", checks.dangling);
+            std::process::exit(1);
+        }
+        if checks.mismatched > 0 {
+            eprintln!("ERROR: {} of the {} fact(s) this save changed are stored as current when their history says they are not, or the other way round. This comes from a bug in git-lex, not from your files. {REBUILD_HINT}", checks.mismatched, statements.len());
+            std::process::exit(1);
+        }
+        return;
     }
 
     let count_q = |q: &str| -> Option<u64> {
@@ -1478,6 +1512,122 @@ fn verify_onegraph(store: &Store) {
             std::process::exit(1);
         }
     }
+}
+
+/// What the store check finds for a set of statements (#49).
+#[derive(Debug, Default, PartialEq)]
+struct StatementChecks {
+    /// Events for these statements with more than one statement, more than
+    /// one assert or retract, or both directions.
+    integrity_bad: u64,
+    /// Distinct commits those events name that the commits graph lacks.
+    dangling: u64,
+    /// Statements whose presence as a plain triple in the history graph
+    /// (the current state) differs from what their events derive: current
+    /// exactly when the latest assert, by commit ordinal, is later than the
+    /// latest retract.
+    mismatched: u64,
+}
+
+/// The whole-store checks of [`history_counts`] and the base-fact count,
+/// restricted to `statements` (N-Quads lines of plain triples in the
+/// history graph). Every lookup is by a known term, so the cost follows the
+/// number of statements a save changed, not the size of the history: on
+/// lUX the whole-store form took about 4.8 s of every save (goodlux,
+/// 2026-10-04: check what the save changed; a full rebuild checks it all).
+fn statement_checks(store: &Store, statements: &std::collections::HashSet<String>) -> Result<StatementChecks, String> {
+    use oxigraph::io::RdfParser;
+    use oxigraph::model::{GraphNameRef, NamedNodeRef, NamedOrBlankNodeRef, Term, Triple};
+    use std::collections::HashSet;
+
+    const XSD_INTEGER: &str = "http://www.w3.org/2001/XMLSchema#integer";
+    let lh = GraphNameRef::from(NamedNodeRef::new_unchecked(spo_events::LEXHISTORY_GRAPH_IRI));
+    let cg = GraphNameRef::from(NamedNodeRef::new_unchecked("https://repolex.ai/git-lex/NamedGraph/commits"));
+    let reifies = NamedNodeRef::new_unchecked("http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies");
+    let asserted_in = NamedNodeRef::new_unchecked(spo_events::ONEGRAPH_ASSERTED_IN);
+    let retracted_in = NamedNodeRef::new_unchecked(spo_events::ONEGRAPH_RETRACTED_IN);
+    let ordinal_p = NamedNodeRef::new_unchecked(SYNC_MARKER_PREDICATE);
+
+    let mut text = String::new();
+    for line in statements {
+        text.push_str(line.trim_end());
+        text.push('\n');
+    }
+    let mut out = StatementChecks::default();
+    let mut dangling: HashSet<Term> = HashSet::new();
+    for q in RdfParser::from_format(RdfFormat::NQuads).for_reader(Cursor::new(text.as_bytes())) {
+        let q = q.map_err(|e| e.to_string())?;
+        let triple = Triple::new(q.subject, q.predicate, q.object);
+        let term = Term::from(triple.clone());
+        let mut latest_assert: Option<i64> = None;
+        let mut latest_retract: Option<i64> = None;
+        for ev in store.quads_for_pattern(None, Some(reifies), Some(term.as_ref()), Some(lh)) {
+            let ev = ev.map_err(|e| e.to_string())?;
+            let e = NamedOrBlankNodeRef::from(&ev.subject);
+            let count = |p: NamedNodeRef<'_>| -> Result<Vec<Term>, String> {
+                store
+                    .quads_for_pattern(Some(e), Some(p), None, Some(lh))
+                    .map(|q| q.map(|q| q.object).map_err(|e| e.to_string()))
+                    .collect()
+            };
+            let statements_of = count(reifies)?;
+            let asserts = count(asserted_in)?;
+            let retracts = count(retracted_in)?;
+            if statements_of.len() > 1 || asserts.len() > 1 || retracts.len() > 1 || (!asserts.is_empty() && !retracts.is_empty()) {
+                out.integrity_bad += 1;
+                continue;
+            }
+            for (commits, latest) in [(&asserts, &mut latest_assert), (&retracts, &mut latest_retract)] {
+                for c in commits {
+                    let Term::NamedNode(cn) = c else {
+                        dangling.insert(c.clone());
+                        continue;
+                    };
+                    let mut ord: Option<Option<i64>> = None;
+                    for oq in store.quads_for_pattern(Some(cn.as_ref().into()), Some(ordinal_p), None, Some(cg)) {
+                        let v = match oq.map_err(|e| e.to_string())?.object {
+                            Term::Literal(lit) if lit.datatype().as_str() == XSD_INTEGER => lit.value().parse::<i64>().ok(),
+                            _ => None,
+                        };
+                        ord = Some(match (ord, v) {
+                            (None, v) => v,
+                            (Some(Some(a)), Some(b)) => Some(a.max(b)),
+                            _ => None,
+                        });
+                    }
+                    match ord {
+                        Some(Some(o)) => *latest = Some(latest.map_or(o, |l| l.max(o))),
+                        Some(None) => return Err(format!("commit {c} has an ordinal that is not an xsd:integer")),
+                        None => {
+                            let present = store
+                                .quads_for_pattern(Some(cn.as_ref().into()), None, None, Some(cg))
+                                .next()
+                                .is_some();
+                            if !present {
+                                dangling.insert(c.clone());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        let live = match (latest_assert, latest_retract) {
+            (Some(a), Some(r)) => r < a,
+            (Some(_), None) => true,
+            _ => false,
+        };
+        let stored = store.contains(oxigraph::model::QuadRef::new(
+            triple.subject.as_ref(),
+            triple.predicate.as_ref(),
+            triple.object.as_ref(),
+            lh,
+        )).map_err(|e| e.to_string())?;
+        if live != stored {
+            out.mismatched += 1;
+        }
+    }
+    out.dangling = dangling.len() as u64;
+    Ok(out)
 }
 
 /// The branch HEAD is on, or None when detached.
@@ -1836,6 +1986,120 @@ mod coherence_query_tests {
     /// Random histories, checked against the SPARQL oracles: integrity on
     /// every population, dangling and the derived count on clean ones (the
     /// only case verify reads them in — an integrity failure aborts first).
+    /// The scoped store check (#49) against the whole-store one, on random
+    /// histories: the same integrity verdict on damaged ones; on clean ones
+    /// the same dangling count, and a base layer built from the events
+    /// passes both, while each statement flipped (current when it should not
+    /// be, or missing when it should be there) is caught exactly once.
+    #[test]
+    fn scoped_check_agrees_with_whole_store_on_random_histories() {
+        let mut seed: u64 = 0x2545_f491_4f6c_dd1d;
+        let mut next = |m: u64| -> u64 {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed % m
+        };
+        let int = "^^<http://www.w3.org/2001/XMLSchema#integer>";
+        for round in 0..400 {
+            let dirty = round % 4 == 0;
+            let commits = 1 + next(6);
+            let mut nq = String::new();
+            let mut ord: Vec<Option<u64>> = Vec::new();
+            for c in 0..commits {
+                if next(12) == 0 {
+                    ord.push(None); // missing from the commits graph
+                } else {
+                    let o = 1 + next(5);
+                    ord.push(Some(o));
+                    nq.push_str(&format!("<https://ex/c{c}> <{GL}git2/ordinalDerived> \"{o}\"{int} <{CG}> .\n"));
+                }
+            }
+            let mut latest: std::collections::HashMap<u64, (Option<u64>, Option<u64>)> = Default::default();
+            for e in 0..next(14) {
+                let stmt = next(5);
+                nq.push_str(&format!("<https://ex/e{e}> <{RDF}type> <{GL}SpoEvent> <{LH}> .\n"));
+                nq.push_str(&format!(
+                    "<https://ex/e{e}> <{RDF}reifies> <<( <https://ex/s{stmt}> <https://ex/p> \"v{stmt}\" )>> <{LH}> .\n"
+                ));
+                let c = next(commits);
+                let assert = next(2) == 0;
+                let dir = if assert { "assertedIn" } else { "retractedIn" };
+                nq.push_str(&format!("<https://ex/e{e}> <{GL}{dir}> <https://ex/c{c}> <{LH}> .\n"));
+                let slot = latest.entry(stmt).or_default();
+                if let Some(o) = ord[c as usize] {
+                    let side = if assert { &mut slot.0 } else { &mut slot.1 };
+                    *side = Some(side.map_or(o, |x| x.max(o)));
+                }
+                if dirty && next(3) == 0 {
+                    nq.push_str(&match next(3) {
+                        0 => format!("<https://ex/e{e}> <{RDF}reifies> <<( <https://ex/s{}> <https://ex/p> \"v{}\" )>> <{LH}> .\n", (stmt + 1) % 5, (stmt + 1) % 5),
+                        1 => format!("<https://ex/e{e}> <{GL}assertedIn> <https://ex/c{}> <{LH}> .\n", next(commits)),
+                        _ => format!("<https://ex/e{e}> <{GL}retractedIn> <https://ex/c{}> <{LH}> .\n", next(commits)),
+                    });
+                }
+            }
+            // The base layer as the walk would leave it, then some flips.
+            let mut flips = 0u64;
+            let mut scope = std::collections::HashSet::new();
+            for stmt in 0..5u64 {
+                let line = format!("<https://ex/s{stmt}> <https://ex/p> \"v{stmt}\" <{LH}> .");
+                let live = match latest.get(&stmt) {
+                    Some((Some(a), Some(r))) => r < a,
+                    Some((Some(_), None)) => true,
+                    _ => false,
+                };
+                let flip = next(5) == 0;
+                if live != flip {
+                    nq.push_str(&line);
+                    nq.push('\n');
+                }
+                if flip {
+                    flips += 1;
+                }
+                scope.insert(line);
+            }
+            let store = store_from(&nq);
+            let whole = super::history_counts(&store).expect("whole-store counts");
+            let scoped = super::statement_checks(&store, &scope).expect("scoped checks");
+            assert_eq!(scoped.integrity_bad > 0, whole.integrity_bad > 0, "integrity, round {round}:\n{nq}");
+            if whole.integrity_bad > 0 {
+                continue;
+            }
+            assert_eq!(scoped.dangling, whole.dangling, "dangling, round {round}:\n{nq}");
+            if whole.dangling > 0 {
+                continue;
+            }
+            assert_eq!(scoped.mismatched, flips, "mismatched, round {round}:\n{nq}");
+            if flips == 0 {
+                assert_eq!(whole.derived_live, n(&store, super::BASE_COUNT_Q), "whole-store parity, round {round}:\n{nq}");
+            }
+        }
+    }
+
+    /// An append's check reads only what it is given: damage elsewhere in
+    /// the history is the full rebuild's to find.
+    #[test]
+    fn scoped_check_reads_only_its_statements() {
+        let int = "^^<http://www.w3.org/2001/XMLSchema#integer>";
+        let nq = format!(
+            "<https://ex/c1> <{GL}git2/ordinalDerived> \"1\"{int} <{CG}> .\n\
+             <https://ex/e1> <{RDF}reifies> <<( <https://ex/a> <https://ex/p> \"1\" )>> <{LH}> .\n\
+             <https://ex/e1> <{GL}assertedIn> <https://ex/c1> <{LH}> .\n\
+             <https://ex/a> <https://ex/p> \"1\" <{LH}> .\n\
+             <https://ex/e2> <{RDF}reifies> <<( <https://ex/b> <https://ex/p> \"2\" )>> <{LH}> .\n\
+             <https://ex/e2> <{GL}assertedIn> <https://ex/gone> <{LH}> .\n"
+        );
+        let store = store_from(&nq);
+        let a: std::collections::HashSet<String> =
+            [format!("<https://ex/a> <https://ex/p> \"1\" <{LH}> .")].into_iter().collect();
+        assert_eq!(super::statement_checks(&store, &a).unwrap(), super::StatementChecks::default());
+        let b: std::collections::HashSet<String> =
+            [format!("<https://ex/b> <https://ex/p> \"2\" <{LH}> .")].into_iter().collect();
+        let found = super::statement_checks(&store, &b).unwrap();
+        assert_eq!((found.dangling, found.mismatched), (1, 0));
+    }
+
     #[test]
     fn one_pass_counts_agree_with_sparql_on_random_histories() {
         let mut seed: u64 = 0x9e37_79b9_7f4a_7c15;

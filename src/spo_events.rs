@@ -1219,6 +1219,7 @@ pub fn onegraph_walk_engine_with(
     // size of the next store write.
     let mut pending_quads = 0usize;
     let mut changed_subjects: HashSet<String> = HashSet::new();
+    let mut changed_statements: HashSet<String> = HashSet::new();
     let mut events_seen = 0usize;
     let mut events_emitted = 0usize;
 
@@ -1444,6 +1445,7 @@ pub fn onegraph_walk_engine_with(
                 changed_subjects.extend(
                     base_final.keys().filter_map(|line| take_term(line).map(|(subject, _)| subject)),
                 );
+                changed_statements.extend(base_final.keys().cloned());
             }
             write_walk_batch(store, &mut nq_buffer, &mut base_final)?;
             walk_file_ids.clear();
@@ -1653,7 +1655,7 @@ pub fn onegraph_walk_engine_with(
         eprintln!(" done");
     }
 
-    Ok(WalkOutcome { events_seen, events_emitted, changed_subjects })
+    Ok(WalkOutcome { events_seen, events_emitted, changed_subjects, changed_statements })
 }
 
 /// What one walk did: the summary counts, and every subject whose
@@ -1665,6 +1667,10 @@ pub struct WalkOutcome {
     /// rebuild: everything changed, the caller re-materializes the whole
     /// now view, and the list would grow with the whole of history.
     pub changed_subjects: HashSet<String>,
+    /// Every statement the walk asserted or retracted, as the N-Quads line
+    /// of its plain triple in the history graph. EMPTY after a full rebuild,
+    /// for the same reason. The end-of-sync store check reads exactly these.
+    pub changed_statements: HashSet<String>,
 }
 
 /// The Thing → File edge the anchor facts carry (git-lex:fileId).
