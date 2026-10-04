@@ -83,6 +83,10 @@ pub(crate) fn cmd_save(message: &str, dry_run: bool, no_restamp: bool) -> Outcom
         }
     }
     let root = require_git_root()?;
+    // Only `git lex init` creates `.lex/` (git-lex#47). A save in a
+    // repository that was never set up used to create `.lex/`, install the
+    // hook, commit, and register the repository on this machine.
+    git_lex::require_lex_repo(&root)?;
 
     // Identity floor: a soul repo without its root SOUL.md must not save
     // (fail-loud, #29 — the file is restorable via kit-update).
@@ -561,6 +565,13 @@ fn unstaged_extracts(root: &std::path::Path) -> Vec<String> {
 /// extraction, markdown link extraction, stages artifacts, then SHACL
 /// validates. Exits non-zero if anything fails.
 pub(crate) fn hook_pre_commit() -> Outcome {
+    // A hook left behind in a repository without git-lex (nuked by hand,
+    // or copied) does nothing: it must neither create `.lex/` (git-lex#47)
+    // nor block the commit.
+    if let Some(root) = git_lex::find_git_root()
+        && git_lex::lex_repo_check(&root).is_err() {
+            return Ok(());
+        }
     // Phase 0: machine-maintained dates (git-lex:updatedDate, Rob-ruled
     // 2026-08-26). BEFORE extraction, so the stamped value reaches the
     // sidecar and both land in the same commit. Lives in the hook, not in

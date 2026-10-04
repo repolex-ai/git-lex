@@ -2120,6 +2120,16 @@ mod lex_repo_check_tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// #33: the refusal comes back as a value, not an exit.
+    #[test]
+    fn require_lex_repo_returns_the_failure() {
+        let dir = scratch("failure");
+        let f = crate::require_lex_repo(&dir).unwrap_err();
+        assert_eq!(f.code, 1);
+        assert!(f.message.starts_with("fatal: this repository is not set up for git-lex"), "{}", f.message);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn a_repository_with_repo_yml_passes() {
         let dir = scratch("some");

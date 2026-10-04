@@ -1683,6 +1683,65 @@ fn first_commit_on_or_after(root: &std::path::Path, date: &str) -> Option<String
 }
 
 #[cfg(test)]
+mod failure_path_tests {
+    //! Error paths that used to end the process (#33), now returned.
+    use super::*;
+
+    fn git(dir: &std::path::Path, args: &[&str]) {
+        let ok = Command::new("git")
+            .current_dir(dir)
+            .args(["-c", "user.name=t", "-c", "user.email=t@t"])
+            .args(args)
+            .status()
+            .unwrap()
+            .success();
+        assert!(ok, "git {args:?}");
+    }
+
+    fn repo(tag: &str) -> std::path::PathBuf {
+        let d = std::env::temp_dir().join(format!("glx-failure-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        git(&d, &["init", "-q", "-b", "main"]);
+        git(&d, &["commit", "-q", "--allow-empty", "-m", "one"]);
+        d
+    }
+
+    #[test]
+    fn sync_on_another_branch_is_refused_with_the_reason() {
+        let d = repo("branch");
+        assert_eq!(gate_default_branch(&d), Ok(()));
+        git(&d, &["checkout", "-q", "-b", "feature"]);
+        let f = gate_default_branch(&d).unwrap_err();
+        assert_eq!(f.code, 1);
+        assert!(f.message.contains("you are on 'feature'"), "{}", f.message);
+        assert!(f.message.contains("merge your branch, then sync"), "{}", f.message);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn sync_on_a_detached_head_is_refused() {
+        let d = repo("detached");
+        git(&d, &["checkout", "-q", "--detach"]);
+        let f = gate_default_branch(&d).unwrap_err();
+        assert!(f.message.contains("HEAD is detached"), "{}", f.message);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn a_soul_repo_without_soul_md_is_refused() {
+        let d = repo("soulmd");
+        std::fs::create_dir_all(crate::layout::lex_dir(&d)).unwrap();
+        std::fs::write(crate::layout::repo_yml(&d), "name: x\nkit: repolex-ai/git-lex-kit-soul\n").unwrap();
+        let f = crate::soul_md::require_soul_md(&d).unwrap_err();
+        assert!(f.message.starts_with("fatal: root SOUL.md is missing"), "{}", f.message);
+        std::fs::write(d.join("SOUL.md"), "# x\n").unwrap();
+        assert_eq!(crate::soul_md::require_soul_md(&d), Ok(()));
+        let _ = std::fs::remove_dir_all(&d);
+    }
+}
+
+#[cfg(test)]
 mod dev_horizon_tests {
     use super::*;
 
