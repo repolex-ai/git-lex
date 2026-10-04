@@ -1546,3 +1546,105 @@ u:c a owl:DatatypeProperty ; owl:equivalentProperty s:b .
         assert!(bridged.contains("required") && bridged.contains("IRI"), "{bridged}");
     }
 }
+
+/// Receipt instruments for refactoring code whose output is stored (#37).
+/// Run by hand, before and after a change, and diff the two output folders:
+///
+/// ```text
+/// GLX_GOLDEN_REPO=<a git-lex repo> GLX_GOLDEN_OUT=<empty dir> \
+///   cargo test --release --bin git-lex golden_ -- --ignored --test-threads=1
+/// ```
+///
+/// They change the process's working directory, so they are ignored by
+/// default and must run one at a time.
+#[cfg(test)]
+mod golden_receipts {
+    use super::*;
+
+    fn env_paths() -> (PathBuf, PathBuf) {
+        let repo = PathBuf::from(std::env::var("GLX_GOLDEN_REPO").expect("GLX_GOLDEN_REPO"));
+        let out = PathBuf::from(std::env::var("GLX_GOLDEN_OUT").expect("GLX_GOLDEN_OUT"));
+        fs::create_dir_all(&out).unwrap();
+        std::env::set_current_dir(&repo).unwrap();
+        (repo, out)
+    }
+
+    /// Every installed kit's generated shapes, byte for byte.
+    #[test]
+    #[ignore]
+    fn golden_shapes() {
+        let (repo, out) = env_paths();
+        for kit in git_lex::installed_kit_specs(&repo) {
+            let (_, _, short) = resolve_kit_spec(&kit);
+            let text = match generate_shacl_shapes(&kit) {
+                Ok(Some(s)) => s,
+                Ok(None) => "(no shapes)\n".to_string(),
+                Err(e) => format!("(error) {e}\n"),
+            };
+            fs::write(out.join(format!("shapes-{short}.ttl")), text).unwrap();
+        }
+    }
+
+    /// What validation converts every document's frontmatter into.
+    #[test]
+    #[ignore]
+    fn golden_frontmatter_turtle() {
+        let (repo, out) = env_paths();
+        let kit = git_lex::get_kit().expect("a kit");
+        let mut all = String::new();
+        for f in git_lex::nquad::walk_repo_docs(&repo) {
+            if f.extension().is_none_or(|e| e != "md") || git_lex::nquad::is_template(&f) {
+                continue;
+            }
+            let rel = f.strip_prefix(&repo).unwrap().display().to_string();
+            let got = match git_lex::extraction::frontmatter_to_turtle(&f, &repo, &kit) {
+                Ok(Some(t)) => t,
+                Ok(None) => "(none)".to_string(),
+                Err(e) => format!("(error) {e}"),
+            };
+            all.push_str(&format!("=== {rel}\n{got}\n"));
+        }
+        fs::write(out.join("frontmatter-turtle.txt"), all).unwrap();
+    }
+
+    /// The working-tree walk's N-Quads (the emitter's output for every
+    /// document), without writing sidecars.
+    #[test]
+    #[ignore]
+    fn golden_now_walk() {
+        let (repo, out) = env_paths();
+        let ctx = git_lex::nquad::ResolverContext::build(&repo);
+        let walk = git_lex::nquad::generate_frontmatter_nquads_with(
+            &repo,
+            &ctx,
+            git_lex::nquad::NowWalkOpts { write_sidecars: false, build_nquads: true },
+        )
+        .unwrap();
+        let mut lines: Vec<&str> = walk.nquads.lines().collect();
+        lines.sort();
+        fs::write(out.join("now-walk.nq"), lines.join("\n") + "\n").unwrap();
+        fs::write(out.join("now-walk-counts.txt"), format!("errors {} facts {}\n", walk.errors, walk.facts)).unwrap();
+    }
+
+    /// Validation's verdict over the whole repository. Its report goes to
+    /// stdout and stderr; run with `--nocapture` and keep both.
+    #[test]
+    #[ignore]
+    fn golden_validate() {
+        let (_repo, out) = env_paths();
+        let passed = crate::save::cmd_validate().unwrap();
+        fs::write(out.join("validate.txt"), format!("passed {passed}\n")).unwrap();
+    }
+
+    /// Every quad in a store, sorted (GLX_GOLDEN_STORE: the store folder).
+    #[test]
+    #[ignore]
+    fn golden_store_dump() {
+        let (_repo, out) = env_paths();
+        let path = PathBuf::from(std::env::var("GLX_GOLDEN_STORE").expect("GLX_GOLDEN_STORE"));
+        let store = oxigraph::store::Store::open_read_only(&path).unwrap();
+        let mut lines: Vec<String> = store.iter().map(|q| q.unwrap().to_string()).collect();
+        lines.sort();
+        fs::write(out.join("store.nq"), lines.join(" .\n") + " .\n").unwrap();
+    }
+}
