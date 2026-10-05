@@ -3,6 +3,13 @@
 
 use std::process::Command;
 use git_lex::{Failure, Outcome};
+use rudof_rdf::rdf_core::RDFFormat;
+use rudof_rdf::rdf_impl::{InMemoryGraph, ReaderMode};
+use shacl_ir::compiled::schema_ir::SchemaIR as ShaclSchemaIR;
+use shacl_rdf::ShaclParser;
+use shacl_validation::shacl_processor::{GraphValidation, ShaclProcessor, ShaclValidationMode};
+use shacl_validation::store::Graph;
+use sparql_service::RdfData;
 use std::time::Instant;
 use git_lex::get_kit;
 use git_lex::nquad;
@@ -350,177 +357,204 @@ pub(crate) fn cmd_validate() -> Outcome<bool> {
     let shapes_ttl = ontology::read_kit_shapes(&kit);
 
     if shapes_ttl.is_empty() {
-        // Two very different "no shapes" cases (found live by the fresh
-        // base-kit-only init receipt, review #12 sweep):
-        // - the kit's ontology yields NO shapes (base ships engine vocab
-        //   only, no document classes) → there is genuinely nothing to
-        //   validate; the gate passes (blocking every commit of a
-        //   base-kit repo forever is not a gate, it's a wall);
-        // - the kit's ontology WOULD yield shapes but they're not
-        //   installed → broken/partial install; a gate that can't run
-        //   must not pretend it passed (Rob-ruled 2026-07-29).
-        // Deciding which by re-deriving from the source TTL — the same
-        // generator init/kit-update run.
-        match crate::shacl::generate_shacl_shapes(&kit) {
-            Ok(None) => {
-                println!("Kit '{}' declares no document classes — nothing to validate.", kit);
-                return Ok(true);
-            }
-            Ok(Some(_)) => {
-                eprintln!("fatal: kit '{}' is configured but its SHACL shapes are not installed — validation cannot run.", kit);
-                eprintln!("Fix: `git lex kit-update` (reinstalls the kit's ontology and shapes), then retry.");
-                return Ok(false);
-            }
-            Err(e) => {
-                eprintln!("fatal: kit '{}' ontology is broken ({e}) — validation cannot run.", kit);
-                eprintln!("Fix the kit TTL (or `git lex kit-update` for a fresh copy), then retry.");
-                return Ok(false);
-            }
-        }
+        return Ok(verdict_without_shapes(&kit));
     }
 
     // One walker for the whole codebase; `.txt` files ride along for the
     // slug index (sync's resolver indexes them as link targets, so validate
-    // must too). Only .md files are validated (filter in the loop below).
+    // must too). Only .md files are validated (filter in validate_document).
     let files = git_lex::nquad::walk_repo_docs(&root);
 
-    // Parse SHACL shapes into compiled schema (once)
-    use rudof_rdf::rdf_core::RDFFormat;
-    use rudof_rdf::rdf_impl::{InMemoryGraph, ReaderMode};
-    use sparql_service::RdfData;
-    use shacl_rdf::ShaclParser;
-    use shacl_ir::compiled::schema_ir::SchemaIR as ShaclSchemaIR;
-    use shacl_validation::shacl_processor::{GraphValidation, ShaclProcessor, ShaclValidationMode};
-    use shacl_validation::store::Graph;
+    let Some(compiled_shapes) = compile_shapes(&kit, &shapes_ttl) else {
+        return Ok(false);
+    };
 
-    // CORRUPT shapes = same law as MISSING shapes (twenty lines up): a gate
-    // that can't run must not pretend it passed (Rob-ruled 2026-07-29).
-    // These four arms used to `return true` — a broken shapes file waved
-    // every save through while printing an error nobody was required to
-    // read. All four are the identical cure: kit-update regenerates shapes.
-    let shapes_broken = |stage: &str, e: &dyn std::fmt::Display| -> bool {
+    let mut tally = ValidationTally::default();
+    for filepath in &files {
+        validate_document(filepath, &root, &kit, &compiled_shapes, &mut tally);
+    }
+    Ok(report_validation(&tally, start))
+}
+
+/// The verdict when the kit has no installed shapes: pass when its ontology
+/// declares no document classes, block when shapes should exist.
+fn verdict_without_shapes(kit: &str) -> bool {
+    // Two very different "no shapes" cases (found live by the fresh
+    // base-kit-only init receipt, review #12 sweep):
+    // - the kit's ontology yields NO shapes (base ships engine vocab
+    //   only, no document classes) → there is genuinely nothing to
+    //   validate; the gate passes (blocking every commit of a
+    //   base-kit repo forever is not a gate, it's a wall);
+    // - the kit's ontology WOULD yield shapes but they're not
+    //   installed → broken/partial install; a gate that can't run
+    //   must not pretend it passed (Rob-ruled 2026-07-29).
+    // Deciding which by re-deriving from the source TTL — the same
+    // generator init/kit-update run.
+    match crate::shacl::generate_shacl_shapes(kit) {
+        Ok(None) => {
+            println!("Kit '{}' declares no document classes — nothing to validate.", kit);
+            true
+        }
+        Ok(Some(_)) => {
+            eprintln!("fatal: kit '{}' is configured but its SHACL shapes are not installed — validation cannot run.", kit);
+            eprintln!("Fix: `git lex kit-update` (reinstalls the kit's ontology and shapes), then retry.");
+            false
+        }
+        Err(e) => {
+            eprintln!("fatal: kit '{}' ontology is broken ({e}) — validation cannot run.", kit);
+            eprintln!("Fix the kit TTL (or `git lex kit-update` for a fresh copy), then retry.");
+            false
+        }
+    }
+}
+
+/// The kit's shapes, parsed and compiled once for the whole run. None, after
+/// saying why, when they are installed but unusable.
+fn compile_shapes(kit: &str, shapes_ttl: &str) -> Option<ShaclSchemaIR> {
+    // CORRUPT shapes = same law as MISSING shapes (verdict_without_shapes):
+    // a gate that can't run must not pretend it passed (Rob-ruled
+    // 2026-07-29). These four arms used to `return true` — a broken shapes
+    // file waved every save through while printing an error nobody was
+    // required to read. All four are the identical cure: kit-update
+    // regenerates shapes.
+    let shapes_broken = |stage: &str, e: &dyn std::fmt::Display| -> Option<ShaclSchemaIR> {
         eprintln!("fatal: kit '{}' shapes are installed but unusable — {stage}: {e}", kit);
         eprintln!("Validation cannot run, so the save is blocked (a gate that can't run must not pretend it passed).");
         eprintln!("Fix: `git lex kit-update` (regenerates the kit's shapes), then retry.");
-        false
+        None
     };
     let shapes_graph = match InMemoryGraph::from_reader(
         &mut shapes_ttl.as_bytes(), "shapes", &RDFFormat::Turtle, None, &ReaderMode::Lax,
     ) {
         Ok(g) => g,
-        Err(e) => return Ok(shapes_broken("Turtle parse failed", &e)),
+        Err(e) => return shapes_broken("Turtle parse failed", &e),
     };
     let shapes_rdf = match RdfData::from_graph(shapes_graph) {
         Ok(d) => d,
-        Err(e) => return Ok(shapes_broken("graph load failed", &e)),
+        Err(e) => return shapes_broken("graph load failed", &e),
     };
     let shapes_schema = match ShaclParser::new(shapes_rdf).parse() {
         Ok(s) => s,
-        Err(e) => return Ok(shapes_broken("SHACL parse failed", &e)),
+        Err(e) => return shapes_broken("SHACL parse failed", &e),
     };
-    let compiled_shapes = match ShaclSchemaIR::compile(&shapes_schema) {
-        Ok(c) => c,
-        Err(e) => return Ok(shapes_broken("schema compile failed", &e)),
+    match ShaclSchemaIR::compile(&shapes_schema) {
+        Ok(c) => Some(c),
+        Err(e) => shapes_broken("schema compile failed", &e),
+    }
+}
+
+/// What validation counted over the run.
+#[derive(Default)]
+struct ValidationTally {
+    files: usize,
+    violations: usize,
+    failed: Vec<String>,
+}
+
+/// Validate one document against the compiled shapes, printing its
+/// violations and counting them into `tally`.
+fn validate_document(
+    filepath: &std::path::Path,
+    root: &std::path::Path,
+    kit: &str,
+    compiled_shapes: &ShaclSchemaIR,
+    tally: &mut ValidationTally,
+) {
+    if !filepath.to_string_lossy().ends_with(".md") { return; }
+    // __ClassName.md templates are kit-owned scaffolds, never documents.
+    // They were previously invisible here by accident (all-null values →
+    // no triples → Ok(None)); now that a classed document emits its type
+    // even with no values, the skip must be explicit — the same filter
+    // extraction's own walker applies.
+    if git_lex::nquad::is_template(filepath) { return; }
+    let ttl = match frontmatter_to_turtle(filepath, root, kit) {
+        Ok(Some(t)) => t,
+        Ok(None) => return,
+        Err(e) => {
+            eprintln!("  {}: {}", filepath.display(), e);
+            tally.files += 1;
+            tally.violations += 1;
+            tally.failed.push(filepath.display().to_string());
+            return;
+        }
+    };
+    tally.files += 1;
+
+    // Parse this file's Turtle into RdfData
+    // Every failure arm below COUNTS as a violation (review #24): a
+    // file whose extracted Turtle can't parse, load, or validate is a
+    // file the gate could not judge — and a gate that can't run must
+    // not pretend it passed (same law as the missing-shapes arm above).
+    let data_graph = match InMemoryGraph::from_reader(
+        &mut ttl.as_bytes(), &filepath.to_string_lossy(), &RDFFormat::Turtle, None, &ReaderMode::Strict,
+    ) {
+        Ok(g) => g,
+        Err(e) => {
+            eprintln!("  Parse error in {}: {}", filepath.display(), e);
+            tally.violations += 1;
+            tally.failed.push(filepath.display().to_string());
+            return;
+        }
+    };
+    let data_rdf = match RdfData::from_graph(data_graph) {
+        Ok(d) => d,
+        Err(e) => {
+            eprintln!("  Data load error in {}: {}", filepath.display(), e);
+            tally.violations += 1;
+            tally.failed.push(filepath.display().to_string());
+            return;
+        }
     };
 
-    let mut total_files = 0;
-    let mut total_violations = 0;
-    let mut failed_files = Vec::new();
-
-    for filepath in &files {
-        if !filepath.to_string_lossy().ends_with(".md") { continue; }
-        // __ClassName.md templates are kit-owned scaffolds, never documents.
-        // They were previously invisible here by accident (all-null values →
-        // no triples → Ok(None)); now that a classed document emits its type
-        // even with no values, the skip must be explicit — the same filter
-        // extraction's own walker applies.
-        if git_lex::nquad::is_template(filepath) { continue; }
-        let ttl = match frontmatter_to_turtle(filepath, &root, &kit) {
-            Ok(Some(t)) => t,
-            Ok(None) => continue,
-            Err(e) => {
-                eprintln!("  {}: {}", filepath.display(), e);
-                total_files += 1;
-                total_violations += 1;
-                failed_files.push(filepath.display().to_string());
-                continue;
-            }
-        };
-        total_files += 1;
-
-        // Parse this file's Turtle into RdfData
-        // Every failure arm below COUNTS as a violation (review #24): a
-        // file whose extracted Turtle can't parse, load, or validate is a
-        // file the gate could not judge — and a gate that can't run must
-        // not pretend it passed (same law as the missing-shapes arm above).
-        let data_graph = match InMemoryGraph::from_reader(
-            &mut ttl.as_bytes(), &filepath.to_string_lossy(), &RDFFormat::Turtle, None, &ReaderMode::Strict,
-        ) {
-            Ok(g) => g,
-            Err(e) => {
-                eprintln!("  Parse error in {}: {}", filepath.display(), e);
-                total_violations += 1;
-                failed_files.push(filepath.display().to_string());
-                continue;
-            }
-        };
-        let data_rdf = match RdfData::from_graph(data_graph) {
-            Ok(d) => d,
-            Err(e) => {
-                eprintln!("  Data load error in {}: {}", filepath.display(), e);
-                total_violations += 1;
-                failed_files.push(filepath.display().to_string());
-                continue;
-            }
-        };
-
-        // Validate
-        let mut validator = GraphValidation::from_graph(
-            Graph::from_data(data_rdf), ShaclValidationMode::Native,
-        );
-        match ShaclProcessor::validate(&mut validator, &compiled_shapes) {
-            Ok(report) => {
-                if !report.conforms() {
-                    let relpath = filepath.strip_prefix(&root).unwrap_or(filepath);
-                    let violations = report.count_violations();
-                    total_violations += violations;
-                    failed_files.push(relpath.to_string_lossy().to_string());
-                    eprintln!("  {} — {} violation(s):", relpath.display(), violations);
-                    for result in report.results() {
-                        let msg = result.message().unwrap_or("(no message)");
-                        // Name the PROPERTY: "MinCount(1) not satisfied" alone
-                        // tells the author nothing about which field to fix
-                        // (selkie's incident — three empty identity fields,
-                        // zero named). Local name is enough; the file line
-                        // above scopes the kit.
-                        match result.path().and_then(|p| p.pred()) {
-                            Some(pred) => {
-                                let local = pred.as_str().rsplit('/').next().unwrap_or(pred.as_str());
-                                eprintln!("    → {}: {}", local, msg);
-                            }
-                            None => eprintln!("    → {}", msg),
+    // Validate
+    let mut validator = GraphValidation::from_graph(
+        Graph::from_data(data_rdf), ShaclValidationMode::Native,
+    );
+    match ShaclProcessor::validate(&mut validator, compiled_shapes) {
+        Ok(report) => {
+            if !report.conforms() {
+                let relpath = filepath.strip_prefix(root).unwrap_or(filepath);
+                let violations = report.count_violations();
+                tally.violations += violations;
+                tally.failed.push(relpath.to_string_lossy().to_string());
+                eprintln!("  {} — {} violation(s):", relpath.display(), violations);
+                for result in report.results() {
+                    let msg = result.message().unwrap_or("(no message)");
+                    // Name the PROPERTY: "MinCount(1) not satisfied" alone
+                    // tells the author nothing about which field to fix
+                    // (selkie's incident — three empty identity fields,
+                    // zero named). Local name is enough; the file line
+                    // above scopes the kit.
+                    match result.path().and_then(|p| p.pred()) {
+                        Some(pred) => {
+                            let local = pred.as_str().rsplit('/').next().unwrap_or(pred.as_str());
+                            eprintln!("    → {}: {}", local, msg);
                         }
+                        None => eprintln!("    → {}", msg),
                     }
                 }
             }
-            Err(e) => {
-                eprintln!("  Validation error for {}: {}", filepath.display(), e);
-                total_violations += 1;
-                failed_files.push(filepath.display().to_string());
-            }
+        }
+        Err(e) => {
+            eprintln!("  Validation error for {}: {}", filepath.display(), e);
+            tally.violations += 1;
+            tally.failed.push(filepath.display().to_string());
         }
     }
+}
 
+/// Print the run's totals; true when nothing failed.
+fn report_validation(tally: &ValidationTally, start: Instant) -> bool {
     let elapsed = start.elapsed();
-    if total_violations == 0 {
+    if tally.violations == 0 {
         eprintln!("Validated {} files in {:.1}ms — all pass ✓",
-            total_files, elapsed.as_secs_f64() * 1000.0);
-        Ok(true)
+            tally.files, elapsed.as_secs_f64() * 1000.0);
+        true
     } else {
         eprintln!("Validated {} files in {:.1}ms — {} violation(s) in {} file(s)",
-            total_files, elapsed.as_secs_f64() * 1000.0,
-            total_violations, failed_files.len());
-        Ok(false)
+            tally.files, elapsed.as_secs_f64() * 1000.0,
+            tally.violations, tally.failed.len());
+        false
     }
 }
 
@@ -1694,5 +1728,27 @@ mod extract_staging_gate_tests {
         let dir = repo();
         std::fs::write(dir.0.join("README.md"), "hello\n").unwrap();
         assert!(unstaged_extracts(&dir.0).is_empty());
+    }
+}
+
+#[cfg(test)]
+mod validate_piece_tests {
+    use super::*;
+
+    #[test]
+    fn usable_shapes_compile() {
+        let ttl = "@prefix sh: <http://www.w3.org/ns/shacl#> .\n\
+                   @prefix t: <https://ex/t/> .\n\
+                   t:NoteShape a sh:NodeShape ; sh:targetClass t:Note ;\n\
+                     sh:property [ sh:path t:title ; sh:minCount 1 ] .\n";
+        assert!(compile_shapes("t", ttl).is_some());
+    }
+
+    #[test]
+    fn any_violation_fails_the_run() {
+        let start = Instant::now();
+        assert!(report_validation(&ValidationTally { files: 3, ..Default::default() }, start));
+        let failed = ValidationTally { files: 3, violations: 1, failed: vec!["a.md".into()] };
+        assert!(!report_validation(&failed, start));
     }
 }
