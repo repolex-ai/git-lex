@@ -19,6 +19,7 @@ name = "gitlexd"
 path = "src/bin/gitlexd.rs"
 
 [dependencies]
+aho-corasick = "1.1"
 libc = "0.2"
 clap = { version = "4", features = ["derive", "wrap_help"] }
 clap_mangen = "0.2"

@@ -194,6 +194,29 @@ fn reference_needle(rel: &str) -> Option<String> {
         .map(str::to_string)
 }
 
+/// The names of documents that came or went, matched in one pass over a
+/// document's text however many there are. One substring search per name
+/// made a commit adding thousands of documents cost names × documents
+/// (stress test, #51: 15 s of a 42 s sync at 30,000 documents).
+pub struct ChangedNames(Option<aho_corasick::AhoCorasick>);
+
+impl ChangedNames {
+    pub fn new(names: &[String]) -> ChangedNames {
+        if names.is_empty() {
+            return ChangedNames(None);
+        }
+        // Built from plain strings, so it cannot fail; if it ever did, every
+        // cached document would be treated as mentioning a changed name.
+        ChangedNames(aho_corasick::AhoCorasick::new(names).ok().or_else(|| {
+            aho_corasick::AhoCorasick::new([""]).ok()
+        }))
+    }
+
+    pub fn mentioned_in(&self, content: &str) -> bool {
+        self.0.as_ref().is_some_and(|m| m.is_match(content))
+    }
+}
+
 impl WalkCache {
     /// Load the cache for this context. None = no usable cache (absent,
     /// unreadable, or built under a different context) — the caller runs
@@ -279,11 +302,17 @@ impl WalkCache {
         &self.changed_names
     }
 
+    /// A matcher for the names of documents added or removed since the
+    /// cache was written, built once per walk.
+    pub fn changed_name_matcher(&self) -> ChangedNames {
+        ChangedNames::new(&self.changed_names)
+    }
+
     /// Does this document's text mention a document that came or went? Its
     /// cached output may then be wrong (a link that now resolves, or no
     /// longer does), so it must be extracted again.
     pub fn mentions_changed_file(changed_names: &[String], content: &str) -> bool {
-        changed_names.iter().any(|n| content.contains(n.as_str()))
+        ChangedNames::new(changed_names).mentioned_in(content)
     }
 
     fn frag_path(&self, relpath: &str) -> PathBuf {

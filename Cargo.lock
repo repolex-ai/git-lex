@@ -765,6 +765,7 @@ dependencies = [
 name = "git-lex"
 version = "0.0.1"
 dependencies = [
+ "aho-corasick",
  "axum",
  "clap",
  "clap_mangen",

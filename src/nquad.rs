@@ -817,7 +817,7 @@ pub fn generate_frontmatter_nquads_with(
         crate::walkcache::WalkCache::load(&root, &ctx_hash, &rel_files)
             .unwrap_or_else(|| crate::walkcache::WalkCache::empty(&root, &ctx_hash, &rel_files))
     };
-    let changed_names = cache.changed_names().to_vec();
+    let changed_names = cache.changed_name_matcher();
     // The tampered-sidecar belt: a sidecar dirty in git while its source
     // file is unchanged means the on-disk sidecar diverged from what the
     // last commit pinned — send its source through the full pipeline so
@@ -1179,7 +1179,7 @@ fn prepare_walk_file(
     parser: &mut tree_sitter_md::MarkdownParser,
     job: &WalkJob,
     md_index: &HashSet<String>,
-    changed_names: &[String],
+    changed_names: &crate::walkcache::ChangedNames,
 ) -> PreparedFile {
     let content = match fs::read_to_string(job.filepath) {
         Ok(c) => c,
@@ -1190,7 +1190,7 @@ fn prepare_walk_file(
         .cached
         .as_ref()
         .is_some_and(|(bh, ih)| *bh == bytes_hash && *ih == job.blob_hash)
-        && !crate::walkcache::WalkCache::mentions_changed_file(changed_names, &content)
+        && !changed_names.mentioned_in(&content)
     {
         return PreparedFile::Unchanged { bytes_hash };
     }
