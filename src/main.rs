@@ -468,6 +468,14 @@ fn cmd_nuke() -> Outcome {
     // Remove our section from the pre-commit hook
     let _ = hooks::remove_hook();
 
+    // Auto-commit any uncommitted work first so nothing is lost. BEFORE the
+    // .gitignore lines go: the snapshot adds everything not ignored, and
+    // with the lines already gone it committed the whole derived store
+    // (.lex/_ignore/: the database, the walk cache, the git layer copy —
+    // about 1.5 GB on the largest soul) into history, and nuke then pushed
+    // it (stress test, #51).
+    auto_commit_snapshot("pre-nuke");
+
     // Every git-lex line leaves .gitignore: the managed block and any bare
     // line naming a git-lex directory (git-lex#48).
     let ignore = git_lex::kit::remove_engine_gitignore(&root);
@@ -479,9 +487,6 @@ fn cmd_nuke() -> Outcome {
         what.extend(ignore.removed_lines.iter().map(|l| format!("`{l}`")));
         println!("Removed git-lex's lines from .gitignore: {}.", what.join(", "));
     }
-
-    // Auto-commit any uncommitted work first so nothing is lost.
-    auto_commit_snapshot("pre-nuke");
 
     // `git rm -rf .lex/` — un-track anything committed and delete from disk
     // in one shot. Ignore failure (the path may not be tracked at all, which
