@@ -49,6 +49,14 @@ impl PhaseClock {
 }
 
 pub fn cmd_sync() -> Outcome {
+    cmd_sync_into(None)
+}
+
+/// [`cmd_sync`], writing into the store at `store_dir` instead of the
+/// repository's own. gitlexd syncs into a copy of the store and swaps it in
+/// when the sync succeeds, so queries keep reading the old store meanwhile
+/// (#46). The copy must already exist or be creatable; nothing is migrated.
+pub fn cmd_sync_into(store_dir: Option<&std::path::Path>) -> Outcome {
     let start = Instant::now();
     let mut clock = PhaseClock::start();
 
@@ -70,7 +78,16 @@ pub fn cmd_sync() -> Outcome {
     // identity.yml still written for Pool's boot-skip until its read cuts
     // over. IRIs no longer carry it — see git.rs Task-2 IRI families.
     crate::git::ensure_genesis_recorded();
-    let store = open_or_create_store()?;
+    let store = match store_dir {
+        None => open_or_create_store()?,
+        Some(dir) => {
+            std::fs::create_dir_all(dir)
+                .map_err(|e| Failure::new(format!("fatal: cannot create store directory {}: {e}", dir.display())))?;
+            Store::open(dir)
+                .map_err(|e| Failure::new(format!("fatal: cannot open the store at {}: {e}", dir.display())))?
+        }
+    };
+    let store_shown = store_dir.map(std::path::Path::to_path_buf).or_else(store_path).unwrap_or_default();
     clock.mark("open");
 
     // Get current HEAD commit
@@ -218,7 +235,7 @@ These are in your WORKING FILES, not history — fix the listed files and the wa
         elapsed.as_secs_f64() * 1000.0
     );
     println!("  git2 layer: {} quads; extracted: {} now-view facts", git_count, fm_count);
-    println!("Store: {}", store_path().unwrap().display());
+    println!("Store: {}", store_shown.display());
 
     // Spine refresh — every sync, every repo, no gate (Rob-ruled
     // 2026-08-29). Kept AFTER the sync report: sync's own success is

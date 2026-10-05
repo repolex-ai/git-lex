@@ -36,7 +36,8 @@ fn main() {
             git_lex::exit_quietly_on_closed_pipe();
             status()
         }
-        ["worker", path] => worker(path),
+        ["worker", path] => worker(path, None),
+        ["worker", path, store] => worker(path, Some(std::path::Path::new(store))),
         _ => {
             eprintln!("usage: gitlexd | gitlexd start | gitlexd restart | gitlexd stop | gitlexd status");
             2
@@ -46,13 +47,14 @@ fn main() {
 }
 
 /// The sync worker: run the engine in this process with the soul as the
-/// working directory. Its output and exit status go back to the daemon.
-fn worker(path: &str) -> i32 {
+/// working directory, into `store` when given (the daemon's copy of the
+/// soul's store). Its output and exit status go back to the daemon.
+fn worker(path: &str, store: Option<&std::path::Path>) -> i32 {
     if let Err(e) = std::env::set_current_dir(path) {
         eprintln!("cannot enter {path}: {e}");
         return 1;
     }
-    match git_lex::sync::cmd_sync() {
+    match git_lex::sync::cmd_sync_into(store) {
         Ok(()) => 0,
         Err(failure) => {
             if !failure.message.is_empty() {

@@ -7,10 +7,16 @@
 //! repository — the git-root lookup, the IRI base cache in git.rs and the
 //! bare `git` calls all read it. One process per sync keeps every one of
 //! those assumptions true and lets souls sync in parallel (goodlux,
-//! 2026-09-22: option A). The daemon closes its handle on the store before
-//! the worker starts, since RocksDB's lock is per process, and reopens it
-//! when the worker exits. Queries for that soul wait on the lock meanwhile;
-//! no query ever reads a half-written store.
+//! 2026-09-22: option A).
+//!
+//! RocksDB lets one process open a store, so the worker cannot write the
+//! store the daemon is serving. It writes a copy instead (#46): the daemon
+//! takes a backup of the store into `.lex/_ignore/oxigraph.next` (hard links
+//! on the same disk, so it is cheap), the worker syncs into that, and on
+//! success the daemon takes the write lock, closes the store, swaps the two
+//! folders and reopens. Queries keep reading the old store for the whole
+//! sync and wait only for the swap. A failed sync never touches the store
+//! being served. No query ever reads a half-written store.
 
 use oxigraph::store::Store;
 use std::fs::File;
@@ -56,6 +62,9 @@ pub struct Soul {
     /// Set when the daemon has dropped this soul (its `.lex` is gone, or
     /// `git lex nuke` said so). The loops exit; nothing syncs it again.
     gone: std::sync::atomic::AtomicBool,
+    /// Held for a whole sync, copy to swap. The store's own lock is held
+    /// only for the swap, so dropping a soul waits on this instead.
+    syncing: tokio::sync::Mutex<()>,
 }
 
 impl Soul {
@@ -73,6 +82,7 @@ impl Soul {
             completed_tx,
             completed_rx,
             gone: std::sync::atomic::AtomicBool::new(false),
+            syncing: tokio::sync::Mutex::new(()),
         }
     }
 
@@ -173,9 +183,11 @@ impl Daemon {
         };
         soul.gone.store(true, Ordering::SeqCst);
         // Waits for a running sync to finish, then closes the store.
+        let sync = soul.syncing.lock().await;
         let mut guard = Arc::clone(&soul.store).write_owned().await;
         *guard = None;
         drop(guard);
+        drop(sync);
         soul.wake.notify_one();
         self.log(&format!("{} {} dropped (its .lex is gone)", soul.short(), soul.path.display()));
         Some(soul)
@@ -283,8 +295,8 @@ impl Daemon {
         tokio::spawn(watch_loop(Arc::clone(self), Arc::clone(soul)));
     }
 
-    /// One sync of one soul, as a worker process. Holds the store's write
-    /// lock throughout, so no query reads during it.
+    /// One sync of one soul, as a worker process writing a copy of the
+    /// store, swapped in on success. Queries read the old store meanwhile.
     async fn sync_once(&self, soul: &Soul) {
         if soul.gone.load(Ordering::SeqCst) || !crate::layout::lex_dir(&soul.path).is_dir() {
             // Never run the engine in a repository git-lex has left: the
@@ -292,48 +304,73 @@ impl Daemon {
             return;
         }
         let _permit = self.syncs.acquire().await;
-        let mut guard = Arc::clone(&soul.store).write_owned().await;
+        let _sync = soul.syncing.lock().await;
+        if soul.gone.load(Ordering::SeqCst) {
+            return;
+        }
         soul.status.lock().unwrap().syncing = true;
-        *guard = None; // closes the store: RocksDB's lock is per process
         let started = Instant::now();
         self.log(&format!("{} sync starting: {}", soul.short(), soul.path.display()));
-        let exe = self.worker_exe.clone();
-        let path = soul.path.clone();
-        let out = tokio::task::spawn_blocking(move || {
-            std::process::Command::new(exe)
-                .arg("worker")
-                .arg(&path)
-                .current_dir(&path)
-                .output()
-        })
-        .await;
-        let mut error: Option<String> = None;
-        match out {
-            Ok(Ok(o)) => {
-                for line in String::from_utf8_lossy(&o.stdout).lines().chain(String::from_utf8_lossy(&o.stderr).lines()) {
-                    if !line.trim().is_empty() {
-                        self.log(&format!("{}   {line}", soul.short()));
+
+        let next = crate::layout::store_next_dir(&soul.path);
+        let mut error: Option<String> = copy_store(&soul.store, &next).await.err();
+        if error.is_none() {
+            let exe = self.worker_exe.clone();
+            let path = soul.path.clone();
+            let next_arg = next.clone();
+            let out = tokio::task::spawn_blocking(move || {
+                std::process::Command::new(exe)
+                    .arg("worker")
+                    .arg(&path)
+                    .arg(&next_arg)
+                    .current_dir(&path)
+                    .output()
+            })
+            .await;
+            match out {
+                Ok(Ok(o)) => {
+                    for line in String::from_utf8_lossy(&o.stdout).lines().chain(String::from_utf8_lossy(&o.stderr).lines()) {
+                        if !line.trim().is_empty() {
+                            self.log(&format!("{}   {line}", soul.short()));
+                        }
+                    }
+                    if !o.status.success() {
+                        let last = String::from_utf8_lossy(&o.stderr)
+                            .lines()
+                            .rev()
+                            .find(|l| !l.trim().is_empty())
+                            .map(str::to_string)
+                            .unwrap_or_else(|| format!("worker exited with {}", o.status));
+                        error = Some(last);
                     }
                 }
-                if !o.status.success() {
-                    let last = String::from_utf8_lossy(&o.stderr)
-                        .lines()
-                        .rev()
-                        .find(|l| !l.trim().is_empty())
-                        .map(str::to_string)
-                        .unwrap_or_else(|| format!("worker exited with {}", o.status));
-                    error = Some(last);
-                }
+                Ok(Err(e)) => error = Some(format!("could not start the sync worker: {e}")),
+                Err(e) => error = Some(format!("sync worker task failed: {e}")),
             }
-            Ok(Err(e)) => error = Some(format!("could not start the sync worker: {e}")),
-            Err(e) => error = Some(format!("sync worker task failed: {e}")),
         }
-        let (store, open_error) = match open_existing(&soul.path) {
-            Ok(s) => (s, None),
-            Err(e) => (None, Some(e)),
-        };
-        let synced_to = store.as_ref().and_then(crate::sync::synced_marker);
-        *guard = store;
+
+        // Swap only a finished copy, and never for a soul dropped meanwhile.
+        let mut open_error: Option<String> = None;
+        let mut synced_to = soul.status.lock().unwrap().synced_to.clone();
+        if error.is_none() && !soul.gone.load(Ordering::SeqCst) {
+            let swap_started = Instant::now();
+            let mut guard = Arc::clone(&soul.store).write_owned().await;
+            *guard = None; // closes the store: RocksDB's lock is per process
+            let swapped = swap_in(&soul.path);
+            let (store, e) = match open_existing(&soul.path) {
+                Ok(s) => (s, None),
+                Err(e) => (None, Some(e)),
+            };
+            synced_to = store.as_ref().and_then(crate::sync::synced_marker);
+            *guard = store;
+            drop(guard);
+            open_error = swapped.err().or(e);
+            self.log(&format!("{} store swapped in {} ms", soul.short(), swap_started.elapsed().as_millis()));
+        }
+        // A failed sync leaves its copy behind; it is never served.
+        let _ = std::fs::remove_dir_all(&next);
+        let _ = std::fs::remove_dir_all(crate::layout::store_prev_dir(&soul.path));
+
         let ms = started.elapsed().as_millis();
         {
             let mut st = soul.status.lock().unwrap();
@@ -341,8 +378,10 @@ impl Daemon {
             st.syncs += 1;
             st.last_sync_ms = Some(ms);
             st.last_error = error.clone();
-            st.open_error = open_error.clone();
-            st.synced_to = synced_to.clone();
+            if error.is_none() {
+                st.open_error = open_error.clone();
+                st.synced_to = synced_to.clone();
+            }
         }
         match (&error, &open_error) {
             (None, None) => self.log(&format!(
@@ -356,9 +395,60 @@ impl Daemon {
     }
 }
 
+/// Copy the served store into `next` for a sync to write. Readers carry on
+/// while the backup is taken (it holds the read lock only); a soul that has
+/// never synced has nothing to copy, and the worker creates the store.
+async fn copy_store(store: &Arc<RwLock<Option<Store>>>, next: &Path) -> Result<(), String> {
+    let _ = std::fs::remove_dir_all(next);
+    let guard = Arc::clone(store).read_owned().await;
+    let next = next.to_path_buf();
+    tokio::task::spawn_blocking(move || match guard.as_ref() {
+        Some(s) => s
+            .backup(&next)
+            .map_err(|e| format!("could not copy the store for the sync ({}): {e}", next.display())),
+        None => Ok(()),
+    })
+    .await
+    .map_err(|e| format!("store copy task failed: {e}"))?
+}
+
+/// Move the synced copy in place of the store: the store aside to `prev`,
+/// the copy to the store's place. The store must be closed. Undone by
+/// [`recover_swap`] if the process dies in between.
+fn swap_in(root: &Path) -> Result<(), String> {
+    let live = crate::store_path_at(root);
+    let next = crate::layout::store_next_dir(root);
+    let prev = crate::layout::store_prev_dir(root);
+    let _ = std::fs::remove_dir_all(&prev);
+    if live.exists() {
+        std::fs::rename(&live, &prev).map_err(|e| format!("could not move {} aside: {e}", live.display()))?;
+    }
+    std::fs::rename(&next, &live).map_err(|e| format!("could not move the synced store into {}: {e}", live.display()))
+}
+
+/// Finish or undo a swap the process died in the middle of. The store is
+/// missing only between the two renames of [`swap_in`]: with the old store
+/// already aside, the copy is a finished sync and goes in; without a copy,
+/// the old store goes back. Otherwise leftovers of an interrupted sync are
+/// removed.
+fn recover_swap(root: &Path) {
+    let live = crate::store_path_at(root);
+    let next = crate::layout::store_next_dir(root);
+    let prev = crate::layout::store_prev_dir(root);
+    if !live.exists() && prev.exists() {
+        let from = if next.exists() { &next } else { &prev };
+        let _ = std::fs::rename(from, &live);
+    }
+    if live.exists() {
+        let _ = std::fs::remove_dir_all(&next);
+        let _ = std::fs::remove_dir_all(&prev);
+    }
+}
+
 /// Open a soul's store if it exists. A missing store is not an error — the
 /// soul has never been synced, and the first sync creates it.
 fn open_existing(root: &Path) -> Result<Option<Store>, String> {
+    recover_swap(root);
     let p = crate::store_path_at(root);
     if !p.exists() {
         return Ok(None);
@@ -413,5 +503,116 @@ async fn watch_loop(d: Arc<Daemon>, soul: Arc<Soul>) {
             }
         }
         tokio::time::sleep(HEAD_POLL).await;
+    }
+}
+
+#[cfg(test)]
+mod swap_tests {
+    use super::*;
+    use oxigraph::model::{GraphNameRef, NamedNodeRef, QuadRef};
+
+    fn root(tag: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!("glx-swap-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(crate::layout::ignore_dir(&d)).unwrap();
+        d
+    }
+
+    fn quad(n: &str) -> QuadRef<'_> {
+        QuadRef::new(
+            NamedNodeRef::new_unchecked(n),
+            NamedNodeRef::new_unchecked("https://ex/p"),
+            NamedNodeRef::new_unchecked("https://ex/o"),
+            GraphNameRef::DefaultGraph,
+        )
+    }
+
+    /// The whole cycle: the copy is taken while the store stays readable,
+    /// a write to the copy does not reach the served store, and after the
+    /// swap the store holds the copy's writes.
+    #[tokio::test]
+    async fn copy_write_swap() {
+        let r = root("cycle");
+        let live = crate::store_path_at(&r);
+        let next = crate::layout::store_next_dir(&r);
+        let s = Store::open(&live).unwrap();
+        s.insert(quad("https://ex/old")).unwrap();
+        let served = Arc::new(RwLock::new(Some(s)));
+
+        copy_store(&served, &next).await.unwrap();
+        {
+            let copy = Store::open(&next).unwrap();
+            copy.insert(quad("https://ex/new")).unwrap();
+        }
+        let reader = served.read().await;
+        let s = reader.as_ref().unwrap();
+        assert!(s.contains(quad("https://ex/old")).unwrap());
+        assert!(!s.contains(quad("https://ex/new")).unwrap(), "the served store never sees the sync");
+        drop(reader);
+
+        *served.write().await = None;
+        swap_in(&r).unwrap();
+        let s = open_existing(&r).unwrap().unwrap();
+        assert!(s.contains(quad("https://ex/old")).unwrap());
+        assert!(s.contains(quad("https://ex/new")).unwrap());
+        assert!(!next.exists());
+        let _ = std::fs::remove_dir_all(&r);
+    }
+
+    /// A soul that has never synced has nothing to copy; the worker creates
+    /// the store in the copy's place and the swap moves it in.
+    #[tokio::test]
+    async fn first_sync_has_nothing_to_copy() {
+        let r = root("first");
+        let next = crate::layout::store_next_dir(&r);
+        copy_store(&Arc::new(RwLock::new(None)), &next).await.unwrap();
+        assert!(!next.exists());
+        Store::open(&next).unwrap().insert(quad("https://ex/new")).unwrap();
+        swap_in(&r).unwrap();
+        assert!(open_existing(&r).unwrap().unwrap().contains(quad("https://ex/new")).unwrap());
+        let _ = std::fs::remove_dir_all(&r);
+    }
+
+    fn marker(dir: &Path, name: &str) {
+        std::fs::create_dir_all(dir).unwrap();
+        std::fs::write(dir.join("which"), name).unwrap();
+    }
+
+    fn which(dir: &Path) -> String {
+        std::fs::read_to_string(dir.join("which")).unwrap()
+    }
+
+    /// Died between the two renames, with the synced copy ready: it goes in.
+    #[test]
+    fn recovery_finishes_a_half_done_swap() {
+        let r = root("half");
+        marker(&crate::layout::store_prev_dir(&r), "prev");
+        marker(&crate::layout::store_next_dir(&r), "next");
+        recover_swap(&r);
+        assert_eq!(which(&crate::store_path_at(&r)), "next");
+        assert!(!crate::layout::store_prev_dir(&r).exists());
+        let _ = std::fs::remove_dir_all(&r);
+    }
+
+    /// Store aside and no copy: the old store goes back.
+    #[test]
+    fn recovery_puts_the_old_store_back() {
+        let r = root("back");
+        marker(&crate::layout::store_prev_dir(&r), "prev");
+        recover_swap(&r);
+        assert_eq!(which(&crate::store_path_at(&r)), "prev");
+        let _ = std::fs::remove_dir_all(&r);
+    }
+
+    /// A sync that died before its swap leaves a copy that is never served.
+    #[test]
+    fn recovery_discards_an_unfinished_copy() {
+        let r = root("unfinished");
+        marker(&crate::store_path_at(&r), "live");
+        marker(&crate::layout::store_next_dir(&r), "next");
+        recover_swap(&r);
+        assert_eq!(which(&crate::store_path_at(&r)), "live");
+        assert!(!crate::layout::store_next_dir(&r).exists());
+        let _ = std::fs::remove_dir_all(&r);
     }
 }

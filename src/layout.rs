@@ -15,6 +15,8 @@
 //!   extract/          the sidecars: one .fm.spo and .md.spo per document
 //!   _ignore/          derived, never committed:
 //!     oxigraph/         the store
+//!     oxigraph.next/    gitlexd's copy of the store while a sync writes it
+//!     oxigraph.prev/    the replaced store, for the moment of the swap
 //!     walkcache/        the walk's fragment cache
 //!     git-layer.nq      the git layer text the store was last loaded from
 //!     spine/            the exported spine
@@ -92,6 +94,18 @@ pub fn store_dir(root: &Path) -> PathBuf {
 /// `.lex/_ignore/git-layer.nq`
 pub fn git_layer_copy(root: &Path) -> PathBuf {
     ignore_dir(root).join("git-layer.nq")
+}
+
+/// `.lex/_ignore/oxigraph.next/` — the copy of the store a gitlexd sync
+/// writes, swapped in when the sync succeeds (#46).
+pub fn store_next_dir(root: &Path) -> PathBuf {
+    ignore_dir(root).join("oxigraph.next")
+}
+
+/// `.lex/_ignore/oxigraph.prev/` — the store being replaced, for the moment
+/// between moving it aside and moving its successor in.
+pub fn store_prev_dir(root: &Path) -> PathBuf {
+    ignore_dir(root).join("oxigraph.prev")
 }
 
 /// `.lex/_ignore/walkcache/`
