@@ -372,114 +372,7 @@ pub fn frontmatter_to_turtle(
     // (e.g., "repolex-ai/git-lex-kit-soul") — frontmatter keys are
     // written as soul.Journal.journalId, not repolex-ai/git-lex-kit-soul.Journal.journalId.
     let (_, _, short) = crate::resolve_kit_spec(kit);
-    let kit_prefix = format!("{}.", short);
-    let mut doc_type: Option<String> = None;
-    let mut kit_props: Vec<(String, String)> = Vec::new(); // (property_name, value)
-
-    for (key_node, value) in &yaml {
-        let Some(key) = key_node.as_str() else { continue };
-        if let Some(rest) = key.strip_prefix(&kit_prefix) {
-            let segments: Vec<&str> = rest.splitn(2, '.').collect();
-            if segments.len() == 2 {
-                let class_seg = segments[0];
-                let prop_name = segments[1];
-
-                // Infer doc type from class segment (B1 fix, Day 38). This
-                // path used to capitalize the first letter as a GUESS
-                // (`soul.cameraangle` → `Cameraangle`, not the real
-                // `CameraAngle`), while nquad.rs passed the segment through
-                // verbatim — the two emitters disagreed, and the graph path's
-                // phantom `a soul:memory` made `?m a soul:Memory` miss. Both
-                // call `resolve_class_segment` now, so there is one casing
-                // rule. It always yields a class name: extraction runs at
-                // save, where a warning reaches the author who can act, and a
-                // document is never dropped for naming a class the installed
-                // ontology happens not to declare.
-                if doc_type.is_none() {
-                    doc_type = Some(crate::ontology::resolve_class_segment(
-                        kit,
-                        class_seg,
-                        &filepath.display().to_string(),
-                        true, // extraction runs at save — the author can act
-                    ));
-                }
-
-                // Handle all YAML value types. Sequences produce one
-                // entry per item — EXACTLY what flatten_yaml feeds the
-                // emitter. The old code had no Sequence arm, so a doc
-                // whose only kit properties were lists was skipped from
-                // SHACL entirely: it committed cleanly while violating
-                // its shape (adversarial finding 4a).
-                match value {
-                    // trim(): a whitespace-only value is as empty as "" —
-                    // letting " " through would satisfy sh:minCount while
-                    // carrying nothing (selkie's empty-identity incident).
-                    serde_yaml::Value::String(s) if !s.trim().is_empty() => {
-                        kit_props.push((prop_name.to_string(), s.clone()));
-                    }
-                    serde_yaml::Value::Number(n) => {
-                        kit_props.push((prop_name.to_string(), n.to_string()));
-                    }
-                    serde_yaml::Value::Bool(b) => {
-                        kit_props.push((prop_name.to_string(), b.to_string()));
-                    }
-                    serde_yaml::Value::Sequence(seq) => {
-                        for item in seq {
-                            if let Some(s) = item.as_str() {
-                                kit_props.push((prop_name.to_string(), s.to_string()));
-                            } else if let Some(n) = item.as_f64() {
-                                kit_props.push((prop_name.to_string(), n.to_string()));
-                            } else if let Some(b) = item.as_bool() {
-                                kit_props.push((prop_name.to_string(), b.to_string()));
-                            } else if item.is_sequence() {
-                                // `key: [[name]]` is VALID YAML — a list holding a
-                                // list — so it never reaches the wikilink guard,
-                                // which only ever sees strings. It fell through all
-                                // three arms above and vanished: the document saved,
-                                // exit 0, and the property simply was not in the
-                                // graph (@m4rq, 2026-08-27). Quoting it makes it a
-                                // string and the guard fires; leaving it bare was
-                                // silent.
-                                return Err(format!(
-                                    "{}: a nested list value. If you meant a wikilink, that is \
-                                     not wikilink syntax here — YAML reads `[[x]]` as a list \
-                                     inside a list. A frontmatter reference is a Thing address: \
-                                     <namespace/Class/identifier>.",
-                                    prop_name
-                                ));
-                            } else {
-                                return Err(format!(
-                                    "{}: a list item that is not text, a number, or true/false \
-                                     cannot be stored. Remove it or write it as text.",
-                                    prop_name
-                                ));
-                            }
-                        }
-                    }
-                    // Everything else is a shape the graph cannot hold. It used to
-                    // be discarded without a word — the same silence as the nested
-                    // list above, one level up.
-                    serde_yaml::Value::Mapping(_) => {
-                        return Err(format!(
-                            "{}: a nested block of keys. A frontmatter property holds text, a \
-                             number, true/false, or a list of those — not a structure. Flatten \
-                             it into separate keys.",
-                            prop_name
-                        ));
-                    }
-                    serde_yaml::Value::String(_) => {} // empty/whitespace — handled above
-                    serde_yaml::Value::Null => {}      // absent is absent, not an error
-                    _ => {
-                        return Err(format!(
-                            "{}: a value the graph cannot store. Write text, a number, \
-                             true/false, or a list of those.",
-                            prop_name
-                        ));
-                    }
-                }
-            }
-        }
-    }
+    let (doc_type, kit_props) = collect_kit_values(&yaml, kit, &short, filepath)?;
 
     let doc_type = match doc_type {
         Some(t) => t,
@@ -567,61 +460,7 @@ pub fn frontmatter_to_turtle(
             // visible here via the resolved predicate IRI from prop_iris.
             let range = ref_ranges.get(predicate_iri.trim_start_matches('<').trim_end_matches('>'));
             for val in &values {
-                let val = val.as_str();
-                if range.map(String::as_str) == Some(crate::nquad::THING_CLASS_IRI) {
-                    // The angle-bracket lane (Rob-ruled 2026-08-20) —
-                    // mirror the emitter: identifier form only.
-                    match crate::resolve::resolve_thing_reference(val) {
-                        Ok(target) => {
-                            ttl.push_str(&format!(
-                                "<{}> {} {} .\n",
-                                doc_iri, predicate_iri, target
-                            ));
-                        }
-                        Err(msg) => {
-                            return Err(format!("{}: {}", prop_name, msg));
-                        }
-                    }
-                    continue;
-                }
-                if let Some(range_iri) = range {
-                    match crate::nquad::thing_iri_from_range(range_iri, val) {
-                        Some(target) => {
-                            ttl.push_str(&format!(
-                                "<{}> {} {} .\n",
-                                doc_iri, predicate_iri, target
-                            ));
-                        }
-                        None => {
-                            return Err(format!(
-                                "{}: declared range `{}` is not a resolvable class IRI",
-                                prop_name, range_iri
-                            ));
-                        }
-                    }
-                    continue;
-                }
-                match crate::resolve::resolve_frontmatter_value(val) {
-                    crate::resolve::ResolveResult::Iri(uri) => {
-                        // `uri` arrives in `<...>` form, valid Turtle as-is.
-                        ttl.push_str(&format!(
-                            "<{}> {} {} .\n",
-                            doc_iri, predicate_iri, uri
-                        ));
-                    }
-                    crate::resolve::ResolveResult::Unresolved(lit) => {
-                        // Unresolved stays a LITERAL (resolve.rs rule 7) so
-                        // a sh:nodeKind sh:IRI shape flags it — validation
-                        // surfaces the problem instead of inventing an IRI.
-                        ttl.push_str(&format!(
-                            "<{}> {} \"{}\" .\n",
-                            doc_iri, predicate_iri, turtle_escape(&lit)
-                        ));
-                    }
-                    crate::resolve::ResolveResult::Rejected(msg) => {
-                        return Err(format!("{}: {}", prop_name, msg));
-                    }
-                }
+                write_reference_turtle(&mut ttl, &doc_iri, &predicate_iri, prop_name, val, range)?;
             }
         } else if let Some(datatype) = prop_datatypes.get(lookup_key.as_str()) {
             // Typed literal (xsd:integer, xsd:date, etc.)
@@ -647,6 +486,208 @@ pub fn frontmatter_to_turtle(
         eprintln!("=== TTL for {} ===\n{}", filepath.display(), ttl);
     }
     Ok(Some(ttl))
+}
+
+/// A document's class, if it names one, and its kit values as
+/// (property name, value) pairs.
+type KitValues = (Option<String>, Vec<(String, String)>);
+
+/// The document's class (from the first kit key's class segment) and every
+/// non-empty kit value as (property name, value) pairs, one per list item.
+fn collect_kit_values(
+    yaml: &serde_yaml::Mapping,
+    kit: &str,
+    short: &str,
+    filepath: &std::path::Path,
+) -> Result<KitValues, String> {
+    let kit_prefix = format!("{}.", short);
+    let mut doc_type: Option<String> = None;
+    let mut kit_props: Vec<(String, String)> = Vec::new(); // (property_name, value)
+
+    for (key_node, value) in yaml {
+        let Some(key) = key_node.as_str() else { continue };
+        if let Some(rest) = key.strip_prefix(&kit_prefix) {
+            let segments: Vec<&str> = rest.splitn(2, '.').collect();
+            if segments.len() == 2 {
+                let class_seg = segments[0];
+                let prop_name = segments[1];
+
+                // Infer doc type from class segment (B1 fix, Day 38). This
+                // path used to capitalize the first letter as a GUESS
+                // (`soul.cameraangle` → `Cameraangle`, not the real
+                // `CameraAngle`), while nquad.rs passed the segment through
+                // verbatim — the two emitters disagreed, and the graph path's
+                // phantom `a soul:memory` made `?m a soul:Memory` miss. Both
+                // call `resolve_class_segment` now, so there is one casing
+                // rule. It always yields a class name: extraction runs at
+                // save, where a warning reaches the author who can act, and a
+                // document is never dropped for naming a class the installed
+                // ontology happens not to declare.
+                if doc_type.is_none() {
+                    doc_type = Some(crate::ontology::resolve_class_segment(
+                        kit,
+                        class_seg,
+                        &filepath.display().to_string(),
+                        true, // extraction runs at save — the author can act
+                    ));
+                }
+
+                push_kit_value(prop_name, value, &mut kit_props)?;
+            }
+        }
+    }
+    Ok((doc_type, kit_props))
+}
+
+/// One frontmatter value as (property name, value) pairs: nothing for an
+/// empty value, one per item for a list, an error for a shape the graph
+/// cannot hold.
+fn push_kit_value(
+    prop_name: &str,
+    value: &serde_yaml::Value,
+    kit_props: &mut Vec<(String, String)>,
+) -> Result<(), String> {
+    // Handle all YAML value types. Sequences produce one
+    // entry per item — EXACTLY what flatten_yaml feeds the
+    // emitter. The old code had no Sequence arm, so a doc
+    // whose only kit properties were lists was skipped from
+    // SHACL entirely: it committed cleanly while violating
+    // its shape (adversarial finding 4a).
+    match value {
+        // trim(): a whitespace-only value is as empty as "" —
+        // letting " " through would satisfy sh:minCount while
+        // carrying nothing (selkie's empty-identity incident).
+        serde_yaml::Value::String(s) if !s.trim().is_empty() => {
+            kit_props.push((prop_name.to_string(), s.clone()));
+        }
+        serde_yaml::Value::Number(n) => {
+            kit_props.push((prop_name.to_string(), n.to_string()));
+        }
+        serde_yaml::Value::Bool(b) => {
+            kit_props.push((prop_name.to_string(), b.to_string()));
+        }
+        serde_yaml::Value::Sequence(seq) => {
+            for item in seq {
+                if let Some(s) = item.as_str() {
+                    kit_props.push((prop_name.to_string(), s.to_string()));
+                } else if let Some(n) = item.as_f64() {
+                    kit_props.push((prop_name.to_string(), n.to_string()));
+                } else if let Some(b) = item.as_bool() {
+                    kit_props.push((prop_name.to_string(), b.to_string()));
+                } else if item.is_sequence() {
+                    // `key: [[name]]` is VALID YAML — a list holding a
+                    // list — so it never reaches the wikilink guard,
+                    // which only ever sees strings. It fell through all
+                    // three arms above and vanished: the document saved,
+                    // exit 0, and the property simply was not in the
+                    // graph (@m4rq, 2026-08-27). Quoting it makes it a
+                    // string and the guard fires; leaving it bare was
+                    // silent.
+                    return Err(format!(
+                        "{}: a nested list value. If you meant a wikilink, that is \
+                         not wikilink syntax here — YAML reads `[[x]]` as a list \
+                         inside a list. A frontmatter reference is a Thing address: \
+                         <namespace/Class/identifier>.",
+                        prop_name
+                    ));
+                } else {
+                    return Err(format!(
+                        "{}: a list item that is not text, a number, or true/false \
+                         cannot be stored. Remove it or write it as text.",
+                        prop_name
+                    ));
+                }
+            }
+        }
+        // Everything else is a shape the graph cannot hold. It used to
+        // be discarded without a word — the same silence as the nested
+        // list above, one level up.
+        serde_yaml::Value::Mapping(_) => {
+            return Err(format!(
+                "{}: a nested block of keys. A frontmatter property holds text, a \
+                 number, true/false, or a list of those — not a structure. Flatten \
+                 it into separate keys.",
+                prop_name
+            ));
+        }
+        serde_yaml::Value::String(_) => {} // empty/whitespace — handled above
+        serde_yaml::Value::Null => {}      // absent is absent, not an error
+        _ => {
+            return Err(format!(
+                "{}: a value the graph cannot store. Write text, a number, \
+                 true/false, or a list of those.",
+                prop_name
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// One value of an ObjectProperty as a Turtle line: through the declared
+/// range when there is one, else through the path resolver.
+fn write_reference_turtle(
+    ttl: &mut String,
+    doc_iri: &str,
+    predicate_iri: &str,
+    prop_name: &str,
+    val: &str,
+    range: Option<&String>,
+) -> Result<(), String> {
+    if range.map(String::as_str) == Some(crate::nquad::THING_CLASS_IRI) {
+        // The angle-bracket lane (Rob-ruled 2026-08-20) —
+        // mirror the emitter: identifier form only.
+        match crate::resolve::resolve_thing_reference(val) {
+            Ok(target) => {
+                ttl.push_str(&format!(
+                    "<{}> {} {} .\n",
+                    doc_iri, predicate_iri, target
+                ));
+            }
+            Err(msg) => {
+                return Err(format!("{}: {}", prop_name, msg));
+            }
+        }
+        return Ok(());
+    }
+    if let Some(range_iri) = range {
+        match crate::nquad::thing_iri_from_range(range_iri, val) {
+            Some(target) => {
+                ttl.push_str(&format!(
+                    "<{}> {} {} .\n",
+                    doc_iri, predicate_iri, target
+                ));
+            }
+            None => {
+                return Err(format!(
+                    "{}: declared range `{}` is not a resolvable class IRI",
+                    prop_name, range_iri
+                ));
+            }
+        }
+        return Ok(());
+    }
+    match crate::resolve::resolve_frontmatter_value(val) {
+        crate::resolve::ResolveResult::Iri(uri) => {
+            // `uri` arrives in `<...>` form, valid Turtle as-is.
+            ttl.push_str(&format!(
+                "<{}> {} {} .\n",
+                doc_iri, predicate_iri, uri
+            ));
+        }
+        crate::resolve::ResolveResult::Unresolved(lit) => {
+            // Unresolved stays a LITERAL (resolve.rs rule 7) so
+            // a sh:nodeKind sh:IRI shape flags it — validation
+            // surfaces the problem instead of inventing an IRI.
+            ttl.push_str(&format!(
+                "<{}> {} \"{}\" .\n",
+                doc_iri, predicate_iri, turtle_escape(&lit)
+            ));
+        }
+        crate::resolve::ResolveResult::Rejected(msg) => {
+            return Err(format!("{}: {}", prop_name, msg));
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -704,5 +745,41 @@ mod one_line_tests {
     fn single_line_values_pass_through_untouched() {
         assert_eq!(one_line("plain value"), "plain value");
         assert_eq!(one_line("keeps  interior  spaces"), "keeps  interior  spaces");
+    }
+}
+
+#[cfg(test)]
+mod kit_value_tests {
+    use super::push_kit_value;
+
+    fn values(yaml: &str) -> Result<Vec<(String, String)>, String> {
+        let v: serde_yaml::Value = serde_yaml::from_str(yaml).unwrap();
+        let mut out = Vec::new();
+        push_kit_value("p", &v, &mut out).map(|_| out)
+    }
+
+    #[test]
+    fn scalars_and_lists_become_one_pair_per_value() {
+        assert_eq!(values("\"text\"").unwrap(), [("p".into(), "text".into())]);
+        assert_eq!(values("12").unwrap(), [("p".into(), "12".into())]);
+        assert_eq!(values("true").unwrap(), [("p".into(), "true".into())]);
+        assert_eq!(
+            values("[a, 2, false]").unwrap(),
+            [("p".into(), "a".into()), ("p".into(), "2".into()), ("p".into(), "false".into())]
+        );
+    }
+
+    /// Empty is absent: a blank value must not satisfy sh:minCount.
+    #[test]
+    fn empty_and_null_values_carry_nothing() {
+        assert!(values("\"   \"").unwrap().is_empty());
+        assert!(values("~").unwrap().is_empty());
+    }
+
+    #[test]
+    fn shapes_the_graph_cannot_hold_are_refused() {
+        assert!(values("[[name]]").unwrap_err().contains("a nested list value"));
+        assert!(values("{a: 1}").unwrap_err().contains("a nested block of keys"));
+        assert!(values("[{a: 1}]").unwrap_err().contains("a list item that is not text"));
     }
 }
