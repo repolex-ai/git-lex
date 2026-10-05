@@ -751,6 +751,7 @@ pub fn install_scaffold_files_from(kit_dir: &std::path::Path) -> usize {
     fn install_recursive(
         src_dir: &std::path::Path,
         dest_dir: &std::path::Path,
+        keep: &[PathBuf],
         count: &mut usize,
     ) {
         let entries = match fs::read_dir(src_dir) {
@@ -792,11 +793,14 @@ pub fn install_scaffold_files_from(kit_dir: &std::path::Path) -> usize {
 
             if ft.is_dir() {
                 fs::create_dir_all(&dest).ok();
-                install_recursive(&src, &dest, count);
+                install_recursive(&src, &dest, keep, count);
                 continue;
             }
 
             if ft.is_file() {
+                if keep.contains(&dest) && dest.exists() {
+                    continue;
+                }
                 if is_composite_hooks_file(&src) {
                     // Composed from every kit after the copies (#40).
                     continue;
@@ -827,34 +831,40 @@ pub fn install_scaffold_files_from(kit_dir: &std::path::Path) -> usize {
     //   harness/  → repo root       (substrate adapter files)
     //   www/      → .lex/www/       (web UI assets)
     //   scaffold/ → repo root       (legacy, for pre-migration kits)
+    // The root SOUL.md is the soul's own identity document: the kit installs
+    // its template once and never replaces an existing one. Init used to
+    // copy the template over it, so `git lex nuke` then `git lex init`
+    // reset a soul's identity to the blank template (stress test, #51).
+    let keep = [root.join("SOUL.md")];
+
     let ontology_src = kit_dir.join("ontology");
     if ontology_src.exists() {
         let ontology_dest = crate::layout::ontology_dir(&root);
         fs::create_dir_all(&ontology_dest).ok();
-        install_recursive(&ontology_src, &ontology_dest, &mut count);
+        install_recursive(&ontology_src, &ontology_dest, &keep, &mut count);
     }
 
     let content_src = kit_dir.join("content");
     if content_src.exists() {
-        install_recursive(&content_src, &root, &mut count);
+        install_recursive(&content_src, &root, &keep, &mut count);
     }
 
     let harness_src = kit_dir.join("harness");
     if harness_src.exists() {
-        install_recursive(&harness_src, &root, &mut count);
+        install_recursive(&harness_src, &root, &keep, &mut count);
     }
 
     let www_src = kit_dir.join("www");
     if www_src.exists() {
         let www_dest = crate::layout::www_dir(&root);
         fs::create_dir_all(&www_dest).ok();
-        install_recursive(&www_src, &www_dest, &mut count);
+        install_recursive(&www_src, &www_dest, &keep, &mut count);
     }
 
     // Legacy: scaffold/ → repo root (for kits not yet migrated)
     let scaffold_src = kit_dir.join("scaffold");
     if scaffold_src.exists() {
-        install_recursive(&scaffold_src, &root, &mut count);
+        install_recursive(&scaffold_src, &root, &keep, &mut count);
     }
 
     count
