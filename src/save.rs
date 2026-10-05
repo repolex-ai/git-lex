@@ -423,8 +423,11 @@ fn compile_shapes(kit: &str, shapes_ttl: &str) -> Option<ShaclSchemaIR> {
         eprintln!("Fix: `git lex kit-update` (regenerates the kit's shapes), then retry.");
         None
     };
+    // Strict: in lax mode the reader skips what it cannot parse, so a
+    // garbled shapes file read as an EMPTY set of shapes, and empty shapes
+    // pass every document — the exact wave-through the law above forbids.
     let shapes_graph = match InMemoryGraph::from_reader(
-        &mut shapes_ttl.as_bytes(), "shapes", &RDFFormat::Turtle, None, &ReaderMode::Lax,
+        &mut shapes_ttl.as_bytes(), "shapes", &RDFFormat::Turtle, None, &ReaderMode::Strict,
     ) {
         Ok(g) => g,
         Err(e) => return shapes_broken("Turtle parse failed", &e),
@@ -1734,6 +1737,15 @@ mod extract_staging_gate_tests {
 #[cfg(test)]
 mod validate_piece_tests {
     use super::*;
+
+    /// A garbled shapes file blocks; it used to read as no shapes at all,
+    /// which passed every document.
+    #[test]
+    fn garbled_shapes_block_instead_of_passing() {
+        assert!(compile_shapes("t", "this is not turtle {").is_none());
+        let truncated = "@prefix sh: <http://www.w3.org/ns/shacl#> .\n<https://ex/S> a sh:NodeShape ; sh:targetClass";
+        assert!(compile_shapes("t", truncated).is_none());
+    }
 
     #[test]
     fn usable_shapes_compile() {
