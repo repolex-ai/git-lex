@@ -27,11 +27,13 @@
 //!   - the installed ontology (every byte under `.lex/ontology/`) — a kit
 //!     change can alter every document's output without touching any
 //!     document;
-//!   - the git-lex binary itself — an upgrade can change every fragment,
-//!     and a cache written by the old binary would otherwise keep serving
+//!   - the git-lex build itself — an upgrade can change every fragment,
+//!     and a cache written by the old build would otherwise keep serving
 //!     the old output (and skip rewriting the sidecars history is built
-//!     from). Identified by the executable's path, size and modification
-//!     time: any install changes it, and reading it costs one stat.
+//!     from). Identified by a fingerprint of the sources it was built from
+//!     (build.rs), shared by `git-lex` and `gitlexd`: keyed on the
+//!     executable file instead, a save and a sync — two different programs
+//!     — threw away each other's cache every time (#51).
 //!
 //! Either gate changes → the context hash changes → the whole cache is
 //! invalid → full walk, exactly the uncached behavior.
@@ -114,22 +116,12 @@ pub fn blob_hash_of(bytes: &[u8]) -> String {
         .unwrap_or_default()
 }
 
-/// The running binary's identity: executable path, size and mtime. An
-/// install replaces the file, so any upgrade (or downgrade) changes it.
+/// The build's identity: a fingerprint of the source tree and dependency
+/// lock it was compiled from (build.rs). `git-lex` and `gitlexd` from one
+/// build share it, so a save and a sync reuse each other's cache, and any
+/// change to the code still throws the cache away.
 fn binary_identity() -> String {
-    let Ok(exe) = std::env::current_exe() else {
-        return String::new();
-    };
-    let Ok(meta) = fs::metadata(&exe) else {
-        return exe.to_string_lossy().to_string();
-    };
-    let mtime = meta
-        .modified()
-        .ok()
-        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
-    format!("{}\t{}\t{}", exe.to_string_lossy(), meta.len(), mtime)
+    env!("GIT_LEX_BUILD_ID").to_string()
 }
 
 /// The context hash: binary identity + ontology bytes. Anything that can
