@@ -31,8 +31,14 @@ fn err(status: StatusCode, msg: String) -> Response {
 /// before it is a miss: a repository initialized after gitlexd started
 /// joins here, on the first request that names it.
 fn find(d: &Arc<Daemon>, genesis: &str) -> Result<Arc<Soul>, Box<Response>> {
+    // Look again after the re-read whatever it reports: when several
+    // requests miss at once, another one's re-read may be the one that
+    // takes the soul in, and this one's then finds nothing new to join.
     let found = match d.find(genesis) {
-        Err(FindError::NotFound) if d.refresh() > 0 => d.find(genesis),
+        Err(FindError::NotFound) => {
+            d.refresh();
+            d.find(genesis)
+        }
         other => other,
     };
     found.map_err(|e| Box::new(match e {

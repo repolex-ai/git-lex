@@ -214,6 +214,11 @@ impl Daemon {
         };
         let mut souls = self.souls.write().unwrap();
         if let Some(dup) = souls.iter().find(|s| s.genesis == genesis) {
+            // The same repository, taken in by a re-read running alongside
+            // this one: already held, nothing to say.
+            if dup.path == path {
+                return None;
+            }
             self.log(&format!(
                 "skip {}: same first commit as {} (a clone; one store per soul)",
                 path.display(),
