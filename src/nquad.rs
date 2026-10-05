@@ -1341,19 +1341,6 @@ pub fn emit_spo_line_nquads(
     emitted_types: &mut HashSet<String>,
     out: &mut String,
 ) -> u32 {
-    let ResolverContext {
-        path_index,
-        obj_props,
-        prop_datatypes,
-        declared_props,
-        kit_namespaces,
-        ref_ranges,
-        prop_iris,
-        deprecated_props,
-        domain_open_props,
-        ..
-    } = ctx;
-    let mut errors: u32 = 0;
     let parts: Vec<&str> = line.splitn(3, " | ").collect();
     if parts.len() != 3 {
         return 0;
@@ -1389,454 +1376,16 @@ pub fn emit_spo_line_nquads(
     }
 
     if predicate == "linksTo" {
-        // md:linksTo — ONE law (Rob-ruled 2026-08-08): the sidecar object is
-        // a repo-ROOT-relative path, used as-is. The extractor already
-        // resolved the markdown link against its document's folder when it
-        // wrote the sidecar, so resolving again here was the double-join
-        // that minted `Soul/Note/Soul/Note/b.md` File IRIs (review-HIGH).
-        // A leading `/` (the retired 2026-07-28 repo-rooted form, present
-        // in historical sidecars) names the same root-relative path — it is
-        // stripped, not rejected, so all eras replay under the one law.
-        // Deterministic at every commit whether or not the target exists
-        // (forward links are legal; dangling ones warn at save). `.md` is
-        // appended when the target has no extension.
-        //
-        // History note: this lane once dispatched two semantics on a
-        // repo.yml `link_semantics` stamp (the wikilink-era migration
-        // fence). The wikilink reader retired 2026-08-06; the fence itself
-        // retired with the one-law ruling. Old-era bare targets that were
-        // authored source-folder-relative re-derive as root-relative — the
-        // accepted data change that bought one law for all history.
-        match normalize_wikilink_path(object.trim_start_matches('/'), "") {
-            Some(p) => {
-                if graph == format!("<{}>", crate::git::graph_uri("now"))
-                    && !path_index.contains(&p)
-                {
-                    author_diag!(
-                        "warning: {relpath_str}: link target {p} does not exist (yet) — forward link, or fix the path"
-                    );
-                }
-                // Prose links follow documents (Law 6): File → File, both
-                // ends in the File-plane family. A dangling target still
-                // derives its IRI — the dangle is true data about the text.
-                out.push_str(&format!(
-                    "{} <https://repolex.ai/ontology/git-lex/md/linksTo> <{}> {} .\n",
-                    subjects.file_uri, crate::git::file_iri(&uri_encode_path(&p)), graph
-                ));
-            }
-            None => {
-                if warn {
-                    eprintln!(
-                        "error: {relpath_str}: link target {object:?} escapes the repo root — links stay inside the repo"
-                    );
-                }
-                errors += 1;
-            }
-        }
+        emit_links_to(object, subjects, graph, relpath_str, &ctx.path_index, warn, out)
     } else {
         // Check for three-segment dot notation: kit.class.property
         let segments: Vec<&str> = subject.splitn(3, '.').collect();
 
         if segments.len() == 3 {
-            // New dot notation: kit.class.property
-            let kit_name = segments[0];
-            let class_seg = segments[1];
-            let prop_seg = segments[2];
-
-            // Emit rdf:type from class segment (once per class).
-            //
-            // B1 fix (Day 38): the graph path is the one users query, so a
-            // phantom type here is what makes `?m a soul:Memory` return 0.
-            // `resolve_class_segment` folds a case slip onto the canonical
-            // name (warning on the way) and otherwise hands back the class the
-            // line names. It never withholds a type: a class the ontology has
-            // not heard of is still the class this document was written under,
-            // and dropping its type is what erased retired classes wholesale.
-            let canonical_class =
-                crate::ontology::resolve_class_segment(kit_name, class_seg, relpath_str, warn);
-            // The kit's namespace comes from its installed TTL declaration
-            // (get_kit_namespaces_all_kits); the conventional pattern is only
-            // the no-declaration fallback. This is what lets a kit's
-            // namespace migrate with a TTL edit and no emitter change.
-            let kit_ns = kit_namespaces
-                .get(kit_name)
-                .cloned()
-                .unwrap_or_else(|| crate::conventional_kit_namespace(kit_name));
-
-            // The line's subject: the Thing anchor when this line's class IS
-            // the file's anchoring class; otherwise the File node (kit lines
-            // with no Thing anchor — missing id, second class — fall back so
-            // no fact is dropped; the type lands on the same subject, which
-            // preserves today's queryability for the unmigrated corpus and
-            // relocates Thing-ward per file as ids get authored).
-            let line_subject: &str = match (&subjects.thing_uri, &subjects.thing_key) {
-                (Some(t), Some((ak, ac))) if ak == kit_name && *ac == canonical_class => t,
-                _ => &subjects.file_uri,
-            };
-
-            {
-                let canonical = &canonical_class;
-                let type_key = format!("{}.{}", kit_name, canonical);
-                if emitted_types.insert(type_key) {
-                    let type_uri = format!("<{}{}>", kit_ns, canonical);
-                    out.push_str(&format!(
-                        "{} <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> {} {} .\n",
-                        line_subject, type_uri, graph
-                    ));
-                }
-            }
-
-            // Property name passes through as-is (camelCase from ontology)
-            // Kit+class-qualified lookup (Rob-ruled 2026-07-21): the tables
-            // key "{kit}/{Class}/{prop}", so THIS kit's and class's own
-            // declaration governs how the value is processed. The old
-            // bare-name lookup let any installed kit's same-named property
-            // rewrite the behavior (copia:source, a lineage ObjectProperty,
-            // was comma-splitting soul:source prose citations).
-            let lookup_key = format!("{}/{}/{}", kit_name, canonical_class, prop_seg);
-
-            // kit-base 0.18 BOTH-SHAPES WINDOW (goodlux, 2026-09-16): the date
-            // universals were renamed createdDate/updatedDate. A document
-            // still on the old key lands on the NEW predicate when the class
-            // declares it. Save-time extraction prints the rename warning;
-            // this emitter replays history and stays quiet. Remove with the
-            // window (the release after kit-base 0.18 reaches every soul).
-            let (prop_seg, lookup_key): (&str, String) = match prop_seg {
-                "dateCreated" | "dateUpdated" if !prop_iris.contains_key(&lookup_key) => {
-                    let renamed = if prop_seg == "dateCreated" { "createdDate" } else { "updatedDate" };
-                    let renamed_key = format!("{}/{}/{}", kit_name, canonical_class, renamed);
-                    if prop_iris.contains_key(&renamed_key) { (renamed, renamed_key) } else { (prop_seg, lookup_key) }
-                }
-                _ => (prop_seg, lookup_key),
-            };
-
-            // Domain-open lookup (#82): a property declared with no
-            // rdfs:domain is on NO class's shape by construction, so the
-            // class-qualified tables above can never hold it. Its key
-            // carries no class — no domain means every class is in scope.
-            let open_key = format!("{}/{}", kit_name, prop_seg);
-            let domain_open = domain_open_props.get(&open_key);
-
-            // The predicate IRI comes from what the ontology DECLARED, via the
-            // generated shapes — not from gluing this document's kit namespace
-            // onto the key's property segment (#104).
-            //
-            // The glue was correct only while every property a class carried
-            // was declared by that class's own kit. `git-lex:Thing` ended that:
-            // the ruled key `soul.Note.title` would have emitted
-            // `.../ontology/soul/title` for a property declared at
-            // `.../ontology/git-lex/title` — a fact on an IRI no ontology
-            // declares, in every repo, breaking the one rule the rest of this
-            // pipeline exists to enforce.
-            //
-            // Fallback to the old construction when no kit declares the key:
-            // those are precisely the undeclared keys the save-time warning
-            // already reports, and inventing a different IRI for them here
-            // would change what unmigrated corpora replay to.
-            let kit_predicate = prop_iris
-                .get(&lookup_key)
-                .map(|iri| format!("<{}>", iri))
-                .or_else(|| domain_open.map(|d| format!("<{}>", d.iri)))
-                .unwrap_or_else(|| format!("<{}{}>", kit_ns, prop_seg));
-
-            // Check if this is an ObjectProperty (from ontology) → resolve as IRI.
-            // Domain-open ObjectProperties (soul:relatedTo) qualify too: the
-            // declaration says reference, the absent domain says on-any-class.
-            if obj_props.contains(&lookup_key)
-                || domain_open.is_some_and(|d| d.is_object)
-            {
-                // Law 6 (identity model): a DECLARED RANGE makes the
-                // authored value the TARGET'S ID — resolution is declared,
-                // never guessed: id → the range class's id-space → one
-                // Thing IRI. Deterministic at every commit, dangling or
-                // not (existence is the save gate's job, not derivation's).
-                //
-                // Looked up by the DECLARED predicate IRI, not a key rebuilt
-                // from the authoring kit — an inherited property authors
-                // under the subclass's kit (`soul.Note.relatedToId`) while
-                // its range is declared where the property lives (git-lex).
-                // The `{kit}/{prop}` key missed exactly those (#82's
-                // key-mismatch class; table re-keyed 2026-08-20).
-                let range =
-                    ref_ranges.get(kit_predicate.trim_start_matches('<').trim_end_matches('>'));
-                // URL-aware split (review #26): a comma INSIDE a URL is part
-                // of the value, not a list separator.
-                let values = split_object_values(object);
-                for val in &values {
-                    let val = val.as_str();
-                    if val.is_empty() { continue; }
-                    // Range git-lex:Thing (Rob-ruled 2026-08-20): "any
-                    // Thing, any class" — the bare-id derivation below
-                    // cannot apply (there is no one id-space), so the value
-                    // must be the full identifier form <namespace/Class/id>
-                    // and ONLY that form. The angle-bracket lane.
-                    if range.map(String::as_str) == Some(THING_CLASS_IRI) {
-                        match resolve::resolve_thing_reference(val) {
-                            Ok(target) => {
-                                out.push_str(&format!(
-                                    "{} {} {} {} .\n",
-                                    line_subject, kit_predicate, target, graph
-                                ));
-                            }
-                            Err(msg) => {
-                                if warn {
-                                    // Enrich with the concrete fix when the
-                                    // value is recognizably the identifier
-                                    // form minus brackets. NO tracked-file
-                                    // veto here: under a Thing range even a
-                                    // real path is invalid.
-                                    let empty = HashSet::new();
-                                    let hint = bare_kit_reference_suggestion(
-                                        val,
-                                        kit_namespaces,
-                                        &empty,
-                                    )
-                                    .map(|s| format!(" Did you mean `<{s}>`?"))
-                                    .unwrap_or_default();
-                                    eprintln!(
-                                        "error: {}: {} — {}{}",
-                                        relpath_str, prop_seg, msg, hint
-                                    );
-                                }
-                                errors += 1;
-                            }
-                        }
-                        continue;
-                    }
-                    if let Some(range_iri) = range {
-                        match thing_iri_from_range(range_iri, val) {
-                            Some(target) => {
-                                out.push_str(&format!(
-                                    "{} {} {} {} .\n",
-                                    line_subject, kit_predicate, target, graph
-                                ));
-                            }
-                            None => {
-                                if warn {
-                                    eprintln!(
-                                        "error: {}: {} — declared range `{}` is not a resolvable class IRI",
-                                        relpath_str, prop_seg, range_iri
-                                    );
-                                }
-                                errors += 1;
-                            }
-                        }
-                        continue;
-                    }
-                    // No declared range: the legacy path/IRI resolver.
-                    // But first, tr1p's 2026-08-18 finding: the documented
-                    // identifier form minus its brackets is the attractive
-                    // error, and the path lane swallows it silently. Note
-                    // (not error) — resolution below is unchanged.
-                    if warn
-                        && let Some(suggested) =
-                            bare_kit_reference_suggestion(val, kit_namespaces, path_index)
-                        {
-                            author_diag!(
-                                "note: {}: `{}` on `{}` has no angle brackets, so it \
-                                 resolves as a repo-relative path to `{}` — an address \
-                                 nothing in the graph describes. Did you mean `<{}>`?",
-                                relpath_str,
-                                val,
-                                prop_seg,
-                                crate::git::resource_uri(&uri_encode_path(val)),
-                                suggested
-                            );
-                        }
-                    match resolve::resolve_frontmatter_value(val) {
-                        resolve::ResolveResult::Iri(uri) => {
-                            out.push_str(&format!(
-                                "{} {} {} {} .\n",
-                                line_subject, kit_predicate, uri, graph
-                            ));
-                        }
-                        resolve::ResolveResult::Unresolved(literal) => {
-                            out.push_str(&format!(
-                                "{} {} \"{}\" {} .\n",
-                                line_subject, kit_predicate, nq_escape(&literal), graph
-                            ));
-                        }
-                        resolve::ResolveResult::Rejected(msg) => {
-                            if warn {
-                                eprintln!(
-                                    "error: {}: {} — {}",
-                                    relpath_str, prop_seg, msg
-                                );
-                            }
-                            errors += 1;
-                        }
-                    }
-                }
-            } else {
-                // Used-on-undeclared-class is LOUD, never silent: the property
-                // is declared somewhere in THIS kit but not on this class's
-                // shape — it still emits (as a plain literal), and the drift
-                // is surfaced so the shape or the frontmatter gets fixed.
-                {
-                    let key = &lookup_key;
-                    // Membership test against the DECLARED set — datatype-
-                    // unconditional. Testing prop_datatypes here false-warned
-                    // every xsd:string property in every kit (the shapes
-                    // generator omits sh:datatype for strings): 412 bogus
-                    // "not declared" warnings per save in W4R3Z alone
-                    // (found 2026-08-01).
-                    // The whole block below is teaching, no emission — one
-                    // `warn` gate covers the wrong-class, deprecated-note,
-                    // and does-not-exist branches together.
-                    //
-                    // Deprecated check FIRST, before the declared test (#83):
-                    // whether a deprecated prop still sits in the generated
-                    // shapes depends on whether its CLASS survived (a class
-                    // deprecated whole keeps its shape + props; a bare
-                    // appendix prop lands on no shape) — so gating the note
-                    // behind not-declared made the Texture family silently
-                    // invisible while writtenFrom whispered. Deprecated
-                    // whispers regardless of shapes state: one note, the
-                    // line still saves, history replays.
-                    if warn {
-                        if let Some(replaced) =
-                            deprecated_props.get(&format!("{}/{}", kit_name, prop_seg))
-                        {
-                            let repl = replaced
-                                .as_ref()
-                                .map(|r| format!(" — replacement: `{}`", r))
-                                .unwrap_or_default();
-                            author_diag!(
-                                "note: {}: the key `{}.{}.{}` is deprecated (the \
-                                 `{}` ontology retired it{}). The line still saves \
-                                 and history replays; don't use it in new writing — \
-                                 migrate or delete when you next edit this file.",
-                                relpath_str, kit_name, class_seg, prop_seg,
-                                kit_name, repl
-                            );
-                        } else if !declared_props.contains(key)
-                            && !obj_props.contains(key)
-                            // #82: domain-open props are declared — telling
-                            // the author otherwise was the false warning.
-                            && domain_open.is_none()
-                        {
-                        let kit_scope = format!("{}/", kit_name);
-                        let prop_tail = format!("/{}", prop_seg);
-                        let class_for_msg = canonical_class.as_str();
-                        let owners: std::collections::BTreeSet<String> = obj_props
-                            .iter()
-                            .chain(declared_props.iter())
-                            .filter(|k| k.starts_with(&kit_scope) && k.ends_with(&prop_tail))
-                            .filter_map(|k| k.split('/').nth(1).map(str::to_string))
-                            .collect();
-                        if !owners.is_empty() {
-                            let owner_list =
-                                owners.into_iter().collect::<Vec<_>>().join(", ");
-                            author_diag!(
-                                "warning: {}: the key `{}.{}.{}` — `{}` exists in the \
-                                 `{}` ontology, but on class {}, not on {}. Fix, pick \
-                                 one: (a) this line belongs in a {} document — move it \
-                                 there; (b) this key genuinely belongs on {} too — \
-                                 keep the line and report it to the `{}` ontology \
-                                 owner; (c) the line no longer matters — delete it. \
-                                 Until fixed, the value saves as plain ungoverned data.",
-                                relpath_str, kit_name, class_seg, prop_seg, prop_seg,
-                                kit_name, owner_list, class_for_msg, owner_list,
-                                class_for_msg, kit_name
-                            );
-                        } else if !kit_namespaces.contains_key(kit_name)
-                            || obj_props.iter().chain(prop_datatypes.keys())
-                                .any(|k| k.starts_with(&kit_scope))
-                        {
-                            // The kit-qualified prefix CLAIMS ontology
-                            // vocabulary; a property the ontology has never
-                            // heard of used to sail through silently — how
-                            // months of junk keys (writtenFrom, soul.Note.
-                            // title, …) accumulated invisibly (Rob-ruled
-                            // 2026-07-29: warn at save). Bare keys (title:)
-                            // stay free — the open fm: lane is one line up.
-                            //
-                            // did-you-mean: declared keys on THIS class that
-                            // plausibly mean the same thing (the renamed-by-
-                            // the-ontology case, e.g. kind → textureKind) —
-                            // case-insensitive containment either way, 4+
-                            // chars so single letters never match. (The
-                            // deprecated-note lane moved ABOVE the declared
-                            // test — #83 — so this branch only sees keys the
-                            // ontology has truly never heard of.)
-                            let class_prefix =
-                                format!("{}/{}/", kit_name, class_for_msg);
-                            let prop_lower = prop_seg.to_lowercase();
-                            let mut candidates: Vec<String> = obj_props
-                                .iter()
-                                .chain(declared_props.iter())
-                                .filter(|k| k.starts_with(&class_prefix))
-                                .filter_map(|k| k.split('/').nth(2))
-                                .filter(|cand| {
-                                    let cl = cand.to_lowercase();
-                                    cl != prop_lower
-                                        && ((prop_lower.len() >= 4
-                                            && cl.contains(&prop_lower))
-                                            || (cl.len() >= 4
-                                                && prop_lower.contains(&cl)))
-                                })
-                                // #85: never SUGGEST a deprecated key —
-                                // did-you-mean is a destination menu for
-                                // new writing.
-                                .filter(|cand| {
-                                    !deprecated_props.contains_key(&format!(
-                                        "{}/{}",
-                                        kit_name, cand
-                                    ))
-                                })
-                                .map(str::to_string)
-                                .collect();
-                            candidates.sort();
-                            candidates.dedup();
-                            candidates.truncate(3);
-                            let hint = if candidates.is_empty() {
-                                format!(
-                                    " (the `__{}.md` template in this class's folder \
-                                     lists every declared key)",
-                                    class_for_msg
-                                )
-                            } else {
-                                format!(
-                                    " — closest declared keys on {}: {}",
-                                    class_for_msg,
-                                    candidates.join(", ")
-                                )
-                            };
-                            author_diag!(
-                                "warning: {}: the key `{}.{}.{}` does not exist in \
-                                 the `{}` ontology. Fix, pick one: (a) the ontology \
-                                 may use a different name for this{} — if one means \
-                                 the same thing, edit this line to use it; (b) no \
-                                 current key fits and the information matters — keep \
-                                 the line and report the missing key to the `{}` \
-                                 ontology owner; (c) the line no longer matters — \
-                                 delete it. Until fixed, the value saves as plain \
-                                 ungoverned data.",
-                                relpath_str, kit_name, class_seg, prop_seg, kit_name,
-                                hint, kit_name
-                            );
-                            }
-                        }
-                    }
-                }
-                // DatatypeProperty: typed literal if ontology specifies a non-string range.
-                // Domain-open datatype props carry their range in the ontology
-                // record directly — the shapes-derived table can't see them (#82).
-                if let Some(datatype) = prop_datatypes
-                    .get(&lookup_key)
-                    .or_else(|| domain_open.and_then(|d| d.datatype.as_ref()))
-                {
-                    out.push_str(&format!(
-                        "{} {} \"{}\"^^<{}> {} .\n",
-                        line_subject, kit_predicate, nq_escape(object), datatype, graph
-                    ));
-                } else {
-                    out.push_str(&format!(
-                        "{} {} \"{}\" {} .\n",
-                        line_subject, kit_predicate, nq_escape(object), graph
-                    ));
-                }
-            }
+            emit_kit_line(
+                (segments[0], segments[1], segments[2]),
+                object, subjects, graph, relpath_str, ctx, warn, emitted_types, out,
+            )
         } else if subject == "md.externalLink" || subject == "md.unresolvedLink" {
             // #97 (B6): these are the markdown-link extractor's OWN lines,
             // not user frontmatter — and they were falling through to the
@@ -1850,43 +1399,583 @@ pub fn emit_spo_line_nquads(
                 "{} <https://repolex.ai/ontology/git-lex/md/{}> \"{}\" {} .\n",
                 subjects.file_uri, local, nq_escape(object), graph
             ));
+            0
         } else {
-            // Legacy or non-kit frontmatter (title, tags, etc.) — use fm: namespace
-            let fm_predicate = format!("<https://repolex.ai/ontology/git-lex/fm/{}>", uri_encode_path(subject));
+            emit_fm_line(subject, object, subjects, graph, out);
+            0
+        }
+    }
+}
 
-            if subject.ends_with("-link") || subject.ends_with("-links") {
-                let values: Vec<&str> = if subject.ends_with("-links") {
-                    object.split(',').map(|s| s.trim()).filter(|s| !s.is_empty()).collect()
-                } else {
-                    vec![object.trim()]
-                };
-                // Pre-dot-notation-era keys (no current kit emits them;
-                // they exist only in old souls' history). Same law as
-                // everywhere else: paths derive IRIs, anything else stays
-                // a literal — no index lookup, no guessing.
-                for val in values {
-                    if val.is_empty() { continue; }
-                    if val.contains('/') || val.ends_with(".md") {
-                        out.push_str(&format!(
-                            "{} {} <{}> {} .\n",
-                            subjects.file_uri, fm_predicate, crate::git::file_iri(&uri_encode_path(val)), graph
-                        ));
-                    } else {
-                        out.push_str(&format!(
-                            "{} {} \"{}\" {} .\n",
-                            subjects.file_uri, fm_predicate, nq_escape(val), graph
-                        ));
-                    }
+/// A markdown link line: one File → File `md:linksTo`, the target taken as
+/// a repo-root-relative path. Returns the error count.
+fn emit_links_to(
+    object: &str,
+    subjects: &FileSubjects,
+    graph: &str,
+    relpath_str: &str,
+    path_index: &HashSet<String>,
+    warn: bool,
+    out: &mut String,
+) -> u32 {
+    let mut errors: u32 = 0;
+    // md:linksTo — ONE law (Rob-ruled 2026-08-08): the sidecar object is
+    // a repo-ROOT-relative path, used as-is. The extractor already
+    // resolved the markdown link against its document's folder when it
+    // wrote the sidecar, so resolving again here was the double-join
+    // that minted `Soul/Note/Soul/Note/b.md` File IRIs (review-HIGH).
+    // A leading `/` (the retired 2026-07-28 repo-rooted form, present
+    // in historical sidecars) names the same root-relative path — it is
+    // stripped, not rejected, so all eras replay under the one law.
+    // Deterministic at every commit whether or not the target exists
+    // (forward links are legal; dangling ones warn at save). `.md` is
+    // appended when the target has no extension.
+    //
+    // History note: this lane once dispatched two semantics on a
+    // repo.yml `link_semantics` stamp (the wikilink-era migration
+    // fence). The wikilink reader retired 2026-08-06; the fence itself
+    // retired with the one-law ruling. Old-era bare targets that were
+    // authored source-folder-relative re-derive as root-relative — the
+    // accepted data change that bought one law for all history.
+    match normalize_wikilink_path(object.trim_start_matches('/'), "") {
+        Some(p) => {
+            if graph == format!("<{}>", crate::git::graph_uri("now"))
+                && !path_index.contains(&p)
+            {
+                author_diag!(
+                    "warning: {relpath_str}: link target {p} does not exist (yet) — forward link, or fix the path"
+                );
+            }
+            // Prose links follow documents (Law 6): File → File, both
+            // ends in the File-plane family. A dangling target still
+            // derives its IRI — the dangle is true data about the text.
+            out.push_str(&format!(
+                "{} <https://repolex.ai/ontology/git-lex/md/linksTo> <{}> {} .\n",
+                subjects.file_uri, crate::git::file_iri(&uri_encode_path(&p)), graph
+            ));
+        }
+        None => {
+            if warn {
+                eprintln!(
+                    "error: {relpath_str}: link target {object:?} escapes the repo root — links stay inside the repo"
+                );
+            }
+            errors += 1;
+        }
+    }
+    errors
+}
+
+/// A kit line (`kit.Class.property | hasValue | value`): the class's type
+/// once, then the value on the declared predicate — as references for an
+/// ObjectProperty, as a literal otherwise. Returns the error count.
+#[allow(clippy::too_many_arguments)]
+fn emit_kit_line(
+    (kit_name, class_seg, prop_seg): (&str, &str, &str),
+    object: &str,
+    subjects: &FileSubjects,
+    graph: &str,
+    relpath_str: &str,
+    ctx: &ResolverContext,
+    warn: bool,
+    emitted_types: &mut HashSet<String>,
+    out: &mut String,
+) -> u32 {
+    let ResolverContext { obj_props, prop_datatypes, kit_namespaces, prop_iris, domain_open_props, .. } = ctx;
+    // New dot notation: kit.class.property
+
+    // Emit rdf:type from class segment (once per class).
+    //
+    // B1 fix (Day 38): the graph path is the one users query, so a
+    // phantom type here is what makes `?m a soul:Memory` return 0.
+    // `resolve_class_segment` folds a case slip onto the canonical
+    // name (warning on the way) and otherwise hands back the class the
+    // line names. It never withholds a type: a class the ontology has
+    // not heard of is still the class this document was written under,
+    // and dropping its type is what erased retired classes wholesale.
+    let canonical_class =
+        crate::ontology::resolve_class_segment(kit_name, class_seg, relpath_str, warn);
+    // The kit's namespace comes from its installed TTL declaration
+    // (get_kit_namespaces_all_kits); the conventional pattern is only
+    // the no-declaration fallback. This is what lets a kit's
+    // namespace migrate with a TTL edit and no emitter change.
+    let kit_ns = kit_namespaces
+        .get(kit_name)
+        .cloned()
+        .unwrap_or_else(|| crate::conventional_kit_namespace(kit_name));
+
+    // The line's subject: the Thing anchor when this line's class IS
+    // the file's anchoring class; otherwise the File node (kit lines
+    // with no Thing anchor — missing id, second class — fall back so
+    // no fact is dropped; the type lands on the same subject, which
+    // preserves today's queryability for the unmigrated corpus and
+    // relocates Thing-ward per file as ids get authored).
+    let line_subject: &str = match (&subjects.thing_uri, &subjects.thing_key) {
+        (Some(t), Some((ak, ac))) if ak == kit_name && *ac == canonical_class => t,
+        _ => &subjects.file_uri,
+    };
+
+    {
+        let canonical = &canonical_class;
+        let type_key = format!("{}.{}", kit_name, canonical);
+        if emitted_types.insert(type_key) {
+            let type_uri = format!("<{}{}>", kit_ns, canonical);
+            out.push_str(&format!(
+                "{} <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> {} {} .\n",
+                line_subject, type_uri, graph
+            ));
+        }
+    }
+
+    // Property name passes through as-is (camelCase from ontology)
+    // Kit+class-qualified lookup (Rob-ruled 2026-07-21): the tables
+    // key "{kit}/{Class}/{prop}", so THIS kit's and class's own
+    // declaration governs how the value is processed. The old
+    // bare-name lookup let any installed kit's same-named property
+    // rewrite the behavior (copia:source, a lineage ObjectProperty,
+    // was comma-splitting soul:source prose citations).
+    let lookup_key = format!("{}/{}/{}", kit_name, canonical_class, prop_seg);
+
+    // kit-base 0.18 BOTH-SHAPES WINDOW (goodlux, 2026-09-16): the date
+    // universals were renamed createdDate/updatedDate. A document
+    // still on the old key lands on the NEW predicate when the class
+    // declares it. Save-time extraction prints the rename warning;
+    // this emitter replays history and stays quiet. Remove with the
+    // window (the release after kit-base 0.18 reaches every soul).
+    let (prop_seg, lookup_key): (&str, String) = match prop_seg {
+        "dateCreated" | "dateUpdated" if !prop_iris.contains_key(&lookup_key) => {
+            let renamed = if prop_seg == "dateCreated" { "createdDate" } else { "updatedDate" };
+            let renamed_key = format!("{}/{}/{}", kit_name, canonical_class, renamed);
+            if prop_iris.contains_key(&renamed_key) { (renamed, renamed_key) } else { (prop_seg, lookup_key) }
+        }
+        _ => (prop_seg, lookup_key),
+    };
+
+    // Domain-open lookup (#82): a property declared with no
+    // rdfs:domain is on NO class's shape by construction, so the
+    // class-qualified tables above can never hold it. Its key
+    // carries no class — no domain means every class is in scope.
+    let open_key = format!("{}/{}", kit_name, prop_seg);
+    let domain_open = domain_open_props.get(&open_key);
+
+    // The predicate IRI comes from what the ontology DECLARED, via the
+    // generated shapes — not from gluing this document's kit namespace
+    // onto the key's property segment (#104).
+    //
+    // The glue was correct only while every property a class carried
+    // was declared by that class's own kit. `git-lex:Thing` ended that:
+    // the ruled key `soul.Note.title` would have emitted
+    // `.../ontology/soul/title` for a property declared at
+    // `.../ontology/git-lex/title` — a fact on an IRI no ontology
+    // declares, in every repo, breaking the one rule the rest of this
+    // pipeline exists to enforce.
+    //
+    // Fallback to the old construction when no kit declares the key:
+    // those are precisely the undeclared keys the save-time warning
+    // already reports, and inventing a different IRI for them here
+    // would change what unmigrated corpora replay to.
+    let kit_predicate = prop_iris
+        .get(&lookup_key)
+        .map(|iri| format!("<{}>", iri))
+        .or_else(|| domain_open.map(|d| format!("<{}>", d.iri)))
+        .unwrap_or_else(|| format!("<{}{}>", kit_ns, prop_seg));
+
+    // Check if this is an ObjectProperty (from ontology) → resolve as IRI.
+    // Domain-open ObjectProperties (soul:relatedTo) qualify too: the
+    // declaration says reference, the absent domain says on-any-class.
+    // Check if this is an ObjectProperty (from ontology) → resolve as IRI.
+    // Domain-open ObjectProperties (soul:relatedTo) qualify too: the
+    // declaration says reference, the absent domain says on-any-class.
+    if obj_props.contains(&lookup_key)
+        || domain_open.is_some_and(|d| d.is_object)
+    {
+        emit_reference_values(object, line_subject, &kit_predicate, prop_seg, graph, relpath_str, ctx, warn, out)
+    } else {
+        // Used-on-undeclared-class is LOUD, never silent: the property
+        // is declared somewhere in THIS kit but not on this class's
+        // shape — it still emits (as a plain literal), and the drift
+        // is surfaced so the shape or the frontmatter gets fixed.
+        teach_key_diagnostics(
+            (kit_name, class_seg, prop_seg),
+            &canonical_class,
+            &lookup_key,
+            domain_open,
+            relpath_str,
+            ctx,
+            warn,
+        );
+        // DatatypeProperty: typed literal if ontology specifies a non-string range.
+        // Domain-open datatype props carry their range in the ontology
+        // record directly — the shapes-derived table can't see them (#82).
+        if let Some(datatype) = prop_datatypes
+            .get(&lookup_key)
+            .or_else(|| domain_open.and_then(|d| d.datatype.as_ref()))
+        {
+            out.push_str(&format!(
+                "{} {} \"{}\"^^<{}> {} .\n",
+                line_subject, kit_predicate, nq_escape(object), datatype, graph
+            ));
+        } else {
+            out.push_str(&format!(
+                "{} {} \"{}\" {} .\n",
+                line_subject, kit_predicate, nq_escape(object), graph
+            ));
+        }
+        0
+    }
+}
+
+/// The values of an ObjectProperty line as references: through the declared
+/// range, the angle-bracket lane, or the path resolver. Returns the error
+/// count.
+#[allow(clippy::too_many_arguments)]
+fn emit_reference_values(
+    object: &str,
+    line_subject: &str,
+    kit_predicate: &str,
+    prop_seg: &str,
+    graph: &str,
+    relpath_str: &str,
+    ctx: &ResolverContext,
+    warn: bool,
+    out: &mut String,
+) -> u32 {
+    let ResolverContext { path_index, kit_namespaces, ref_ranges, .. } = ctx;
+    let mut errors: u32 = 0;
+    // Law 6 (identity model): a DECLARED RANGE makes the
+    // authored value the TARGET'S ID — resolution is declared,
+    // never guessed: id → the range class's id-space → one
+    // Thing IRI. Deterministic at every commit, dangling or
+    // not (existence is the save gate's job, not derivation's).
+    //
+    // Looked up by the DECLARED predicate IRI, not a key rebuilt
+    // from the authoring kit — an inherited property authors
+    // under the subclass's kit (`soul.Note.relatedToId`) while
+    // its range is declared where the property lives (git-lex).
+    // The `{kit}/{prop}` key missed exactly those (#82's
+    // key-mismatch class; table re-keyed 2026-08-20).
+    let range =
+        ref_ranges.get(kit_predicate.trim_start_matches('<').trim_end_matches('>'));
+    // URL-aware split (review #26): a comma INSIDE a URL is part
+    // of the value, not a list separator.
+    let values = split_object_values(object);
+    for val in &values {
+        let val = val.as_str();
+        if val.is_empty() { continue; }
+        // Range git-lex:Thing (Rob-ruled 2026-08-20): "any
+        // Thing, any class" — the bare-id derivation below
+        // cannot apply (there is no one id-space), so the value
+        // must be the full identifier form <namespace/Class/id>
+        // and ONLY that form. The angle-bracket lane.
+        if range.map(String::as_str) == Some(THING_CLASS_IRI) {
+            match resolve::resolve_thing_reference(val) {
+                Ok(target) => {
+                    out.push_str(&format!(
+                        "{} {} {} {} .\n",
+                        line_subject, kit_predicate, target, graph
+                    ));
                 }
-            } else {
+                Err(msg) => {
+                    if warn {
+                        // Enrich with the concrete fix when the
+                        // value is recognizably the identifier
+                        // form minus brackets. NO tracked-file
+                        // veto here: under a Thing range even a
+                        // real path is invalid.
+                        let empty = HashSet::new();
+                        let hint = bare_kit_reference_suggestion(
+                            val,
+                            kit_namespaces,
+                            &empty,
+                        )
+                        .map(|s| format!(" Did you mean `<{s}>`?"))
+                        .unwrap_or_default();
+                        eprintln!(
+                            "error: {}: {} — {}{}",
+                            relpath_str, prop_seg, msg, hint
+                        );
+                    }
+                    errors += 1;
+                }
+            }
+            continue;
+        }
+        if let Some(range_iri) = range {
+            match thing_iri_from_range(range_iri, val) {
+                Some(target) => {
+                    out.push_str(&format!(
+                        "{} {} {} {} .\n",
+                        line_subject, kit_predicate, target, graph
+                    ));
+                }
+                None => {
+                    if warn {
+                        eprintln!(
+                            "error: {}: {} — declared range `{}` is not a resolvable class IRI",
+                            relpath_str, prop_seg, range_iri
+                        );
+                    }
+                    errors += 1;
+                }
+            }
+            continue;
+        }
+        // No declared range: the legacy path/IRI resolver.
+        // But first, tr1p's 2026-08-18 finding: the documented
+        // identifier form minus its brackets is the attractive
+        // error, and the path lane swallows it silently. Note
+        // (not error) — resolution below is unchanged.
+        if warn
+            && let Some(suggested) =
+                bare_kit_reference_suggestion(val, kit_namespaces, path_index)
+            {
+                author_diag!(
+                    "note: {}: `{}` on `{}` has no angle brackets, so it \
+                     resolves as a repo-relative path to `{}` — an address \
+                     nothing in the graph describes. Did you mean `<{}>`?",
+                    relpath_str,
+                    val,
+                    prop_seg,
+                    crate::git::resource_uri(&uri_encode_path(val)),
+                    suggested
+                );
+            }
+        match resolve::resolve_frontmatter_value(val) {
+            resolve::ResolveResult::Iri(uri) => {
+                out.push_str(&format!(
+                    "{} {} {} {} .\n",
+                    line_subject, kit_predicate, uri, graph
+                ));
+            }
+            resolve::ResolveResult::Unresolved(literal) => {
                 out.push_str(&format!(
                     "{} {} \"{}\" {} .\n",
-                    subjects.file_uri, fm_predicate, nq_escape(object), graph
+                    line_subject, kit_predicate, nq_escape(&literal), graph
                 ));
+            }
+            resolve::ResolveResult::Rejected(msg) => {
+                if warn {
+                    eprintln!(
+                        "error: {}: {} — {}",
+                        relpath_str, prop_seg, msg
+                    );
+                }
+                errors += 1;
             }
         }
     }
     errors
+}
+
+/// Save-time teaching for a literal-valued kit key: a deprecated key, a key
+/// declared on another class, or a key the ontology has never declared.
+/// Prints only; the line still saves.
+fn teach_key_diagnostics(
+    (kit_name, class_seg, prop_seg): (&str, &str, &str),
+    canonical_class: &str,
+    lookup_key: &str,
+    domain_open: Option<&crate::ontology::DomainOpenProp>,
+    relpath_str: &str,
+    ctx: &ResolverContext,
+    warn: bool,
+) {
+    let ResolverContext { obj_props, prop_datatypes, declared_props, kit_namespaces, deprecated_props, .. } = ctx;
+    {
+        let key = lookup_key;
+        // Membership test against the DECLARED set — datatype-
+        // unconditional. Testing prop_datatypes here false-warned
+        // every xsd:string property in every kit (the shapes
+        // generator omits sh:datatype for strings): 412 bogus
+        // "not declared" warnings per save in W4R3Z alone
+        // (found 2026-08-01).
+        // The whole block below is teaching, no emission — one
+        // `warn` gate covers the wrong-class, deprecated-note,
+        // and does-not-exist branches together.
+        //
+        // Deprecated check FIRST, before the declared test (#83):
+        // whether a deprecated prop still sits in the generated
+        // shapes depends on whether its CLASS survived (a class
+        // deprecated whole keeps its shape + props; a bare
+        // appendix prop lands on no shape) — so gating the note
+        // behind not-declared made the Texture family silently
+        // invisible while writtenFrom whispered. Deprecated
+        // whispers regardless of shapes state: one note, the
+        // line still saves, history replays.
+        if warn {
+            if let Some(replaced) =
+                deprecated_props.get(&format!("{}/{}", kit_name, prop_seg))
+            {
+                let repl = replaced
+                    .as_ref()
+                    .map(|r| format!(" — replacement: `{}`", r))
+                    .unwrap_or_default();
+                author_diag!(
+                    "note: {}: the key `{}.{}.{}` is deprecated (the \
+                     `{}` ontology retired it{}). The line still saves \
+                     and history replays; don't use it in new writing — \
+                     migrate or delete when you next edit this file.",
+                    relpath_str, kit_name, class_seg, prop_seg,
+                    kit_name, repl
+                );
+            } else if !declared_props.contains(key)
+                && !obj_props.contains(key)
+                // #82: domain-open props are declared — telling
+                // the author otherwise was the false warning.
+                && domain_open.is_none()
+            {
+            let kit_scope = format!("{}/", kit_name);
+            let prop_tail = format!("/{}", prop_seg);
+            let class_for_msg = canonical_class;
+            let owners: std::collections::BTreeSet<String> = obj_props
+                .iter()
+                .chain(declared_props.iter())
+                .filter(|k| k.starts_with(&kit_scope) && k.ends_with(&prop_tail))
+                .filter_map(|k| k.split('/').nth(1).map(str::to_string))
+                .collect();
+            if !owners.is_empty() {
+                let owner_list =
+                    owners.into_iter().collect::<Vec<_>>().join(", ");
+                author_diag!(
+                    "warning: {}: the key `{}.{}.{}` — `{}` exists in the \
+                     `{}` ontology, but on class {}, not on {}. Fix, pick \
+                     one: (a) this line belongs in a {} document — move it \
+                     there; (b) this key genuinely belongs on {} too — \
+                     keep the line and report it to the `{}` ontology \
+                     owner; (c) the line no longer matters — delete it. \
+                     Until fixed, the value saves as plain ungoverned data.",
+                    relpath_str, kit_name, class_seg, prop_seg, prop_seg,
+                    kit_name, owner_list, class_for_msg, owner_list,
+                    class_for_msg, kit_name
+                );
+            } else if !kit_namespaces.contains_key(kit_name)
+                || obj_props.iter().chain(prop_datatypes.keys())
+                    .any(|k| k.starts_with(&kit_scope))
+            {
+                            warn_unknown_key((kit_name, class_seg, prop_seg), class_for_msg, relpath_str, ctx);
+                }
+            }
+        }
+    }
+}
+
+/// The warning for a kit key no ontology declares, with the closest
+/// declared keys on the class as suggestions.
+fn warn_unknown_key(
+    (kit_name, class_seg, prop_seg): (&str, &str, &str),
+    class_for_msg: &str,
+    relpath_str: &str,
+    ctx: &ResolverContext,
+) {
+    let ResolverContext { obj_props, declared_props, deprecated_props, .. } = ctx;
+    // The kit-qualified prefix CLAIMS ontology
+    // vocabulary; a property the ontology has never
+    // heard of used to sail through silently — how
+    // months of junk keys (writtenFrom, soul.Note.
+    // title, …) accumulated invisibly (Rob-ruled
+    // 2026-07-29: warn at save). Bare keys (title:)
+    // stay free — the open fm: lane is one line up.
+    //
+    // did-you-mean: declared keys on THIS class that
+    // plausibly mean the same thing (the renamed-by-
+    // the-ontology case, e.g. kind → textureKind) —
+    // case-insensitive containment either way, 4+
+    // chars so single letters never match. (The
+    // deprecated-note lane moved ABOVE the declared
+    // test — #83 — so this branch only sees keys the
+    // ontology has truly never heard of.)
+    let class_prefix =
+        format!("{}/{}/", kit_name, class_for_msg);
+    let prop_lower = prop_seg.to_lowercase();
+    let mut candidates: Vec<String> = obj_props
+        .iter()
+        .chain(declared_props.iter())
+        .filter(|k| k.starts_with(&class_prefix))
+        .filter_map(|k| k.split('/').nth(2))
+        .filter(|cand| {
+            let cl = cand.to_lowercase();
+            cl != prop_lower
+                && ((prop_lower.len() >= 4
+                    && cl.contains(&prop_lower))
+                    || (cl.len() >= 4
+                        && prop_lower.contains(&cl)))
+        })
+        // #85: never SUGGEST a deprecated key —
+        // did-you-mean is a destination menu for
+        // new writing.
+        .filter(|cand| {
+            !deprecated_props.contains_key(&format!(
+                "{}/{}",
+                kit_name, cand
+            ))
+        })
+        .map(str::to_string)
+        .collect();
+    candidates.sort();
+    candidates.dedup();
+    candidates.truncate(3);
+    let hint = if candidates.is_empty() {
+        format!(
+            " (the `__{}.md` template in this class's folder \
+             lists every declared key)",
+            class_for_msg
+        )
+    } else {
+        format!(
+            " — closest declared keys on {}: {}",
+            class_for_msg,
+            candidates.join(", ")
+        )
+    };
+    author_diag!(
+        "warning: {}: the key `{}.{}.{}` does not exist in \
+         the `{}` ontology. Fix, pick one: (a) the ontology \
+         may use a different name for this{} — if one means \
+         the same thing, edit this line to use it; (b) no \
+         current key fits and the information matters — keep \
+         the line and report the missing key to the `{}` \
+         ontology owner; (c) the line no longer matters — \
+         delete it. Until fixed, the value saves as plain \
+         ungoverned data.",
+        relpath_str, kit_name, class_seg, prop_seg, kit_name,
+        hint, kit_name
+    );
+}
+
+/// A legacy or non-kit frontmatter line on the open `fm:` namespace.
+fn emit_fm_line(subject: &str, object: &str, subjects: &FileSubjects, graph: &str, out: &mut String) {
+    // Legacy or non-kit frontmatter (title, tags, etc.) — use fm: namespace
+    let fm_predicate = format!("<https://repolex.ai/ontology/git-lex/fm/{}>", uri_encode_path(subject));
+
+    if subject.ends_with("-link") || subject.ends_with("-links") {
+        let values: Vec<&str> = if subject.ends_with("-links") {
+            object.split(',').map(|s| s.trim()).filter(|s| !s.is_empty()).collect()
+        } else {
+            vec![object.trim()]
+        };
+        // Pre-dot-notation-era keys (no current kit emits them;
+        // they exist only in old souls' history). Same law as
+        // everywhere else: paths derive IRIs, anything else stays
+        // a literal — no index lookup, no guessing.
+        for val in values {
+            if val.is_empty() { continue; }
+            if val.contains('/') || val.ends_with(".md") {
+                out.push_str(&format!(
+                    "{} {} <{}> {} .\n",
+                    subjects.file_uri, fm_predicate, crate::git::file_iri(&uri_encode_path(val)), graph
+                ));
+            } else {
+                out.push_str(&format!(
+                    "{} {} \"{}\" {} .\n",
+                    subjects.file_uri, fm_predicate, nq_escape(val), graph
+                ));
+            }
+        }
+    } else {
+        out.push_str(&format!(
+            "{} {} \"{}\" {} .\n",
+            subjects.file_uri, fm_predicate, nq_escape(object), graph
+        ));
+    }
 }
 
 /// Build the slug→path and path indexes used for `[[wikilink]]` resolution.
