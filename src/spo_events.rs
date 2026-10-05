@@ -1214,14 +1214,21 @@ pub fn onegraph_walk_engine_with(
     batch_quads: usize,
 ) -> Result<WalkOutcome, String> {
     let total = commits.len();
-    let mut nq_buffer = String::new();
-    // Quad lines waiting in `nq_buffer`; with `base_final.len()` it is the
-    // size of the next store write.
-    let mut pending_quads = 0usize;
-    let mut changed_subjects: HashSet<String> = HashSet::new();
-    let mut changed_statements: HashSet<String> = HashSet::new();
-    let mut events_seen = 0usize;
-    let mut events_emitted = 0usize;
+    let mut state = WalkState {
+        store,
+        one_graph,
+        clear_first,
+        batch_quads,
+        nq_buffer: String::new(),
+        pending_quads: 0,
+        base_final: HashMap::new(),
+        walk_file_ids: HashMap::new(),
+        blob_memo: HashMap::new(),
+        changed_subjects: HashSet::new(),
+        changed_statements: HashSet::new(),
+        events_seen: 0,
+        events_emitted: 0,
+    };
 
     // ─── Resolved-set diffing (BUG 1 fix, Rob-ruled; the contract is in the
     // SpoEvent class comment: "diffed as RESOLVED sets per commit") ───
@@ -1240,162 +1247,10 @@ pub fn onegraph_walk_engine_with(
     // No rename special-casing: renames only pair old→new paths for content
     // fetching; the sets carry all the semantics.
 
-    // Resolve one sidecar's full content at a commit into the set of its
-    // resolved triple-quad lines (graph term constant, so line-set semantics
-    // == triple-set semantics). Also counts lines in / lines dropped by the
-    // resolver (a line yielding zero triples) — the completeness accounting
-    // foundation (BUG 4).
-    // Accounting (BUG 4): every sidecar line either yields triples, is
-    // counted (`resolver_other`, `unknown_suffix`), or HARD-FAILS the walk
-    // (malformed shape / empty object). The walker knows ONE sidecar format;
-    // a line violating it is either a real bug (fix it) or pre-standard
-    // dev-era data that `dev_history_horizon` in .lex/repo.yml should be
-    // fencing. Nothing vanishes silently, and nothing is tolerated quietly.
-    // The shared emitter (`emit_spo_line_nquads`, also serving the now view
-    // + `git lex query`) is deliberately untouched; lines it drops for its
-    // own reasons land in `resolver_other`.
-    #[derive(Default)]
-    struct DropAccounting {
-        lines_in: usize,
-        empty_object: usize,         // `key | hasValue | ` — empty value, no fact
-        resolver_other: usize,       // dropped inside the shared emitter
-        unknown_suffix: usize,       // sidecar with an undeclared extractor suffix
-        resolver_errors: u32,        // errors reported by the shared emitter
-        // #28: retracts suppressed because an UNTOUCHED sidecar still
-        // asserts the same triple (duplicate ids from merge commits or
-        // pre-gate history). Suppression is correct — the fact never left
-        // the world — but it must be visible, not silent.
-        dup_retracts_suppressed: usize,
-    }
     let mut acct = DropAccounting::default();
     // Unknown-suffix sidecars warn once per path (the walk visits the same
     // path once per touching commit — repeating the warning is noise).
     let mut warned_unknown: HashSet<String> = HashSet::new();
-
-    // Net base-layer effect per triple across this walk (last op wins).
-    let mut base_final: HashMap<String, char> = HashMap::new();
-
-    // Resolve one sidecar's LINES (already read from git) into the set of
-    // resolved triple-quad lines. Split from the by-commit reader so the
-    // duplicate-id retract guard below resolves blobs by oid through the
-    // SAME path — one resolver, no drift between the diff sides and the
-    // guard's view of the untouched world.
-    let resolve_lines = |lines: &[String],
-                         sidecar_path: &str,
-                         relpath_str: &str,
-                         acct: &mut DropAccounting|
-     -> Result<HashSet<String>, String> {
-        acct.lines_in += lines.len();
-        let mut triples: HashSet<String> = HashSet::new();
-        let mut emitted_types: HashSet<String> = HashSet::new();
-        // Both plane anchors, derived from the FULL sidecar at this commit
-        // (identity model re-anchor). The anchor facts (File type, Thing
-        // type, fileId edge) join the resolved set so they diff temporally
-        // like every other fact — a file move is exactly one fileId
-        // retract+assert pair, nothing else. Warnings stay quiet here: the
-        // walk revisits every commit and the save path already warned.
-        let subjects = crate::nquad::derive_file_subjects(
-            lines,
-            relpath_str,
-            &ctx.declared_props,
-            &ctx.obj_props,
-            &ctx.kit_namespaces,
-            false,
-        );
-        {
-            let mut anchor_buf = String::new();
-            crate::nquad::emit_file_anchor_nquads(
-                &subjects, &ctx.kit_namespaces, one_graph, &mut emitted_types, &mut anchor_buf,
-            );
-            for t in anchor_buf.lines().filter(|l| !l.trim().is_empty()) {
-                triples.insert(t.to_string());
-            }
-        }
-        for line in lines {
-            // Shape check — HARD error. The walker knows one format:
-            // `subject | predicate | object`.
-            // splitn(3): MUST match the emitter's split (nquad.rs) — a
-            // value containing " | " is one value, not extra fields.
-            let fields: Vec<&str> = line.splitn(3, " | ").collect();
-            if fields.len() != 3 {
-                return Err(format!(
-                    "malformed sidecar line in {sidecar_path}: {line:?} \
-                     (expected `subject | predicate | object`). \
-                     If this file exists in your CURRENT working tree, the damage \
-                     is live and must be repaired there: edit the source document \
-                     trivially, run `git lex save` (regenerates its sidecar), then \
-                     `rm -rf .lex/_ignore/oxigraph` and re-run `git lex sync`. \
-                     If the line is only in HISTORY (dev-era data), fence it with \
-                     `dev_history_horizon:` in .lex/repo.yml set to the day after \
-                     this commit. Otherwise this is a bug — report it. \
-                     (Known dev-era damage signature: a value hard-wrapped across \
-                     two physical lines — the fragment above may be the tail of \
-                     the previous line.)"
-                ));
-            }
-            // Empty object is DEFINED format semantics, not damage: the
-            // extractor writes `key | hasValue | ` for a frontmatter field
-            // that is present but empty, and an empty value asserts no fact.
-            // Same behavior as the now-view emitter. Skipped, counted.
-            if fields[2].trim().is_empty() {
-                acct.empty_object += 1;
-                continue;
-            }
-            let mut emit_buf = String::new();
-            // Emitter errors are COUNTED (a line can yield some triples AND
-            // errors — e.g. one rejected value among several); the now path
-            // counts the same errors, so the walk must too. warn=false: the
-            // walk revisits every commit — replaying the save path's live
-            // to-dos per visit is the #73 spam (the counts still land).
-            acct.resolver_errors += crate::nquad::emit_spo_line_nquads(
-                line, &subjects, one_graph, relpath_str, ctx,
-                false,
-                &mut emitted_types, &mut emit_buf,
-            );
-            let mut any = false;
-            for triple_nq in emit_buf.lines().filter(|l| !l.trim().is_empty()) {
-                triples.insert(triple_nq.to_string());
-                any = true;
-            }
-            if !any {
-                acct.resolver_other += 1;
-            }
-        }
-        Ok(triples)
-    };
-
-    let resolve_sidecar_at = |reader: &mut SidecarReader,
-                              commit: &str,
-                              sidecar_path: &str,
-                              acct: &mut DropAccounting,
-                              warned_unknown: &mut HashSet<String>|
-     -> Result<HashSet<String>, String> {
-        // Unknown extractor suffix: counted and warned, never silent (the
-        // BUG-4 contract). The diff-tree pathspec matches ALL
-        // `.lex/extract/**.spo`, so a sidecar from an extractor this binary
-        // doesn't know contributes nothing — that must be visible.
-        let Some(relpath_str) = derive_source_document(sidecar_path) else {
-            acct.unknown_suffix += 1;
-            if warned_unknown.insert(sidecar_path.to_string()) {
-                eprintln!(
-                    "  one-graph: sidecar with unknown extractor suffix NOT walked: {sidecar_path} (known: {})",
-                    SPO_EXTRACTOR_SUFFIXES.join(", ")
-                );
-            }
-            return Ok(HashSet::new());
-        };
-        let lines = reader.lines_at(commit, sidecar_path)?;
-        // ABSENT (or empty) sidecar = NO anchors (review-critical fix): the
-        // File rdf:type used to emit unconditionally even for the verified-
-        // empty set of a path absent at this commit — identical on both
-        // diff sides, so a file's anchor facts never diffed: a new file
-        // under-reported its events and a deletion never retracted its
-        // anchors. No sidecar lines, no facts of any kind.
-        if lines.is_empty() {
-            return Ok(HashSet::new());
-        }
-        resolve_lines(&lines, sidecar_path, &relpath_str, acct)
-    };
 
     // ── Duplicate-id retract guard state (#28) ──
     // (blob oid, sidecar path) → resolved triples, content-addressed:
@@ -1407,7 +1262,6 @@ pub fn onegraph_walk_engine_with(
     // Dropped at every batch write: a cache, so emptying it changes no
     // answer, and an old sidecar version stops being asked for as the walk
     // moves forward.
-    let mut blob_memo: HashMap<(git2::Oid, String), HashSet<String>> = HashMap::new();
     let mut guard_acct = DropAccounting::default();
     // Which documents anchor which Thing: the store's base layer plus every
     // fileId change this walk has made SINCE ITS LAST WRITE. Keyed subject →
@@ -1419,7 +1273,6 @@ pub fn onegraph_walk_engine_with(
         one_graph.trim_start_matches('<').trim_end_matches('>'),
     )
     .map_err(|e| format!("one-graph IRI is not a valid named node: {e}"))?;
-    let mut walk_file_ids: HashMap<String, HashMap<String, char>> = HashMap::new();
 
     // clear_first = full rebuild (store deleted/rebuilt; also the fallback when an
     // incremental resume point turns out invalid, e.g. after history rewrite).
@@ -1435,24 +1288,6 @@ pub fn onegraph_walk_engine_with(
             .map_err(|e| format!("one-graph clear (full rebuild) failed: {e}"))?;
     }
 
-    // Write what is pending and forget it. `walk_file_ids` and `blob_memo`
-    // go too: after the write the store's base layer answers for the first,
-    // and the second is a cache. A full rebuild re-materializes the whole
-    // now view, so it keeps no list of changed subjects.
-    macro_rules! write_batch {
-        () => {{
-            if !clear_first {
-                changed_subjects.extend(
-                    base_final.keys().filter_map(|line| take_term(line).map(|(subject, _)| subject)),
-                );
-                changed_statements.extend(base_final.keys().cloned());
-            }
-            write_walk_batch(store, &mut nq_buffer, &mut base_final)?;
-            walk_file_ids.clear();
-            blob_memo.clear();
-        }};
-    }
-
     for (ci, c) in commits.iter().enumerate() {
         if show_progress && total > 0 {
             if ci == 0 { eprint!("  one-graph: walking {} commit(s) ", total); }
@@ -1462,36 +1297,8 @@ pub fn onegraph_walk_engine_with(
             }
         }
 
-        // Touched sidecars, old side vs new side. Renames pair old→new;
-        // everything else appears under the same path on both sides (a path
-        // absent at a commit resolves to a verified-empty set — see
-        // read_sidecar_at_commit: absence is checked, never assumed from a
-        // failed `git show`).
-        let mut old_side: HashSet<&str> = HashSet::new();
-        let mut new_side: HashSet<&str> = HashSet::new();
-        for p in &c.touched {
-            old_side.insert(p.as_str());
-            new_side.insert(p.as_str());
-        }
-        for (old_p, new_p) in &c.renames {
-            old_side.insert(old_p.as_str());
-            new_side.insert(new_p.as_str());
-        }
-
-        let mut old_triples: HashSet<String> = HashSet::new();
-        let mut new_triples: HashSet<String> = HashSet::new();
-        for path in &old_side {
-            old_triples.extend(
-                resolve_sidecar_at(reader, &c.parent_sha, path, &mut acct, &mut warned_unknown)
-                    .map_err(|e| format!("commit {} (old side): {e}", c.sha))?,
-            );
-        }
-        for path in &new_side {
-            new_triples.extend(
-                resolve_sidecar_at(reader, &c.sha, path, &mut acct, &mut warned_unknown)
-                    .map_err(|e| format!("commit {} (new side): {e}", c.sha))?,
-            );
-        }
+        let CommitSides { old_side, new_side, old_triples, new_triples } =
+            resolve_commit_sides(c, reader, ctx, one_graph, &mut acct, &mut warned_unknown)?;
 
         // The diff of resolved worlds IS the event stream for this commit.
         // base_final tracks each touched triple's NET state across this walk
@@ -1517,74 +1324,12 @@ pub fn onegraph_walk_engine_with(
         // resolved; the rest of the repo is not (#15 — scanning the whole
         // extract tree made every edit cost the size of the repo).
         let retracts: Vec<&String> = old_triples.difference(&new_triples).collect();
-        let mut still_live: HashSet<&String> = HashSet::new();
-        if !retracts.is_empty() {
+        let still_live: HashSet<&String> = if retracts.is_empty() {
+            HashSet::new()
+        } else {
             let touched_any: HashSet<&str> = old_side.union(&new_side).copied().collect();
-            let mut docs: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
-            let mut subjects_seen: HashSet<String> = HashSet::new();
-            for cand in &retracts {
-                let Some((subject, _)) = take_term(cand) else { continue };
-                if !subjects_seen.insert(subject.clone()) {
-                    continue;
-                }
-                let iri = subject.trim_start_matches('<').trim_end_matches('>');
-                if let Some(doc) = file_iri_document(iri) {
-                    docs.insert(doc);
-                }
-                let mut files: HashMap<String, char> = HashMap::new();
-                if let Ok(s_node) = oxigraph::model::NamedNodeRef::new(iri) {
-                    for q in store.quads_for_pattern(
-                        Some(s_node.into()),
-                        Some(file_id_pred),
-                        None,
-                        Some(graph_node.as_ref().into()),
-                    ) {
-                        let q = q.map_err(|e| format!("fileId lookup failed: {e}"))?;
-                        files.insert(q.object.to_string(), '+');
-                    }
-                }
-                if let Some(changed) = walk_file_ids.get(&subject) {
-                    for (f, op) in changed {
-                        files.insert(f.clone(), *op);
-                    }
-                }
-                for (f, op) in files {
-                    if op == '+'
-                        && let Some(doc) = file_iri_document(f.trim_start_matches('<').trim_end_matches('>'))
-                    {
-                        docs.insert(doc);
-                    }
-                }
-            }
-            'scan: for doc in &docs {
-                for suffix in SPO_EXTRACTOR_SUFFIXES {
-                    let path = format!(".lex/extract/{doc}.{suffix}.spo");
-                    if touched_any.contains(path.as_str()) {
-                        continue;
-                    }
-                    let Some(oid) = reader.blob_at(&c.sha, &path)? else { continue };
-                    let key = (oid, path.clone());
-                    if !blob_memo.contains_key(&key) {
-                        let lines = reader.blob_lines(oid)?;
-                        let triples = if lines.is_empty() {
-                            HashSet::new()
-                        } else {
-                            resolve_lines(&lines, &path, doc, &mut guard_acct)?
-                        };
-                        blob_memo.insert(key.clone(), triples);
-                    }
-                    let set = &blob_memo[&key];
-                    for cand in &retracts {
-                        if set.contains(*cand) {
-                            still_live.insert(*cand);
-                            if still_live.len() == retracts.len() {
-                                break 'scan; // every candidate accounted for
-                            }
-                        }
-                    }
-                }
-            }
-        }
+            retracts_still_live(&retracts, &touched_any, c, reader, &mut state, ctx, file_id_pred, &graph_node, &mut guard_acct)?
+        };
         for line in retracts {
             if still_live.contains(line) {
                 // Still asserted by an untouched file: the fact never left
@@ -1593,33 +1338,13 @@ pub fn onegraph_walk_engine_with(
                 acct.dup_retracts_suppressed += 1;
                 continue;
             }
-            events_seen += 1;
-            if let Some(quads) = onegraph_event(line, '-', &c.sha, one_graph) {
-                for q in quads { nq_buffer.push_str(&q); nq_buffer.push('\n'); pending_quads += 1; }
-                events_emitted += 1;
-                note_file_id(&mut walk_file_ids, line, '-');
-                base_final.insert(line.clone(), '-');
-            }
             // The guard above has already judged this whole commit, so a
             // write part-way through its events changes nothing it reads —
             // and one commit that asserts a whole tree stays bounded too.
-            if pending_quads + base_final.len() >= batch_quads {
-                write_batch!();
-                pending_quads = 0;
-            }
+            state.record_event(line, '-', &c.sha)?;
         }
         for line in new_triples.difference(&old_triples) {
-            events_seen += 1;
-            if let Some(quads) = onegraph_event(line, '+', &c.sha, one_graph) {
-                for q in quads { nq_buffer.push_str(&q); nq_buffer.push('\n'); pending_quads += 1; }
-                events_emitted += 1;
-                note_file_id(&mut walk_file_ids, line, '+');
-                base_final.insert(line.clone(), '+');
-            }
-            if pending_quads + base_final.len() >= batch_quads {
-                write_batch!();
-                pending_quads = 0;
-            }
+            state.record_event(line, '+', &c.sha)?;
         }
     }
 
@@ -1629,7 +1354,7 @@ pub fn onegraph_walk_engine_with(
     // walked oldest→newest and the last op on a triple wins, so applying
     // each batch's net effect in order ends where applying the whole walk's
     // net effect would. The last (for an append, the only) write:
-    write_batch!();
+    state.write_batch()?;
 
     // Completeness accounting (BUG 4). Malformed lines hard-fail above;
     // what remains countable is emitter-side drops and unknown suffixes.
@@ -1655,9 +1380,363 @@ pub fn onegraph_walk_engine_with(
         eprintln!(" done");
     }
 
-    Ok(WalkOutcome { events_seen, events_emitted, changed_subjects, changed_statements })
+    Ok(WalkOutcome {
+        events_seen: state.events_seen,
+        events_emitted: state.events_emitted,
+        changed_subjects: state.changed_subjects,
+        changed_statements: state.changed_statements,
+    })
 }
 
+// Resolve one sidecar's full content at a commit into the set of its
+// resolved triple-quad lines (graph term constant, so line-set semantics
+// == triple-set semantics). Also counts lines in / lines dropped by the
+// resolver (a line yielding zero triples) — the completeness accounting
+// foundation (BUG 4).
+// Accounting (BUG 4): every sidecar line either yields triples, is
+// counted (`resolver_other`, `unknown_suffix`), or HARD-FAILS the walk
+// (malformed shape / empty object). The walker knows ONE sidecar format;
+// a line violating it is either a real bug (fix it) or pre-standard
+// dev-era data that `dev_history_horizon` in .lex/repo.yml should be
+// fencing. Nothing vanishes silently, and nothing is tolerated quietly.
+// The shared emitter (`emit_spo_line_nquads`, also serving the now view
+// + `git lex query`) is deliberately untouched; lines it drops for its
+// own reasons land in `resolver_other`.
+#[derive(Default)]
+struct DropAccounting {
+    lines_in: usize,
+    empty_object: usize,         // `key | hasValue | ` — empty value, no fact
+    resolver_other: usize,       // dropped inside the shared emitter
+    unknown_suffix: usize,       // sidecar with an undeclared extractor suffix
+    resolver_errors: u32,        // errors reported by the shared emitter
+    // #28: retracts suppressed because an UNTOUCHED sidecar still
+    // asserts the same triple (duplicate ids from merge commits or
+    // pre-gate history). Suppression is correct — the fact never left
+    // the world — but it must be visible, not silent.
+    dup_retracts_suppressed: usize,
+}
+
+/// One commit's touched sidecar paths on each side and their resolved
+/// triples.
+struct CommitSides<'c> {
+    old_side: HashSet<&'c str>,
+    new_side: HashSet<&'c str>,
+    old_triples: HashSet<String>,
+    new_triples: HashSet<String>,
+}
+
+/// Resolve the full old and new content of every sidecar a commit touched.
+fn resolve_commit_sides<'c>(
+    c: &'c WalkCommit,
+    reader: &mut SidecarReader,
+    ctx: &crate::nquad::ResolverContext,
+    one_graph: &str,
+    acct: &mut DropAccounting,
+    warned_unknown: &mut HashSet<String>,
+) -> Result<CommitSides<'c>, String> {
+    // Touched sidecars, old side vs new side. Renames pair old→new;
+    // everything else appears under the same path on both sides (a path
+    // absent at a commit resolves to a verified-empty set — see
+    // read_sidecar_at_commit: absence is checked, never assumed from a
+    // failed `git show`).
+    let mut old_side: HashSet<&str> = HashSet::new();
+    let mut new_side: HashSet<&str> = HashSet::new();
+    for p in &c.touched {
+        old_side.insert(p.as_str());
+        new_side.insert(p.as_str());
+    }
+    for (old_p, new_p) in &c.renames {
+        old_side.insert(old_p.as_str());
+        new_side.insert(new_p.as_str());
+    }
+
+    let mut old_triples: HashSet<String> = HashSet::new();
+    let mut new_triples: HashSet<String> = HashSet::new();
+    for path in &old_side {
+        old_triples.extend(
+            resolve_sidecar_at(reader, &c.parent_sha, path, ctx, one_graph, acct, warned_unknown)
+                .map_err(|e| format!("commit {} (old side): {e}", c.sha))?,
+        );
+    }
+    for path in &new_side {
+        new_triples.extend(
+            resolve_sidecar_at(reader, &c.sha, path, ctx, one_graph, acct, warned_unknown)
+                .map_err(|e| format!("commit {} (new side): {e}", c.sha))?,
+        );
+    }
+    Ok(CommitSides { old_side, new_side, old_triples, new_triples })
+}
+
+/// Resolve one sidecar's LINES (already read from git) into the set of
+/// resolved triple-quad lines. Split from the by-commit reader so the
+/// duplicate-id retract guard resolves blobs by oid through the SAME path —
+/// one resolver, no drift between the diff sides and the guard's view of
+/// the untouched world.
+fn resolve_sidecar_lines(
+    lines: &[String],
+    sidecar_path: &str,
+    relpath_str: &str,
+    ctx: &crate::nquad::ResolverContext,
+    one_graph: &str,
+    acct: &mut DropAccounting,
+) -> Result<HashSet<String>, String> {
+    acct.lines_in += lines.len();
+    let mut triples: HashSet<String> = HashSet::new();
+    let mut emitted_types: HashSet<String> = HashSet::new();
+    // Both plane anchors, derived from the FULL sidecar at this commit
+    // (identity model re-anchor). The anchor facts (File type, Thing
+    // type, fileId edge) join the resolved set so they diff temporally
+    // like every other fact — a file move is exactly one fileId
+    // retract+assert pair, nothing else. Warnings stay quiet here: the
+    // walk revisits every commit and the save path already warned.
+    let subjects = crate::nquad::derive_file_subjects(
+        lines,
+        relpath_str,
+        &ctx.declared_props,
+        &ctx.obj_props,
+        &ctx.kit_namespaces,
+        false,
+    );
+    {
+        let mut anchor_buf = String::new();
+        crate::nquad::emit_file_anchor_nquads(
+            &subjects, &ctx.kit_namespaces, one_graph, &mut emitted_types, &mut anchor_buf,
+        );
+        for t in anchor_buf.lines().filter(|l| !l.trim().is_empty()) {
+            triples.insert(t.to_string());
+        }
+    }
+    for line in lines {
+        // Shape check — HARD error. The walker knows one format:
+        // `subject | predicate | object`.
+        // splitn(3): MUST match the emitter's split (nquad.rs) — a
+        // value containing " | " is one value, not extra fields.
+        let fields: Vec<&str> = line.splitn(3, " | ").collect();
+        if fields.len() != 3 {
+            return Err(format!(
+                "malformed sidecar line in {sidecar_path}: {line:?} \
+                 (expected `subject | predicate | object`). \
+                 If this file exists in your CURRENT working tree, the damage \
+                 is live and must be repaired there: edit the source document \
+                 trivially, run `git lex save` (regenerates its sidecar), then \
+                 `rm -rf .lex/_ignore/oxigraph` and re-run `git lex sync`. \
+                 If the line is only in HISTORY (dev-era data), fence it with \
+                 `dev_history_horizon:` in .lex/repo.yml set to the day after \
+                 this commit. Otherwise this is a bug — report it. \
+                 (Known dev-era damage signature: a value hard-wrapped across \
+                 two physical lines — the fragment above may be the tail of \
+                 the previous line.)"
+            ));
+        }
+        // Empty object is DEFINED format semantics, not damage: the
+        // extractor writes `key | hasValue | ` for a frontmatter field
+        // that is present but empty, and an empty value asserts no fact.
+        // Same behavior as the now-view emitter. Skipped, counted.
+        if fields[2].trim().is_empty() {
+            acct.empty_object += 1;
+            continue;
+        }
+        let mut emit_buf = String::new();
+        // Emitter errors are COUNTED (a line can yield some triples AND
+        // errors — e.g. one rejected value among several); the now path
+        // counts the same errors, so the walk must too. warn=false: the
+        // walk revisits every commit — replaying the save path's live
+        // to-dos per visit is the #73 spam (the counts still land).
+        acct.resolver_errors += crate::nquad::emit_spo_line_nquads(
+            line, &subjects, one_graph, relpath_str, ctx,
+            false,
+            &mut emitted_types, &mut emit_buf,
+        );
+        let mut any = false;
+        for triple_nq in emit_buf.lines().filter(|l| !l.trim().is_empty()) {
+            triples.insert(triple_nq.to_string());
+            any = true;
+        }
+        if !any {
+            acct.resolver_other += 1;
+        }
+    }
+    Ok(triples)
+}
+
+/// One sidecar's resolved triples at a commit; empty when it is absent
+/// there, or when no extractor this binary knows wrote it (counted, warned
+/// once).
+fn resolve_sidecar_at(
+    reader: &mut SidecarReader,
+    commit: &str,
+    sidecar_path: &str,
+    ctx: &crate::nquad::ResolverContext,
+    one_graph: &str,
+    acct: &mut DropAccounting,
+    warned_unknown: &mut HashSet<String>,
+) -> Result<HashSet<String>, String> {
+    // Unknown extractor suffix: counted and warned, never silent (the
+    // BUG-4 contract). The diff-tree pathspec matches ALL
+    // `.lex/extract/**.spo`, so a sidecar from an extractor this binary
+    // doesn't know contributes nothing — that must be visible.
+    let Some(relpath_str) = derive_source_document(sidecar_path) else {
+        acct.unknown_suffix += 1;
+        if warned_unknown.insert(sidecar_path.to_string()) {
+            eprintln!(
+                "  one-graph: sidecar with unknown extractor suffix NOT walked: {sidecar_path} (known: {})",
+                SPO_EXTRACTOR_SUFFIXES.join(", ")
+            );
+        }
+        return Ok(HashSet::new());
+    };
+    let lines = reader.lines_at(commit, sidecar_path)?;
+    // ABSENT (or empty) sidecar = NO anchors (review-critical fix): the
+    // File rdf:type used to emit unconditionally even for the verified-
+    // empty set of a path absent at this commit — identical on both
+    // diff sides, so a file's anchor facts never diffed: a new file
+    // under-reported its events and a deletion never retracted its
+    // anchors. No sidecar lines, no facts of any kind.
+    if lines.is_empty() {
+        return Ok(HashSet::new());
+    }
+    resolve_sidecar_lines(&lines, sidecar_path, &relpath_str, ctx, one_graph, acct)
+}
+
+/// The walk's pending writes and running results.
+struct WalkState<'s> {
+    store: &'s oxigraph::store::Store,
+    one_graph: &'s str,
+    clear_first: bool,
+    batch_quads: usize,
+    nq_buffer: String,
+    // Quad lines waiting in `nq_buffer`; with `base_final.len()` it is the
+    // size of the next store write.
+    pending_quads: usize,
+    // Net base-layer effect per triple across this walk (last op wins).
+    base_final: HashMap<String, char>,
+    walk_file_ids: HashMap<String, HashMap<String, char>>,
+    blob_memo: HashMap<(git2::Oid, String), HashSet<String>>,
+    changed_subjects: HashSet<String>,
+    changed_statements: HashSet<String>,
+    events_seen: usize,
+    events_emitted: usize,
+}
+
+impl WalkState<'_> {
+    // Write what is pending and forget it. `walk_file_ids` and `blob_memo`
+        // go too: after the write the store's base layer answers for the first,
+        // and the second is a cache. A full rebuild re-materializes the whole
+        // now view, so it keeps no list of changed subjects.
+    fn write_batch(&mut self) -> Result<(), String> {
+        if !self.clear_first {
+            self.changed_subjects.extend(
+                self.base_final.keys().filter_map(|line| take_term(line).map(|(subject, _)| subject)),
+            );
+            self.changed_statements.extend(self.base_final.keys().cloned());
+        }
+        write_walk_batch(self.store, &mut self.nq_buffer, &mut self.base_final)?;
+        self.walk_file_ids.clear();
+        self.blob_memo.clear();
+        Ok(())
+    }
+
+    /// One event (`op` '+' assert, '-' retract) for `line` in commit `sha`,
+    /// writing a batch when the pending writes reach the batch size.
+    fn record_event(&mut self, line: &str, op: char, sha: &str) -> Result<(), String> {
+        self.events_seen += 1;
+        if let Some(quads) = onegraph_event(line, op, sha, self.one_graph) {
+            for q in quads { self.nq_buffer.push_str(&q); self.nq_buffer.push('\n'); self.pending_quads += 1; }
+            self.events_emitted += 1;
+            note_file_id(&mut self.walk_file_ids, line, op);
+            self.base_final.insert(line.to_string(), op);
+        }
+        if self.pending_quads + self.base_final.len() >= self.batch_quads {
+            self.write_batch()?;
+            self.pending_quads = 0;
+        }
+        Ok(())
+    }
+}
+
+/// The retract guard (#28): which of this commit's retract candidates an
+/// UNTOUCHED sidecar still asserts, reading only the documents that can.
+#[allow(clippy::too_many_arguments)]
+fn retracts_still_live<'a>(
+    retracts: &[&'a String],
+    touched_any: &HashSet<&str>,
+    c: &WalkCommit,
+    reader: &mut SidecarReader,
+    state: &mut WalkState,
+    ctx: &crate::nquad::ResolverContext,
+    file_id_pred: oxigraph::model::NamedNodeRef<'_>,
+    graph_node: &oxigraph::model::NamedNode,
+    guard_acct: &mut DropAccounting,
+) -> Result<HashSet<&'a String>, String> {
+    let store = state.store;
+    let one_graph = state.one_graph;
+    let mut still_live: HashSet<&'a String> = HashSet::new();
+    let mut docs: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    let mut subjects_seen: HashSet<String> = HashSet::new();
+    for cand in retracts {
+        let Some((subject, _)) = take_term(cand) else { continue };
+        if !subjects_seen.insert(subject.clone()) {
+            continue;
+        }
+        let iri = subject.trim_start_matches('<').trim_end_matches('>');
+        if let Some(doc) = file_iri_document(iri) {
+            docs.insert(doc);
+        }
+        let mut files: HashMap<String, char> = HashMap::new();
+        if let Ok(s_node) = oxigraph::model::NamedNodeRef::new(iri) {
+            for q in store.quads_for_pattern(
+                Some(s_node.into()),
+                Some(file_id_pred),
+                None,
+                Some(graph_node.as_ref().into()),
+            ) {
+                let q = q.map_err(|e| format!("fileId lookup failed: {e}"))?;
+                files.insert(q.object.to_string(), '+');
+            }
+        }
+        if let Some(changed) = state.walk_file_ids.get(&subject) {
+            for (f, op) in changed {
+                files.insert(f.clone(), *op);
+            }
+        }
+        for (f, op) in files {
+            if op == '+'
+                && let Some(doc) = file_iri_document(f.trim_start_matches('<').trim_end_matches('>'))
+            {
+                docs.insert(doc);
+            }
+        }
+    }
+    'scan: for doc in &docs {
+        for suffix in SPO_EXTRACTOR_SUFFIXES {
+            let path = format!(".lex/extract/{doc}.{suffix}.spo");
+            if touched_any.contains(path.as_str()) {
+                continue;
+            }
+            let Some(oid) = reader.blob_at(&c.sha, &path)? else { continue };
+            let key = (oid, path.clone());
+            if !state.blob_memo.contains_key(&key) {
+                let lines = reader.blob_lines(oid)?;
+                let triples = if lines.is_empty() {
+                    HashSet::new()
+                } else {
+                    resolve_sidecar_lines(&lines, &path, doc, ctx, one_graph, guard_acct)?
+                };
+                state.blob_memo.insert(key.clone(), triples);
+            }
+            let set = &state.blob_memo[&key];
+            for cand in retracts {
+                if set.contains(*cand) {
+                    still_live.insert(*cand);
+                    if still_live.len() == retracts.len() {
+                        break 'scan; // every candidate accounted for
+                    }
+                }
+            }
+        }
+    }
+    Ok(still_live)
+}
 /// What one walk did: the summary counts, and every subject whose
 /// base-layer (current-state) facts it changed.
 pub struct WalkOutcome {
