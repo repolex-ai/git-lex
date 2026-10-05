@@ -272,11 +272,70 @@ fn generate_shapes_from_store(
     namespace: &str,
     source_label: &str,
 ) -> Option<String> {
-    // Helper: extract local name from full IRI
-    let local_name = |iri: &str| -> String {
-        iri.rsplit('/').next().unwrap_or(iri).to_string()
+    let classes = query_classes(store, namespace);
+    let f = OntologyFacts {
+        properties: query_properties(store),
+        enum_values: query_enum_values(store),
+        required_props: query_required_props(store),
+        qualified: query_qualified(store),
+        bounded_datatypes: query_bounded_datatypes(store),
     };
+    let sp = Spellings { equivalents: query_equivalents(store), prefix_name, namespace };
 
+    // Build the SHACL Turtle output
+    let mut shacl = String::new();
+    shacl.push_str("@prefix sh:    <http://www.w3.org/ns/shacl#> .\n");
+    shacl.push_str(&format!("@prefix {}: <{}> .\n", prefix_name, namespace));
+    shacl.push_str("@prefix xsd:   <http://www.w3.org/2001/XMLSchema#> .\n");
+    shacl.push_str("@prefix rdfs:  <http://www.w3.org/2000/01/rdf-schema#> .\n\n");
+    shacl.push_str(&format!("# Auto-generated SHACL shapes from {} ontology.\n", source_label));
+    shacl.push_str("# Do not hand-edit — regenerate with: git lex kit-update\n\n");
+
+    for class_iri in &classes {
+        write_class_shape(&mut shacl, store, class_iri, &f, &sp);
+    }
+
+    Some(shacl)
+}
+
+/// The local name of an IRI: its last path segment.
+fn local_name(iri: &str) -> String {
+    iri.rsplit('/').next().unwrap_or(iri).to_string()
+}
+
+struct PropInfo {
+    iri: String,
+    is_object_prop: bool,
+    domain: String,
+    range: String,
+    comment: String,
+}
+
+/// What the shapes are built from, read out of the loaded ontologies.
+struct OntologyFacts {
+    properties: Vec<PropInfo>,
+    enum_values: HashMap<String, Vec<String>>,
+    required_props: HashSet<(String, String)>,
+    qualified: Vec<QualRestriction>,
+    bounded_datatypes: HashMap<String, BoundedDatatype>,
+}
+
+struct QualRestriction {
+    class_iri: String,
+    prop_iri: String,
+    on_class: String,
+    min: u32,
+    exact: bool,
+}
+
+struct BoundedDatatype {
+    base: String,
+    // (facet local name, lexical value)
+    facets: Vec<(String, String)>,
+}
+
+/// The ontology's classes in the kit's namespace, deprecated ones left out.
+fn query_classes(store: &oxigraph::store::Store, namespace: &str) -> Vec<String> {
     // Query 1: Find all non-deprecated classes
     let classes: Vec<String> = {
         let q = "PREFIX owl: <http://www.w3.org/2002/07/owl#>
@@ -296,15 +355,12 @@ fn generate_shapes_from_store(
             _ => Vec::new(),
         }
     };
+    classes
+}
 
+/// Every non-deprecated property with a domain: type, range and comment.
+fn query_properties(store: &oxigraph::store::Store) -> Vec<PropInfo> {
     // Query 2: Find properties with domains, types, ranges, and comments (excluding deprecated)
-    struct PropInfo {
-        iri: String,
-        is_object_prop: bool,
-        domain: String,
-        range: String,
-        comment: String,
-    }
     let properties: Vec<PropInfo> = {
         let q = "PREFIX owl: <http://www.w3.org/2002/07/owl#>
                  PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>
@@ -338,7 +394,11 @@ fn generate_shapes_from_store(
             _ => Vec::new(),
         }
     };
+    properties
+}
 
+/// Enumerated datatypes and their allowed values.
+fn query_enum_values(store: &oxigraph::store::Store) -> HashMap<String, Vec<String>> {
     // Query 3: Find enum values (rdfs:Datatype with owl:oneOf)
     let mut enum_values: HashMap<String, Vec<String>> = HashMap::new();
     {
@@ -366,7 +426,11 @@ fn generate_shapes_from_store(
             }
         }
     }
+    enum_values
+}
 
+/// (class, property) pairs a cardinality restriction makes required.
+fn query_required_props(store: &oxigraph::store::Store) -> HashSet<(String, String)> {
     // Query 4: Find required fields (owl:Restriction with minCardinality or cardinality)
     let mut required_props: HashSet<(String, String)> = HashSet::new(); // (class_iri, prop_iri)
     {
@@ -397,7 +461,11 @@ fn generate_shapes_from_store(
             }
         }
     }
+    required_props
+}
 
+/// Qualified cardinality restrictions (owl:onClass).
+fn query_qualified(store: &oxigraph::store::Store) -> Vec<QualRestriction> {
     // Query 4b: QUALIFIED cardinality — "at least/exactly N of this property's
     // values are of class K". Standard OWL 2 (owl:onClass +
     // owl:minQualifiedCardinality / owl:qualifiedCardinality), sitting on the
@@ -410,13 +478,6 @@ fn generate_shapes_from_store(
     // NO ENFORCEMENT. A class that declares nothing about relatedToId gets no
     // shape emitted for it and anything may go in. Silence in the ontology is
     // permission, not prohibition.
-    struct QualRestriction {
-        class_iri: String,
-        prop_iri: String,
-        on_class: String,
-        min: u32,
-        exact: bool,
-    }
     let mut qualified: Vec<QualRestriction> = Vec::new();
     {
         let q = "PREFIX owl: <http://www.w3.org/2002/07/owl#>
@@ -451,7 +512,11 @@ fn generate_shapes_from_store(
             }
         }
     }
+    qualified
+}
 
+/// Bounded custom datatypes: base type and facets.
+fn query_bounded_datatypes(store: &oxigraph::store::Store) -> HashMap<String, BoundedDatatype> {
     // Query 5: Find BOUNDED custom datatypes — `rdfs:Datatype` declared with
     // `owl:onDatatype` (the base type) plus `owl:withRestrictions` (an RDF list
     // of facet nodes, e.g. `[ xsd:minInclusive 1 ]`). This is the formally
@@ -460,11 +525,6 @@ fn generate_shapes_from_store(
     // datatype — because the emitter only recognized bare xsd types. Declaring
     // the MORE precise type therefore left the data LESS protected than plain
     // xsd:integer, silently (tr1p, copia LookScoreValue, 2026-08-11).
-    struct BoundedDatatype {
-        base: String,
-        // (facet local name, lexical value)
-        facets: Vec<(String, String)>,
-    }
     let mut bounded_datatypes: HashMap<String, BoundedDatatype> = HashMap::new();
     {
         let q = "PREFIX owl: <http://www.w3.org/2002/07/owl#>
@@ -507,7 +567,11 @@ fn generate_shapes_from_store(
             }
         }
     }
+    bounded_datatypes
+}
 
+/// Each property's owl:equivalentProperty closure.
+fn query_equivalents(store: &oxigraph::store::Store) -> HashMap<String, Vec<String>> {
     // Query 6: owl:equivalentProperty — ONE property under several spellings.
     //
     // subtexture.ttl requires exactly one subtexture:id on every Thing and
@@ -550,325 +614,373 @@ fn generate_shapes_from_store(
         }
         closure
     };
+    equivalents
+}
+
+/// Every spelling of a property under owl:equivalentProperty, and how a
+/// shape writes it.
+struct Spellings<'a> {
+    equivalents: HashMap<String, Vec<String>>,
+    prefix_name: &'a str,
+    namespace: &'a str,
+}
+
+impl Spellings<'_> {
     // Every spelling of `iri`, the given one FIRST and the rest sorted. The
     // first member is what the readers of a shape treat as the property's
     // written IRI (ontology.rs), so the spelling a class declares for itself
     // — pan:id on pan:Node — stays the one its documents and graph carry.
-    let spellings = |iri: &str| -> Vec<String> {
+    fn spellings(&self, iri: &str) -> Vec<String> {
         let mut out = vec![iri.to_string()];
-        if let Some(members) = equivalents.get(iri) {
+        if let Some(members) = self.equivalents.get(iri) {
             out.extend(members.iter().filter(|m| m.as_str() != iri).cloned());
         }
         out
-    };
-    let is_spelling_of = |iri: &str, other: &str| -> bool {
-        iri == other || equivalents.get(iri).is_some_and(|m| m.iter().any(|x| x == other))
-    };
+    }
+
+    fn is_spelling_of(&self, iri: &str, other: &str) -> bool {
+        iri == other || self.equivalents.get(iri).is_some_and(|m| m.iter().any(|x| x == other))
+    }
+
     // `sh:path` for a property: plain when it has one spelling, a standard
     // SHACL alternative path over every spelling when it has several, so
     // min/max counts are evaluated over the union.
-    let fmt_iri = |iri: &str| -> String {
-        match iri.strip_prefix(namespace) {
-            Some(local) => format!("{}:{}", prefix_name, local),
+    fn fmt_iri(&self, iri: &str) -> String {
+        match iri.strip_prefix(self.namespace) {
+            Some(local) => format!("{}:{}", self.prefix_name, local),
             None => format!("<{}>", iri),
         }
-    };
-    let path_line = |iri: &str| -> String {
-        let members = spellings(iri);
+    }
+
+    fn path_line(&self, iri: &str) -> String {
+        let members = self.spellings(iri);
         if members.len() == 1 {
-            format!("        sh:path {} ;\n", fmt_iri(iri))
+            format!("        sh:path {} ;\n", self.fmt_iri(iri))
         } else {
-            let list: Vec<String> = members.iter().map(|m| fmt_iri(m)).collect();
+            let list: Vec<String> = members.iter().map(|m| self.fmt_iri(m)).collect();
             format!("        sh:path [ sh:alternativePath ( {} ) ] ;\n", list.join(" "))
         }
-    };
+    }
+}
 
-    // Build the SHACL Turtle output
-    let mut shacl = String::new();
-    shacl.push_str("@prefix sh:    <http://www.w3.org/ns/shacl#> .\n");
-    shacl.push_str(&format!("@prefix {}: <{}> .\n", prefix_name, namespace));
-    shacl.push_str("@prefix xsd:   <http://www.w3.org/2001/XMLSchema#> .\n");
-    shacl.push_str("@prefix rdfs:  <http://www.w3.org/2000/01/rdf-schema#> .\n\n");
-    shacl.push_str(&format!("# Auto-generated SHACL shapes from {} ontology.\n", source_label));
-    shacl.push_str("# Do not hand-edit — regenerate with: git lex kit-update\n\n");
+/// One class's node shape: its own and inherited properties, then its
+/// qualified restrictions.
+fn write_class_shape(
+    shacl: &mut String,
+    store: &oxigraph::store::Store,
+    class_iri: &String,
+    f: &OntologyFacts,
+    sp: &Spellings,
+) {
+    let class_name = local_name(class_iri);
+    let shape_name = format!("{}Shape", class_name);
 
-    for class_iri in &classes {
-        let class_name = local_name(class_iri);
-        let shape_name = format!("{}Shape", class_name);
+    shacl.push_str(&format!("\n# --- {} ---\n\n", class_name));
+    shacl.push_str(&format!("{}:{} a sh:NodeShape ;\n", sp.prefix_name, shape_name));
+    shacl.push_str(&format!("    sh:targetClass {}:{}", sp.prefix_name, class_name));
 
-        shacl.push_str(&format!("\n# --- {} ---\n\n", class_name));
-        shacl.push_str(&format!("{}:{} a sh:NodeShape ;\n", prefix_name, shape_name));
-        shacl.push_str(&format!("    sh:targetClass {}:{}", prefix_name, class_name));
-
-        // Properties of this class AND of every class it inherits from
-        // (#104). This used to be an exact IRI match on the domain, so a
-        // property declared on a parent reached no child at all.
-        //
-        // Not theoretical and not new: copia:Group is an abstract parent
-        // declaring groupTitle, groupDepictedBy and fromNocturneId, and its
-        // subclasses copia:Set and copia:Sequence received none of them —
-        // shipped, unnoticed only because nobody authors a Group. The
-        // git-lex:Thing properties are simply the first case where it had to
-        // work.
-        //
-        // Own properties first, then inherited, so the generated shape reads
-        // in the order the author thinks in. A child re-declaring a parent's
-        // property wins, because its own domain already placed it.
-        //
-        // One shape per PROPERTY, not per spelling: pan:id (own), git-lex:id
-        // and subtexture:id (inherited) are one property under Query 6, and
-        // the first spelling seen — the class's own — represents it.
-        let ancestors = ancestor_chain(store, class_iri);
-        let mut class_props: Vec<&PropInfo> = Vec::new();
-        for p in properties.iter().filter(|p| p.domain == *class_iri) {
-            if !class_props.iter().any(|existing| is_spelling_of(&existing.iri, &p.iri)) {
+    // Properties of this class AND of every class it inherits from
+    // (#104). This used to be an exact IRI match on the domain, so a
+    // property declared on a parent reached no child at all.
+    //
+    // Not theoretical and not new: copia:Group is an abstract parent
+    // declaring groupTitle, groupDepictedBy and fromNocturneId, and its
+    // subclasses copia:Set and copia:Sequence received none of them —
+    // shipped, unnoticed only because nobody authors a Group. The
+    // git-lex:Thing properties are simply the first case where it had to
+    // work.
+    //
+    // Own properties first, then inherited, so the generated shape reads
+    // in the order the author thinks in. A child re-declaring a parent's
+    // property wins, because its own domain already placed it.
+    //
+    // One shape per PROPERTY, not per spelling: pan:id (own), git-lex:id
+    // and subtexture:id (inherited) are one property under Query 6, and
+    // the first spelling seen — the class's own — represents it.
+    let ancestors = ancestor_chain(store, class_iri);
+    let mut class_props: Vec<&PropInfo> = Vec::new();
+    for p in f.properties.iter().filter(|p| p.domain == *class_iri) {
+        if !class_props.iter().any(|existing| sp.is_spelling_of(&existing.iri, &p.iri)) {
+            class_props.push(p);
+        }
+    }
+    for ancestor in &ancestors {
+        for p in f.properties.iter().filter(|p| p.domain == *ancestor) {
+            if !class_props.iter().any(|existing| sp.is_spelling_of(&existing.iri, &p.iri)) {
                 class_props.push(p);
-            }
-        }
-        for ancestor in &ancestors {
-            for p in properties.iter().filter(|p| p.domain == *ancestor) {
-                if !class_props.iter().any(|existing| is_spelling_of(&existing.iri, &p.iri)) {
-                    class_props.push(p);
-                }
-            }
-        }
-
-        // Qualified restrictions for this class OR any ancestor — a parent
-        // that declares "at least one Place" constrains its children too, the
-        // same inheritance Query 4's required-ness already follows.
-        let class_quals: Vec<&QualRestriction> = qualified.iter()
-            .filter(|q| q.class_iri == *class_iri || ancestors.contains(&q.class_iri))
-            .collect();
-
-        if class_props.is_empty() && class_quals.is_empty() {
-            shacl.push_str(" .\n");
-            continue;
-        }
-
-        for (i, prop) in class_props.iter().enumerate() {
-            let prop_name = local_name(&prop.iri);
-            // The class no longer necessarily ends at the last PROPERTY —
-            // qualified blocks may follow it.
-            let is_last = i == class_props.len() - 1 && class_quals.is_empty();
-            // A required-ness restriction can sit on the class OR on any
-            // ancestor — an inherited property that a parent declares required
-            // is required here too (#104).
-            // A restriction under ANY spelling of the property counts: the
-            // "exactly one subtexture:id" on subtexture:Thing requires pan:id
-            // on pan:Node.
-            let members = spellings(&prop.iri);
-            let is_required = members.iter().any(|m| {
-                required_props.contains(&(class_iri.clone(), m.clone()))
-                    || ancestors.iter().any(|a| required_props.contains(&(a.clone(), m.clone())))
-            });
-            // Type and range come from whichever spelling declares them: the
-            // class's own spelling first, then the others in closure order.
-            let declared_range = if !prop.range.is_empty() {
-                prop.range.clone()
-            } else {
-                members.iter()
-                    .find_map(|m| properties.iter().find(|q| q.iri == *m && !q.range.is_empty()))
-                    .map(|q| q.range.clone())
-                    .unwrap_or_default()
-            };
-            let is_object_prop = prop.is_object_prop
-                || members.iter().any(|m| properties.iter().any(|q| q.iri == *m && q.is_object_prop));
-
-            shacl.push_str(" ;\n    sh:property [\n");
-            // An INHERITED property usually lives in another kit's namespace
-            // (git-lex:title on a soul class), where the local prefix would
-            // name a different IRI entirely. Full bracketed IRI in that case —
-            // always valid Turtle, and parse_shacl_hints already handles the
-            // bracketed form. Several spellings become one alternative path.
-            shacl.push_str(&path_line(&prop.iri));
-
-            if !prop.comment.is_empty() {
-                let escaped = prop.comment.replace('\\', "\\\\").replace('"', "\\\"");
-                shacl.push_str(&format!("        rdfs:comment \"{}\" ;\n", escaped));
-            }
-
-            if is_object_prop {
-                shacl.push_str("        sh:nodeKind sh:IRI ;\n");
-                let msg = format!("{} must be an IRI reference.", prop_name);
-                shacl.push_str(&format!("        sh:message \"{}\" ;\n", msg));
-            } else if let Some(values) = enum_values.get(&declared_range) {
-                let quoted: Vec<String> = values.iter().map(|v| format!("\"{}\"", v)).collect();
-                shacl.push_str(&format!("        sh:in ( {} ) ;\n", quoted.join(" ")));
-                let msg = format!("{} must be {}.",
-                    prop_name,
-                    values.iter().map(|v| format!("'{}'", v)).collect::<Vec<_>>().join(", "));
-                shacl.push_str(&format!("        sh:message \"{}\" ;\n", msg));
-            } else if let Some(bounded) = bounded_datatypes.get(&declared_range) {
-                // A bounded custom datatype: emit the base type AND the bounds.
-                let xsd_prefix = "http://www.w3.org/2001/XMLSchema#";
-                let base_local = if bounded.base.starts_with(xsd_prefix) {
-                    let t = &bounded.base[xsd_prefix.len()..];
-                    shacl.push_str(&format!("        sh:datatype xsd:{} ;\n", t));
-                    t.to_string()
-                } else {
-                    // A base we cannot express as an xsd type. Say so — a
-                    // constraint we silently dropped is the whole defect class.
-                    eprintln!(
-                        "warning: {} declares owl:onDatatype <{}>, which is not an XSD type — \
-no sh:datatype emitted for properties ranged at it. Range them at an XSD base type, \
-or the values save ungoverned.",
-                        local_name(&declared_range), bounded.base
-                    );
-                    String::new()
-                };
-
-                let mut described: Vec<String> = Vec::new();
-                for (facet, value) in &bounded.facets {
-                    // XSD facet -> SHACL constraint. Numeric facets take a bare
-                    // literal; pattern takes a quoted string.
-                    let emitted = match facet.as_str() {
-                        "minInclusive" => Some(("sh:minInclusive", true, format!("at least {}", value))),
-                        "maxInclusive" => Some(("sh:maxInclusive", true, format!("at most {}", value))),
-                        "minExclusive" => Some(("sh:minExclusive", true, format!("greater than {}", value))),
-                        "maxExclusive" => Some(("sh:maxExclusive", true, format!("less than {}", value))),
-                        "minLength"    => Some(("sh:minLength",    true, format!("at least {} characters", value))),
-                        "maxLength"    => Some(("sh:maxLength",    true, format!("at most {} characters", value))),
-                        "pattern"      => Some(("sh:pattern",      false, format!("matching {}", value))),
-                        _ => None,
-                    };
-                    match emitted {
-                        Some((sh_name, bare, description)) => {
-                            if bare {
-                                shacl.push_str(&format!("        {} {} ;\n", sh_name, value));
-                            } else {
-                                let esc = value.replace('\\', "\\\\").replace('"', "\\\"");
-                                shacl.push_str(&format!("        {} \"{}\" ;\n", sh_name, esc));
-                            }
-                            described.push(description);
-                        }
-                        None => {
-                            // NOT silently skipped — an untranslated facet is a
-                            // bound the author declared and the data will not carry.
-                            eprintln!(
-                                "warning: {} declares the XSD facet '{}' ({}), which git-lex does not \
-translate to a SHACL constraint — that bound is NOT enforced. Report it so the \
-generator learns it, or express the bound with a facet git-lex knows \
-(minInclusive, maxInclusive, minExclusive, maxExclusive, minLength, maxLength, pattern).",
-                                local_name(&declared_range), facet, value
-                            );
-                        }
-                    }
-                }
-
-                let msg = if described.is_empty() {
-                    format!("Expected datatype: xsd:{}.", base_local)
-                } else if base_local.is_empty() {
-                    format!("{} must be {}.", prop_name, described.join(", "))
-                } else {
-                    format!("{} must be an xsd:{} {}.", prop_name, base_local, described.join(", "))
-                };
-                shacl.push_str(&format!("        sh:message \"{}\" ;\n", msg));
-            } else {
-                let xsd_prefix = "http://www.w3.org/2001/XMLSchema#";
-                if declared_range.starts_with(xsd_prefix) && declared_range != format!("{}string", xsd_prefix) {
-                    let xsd_type = &declared_range[xsd_prefix.len()..];
-                    shacl.push_str(&format!("        sh:datatype xsd:{} ;\n", xsd_type));
-                    let msg = format!("Expected datatype: xsd:{}.", xsd_type);
-                    shacl.push_str(&format!("        sh:message \"{}\" ;\n", msg));
-                }
-            }
-
-            if is_required {
-                shacl.push_str("        sh:minCount 1 ;\n");
-            }
-
-            if is_last {
-                shacl.push_str("    ] .\n");
-            } else {
-                shacl.push_str("    ]");
-            }
-        }
-
-        // QUALIFIED BLOCKS. One sh:property per restriction, in the form
-        // proved by `probe_pattern_inside_qualified_value_shape`.
-        //
-        // The pattern is DERIVED from owl:onClass's local name — the author
-        // declares semantics ("at least one Place") and never writes a regex.
-        //
-        // WHY A PATTERN AND NOT sh:class: the save gate builds a fresh graph
-        // per DOCUMENT, so a referenced Thing's rdf:type is never present and
-        // sh:class would fail every document on every save (probed:
-        // `probe_qualified_value_shape_capability`). The pattern reads the
-        // class out of the IRI path instead and resolves nothing.
-        //
-        // THE FLIP CONDITION, named so the upgrade is an edit and not a
-        // rediscovery: the day validation builds ONE graph over MORE THAN ONE
-        // document, swap the sh:pattern line for `sh:class <onClass>`. That is
-        // strictly better — it checks what a thing IS rather than what its
-        // name looks like — and needs no ontology change.
-        //
-        // LOAD-BEARING DEPENDENCY (@tr1p's words, kept deliberately): this
-        // reads the CLASS OUT OF THE IRI PATH, sound only because instance
-        // IRIs are <namespace/Class/id> by the naming law Rob ruled
-        // 2026-07-16. It does NOT resolve the target node. If that law ever
-        // softens, this check silently weakens and nothing here will say so.
-        for (i, qr) in class_quals.iter().enumerate() {
-            let is_last = i == class_quals.len() - 1;
-            let on_local = local_name(&qr.on_class);
-            shacl.push_str(" ;\n    sh:property [\n");
-            shacl.push_str(&path_line(&qr.prop_iri));
-            // NO sh:nodeKind here — and CORRECTING WHAT I FIRST WROTE HERE,
-            // which was wrong and which I had already told @tr1p (2026-08-27).
-            //
-            // I claimed the baseline nodeKind shape closes the broken-reference
-            // hole. It does not, and for relatedToId it cannot, because NO
-            // VALUE OF relatedToId CAN EVER BE A LITERAL. Measured, both ways:
-            //
-            //   path form   `Soul/Note/x.md`        -> REFUSED outright ("has no
-            //                                          angle brackets ... Paths
-            //                                          do not resolve to Things")
-            //   bracket form `<soul/Note/nope-xyz>` -> CONSTRUCTED into a
-            //                                          syntactically perfect IRI
-            //                                          with NO existence check
-            //
-            // The bracket form resolves by PATTERN against the one root, never
-            // by lookup, so it always succeeds. sh:nodeKind sh:IRI on this path
-            // is therefore a check that cannot fail: real, and vacuous. What is
-            // missing from a dangling reference is the REFERENT, not the form.
-            //
-            // KNOWN GAP, measured by @nug3 and @tr1p and confirmed here: a
-            // dangling <copia/Place/typo> still matches "/Place/" and still
-            // SATISFIES a qualified restriction. Until existence checking
-            // exists, these shapes guarantee the SHAPE of a reference list, not
-            // that the things in it are real. Pinned by
-            // `dangling_reference_satisfies_a_qualified_shape` so the gap lives
-            // in the test suite rather than in a chat log.
-            //
-            // Existence checking cannot run at the save gate today for the same
-            // reason sh:class cannot: the graph holds one document. It arrives
-            // with the same flip.
-            shacl.push_str("        sh:qualifiedValueShape [ sh:pattern \"/");
-            shacl.push_str(&on_local);
-            shacl.push_str("/\" ] ;\n");
-            shacl.push_str(&format!("        sh:qualifiedMinCount {} ;\n", qr.min));
-            if qr.exact {
-                shacl.push_str(&format!("        sh:qualifiedMaxCount {} ;\n", qr.min));
-            }
-            let how_many = if qr.exact {
-                format!("exactly {}", qr.min)
-            } else if qr.min == 1 {
-                "at least one".to_string()
-            } else {
-                format!("at least {}", qr.min)
-            };
-            shacl.push_str(&format!(
-                "        sh:message \"{} must reference {} {} — <.../{}/&lt;id&gt;>.\" ;\n",
-                local_name(class_iri), how_many, on_local, on_local
-            ));
-            if is_last {
-                shacl.push_str("    ] .\n");
-            } else {
-                shacl.push_str("    ]");
             }
         }
     }
 
-    Some(shacl)
+    // Qualified restrictions for this class OR any ancestor — a parent
+    // that declares "at least one Place" constrains its children too, the
+    // same inheritance Query 4's required-ness already follows.
+    let class_quals: Vec<&QualRestriction> = f.qualified.iter()
+        .filter(|q| q.class_iri == *class_iri || ancestors.contains(&q.class_iri))
+        .collect();
+
+    if class_props.is_empty() && class_quals.is_empty() {
+        shacl.push_str(" .\n");
+        return;
+    }
+
+    for (i, prop) in class_props.iter().enumerate() {
+        // The class no longer necessarily ends at the last PROPERTY —
+        // qualified blocks may follow it.
+        let is_last = i == class_props.len() - 1 && class_quals.is_empty();
+        write_property_shape(shacl, class_iri, prop, is_last, &ancestors, f, sp);
+    }
+
+    // QUALIFIED BLOCKS. One sh:property per restriction, in the form
+    // proved by `probe_pattern_inside_qualified_value_shape`.
+    //
+    // The pattern is DERIVED from owl:onClass's local name — the author
+    // declares semantics ("at least one Place") and never writes a regex.
+    //
+    // WHY A PATTERN AND NOT sh:class: the save gate builds a fresh graph
+    // per DOCUMENT, so a referenced Thing's rdf:type is never present and
+    // sh:class would fail every document on every save (probed:
+    // `probe_qualified_value_shape_capability`). The pattern reads the
+    // class out of the IRI path instead and resolves nothing.
+    //
+    // THE FLIP CONDITION, named so the upgrade is an edit and not a
+    // rediscovery: the day validation builds ONE graph over MORE THAN ONE
+    // document, swap the sh:pattern line for `sh:class <onClass>`. That is
+    // strictly better — it checks what a thing IS rather than what its
+    // name looks like — and needs no ontology change.
+    //
+    // LOAD-BEARING DEPENDENCY (@tr1p's words, kept deliberately): this
+    // reads the CLASS OUT OF THE IRI PATH, sound only because instance
+    // IRIs are <namespace/Class/id> by the naming law Rob ruled
+    // 2026-07-16. It does NOT resolve the target node. If that law ever
+    // softens, this check silently weakens and nothing here will say so.
+    for (i, qr) in class_quals.iter().enumerate() {
+        let is_last = i == class_quals.len() - 1;
+        write_qualified_shape(shacl, class_iri, qr, is_last, sp);
+    }
+}
+
+/// One property's `sh:property` block within a class shape.
+fn write_property_shape(
+    shacl: &mut String,
+    class_iri: &str,
+    prop: &PropInfo,
+    is_last: bool,
+    ancestors: &[String],
+    f: &OntologyFacts,
+    sp: &Spellings,
+) {
+    let prop_name = local_name(&prop.iri);
+    // A required-ness restriction can sit on the class OR on any
+    // ancestor — an inherited property that a parent declares required
+    // is required here too (#104).
+    // A restriction under ANY spelling of the property counts: the
+    // "exactly one subtexture:id" on subtexture:Thing requires pan:id
+    // on pan:Node.
+    let members = sp.spellings(&prop.iri);
+    let is_required = members.iter().any(|m| {
+        f.required_props.contains(&(class_iri.to_string(), m.clone()))
+            || ancestors.iter().any(|a| f.required_props.contains(&(a.clone(), m.clone())))
+    });
+    // Type and range come from whichever spelling declares them: the
+    // class's own spelling first, then the others in closure order.
+    let declared_range = if !prop.range.is_empty() {
+        prop.range.clone()
+    } else {
+        members.iter()
+            .find_map(|m| f.properties.iter().find(|q| q.iri == *m && !q.range.is_empty()))
+            .map(|q| q.range.clone())
+            .unwrap_or_default()
+    };
+    let is_object_prop = prop.is_object_prop
+        || members.iter().any(|m| f.properties.iter().any(|q| q.iri == *m && q.is_object_prop));
+
+    shacl.push_str(" ;\n    sh:property [\n");
+    // An INHERITED property usually lives in another kit's namespace
+    // (git-lex:title on a soul class), where the local prefix would
+    // name a different IRI entirely. Full bracketed IRI in that case —
+    // always valid Turtle, and parse_shacl_hints already handles the
+    // bracketed form. Several spellings become one alternative path.
+    shacl.push_str(&sp.path_line(&prop.iri));
+
+    if !prop.comment.is_empty() {
+        let escaped = prop.comment.replace('\\', "\\\\").replace('"', "\\\"");
+        shacl.push_str(&format!("        rdfs:comment \"{}\" ;\n", escaped));
+    }
+
+    write_value_constraint(shacl, &prop_name, &declared_range, is_object_prop, f);
+
+    if is_required {
+        shacl.push_str("        sh:minCount 1 ;\n");
+    }
+
+    if is_last {
+        shacl.push_str("    ] .\n");
+    } else {
+        shacl.push_str("    ]");
+    }
+}
+
+/// The value constraint for one property: IRI node kind, enumeration,
+/// bounded datatype, or plain XSD datatype.
+fn write_value_constraint(
+    shacl: &mut String,
+    prop_name: &str,
+    declared_range: &str,
+    is_object_prop: bool,
+    f: &OntologyFacts,
+) {
+    if is_object_prop {
+        shacl.push_str("        sh:nodeKind sh:IRI ;\n");
+        let msg = format!("{} must be an IRI reference.", prop_name);
+        shacl.push_str(&format!("        sh:message \"{}\" ;\n", msg));
+    } else if let Some(values) = f.enum_values.get(declared_range) {
+        let quoted: Vec<String> = values.iter().map(|v| format!("\"{}\"", v)).collect();
+        shacl.push_str(&format!("        sh:in ( {} ) ;\n", quoted.join(" ")));
+        let msg = format!("{} must be {}.",
+            prop_name,
+            values.iter().map(|v| format!("'{}'", v)).collect::<Vec<_>>().join(", "));
+        shacl.push_str(&format!("        sh:message \"{}\" ;\n", msg));
+    } else if let Some(bounded) = f.bounded_datatypes.get(declared_range) {
+        // A bounded custom datatype: emit the base type AND the bounds.
+        let xsd_prefix = "http://www.w3.org/2001/XMLSchema#";
+        let base_local = if bounded.base.starts_with(xsd_prefix) {
+            let t = &bounded.base[xsd_prefix.len()..];
+            shacl.push_str(&format!("        sh:datatype xsd:{} ;\n", t));
+            t.to_string()
+        } else {
+            // A base we cannot express as an xsd type. Say so — a
+            // constraint we silently dropped is the whole defect class.
+            eprintln!(
+                "warning: {} declares owl:onDatatype <{}>, which is not an XSD type — \
+no sh:datatype emitted for properties ranged at it. Range them at an XSD base type, \
+or the values save ungoverned.",
+                local_name(declared_range), bounded.base
+            );
+            String::new()
+        };
+
+        let mut described: Vec<String> = Vec::new();
+        for (facet, value) in &bounded.facets {
+            // XSD facet -> SHACL constraint. Numeric facets take a bare
+            // literal; pattern takes a quoted string.
+            let emitted = match facet.as_str() {
+                "minInclusive" => Some(("sh:minInclusive", true, format!("at least {}", value))),
+                "maxInclusive" => Some(("sh:maxInclusive", true, format!("at most {}", value))),
+                "minExclusive" => Some(("sh:minExclusive", true, format!("greater than {}", value))),
+                "maxExclusive" => Some(("sh:maxExclusive", true, format!("less than {}", value))),
+                "minLength"    => Some(("sh:minLength",    true, format!("at least {} characters", value))),
+                "maxLength"    => Some(("sh:maxLength",    true, format!("at most {} characters", value))),
+                "pattern"      => Some(("sh:pattern",      false, format!("matching {}", value))),
+                _ => None,
+            };
+            match emitted {
+                Some((sh_name, bare, description)) => {
+                    if bare {
+                        shacl.push_str(&format!("        {} {} ;\n", sh_name, value));
+                    } else {
+                        let esc = value.replace('\\', "\\\\").replace('"', "\\\"");
+                        shacl.push_str(&format!("        {} \"{}\" ;\n", sh_name, esc));
+                    }
+                    described.push(description);
+                }
+                None => {
+                    // NOT silently skipped — an untranslated facet is a
+                    // bound the author declared and the data will not carry.
+                    eprintln!(
+                        "warning: {} declares the XSD facet '{}' ({}), which git-lex does not \
+translate to a SHACL constraint — that bound is NOT enforced. Report it so the \
+generator learns it, or express the bound with a facet git-lex knows \
+(minInclusive, maxInclusive, minExclusive, maxExclusive, minLength, maxLength, pattern).",
+                        local_name(declared_range), facet, value
+                    );
+                }
+            }
+        }
+
+        let msg = if described.is_empty() {
+            format!("Expected datatype: xsd:{}.", base_local)
+        } else if base_local.is_empty() {
+            format!("{} must be {}.", prop_name, described.join(", "))
+        } else {
+            format!("{} must be an xsd:{} {}.", prop_name, base_local, described.join(", "))
+        };
+        shacl.push_str(&format!("        sh:message \"{}\" ;\n", msg));
+    } else {
+        let xsd_prefix = "http://www.w3.org/2001/XMLSchema#";
+        if declared_range.starts_with(xsd_prefix) && declared_range != format!("{}string", xsd_prefix) {
+            let xsd_type = &declared_range[xsd_prefix.len()..];
+            shacl.push_str(&format!("        sh:datatype xsd:{} ;\n", xsd_type));
+            let msg = format!("Expected datatype: xsd:{}.", xsd_type);
+            shacl.push_str(&format!("        sh:message \"{}\" ;\n", msg));
+        }
+    }
+}
+
+/// One qualified restriction's `sh:property` block within a class shape.
+fn write_qualified_shape(
+    shacl: &mut String,
+    class_iri: &str,
+    qr: &QualRestriction,
+    is_last: bool,
+    sp: &Spellings,
+) {
+    let on_local = local_name(&qr.on_class);
+    shacl.push_str(" ;\n    sh:property [\n");
+    shacl.push_str(&sp.path_line(&qr.prop_iri));
+    // NO sh:nodeKind here — and CORRECTING WHAT I FIRST WROTE HERE,
+    // which was wrong and which I had already told @tr1p (2026-08-27).
+    //
+    // I claimed the baseline nodeKind shape closes the broken-reference
+    // hole. It does not, and for relatedToId it cannot, because NO
+    // VALUE OF relatedToId CAN EVER BE A LITERAL. Measured, both ways:
+    //
+    //   path form   `Soul/Note/x.md`        -> REFUSED outright ("has no
+    //                                          angle brackets ... Paths
+    //                                          do not resolve to Things")
+    //   bracket form `<soul/Note/nope-xyz>` -> CONSTRUCTED into a
+    //                                          syntactically perfect IRI
+    //                                          with NO existence check
+    //
+    // The bracket form resolves by PATTERN against the one root, never
+    // by lookup, so it always succeeds. sh:nodeKind sh:IRI on this path
+    // is therefore a check that cannot fail: real, and vacuous. What is
+    // missing from a dangling reference is the REFERENT, not the form.
+    //
+    // KNOWN GAP, measured by @nug3 and @tr1p and confirmed here: a
+    // dangling <copia/Place/typo> still matches "/Place/" and still
+    // SATISFIES a qualified restriction. Until existence checking
+    // exists, these shapes guarantee the SHAPE of a reference list, not
+    // that the things in it are real. Pinned by
+    // `dangling_reference_satisfies_a_qualified_shape` so the gap lives
+    // in the test suite rather than in a chat log.
+    //
+    // Existence checking cannot run at the save gate today for the same
+    // reason sh:class cannot: the graph holds one document. It arrives
+    // with the same flip.
+    shacl.push_str("        sh:qualifiedValueShape [ sh:pattern \"/");
+    shacl.push_str(&on_local);
+    shacl.push_str("/\" ] ;\n");
+    shacl.push_str(&format!("        sh:qualifiedMinCount {} ;\n", qr.min));
+    if qr.exact {
+        shacl.push_str(&format!("        sh:qualifiedMaxCount {} ;\n", qr.min));
+    }
+    let how_many = if qr.exact {
+        format!("exactly {}", qr.min)
+    } else if qr.min == 1 {
+        "at least one".to_string()
+    } else {
+        format!("at least {}", qr.min)
+    };
+    shacl.push_str(&format!(
+        "        sh:message \"{} must reference {} {} — <.../{}/&lt;id&gt;>.\" ;\n",
+        local_name(class_iri), how_many, on_local, on_local
+    ));
+    if is_last {
+        shacl.push_str("    ] .\n");
+    } else {
+        shacl.push_str("    ]");
+    }
 }
 
 // ─── Kit-based shapes ─────────────────────────────────────────
