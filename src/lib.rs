@@ -836,10 +836,25 @@ fn fold_same_directory(repos: &mut Vec<serde_json::Value>, key: impl Fn(&str) ->
 /// about — a browser's own state, saved beside ours — survive our writes. The
 /// new file is written to a temporary name and renamed into place, so a reader
 /// never catches a half-written registry.
+///
+/// Every git-lex command in a repository writes here, so several run at
+/// once whenever several agents work. The whole read-modify-write holds an
+/// exclusive lock on `repos.json.lock`: without it, two writers each read
+/// the old list and the second rename dropped the first one's row (stress
+/// test, #51: 7 of 30 souls created at once lost their row), and both wrote
+/// the same temporary file.
 fn registry_update(edit: impl FnOnce(&mut Vec<serde_json::Value>)) -> Result<(), String> {
     let reg = registry_path().ok_or_else(|| "no home directory".to_string())?;
     let dir = reg.parent().expect("registry path always has a parent");
     fs::create_dir_all(dir).map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
+    let lock_path = reg.with_extension("json.lock");
+    let lock = fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(&lock_path)
+        .map_err(|e| format!("cannot open {}: {e}", lock_path.display()))?;
+    lock.lock().map_err(|e| format!("cannot lock {}: {e}", lock_path.display()))?;
 
     let mut doc: serde_json::Value = fs::read_to_string(&reg)
         .ok()
@@ -873,7 +888,7 @@ fn registry_update(edit: impl FnOnce(&mut Vec<serde_json::Value>)) -> Result<(),
     doc["repos"] = serde_json::Value::Array(repos);
 
     let body = serde_json::to_string_pretty(&doc).map_err(|e| e.to_string())? + "\n";
-    let tmp = reg.with_extension("json.tmp");
+    let tmp = reg.with_extension(format!("json.{}.tmp", std::process::id()));
     fs::write(&tmp, body).map_err(|e| e.to_string())?;
     fs::rename(&tmp, &reg).map_err(|e| e.to_string())?;
 
