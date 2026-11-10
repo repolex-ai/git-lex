@@ -265,5 +265,6 @@ One run does, in order:
    audit (missing/extra folder warnings, a reap of retired class folders that
    hold nothing but scaffold, and a receipt naming deprecated-class folders
    still on disk — content is never deleted).
-7. **Converge the Git pre-commit hook**, self-heal `SOUL.md`'s `soulId`, and
-   reload the ontology graph in the store.
+7. **Converge the Git pre-commit hook** and self-heal `SOUL.md`'s `soulId`.
+   The store's `repo-ontology` graph picks up the new ontologies on the next
+   sync, which reloads it every time.

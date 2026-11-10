@@ -66,7 +66,7 @@ except the history graph, which has its own IRI.
 | `filetree` | Every file at the newest commit, as index entries addressed by path (`git2/IndexEntry/<path>`) | the current HEAD | the last synced commit |
 | `repo-ontology` | The installed kits' schema, queryable | no | yes |
 
-The `repo-ontology` graph contains the ontology of every installed kit, loaded as data. It answers queries like "what fields can a Journal carry?" without reading TTL files directly:
+The `repo-ontology` graph contains the ontology of every installed kit, loaded as data and reloaded from `.lex/ontology/` on every sync. It answers queries like "what fields can a Journal carry?" without reading TTL files directly:
 
 ```sparql
 SELECT ?property ?range WHERE {

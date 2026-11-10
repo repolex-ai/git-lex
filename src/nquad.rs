@@ -2004,12 +2004,12 @@ pub fn build_path_index(
 /// into the self-describing ontology graph
 /// `<https://repolex.ai/git-lex/NamedGraph/repo-ontology>` of `store`.
 ///
-/// Runs at INIT and KIT-UPDATE (Rob Day-50): the graph persists in the
-/// store ("stays put") — sync does not rebuild it, query does not touch it.
-/// One exception (#81): sync self-heals an EMPTY graph (fresh store after a
-/// deliberate delete) by loading the TTLs already installed on disk, so a
-/// store rebuild doesn't require a second kit-update.
-/// The graph is cleared first so a kit-update fully refreshes the vocabulary.
+/// Runs on EVERY sync (goodlux, 2026-11-10): kit-update, kit-add,
+/// kit-remove and init only write the TTL files, and the next sync — run by
+/// gitlexd, the one process that holds the store — loads them. Before this,
+/// those commands opened the store themselves and failed on gitlexd's lock
+/// (#75), leaving the graph stale.
+/// The graph is cleared first, so a removed or retired term leaves with it.
 /// LOUD but not fatal on a broken TTL. Returns the number of files loaded.
 pub fn load_ontology_graph(store: &oxigraph::store::Store) -> usize {
     let Some(root) = find_git_root() else { return 0 };

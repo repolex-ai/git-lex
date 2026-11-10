@@ -330,10 +330,6 @@ pub(crate) fn cmd_init(directory: Option<String>, kit: Option<String>) -> Outcom
     // committed as "git lex identity" — extracted step, see fn doc.
     record_identity(&root, &repo_yml_path)?;
 
-    // t-box: load installed kit ontologies into the persistent ontology
-    // graph (the shared lifecycle helper — review #11).
-    crate::kit_cmds::reload_ontology_graph()?;
-
     // Register this repo in the machine-level registry (~/.lex/repos)
     registry_add(&root);
     Ok(())

@@ -23,7 +23,7 @@ use crate::shacl::{build_shacl_shapes, parse_shacl_hints};
 use git_lex::kit::ensure_engine_gitignore;
 #[cfg(test)]
 use git_lex::kit::{ENGINE_GITIGNORE_BEGIN, ENGINE_GITIGNORE_END};
-use git_lex::{open_or_create_store, require_git_root, BASE_KIT};
+use git_lex::{require_git_root, BASE_KIT};
 
 // ─── kit-update ────────────────────────────────────────────────
 
@@ -594,8 +594,6 @@ pub(crate) fn cmd_kit_update(kit_arg: Option<String>) -> Outcome {
     println!("Kit update complete: {} kit(s) fetched, {} kit(s) rebuilt.",
              kits_to_fetch.len(), all_installed_kits.len());
 
-    // t-box refresh: kit vocab may have changed.
-    reload_ontology_graph()?;
     git_lex::context::refresh(&root);
     Ok(())
 }
@@ -790,17 +788,6 @@ fn converge_ontology_mirror(root: &Path) {
     }
 }
 
-/// t-box reload: installed kit ontologies → the persistent ontology graph
-/// (it stays put across syncs). ONE helper for the three lifecycle moments
-/// that change kit vocab — init, kit-add, kit-update; the block used to be
-/// tripled verbatim (review #11).
-pub(crate) fn reload_ontology_graph() -> Outcome {
-    let store = open_or_create_store()?;
-    let n = git_lex::nquad::load_ontology_graph(&store);
-    println!("Ontology graph: {} kit ttl file(s) loaded", n);
-    Ok(())
-}
-
 // ─── kit-add ─────────────────────────────────────────────────────
 
 /// Add an optional kit to the repo. Validates `scope: optional`, installs
@@ -905,8 +892,6 @@ pub(crate) fn cmd_kit_add(kit_spec: String) -> Outcome {
 
     println!("Kit '{}' added.", canonical_spec);
 
-    // t-box: the new kit's ontology joins the persistent ontology graph.
-    reload_ontology_graph()?;
     git_lex::context::refresh(&root);
     Ok(())
 }
@@ -1012,7 +997,6 @@ pub(crate) fn cmd_kit_remove(kit_spec: String, force: bool) -> Outcome {
         }
     regenerate_installed_kits(&root, None)?;
     harness::run_substrate_setup(&root, None)?;
-    reload_ontology_graph()?;
 
     println!("Kit '{}' removed.", canonical_spec);
     git_lex::context::refresh(&root);

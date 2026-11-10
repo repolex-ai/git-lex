@@ -111,6 +111,9 @@ pub fn cmd_sync_into(store_dir: Option<&std::path::Path>) -> Outcome {
             &head_sha[..8.min(head_sha.len())],
             elapsed.as_secs_f64() * 1000.0
         );
+        // The ontology graph reloads here too, so a sync with no new commit
+        // still picks up kit files written since the last one.
+        crate::nquad::load_ontology_graph(&store);
         // Converge the spine even on the fast path: a no-op when current,
         // and it heals a spine that failed to write on an earlier sync.
         clock.mark("fast path");
@@ -133,8 +136,13 @@ pub fn cmd_sync_into(store_dir: Option<&std::path::Path>) -> Outcome {
         .contains_named_graph(&oxigraph::model::NamedNode::new_unchecked(NOW_GRAPH_IRI))
         .unwrap_or(false);
 
-    heal_ontology_graph(&store);
-    clock.mark("clear derived + heal ontology");
+    // The ontology graph is reloaded from the installed kit TTLs on every
+    // sync: kit-update, kit-add, kit-remove and init only write the files,
+    // and the next sync (run by gitlexd, which holds the store) loads them.
+    // Nine files, a few thousand statements — cheaper to reload than to
+    // track whether they changed (goodlux, 2026-11-10).
+    crate::nquad::load_ontology_graph(&store);
+    clock.mark("clear derived + reload ontology");
 
 
     let mut git_count = 0;
@@ -585,8 +593,8 @@ fn clear_derived_graphs(store: &Store, keep_diffed_git_graphs: bool) {
     for graph_uri in &existing_graphs {
         // Keep-list: the one graph (persistent, append-only — incremental
         // appends; full rebuild only via the spike command or an
-        // invalid-resume fallback), the repo-ontology graph (loaded at
-        // init/kit-update, "stays put") and the now view (refreshed after
+        // invalid-resume fallback), the repo-ontology graph (reloaded in
+        // place right after this sweep) and the now view (refreshed after
         // the walk from what the walk changed). EVERYTHING else is derived and
         // regenerated — including the retired sync/<sha>, history, and meta
         // families, which this sweep removes from pre-cutover stores.
@@ -602,34 +610,6 @@ fn clear_derived_graphs(store: &Store, keep_diffed_git_graphs: bool) {
                     eprintln!("warning: failed to clear graph {}: {} — stale triples may mix with the regeneration", graph_uri, e);
                 }
             }
-    }
-}
-
-fn heal_ontology_graph(store: &Store) {
-    // t-box self-heal (#81): the repo-ontology graph persists and is loaded
-    // at init/kit-update ("stays put", Rob Day-50) — but a fresh store
-    // (deleted for a rebuild) starts EMPTY, which forced the cure sequence
-    // "kit-update → rm store → sync → kit-update": the second update only
-    // reloaded vocabulary already sitting on disk. If the graph is empty
-    // and installed TTLs exist, load them now. Verify's empty-graph refusal
-    // still stands when no kits are installed (nothing on disk to load).
-    let ont_empty = match oxigraph::model::NamedNode::new(
-        "https://repolex.ai/git-lex/NamedGraph/repo-ontology",
-    ) {
-        Ok(g) => store
-            .quads_for_pattern(None, None, None, Some(g.as_ref().into()))
-            .next()
-            .is_none(),
-        Err(_) => false,
-    };
-    if ont_empty {
-        let n = crate::nquad::load_ontology_graph(store);
-        if n > 0 {
-            println!(
-                "Ontology graph was empty (fresh store) — loaded {} kit ttl file(s) from disk",
-                n
-            );
-        }
     }
 }
 
