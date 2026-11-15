@@ -324,16 +324,17 @@ pub(crate) fn cmd_init(directory: Option<String>, kit: Option<String>) -> Outcom
 
     // Commit setup files + offer the initial-content commit for
     // brand-new repos — extracted step, see fn doc.
-    commit_setup_and_content();
-
-    // A new soul gets its own key as soon as it has a first commit to be
-    // named by (src/identity.rs). That first commit cannot be signed by a
-    // key that is named after it; everything after it can.
+    // The order below is what lets a brand-new soul commit at all. A soul's
+    // id is its first commit, the save gate requires that id in SOUL.md,
+    // and the gate runs on every commit: so in an empty repo no commit
+    // could pass until one existed. First the first commit, empty and
+    // ungated (it holds nothing to check). Then the key named after it.
+    // Then the ids written into SOUL.md and committed. Only then the setup
+    // files and any content, through the gate like every later commit.
+    let was_empty = ensure_first_commit();
     bind_new_soul(&root);
-
-    // Genesis identity: repo.yml genesis_sha + SOUL.md soulId fill,
-    // committed as "git lex identity" — extracted step, see fn doc.
     record_identity(&root, &repo_yml_path)?;
+    commit_setup_and_content(was_empty);
 
     // Register this repo in the machine-level registry (~/.lex/repos)
     registry_add(&root);
@@ -539,11 +540,34 @@ fn generate_readme_lex(
     doc
 }
 
-/// init step: commit the .lex/ setup files, then (brand-new repos only)
-/// offer to commit pre-existing content.
-fn commit_setup_and_content() {
+/// init step: give an empty repo its first commit. Returns whether the
+/// repo was empty. The commit is empty and skips the pre-commit gate:
+/// there is nothing in it to validate, and the gate cannot pass before the
+/// soul has the id this commit gives it.
+fn ensure_first_commit() -> bool {
     let has_commits = Command::new("git").args(["rev-parse", "HEAD"]).output()
         .map(|o| o.status.success()).unwrap_or(false);
+    if has_commits {
+        return false;
+    }
+    let made = git_lex::identity::git_commit(git_lex::identity::session_signer().as_ref())
+        .args(["--allow-empty", "--no-verify", "-q", "-m", "git lex init: first commit"])
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+    if !made {
+        eprintln!(
+            "warning: could not make this repository's first commit (see git output above). \
+             Until it has one it has no id, and nothing here can be saved."
+        );
+    }
+    true
+}
+
+/// init step: commit the .lex/ setup files, then (brand-new repos only)
+/// offer to commit pre-existing content.
+fn commit_setup_and_content(was_empty: bool) {
+    let has_commits = !was_empty;
 
     let _ = Command::new("git").args(["add", ".lex/"]).status();
     if git_lex::identity::git_commit(git_lex::identity::session_signer().as_ref()).args(["-m", "git lex init"]).output()

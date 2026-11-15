@@ -1745,7 +1745,12 @@ mod extract_staging_gate_tests {
     fn repo() -> Tmp {
         let nanos = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
-        let dir = Tmp(std::env::temp_dir().join(format!("glx-gate-{}-{nanos}", std::process::id())));
+        // Two tests starting in the same clock tick got the same folder
+        // and fought over its git config (seen 2026-11-15); the counter
+        // makes the name unique within the process.
+        static NEXT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+        let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let dir = Tmp(std::env::temp_dir().join(format!("glx-gate-{}-{nanos}-{n}", std::process::id())));
         let root = &dir.0;
         std::fs::create_dir_all(root.join(".lex/extract/Soul/Note")).unwrap();
         let repo = git2::Repository::init(root).unwrap();

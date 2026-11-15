@@ -16,6 +16,42 @@ use std::fs;
 use std::path::Path;
 
 const SOUL_ID_KEY: &str = "soul.Soul.soulId";
+/// Every Thing carries its `.id` line (goodlux, 2026-08-28), and the save
+/// gate requires it. A soul's is derived from the same first commit as its
+/// soulId, so git-lex writes it; the kit's template cannot.
+const SOUL_THING_ID_KEY: &str = "soul.Soul.id";
+
+fn soul_thing_id(sha: &str) -> String {
+    format!("<soul/Soul/{sha}>")
+}
+
+/// Pure transform: the content with its `soul.Soul.id` line set to the id
+/// derived from the first commit. None when it is already right, and when
+/// there is no well-formed frontmatter to put it in (the soulId fill runs
+/// first and makes one).
+fn with_thing_id(content: &str, sha: &str) -> Option<String> {
+    let (fm, body) = crate::split_frontmatter(content);
+    let block = fm?;
+    let want = soul_thing_id(sha);
+    let prefix = format!("{SOUL_THING_ID_KEY}:");
+    let mut lines: Vec<String> = block.lines().map(String::from).collect();
+    match lines.iter().position(|l| l.trim_start().starts_with(&prefix)) {
+        Some(i) => {
+            let value = lines[i].trim_start()[prefix.len()..].trim();
+            if value == want {
+                return None;
+            }
+            lines[i] = format!("{SOUL_THING_ID_KEY}: {want}");
+        }
+        None => {
+            // Beside the soulId line it is derived with, else first.
+            let soul_id = format!("{SOUL_ID_KEY}:");
+            let at = lines.iter().position(|l| l.trim_start().starts_with(&soul_id)).map_or(0, |i| i + 1);
+            lines.insert(at, format!("{SOUL_THING_ID_KEY}: {want}"));
+        }
+    }
+    Some(format!("---\n{}\n---\n{}", lines.join("\n"), body))
+}
 
 /// Is this a soul repo? True when the repo's domain kit resolves to the
 /// short name `soul`. Optional kits can't make a repo a soul repo.
@@ -74,7 +110,18 @@ fn heal_soul_id_inner(root: &Path, write: bool) -> HealOutcome {
     let Some(sha) = crate::git::genesis_sha() else {
         return HealOutcome::NoGenesis;
     };
-    match healed_content(&content, &sha) {
+    // soulId first, then the `.id` line beside it. A file whose soulId was
+    // already right but which has no `.id` line counts as a fill.
+    let soul_id_fix = healed_content(&content, &sha);
+    let after_soul_id = soul_id_fix.as_ref().map_or(content.as_str(), |(updated, _)| updated.as_str());
+    let thing_id_fix = with_thing_id(after_soul_id, &sha);
+    let fix = match (soul_id_fix.clone(), thing_id_fix) {
+        (None, None) => None,
+        (Some((_, previous)), Some(both)) => Some((both, previous)),
+        (Some(only_soul_id), None) => Some(only_soul_id),
+        (None, Some(only_thing_id)) => Some((only_thing_id, None)),
+    };
+    match fix {
         None => HealOutcome::Unchanged,
         Some((updated, previous)) => {
             if write
@@ -210,6 +257,20 @@ mod tests {
     use super::*;
 
     const SHA: &str = "495d8c70114a9918ecba0bc4d49ba3653b5930fb";
+
+    #[test]
+    fn the_thing_id_line_is_written_beside_the_soul_id_and_then_left_alone() {
+        let template = format!("---\n{SOUL_ID_KEY}: {SHA} # derived\nsoul.Soul.role: # optional\n---\n\n# name\n");
+        let filled = with_thing_id(&template, SHA).expect("a template has no .id line");
+        assert_eq!(
+            filled,
+            format!("---\n{SOUL_ID_KEY}: {SHA} # derived\nsoul.Soul.id: <soul/Soul/{SHA}>\nsoul.Soul.role: # optional\n---\n\n# name\n")
+        );
+        assert_eq!(with_thing_id(&filled, SHA), None, "right already: untouched");
+        let wrong = filled.replace(&format!("<soul/Soul/{SHA}>"), "<soul/Soul/kira>");
+        assert_eq!(with_thing_id(&wrong, SHA).as_deref(), Some(filled.as_str()), "a wrong one is corrected");
+        assert_eq!(with_thing_id("no frontmatter\n", SHA), None);
+    }
 
     #[test]
     fn fills_empty_template_line_preserving_comment() {
