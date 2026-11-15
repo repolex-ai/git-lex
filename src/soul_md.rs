@@ -25,8 +25,8 @@ fn soul_thing_id(sha: &str) -> String {
     format!("<soul/Soul/{sha}>")
 }
 
-/// Pure transform: the content with its `soul.Soul.id` line set to the id
-/// derived from the first commit. None when it is already right, and when
+/// Pure transform: the content with a `soul.Soul.id` line added, derived
+/// from the first commit. None when the file already has the line, and when
 /// there is no well-formed frontmatter to put it in (the soulId fill runs
 /// first and makes one).
 fn with_thing_id(content: &str, sha: &str) -> Option<String> {
@@ -36,13 +36,10 @@ fn with_thing_id(content: &str, sha: &str) -> Option<String> {
     let prefix = format!("{SOUL_THING_ID_KEY}:");
     let mut lines: Vec<String> = block.lines().map(String::from).collect();
     match lines.iter().position(|l| l.trim_start().starts_with(&prefix)) {
-        Some(i) => {
-            let value = lines[i].trim_start()[prefix.len()..].trim();
-            if value == want {
-                return None;
-            }
-            lines[i] = format!("{SOUL_THING_ID_KEY}: {want}");
-        }
+        // A line that is there is left exactly as it is, whatever it says.
+        // This only fills the gap a new soul starts with; it never rewrites
+        // an existing soul's identity file.
+        Some(_) => return None,
         None => {
             // Beside the soulId line it is derived with, else first.
             let soul_id = format!("{SOUL_ID_KEY}:");
@@ -266,9 +263,9 @@ mod tests {
             filled,
             format!("---\n{SOUL_ID_KEY}: {SHA} # derived\nsoul.Soul.id: <soul/Soul/{SHA}>\nsoul.Soul.role: # optional\n---\n\n# name\n")
         );
-        assert_eq!(with_thing_id(&filled, SHA), None, "right already: untouched");
-        let wrong = filled.replace(&format!("<soul/Soul/{SHA}>"), "<soul/Soul/kira>");
-        assert_eq!(with_thing_id(&wrong, SHA).as_deref(), Some(filled.as_str()), "a wrong one is corrected");
+        assert_eq!(with_thing_id(&filled, SHA), None, "there already: untouched");
+        let other = filled.replace(&format!("<soul/Soul/{SHA}>"), "<soul/Soul/kira>");
+        assert_eq!(with_thing_id(&other, SHA), None, "an existing line is never rewritten");
         assert_eq!(with_thing_id("no frontmatter\n", SHA), None);
     }
 
