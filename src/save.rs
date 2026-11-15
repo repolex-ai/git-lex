@@ -173,14 +173,40 @@ pub(crate) fn cmd_save(message: &str, dry_run: bool, no_restamp: bool) -> Outcom
     // A save in another agent's folder then says, and proves, who made it.
     // With no harness marker (a person at a terminal) or no bound key,
     // nothing here changes: the identity resolved above stands, unsigned.
-    let signer = git_lex::gitlexd::session::session_soul()
+    //
+    // The signing agent's name and email come from ITS soul: repo.yml when
+    // it has both, else the same sources save has always read, looked up
+    // in that soul (a soul whose repo.yml lacked agent_email saved
+    // unsigned without a word, found on the first Antigravity bind,
+    // 2026-11-15). A bound agent whose name cannot be found is refused:
+    // an agent with a key never saves unsigned by accident.
+    let bound = git_lex::gitlexd::session::session_soul()
         .ok()
         .filter(|s| s.from_harness())
         .and_then(|s| {
             let key = git_lex::identity::bound_key(&s.root, &git_lex::identity::host_dir()?, git_lex::identity::now_secs())?;
-            let yml = git_lex::RepoYml::load(&s.root);
-            Some((key, yml.agent_name.filter(|n| !n.is_empty())?, yml.agent_email.filter(|e| !e.is_empty())?))
+            Some((key, s.root))
         });
+    let signer = match bound {
+        None => None,
+        Some((key, soul)) => {
+            let yml = git_lex::RepoYml::load(&soul);
+            let named = match (yml.agent_name.filter(|n| !n.is_empty()), yml.agent_email.filter(|e| !e.is_empty())) {
+                (Some(name), Some(email)) => Some((name, email)),
+                _ => resolve_agent_identity(&soul),
+            };
+            let Some((name, email)) = named else {
+                return Err(Failure::new(format!(
+                    "fatal: this session's agent has a key but no name to sign with.\n\
+                     Add these two lines to {} and save again:\n\
+                     \x20   agent_name: <the agent's name>\n\
+                     \x20   agent_email: <the agent's email>",
+                    git_lex::layout::repo_yml(&soul).display()
+                )));
+            };
+            Some((key, name, email))
+        }
+    };
     let (author_name, author_email) = match &signer {
         Some((_, name, email)) => (name.clone(), email.clone()),
         None => (author_name, author_email),
