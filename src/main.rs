@@ -397,8 +397,8 @@ fn commit_and_push_nuke(root: &std::path::Path) {
     let has_changes = matches!(&status, Ok(o) if !String::from_utf8_lossy(&o.stdout).trim().is_empty());
     if has_changes {
         let _ = Command::new("git").args(["add", "-A"]).current_dir(root).status();
-        let commit = Command::new("git")
-            .args(["commit", "-m", "git lex nuke"])
+        let commit = git_lex::identity::git_commit(git_lex::identity::session_signer().as_ref())
+            .args(["-m", "git lex nuke"])
             .current_dir(root)
             .status();
         if matches!(commit, Ok(s) if s.success()) {

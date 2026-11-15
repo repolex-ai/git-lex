@@ -180,13 +180,7 @@ pub(crate) fn cmd_save(message: &str, dry_run: bool, no_restamp: bool) -> Outcom
     // unsigned without a word, found on the first Antigravity bind,
     // 2026-11-15). A bound agent whose name cannot be found is refused:
     // an agent with a key never saves unsigned by accident.
-    let bound = git_lex::gitlexd::session::session_soul()
-        .ok()
-        .filter(|s| s.from_harness())
-        .and_then(|s| {
-            let key = git_lex::identity::bound_key(&s.root, &git_lex::identity::host_dir()?, git_lex::identity::now_secs())?;
-            Some((key, s.root))
-        });
+    let bound = git_lex::identity::session_signer().map(|s| (s.key, s.soul));
     let signer = match bound {
         None => None,
         Some((key, soul)) => {
@@ -312,15 +306,17 @@ pub(crate) fn cmd_save(message: &str, dry_run: bool, no_restamp: bool) -> Outcom
     }
 
     let mut commit = Command::new("git");
-    if let Some((key, name, email)) = &signer {
-        // The signature covers the committer line too, so it must name the
-        // same agent as the author.
-        commit
-            .args(git_lex::identity::signing_args(key))
-            .env("GIT_COMMITTER_NAME", name)
-            .env("GIT_COMMITTER_EMAIL", email);
+    if let Some((key, _, _)) = &signer {
+        commit.args(git_lex::identity::signing_args(key));
     }
-    commit.args(["commit", "--author", &author, "-m", message]);
+    // Author and committer are the same agent on every save, signed or not
+    // (goodlux, 2026-11-15). git takes the committer from its own config
+    // when the harness sets no GIT_COMMITTER_* variables, which recorded the
+    // machine's human as the committer of an agent's save.
+    commit
+        .env("GIT_COMMITTER_NAME", &author_name)
+        .env("GIT_COMMITTER_EMAIL", &author_email)
+        .args(["commit", "--author", &author, "-m", message]);
     if signer.is_some() {
         commit.arg("-S");
     }

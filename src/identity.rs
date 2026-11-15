@@ -26,7 +26,7 @@
 
 use base64::Engine;
 use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
-use ed25519_dalek::{Signer, SigningKey, Verifier, VerifyingKey};
+use ed25519_dalek::{Signer as _, SigningKey, Verifier as _, VerifyingKey};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
@@ -342,6 +342,51 @@ pub fn verifying_args(host: &Path) -> Vec<String> {
         "-c".into(),
         format!("gpg.ssh.allowedSignersFile={}", allowed_signers_path(host).display()),
     ]
+}
+
+/// The agent a commit made in this session is signed as.
+#[derive(Debug)]
+pub struct Signer {
+    /// Its private key.
+    pub key: PathBuf,
+    /// Its soul folder (the session's home, not the folder being committed in).
+    pub soul: PathBuf,
+    /// Its name and email, when its `.lex/repo.yml` has both.
+    pub who: Option<(String, String)>,
+}
+
+/// The agent whose session this is, when a harness places the session in a
+/// soul that holds a bound key. None for a person at a terminal, for a
+/// harness git-lex does not recognise, and for an agent with no key: those
+/// commit as they always have, unsigned.
+pub fn session_signer() -> Option<Signer> {
+    let session = crate::gitlexd::session::session_soul().ok().filter(|s| s.from_harness())?;
+    let key = bound_key(&session.root, &host_dir()?, now_secs())?;
+    let yml = crate::RepoYml::load(&session.root);
+    let who = match (yml.agent_name.filter(|n| !n.is_empty()), yml.agent_email.filter(|e| !e.is_empty())) {
+        (Some(name), Some(email)) => Some((name, email)),
+        _ => None,
+    };
+    Some(Signer { key, soul: session.root, who })
+}
+
+/// `git commit`, as the session's agent when there is one: signed with its
+/// key, and with its name as author and committer when the name is known.
+/// With no signer this is plain `git commit`. Every commit git-lex itself
+/// makes starts here; the caller adds the message and the rest.
+pub fn git_commit(signer: Option<&Signer>) -> std::process::Command {
+    let mut git = std::process::Command::new("git");
+    let Some(signer) = signer else {
+        git.arg("commit");
+        return git;
+    };
+    git.args(signing_args(&signer.key)).args(["commit", "-S"]);
+    if let Some((name, email)) = &signer.who {
+        git.arg(format!("--author={name} <{email}>"))
+            .env("GIT_COMMITTER_NAME", name)
+            .env("GIT_COMMITTER_EMAIL", email);
+    }
+    git
 }
 
 // ─── Binding an agent to its key ───────────────────────────────

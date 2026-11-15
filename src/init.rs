@@ -326,6 +326,11 @@ pub(crate) fn cmd_init(directory: Option<String>, kit: Option<String>) -> Outcom
     // brand-new repos — extracted step, see fn doc.
     commit_setup_and_content();
 
+    // A new soul gets its own key as soon as it has a first commit to be
+    // named by (src/identity.rs). That first commit cannot be signed by a
+    // key that is named after it; everything after it can.
+    bind_new_soul(&root);
+
     // Genesis identity: repo.yml genesis_sha + SOUL.md soulId fill,
     // committed as "git lex identity" — extracted step, see fn doc.
     record_identity(&root, &repo_yml_path)?;
@@ -541,7 +546,7 @@ fn commit_setup_and_content() {
         .map(|o| o.status.success()).unwrap_or(false);
 
     let _ = Command::new("git").args(["add", ".lex/"]).status();
-    if Command::new("git").args(["commit", "-m", "git lex init"]).output()
+    if git_lex::identity::git_commit(git_lex::identity::session_signer().as_ref()).args(["-m", "git lex init"]).output()
         .map(|o| o.status.success()).unwrap_or(false) {
         println!("\nCommitted git-lex setup files.");
     }
@@ -557,7 +562,7 @@ fn commit_setup_and_content() {
             let input = input.trim().to_lowercase();
             if input.is_empty() || input == "y" || input == "yes" {
                 let _ = Command::new("git").args(["add", "."]).status();
-                let committed = Command::new("git").args(["commit", "-m", "Initial content"]).status()
+                let committed = git_lex::identity::git_commit(git_lex::identity::session_signer().as_ref()).args(["-m", "Initial content"]).status()
                     .map(|s| s.success()).unwrap_or(false);
                 if committed {
                     println!("Committed existing content.");
@@ -566,6 +571,24 @@ fn commit_setup_and_content() {
                 }
             }
         }
+    }
+}
+
+/// init step: give a soul repo its key and list the public half on this
+/// machine. Never fails init: a soul that cannot be bound now is bound
+/// later with `git lex identity bind`, and the reason is said.
+fn bind_new_soul(root: &std::path::Path) {
+    if !git_lex::soul_md::soul_kit_installed(root) {
+        return;
+    }
+    let Some(host) = git_lex::identity::host_dir() else { return };
+    match git_lex::identity::bind(root, &host, git_lex::identity::now_secs()) {
+        Ok(git_lex::identity::Bound::New) => println!(
+            "Key: this agent now has its own key ({}). Its saves are signed with it.",
+            git_lex::identity::key_path(root).display()
+        ),
+        Ok(git_lex::identity::Bound::Already) => {}
+        Err(why) => eprintln!("note: this soul was not given a key.\n{why}"),
     }
 }
 
@@ -604,8 +627,8 @@ fn record_identity(root: &std::path::Path, repo_yml_path: &std::path::Path) -> O
             // commit here must not exit 0 silently (review #50). The data
             // survives on disk and sync/kit-update self-heal the content,
             // but the user has to know it's riding uncommitted.
-            let committed = Command::new("git")
-                .args(["commit", "-m", "git lex identity"])
+            let committed = git_lex::identity::git_commit(git_lex::identity::session_signer().as_ref())
+                .args(["-m", "git lex identity"])
                 .status()
                 .map(|s| s.success())
                 .unwrap_or(false);

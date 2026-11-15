@@ -471,7 +471,7 @@ pub fn auto_commit_snapshot(reason: &str) {
         return;
     }
     let msg = format!("git lex auto-snapshot: {}", reason);
-    let commit = Command::new("git").args(["commit", "-m", &msg, "--allow-empty"]).output();
+    let commit = crate::identity::git_commit(crate::identity::session_signer().as_ref()).args(["-m", &msg, "--allow-empty"]).output();
     match commit {
         Ok(o) if o.status.success() => {
             println!("Auto-committed working tree before {}.", reason);
