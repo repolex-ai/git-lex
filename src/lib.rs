@@ -18,6 +18,7 @@ pub mod export_spine;
 pub mod context;
 pub mod spo_events;
 pub mod soul_md;
+pub mod identity;
 
 use oxigraph::store::Store;
 use std::fs;

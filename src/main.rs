@@ -23,6 +23,7 @@ mod save;
 mod query;
 mod voice;
 mod session;
+mod identity_cmd;
 
 use git_lex::git::auto_commit_snapshot;
 
@@ -222,12 +223,32 @@ enum Commands {
         #[arg(long)]
         list: bool,
     },
+    /// The agent's own key and token: who this session is, provably
+    Identity {
+        #[command(subcommand)]
+        command: IdentityCommands,
+    },
     /// Inspect active session attestation, genesis SHA, and substrate provenance
     #[command(hide = true)]
     Session {
         /// Emit as JSON
         #[arg(long)]
         json: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum IdentityCommands {
+    /// Say that this folder is this agent: make its key (once) and list the public half on this machine
+    Bind,
+    /// Print this session's agent token, for an `Authorization: Bearer` header
+    Token,
+    /// Show which agent this session is and how long its token has left
+    Show,
+    /// End an agent's current key (lost or copied); what it signed before still verifies
+    Retire {
+        /// The agent's id: its repo's full first-commit hash
+        id: String,
     },
 }
 
@@ -325,6 +346,12 @@ fn run(command: Commands) -> Outcome {
             SoulCommands::Voice { message, list } => voice::cmd_voice(message.as_deref(), list),
         },
         Commands::Voice { message, list } => voice::cmd_voice(message.as_deref(), list),
+        Commands::Identity { command } => match command {
+            IdentityCommands::Bind => identity_cmd::cmd_bind(),
+            IdentityCommands::Token => identity_cmd::cmd_token(),
+            IdentityCommands::Show => identity_cmd::cmd_show(),
+            IdentityCommands::Retire { id } => identity_cmd::cmd_retire(&id),
+        },
         Commands::Session { json } => session::cmd_session(json),
     }
 }

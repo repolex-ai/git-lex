@@ -166,6 +166,25 @@ pub(crate) fn cmd_save(message: &str, dry_run: bool, no_restamp: bool) -> Outcom
             return Err(Failure::new([String::from("fatal: no agent identity configured."), String::new(), String::from("Couldn't resolve an author identity from any of:"), String::from("  - agent_name: / agent_email: in .lex/repo.yml (the simplest fix:"), String::from("    add those two lines there and save again)"), String::from("  - GIT_AUTHOR_NAME / GIT_AUTHOR_EMAIL in the environment"), format!("  - {}/.claude/settings.json", root.display()), String::new(), String::from("Agent repos: `git lex kit-update` refreshes identity; squad repos get"), String::from("env vars injected by your agent session's settings.")].join("\n")));
         }
     };
+    // Who is saving (goodlux, 2026-11-15): the agent whose SESSION this is,
+    // not the folder being saved in. When a harness places the session in a
+    // soul that holds a bound key (src/identity.rs), the commit is that
+    // agent's: its name as author and committer, its key as the signature.
+    // A save in another agent's folder then says, and proves, who made it.
+    // With no harness marker (a person at a terminal) or no bound key,
+    // nothing here changes: the identity resolved above stands, unsigned.
+    let signer = git_lex::gitlexd::session::session_soul()
+        .ok()
+        .filter(|s| s.from_harness())
+        .and_then(|s| {
+            let key = git_lex::identity::bound_key(&s.root, &git_lex::identity::host_dir()?, git_lex::identity::now_secs())?;
+            let yml = git_lex::RepoYml::load(&s.root);
+            Some((key, yml.agent_name.filter(|n| !n.is_empty())?, yml.agent_email.filter(|e| !e.is_empty())?))
+        });
+    let (author_name, author_email) = match &signer {
+        Some((_, name, email)) => (name.clone(), email.clone()),
+        None => (author_name, author_email),
+    };
     let author = format!("{} <{}>", author_name, author_email);
 
     // The write-health probe: run the exact gates a real save runs —
@@ -266,9 +285,20 @@ pub(crate) fn cmd_save(message: &str, dry_run: bool, no_restamp: bool) -> Outcom
         return Ok(());
     }
 
-    let status = Command::new("git")
-        .args(["commit", "--author", &author, "-m", message])
-        .status();
+    let mut commit = Command::new("git");
+    if let Some((key, name, email)) = &signer {
+        // The signature covers the committer line too, so it must name the
+        // same agent as the author.
+        commit
+            .args(git_lex::identity::signing_args(key))
+            .env("GIT_COMMITTER_NAME", name)
+            .env("GIT_COMMITTER_EMAIL", email);
+    }
+    commit.args(["commit", "--author", &author, "-m", message]);
+    if signer.is_some() {
+        commit.arg("-S");
+    }
+    let status = commit.status();
     match status {
         Ok(s) if s.success() => {
             // The reconciler teaching line (selkie's incident, link 4): save
