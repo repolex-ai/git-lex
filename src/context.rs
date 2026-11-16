@@ -144,14 +144,18 @@ fn build_model(root: &Path) -> Model {
         }
     }
 
-    // Properties, from the shapes validation actually enforces.
+    // Properties, from the shapes validation actually enforces. A property
+    // with several spellings (owl:equivalentProperty, e.g. git-lex:id and
+    // subtexture:id) is one shape whose path lists them all; the first in
+    // the list is the spelling this kit writes, and the only one shown, so
+    // the context names each property once.
     let mut by_class: BTreeMap<String, BTreeMap<String, Prop>> = BTreeMap::new();
     let q = format!(
         "{PREFIXES} SELECT ?class ?path ?nodeKind ?datatype ?minCount ?comment ?range ?value WHERE {{
             ?shape sh:targetClass ?class .
             OPTIONAL {{
                 ?shape sh:property ?prop . ?prop sh:path ?pathNode .
-                OPTIONAL {{ ?pathNode sh:alternativePath/rdf:rest*/rdf:first ?alt }}
+                OPTIONAL {{ ?pathNode sh:alternativePath/rdf:first ?alt }}
                 BIND(COALESCE(?alt, ?pathNode) AS ?path)
                 FILTER(isIRI(?path))
                 OPTIONAL {{ ?prop sh:nodeKind ?nodeKind }}
@@ -203,7 +207,12 @@ fn build_model(root: &Path) -> Model {
     }
 
     // Universal properties: declared on git-lex:Thing itself.
-    let q = format!("{PREFIXES} SELECT ?path WHERE {{ ?path rdfs:domain gl:Thing }}");
+    // The Subtexture base ontology declares the same properties on its own
+    // root; a kit that uses a base spelling directly gets it listed here too.
+    let q = format!(
+        "{PREFIXES} SELECT ?path WHERE {{ {{ ?path rdfs:domain gl:Thing }} UNION {{ ?path rdfs:domain <{}> }} }}",
+        crate::nquad::SUBTEXTURE_THING_CLASS_IRI
+    );
     let universal_iris: BTreeSet<String> = rows(&store, &q).iter().filter_map(|r| iri(r, "path")).collect();
     let mut universals: BTreeMap<String, Prop> = BTreeMap::new();
     for props in by_class.values() {

@@ -1037,6 +1037,16 @@ pub const BASE_KIT: &str = "repolex-ai/git-lex-kit-base";
 /// other kit's folder is its short name (`soul`, `copia`).
 pub const BASE_ONTOLOGY_FOLDER: &str = "git-lex";
 
+/// The second folder the base kit ships: the Subtexture base ontology, shared
+/// word for word with Pan and ravel (goodlux, 2026-11-16). git-lex's own terms
+/// are declared in `git-lex/` as subclasses and equivalents of these, and
+/// git-lex keeps writing its own spellings. A repo whose base kit predates
+/// the folder simply has none, and nothing changes for it.
+pub const SUBTEXTURE_ONTOLOGY_FOLDER: &str = "subtexture";
+
+/// Every ontology folder the base kit owns.
+pub const BASE_ONTOLOGY_FOLDERS: [&str; 2] = [BASE_ONTOLOGY_FOLDER, SUBTEXTURE_ONTOLOGY_FOLDER];
+
 /// Which kits are installed in this repo. `.lex/repo.yml` is the ONLY answer
 /// (goodlux, 2026-09-16, issue #17): the base kit, then `kit:`, then
 /// `optional_kits:` sorted. What happens to sit on disk is never consulted.
@@ -1066,8 +1076,12 @@ pub fn installed_ontology_dirs(root: &std::path::Path) -> Vec<(String, PathBuf)>
     let ont_root = crate::layout::ontology_dir(root);
     let mut out: Vec<(String, PathBuf)> = installed_kit_specs(root)
         .iter()
-        .map(|spec| {
-            if spec == BASE_KIT { BASE_ONTOLOGY_FOLDER.to_string() } else { resolve_kit_spec(spec).2 }
+        .flat_map(|spec| {
+            if spec == BASE_KIT {
+                BASE_ONTOLOGY_FOLDERS.iter().map(|f| f.to_string()).collect()
+            } else {
+                vec![resolve_kit_spec(spec).2]
+            }
         })
         .map(|name| (name.clone(), ont_root.join(&name)))
         .filter(|(_, dir)| dir.is_dir())
@@ -1088,7 +1102,7 @@ pub fn installed_kit_ontology_dir(root: &std::path::Path, kit: &str) -> Option<P
 /// Does repo.yml list this kit (spec or short name) as installed?
 pub fn is_kit_installed(root: &std::path::Path, kit: &str) -> bool {
     let (_, _, short) = resolve_kit_spec(kit);
-    short == BASE_ONTOLOGY_FOLDER
+    BASE_ONTOLOGY_FOLDERS.contains(&short.as_str())
         || installed_kit_specs(root).iter().any(|k| resolve_kit_spec(k).2 == short)
 }
 
@@ -1348,6 +1362,7 @@ pub fn prefix_bindings_at(root: Option<&std::path::Path>) -> Vec<(String, String
         ("git2:".to_string(), "https://repolex.ai/ontology/git-lex/git2/".to_string()),
         ("md:".to_string(), "https://repolex.ai/ontology/git-lex/md/".to_string()),
         ("fm:".to_string(), "https://repolex.ai/ontology/git-lex/fm/".to_string()),
+        ("subtexture:".to_string(), "https://repolex.ai/ontology/subtexture/".to_string()),
         ("rdf:".to_string(), "http://www.w3.org/1999/02/22-rdf-syntax-ns#".to_string()),
         ("rdfs:".to_string(), "http://www.w3.org/2000/01/rdf-schema#".to_string()),
         ("owl:".to_string(), "http://www.w3.org/2002/07/owl#".to_string()),
@@ -2065,6 +2080,16 @@ mod installed_kits_tests {
         fs::create_dir_all(root.join(".lex/ontology/stray")).unwrap();
         let names: Vec<String> = installed_ontology_dirs(&root).into_iter().map(|(n, _)| n).collect();
         assert_eq!(names, vec!["git-lex"]);
+        assert!(installed_kit_ontology_dir(&root, "subtexture").is_none());
+
+        // The base kit's second folder is read once it is on disk, with no
+        // line in repo.yml: it belongs to the base kit.
+        fs::create_dir_all(root.join(".lex/ontology/subtexture")).unwrap();
+        fs::write(root.join(".lex/ontology/subtexture/subtexture.ttl"), "").unwrap();
+        let names: Vec<String> = installed_ontology_dirs(&root).into_iter().map(|(n, _)| n).collect();
+        assert_eq!(names, vec!["git-lex", "subtexture"]);
+        assert!(installed_kit_ontology_dir(&root, "subtexture").is_some());
+        assert!(installed_ontology_files(&root).iter().any(|p| p.ends_with("subtexture/subtexture.ttl")));
         let _ = fs::remove_dir_all(&root);
     }
 }

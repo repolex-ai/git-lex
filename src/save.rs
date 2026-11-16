@@ -1412,7 +1412,7 @@ pub(crate) fn cmd_extract() -> Outcome {
                 // in-repo existence law below has no single id-space to
                 // check them against. Resolution/rejection already
                 // happened in the emit lane.
-                if range_iri == git_lex::nquad::THING_CLASS_IRI {
+                if git_lex::nquad::is_thing_root(range_iri) {
                     continue;
                 }
                 let enforce = *foldered_cache.entry(range_iri.clone()).or_insert_with(|| {

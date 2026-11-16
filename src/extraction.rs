@@ -633,7 +633,7 @@ fn write_reference_turtle(
     val: &str,
     range: Option<&String>,
 ) -> Result<(), String> {
-    if range.map(String::as_str) == Some(crate::nquad::THING_CLASS_IRI) {
+    if range.is_some_and(|r| crate::nquad::is_thing_root(r)) {
         // The angle-bracket lane (Rob-ruled 2026-08-20) —
         // mirror the emitter: identifier form only.
         match crate::resolve::resolve_thing_reference(val) {

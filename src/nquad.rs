@@ -373,6 +373,17 @@ impl ResolverContext {
 /// `resolve::resolve_thing_reference`, everything else rejected at save.
 pub const THING_CLASS_IRI: &str = "https://repolex.ai/ontology/git-lex/Thing";
 
+/// The Subtexture base ontology's root class. `git-lex:Thing` is declared a
+/// subclass of it; a kit may name either as a range (goodlux, 2026-11-16).
+pub const SUBTEXTURE_THING_CLASS_IRI: &str = "https://repolex.ai/ontology/subtexture/Thing";
+
+/// Is this range "any Thing, any class"? True for `git-lex:Thing` and for
+/// `subtexture:Thing`. Such a range fixes no class, so the value must be the
+/// full address `<namespace/Class/id>`: the angle-bracket lane.
+pub fn is_thing_root(range_iri: &str) -> bool {
+    range_iri == THING_CLASS_IRI || range_iri == SUBTEXTURE_THING_CLASS_IRI
+}
+
 /// A Thing IRI derived from a range CLASS IRI + a bare target id:
 /// `https://repolex.ai/ontology/copia/Being` + `lux`
 /// → `https://repolex.ai/copia/Being/lux` (universal instance law; the
@@ -1667,7 +1678,7 @@ fn emit_reference_values(
         // cannot apply (there is no one id-space), so the value
         // must be the full identifier form <namespace/Class/id>
         // and ONLY that form. The angle-bracket lane.
-        if range.map(String::as_str) == Some(THING_CLASS_IRI) {
+        if range.is_some_and(|r| is_thing_root(r)) {
             match resolve::resolve_thing_reference(val) {
                 Ok(target) => {
                     out.push_str(&format!(
@@ -2168,6 +2179,16 @@ mod tests {
     /// the range is declared on the git-lex property — the lookup must go
     /// through the declared predicate IRI, and a concrete range must keep
     /// working through the same key.
+    /// Either root class as a range means "any Thing, by full address"
+    /// (goodlux, 2026-11-16: subtexture:Thing underpins git-lex:Thing).
+    #[test]
+    fn both_root_classes_are_the_thing_range() {
+        assert!(is_thing_root("https://repolex.ai/ontology/git-lex/Thing"));
+        assert!(is_thing_root("https://repolex.ai/ontology/subtexture/Thing"));
+        assert!(!is_thing_root("https://repolex.ai/ontology/subtexture/Set"));
+        assert!(!is_thing_root("https://repolex.ai/ontology/soul/Note"));
+    }
+
     #[test]
     fn thing_range_is_the_angle_bracket_lane() {
         let mut obj_props = HashSet::new();

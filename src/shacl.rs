@@ -1063,6 +1063,56 @@ t:lookTechnicalScore a owl:DatatypeProperty ;
             .expect("shapes generate")
     }
 
+    /// The layering ruled by goodlux on 2026-11-16: the Subtexture base
+    /// ontology declares the root class and the shared properties; git-lex
+    /// declares its own root a subclass and its own properties equivalent,
+    /// and keeps writing its own spellings. A kit class under git-lex:Thing
+    /// gets ONE shape per shared property, accepting either spelling, with
+    /// the rules from both layers; and a range of either root class is an
+    /// address with no class fixed.
+    #[test]
+    fn a_kit_class_under_the_layered_roots_gets_one_shape_per_shared_property() {
+        let ttl = r#"
+@prefix owl: <http://www.w3.org/2002/07/owl#> .
+@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+@prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
+@prefix st: <https://repolex.ai/ontology/subtexture/> .
+@prefix gl: <https://repolex.ai/ontology/git-lex/> .
+@prefix t: <https://repolex.ai/ontology/t/> .
+
+st:Thing a owl:Class .
+st:id a owl:ObjectProperty ; rdfs:domain st:Thing ; rdfs:range st:Thing .
+st:title a owl:DatatypeProperty ; rdfs:domain st:Thing ; rdfs:range xsd:string .
+st:Thing rdfs:subClassOf
+    [ a owl:Restriction ; owl:onProperty st:id ; owl:maxCardinality 1 ] ,
+    [ a owl:Restriction ; owl:onProperty st:title ; owl:maxCardinality 1 ] .
+
+gl:Thing a owl:Class ; rdfs:subClassOf st:Thing .
+gl:id a owl:ObjectProperty ; rdfs:domain gl:Thing ; rdfs:range gl:Thing ; owl:equivalentProperty st:id .
+gl:title a owl:DatatypeProperty ; rdfs:domain gl:Thing ; rdfs:range xsd:string ; owl:equivalentProperty st:title .
+gl:Thing rdfs:subClassOf [ a owl:Restriction ; owl:onProperty gl:id ; owl:cardinality 1 ] .
+
+t:Entry a owl:Class ; rdfs:subClassOf gl:Thing .
+t:pointsAt a owl:ObjectProperty ; rdfs:domain t:Entry ; rdfs:range st:Thing .
+"#;
+        let shapes = shapes_for(ttl);
+        let id_alt = "sh:path [ sh:alternativePath ( <https://repolex.ai/ontology/git-lex/id> <https://repolex.ai/ontology/subtexture/id> ) ]";
+        let title_alt = "sh:path [ sh:alternativePath ( <https://repolex.ai/ontology/git-lex/title> <https://repolex.ai/ontology/subtexture/title> ) ]";
+        assert_eq!(shapes.matches(id_alt).count(), 1, "{shapes}");
+        assert_eq!(shapes.matches(title_alt).count(), 1, "{shapes}");
+        // No second shape under the base spelling alone.
+        assert!(!shapes.contains("sh:path <https://repolex.ai/ontology/subtexture/id>"), "{shapes}");
+        assert!(!shapes.contains("sh:path <https://repolex.ai/ontology/subtexture/title>"), "{shapes}");
+        // git-lex's required id still holds for the kit class, across the bridge.
+        let rest = &shapes[shapes.find(id_alt).unwrap()..];
+        let id_shape = &rest[..rest.find("    ] ;").unwrap()];
+        assert!(id_shape.contains("sh:minCount 1"), "{shapes}");
+        assert!(id_shape.contains("sh:nodeKind sh:IRI"), "{shapes}");
+        // A range of the base root is an address with no class fixed.
+        let rest = &shapes[shapes.find("sh:path t:pointsAt").expect("pointsAt shape")..];
+        assert!(rest[..rest.find("    ] ;").unwrap()].contains("sh:nodeKind sh:IRI"), "{shapes}");
+    }
+
     /// Rob's build order via @tr1p, 2026-08-27: standard OWL 2 qualified
     /// cardinality replaces the relatedTo{Class}Id twins. The author declares
     /// SEMANTICS; the generator picks the enforceable form.
