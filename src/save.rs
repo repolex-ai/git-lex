@@ -735,6 +735,9 @@ pub(crate) fn hook_pre_commit() -> Outcome {
     Ok(())
 }
 
+/// What `substrate` says in a document a person saved by hand.
+pub const PERSON_SUBSTRATE: &str = "carbon";
+
 /// Detect active runtime substrate for stamping documents on save.
 ///
 /// Order of precedence:
@@ -773,6 +776,14 @@ pub fn detect_runtime_substrate(root: &std::path::Path) -> Option<String> {
             eprintln!("warning: could not read the Claude session log; writing substrate: claude-opus-5 into the documents this save touches");
             "claude-opus-5".to_string()
         }));
+    }
+    // No harness is running this save. In the repo of the person this machine
+    // belongs to, that is the person saving by hand: carbon (goodlux, 2026-11-16).
+    if let Some(host) = git_lex::identity::host_dir()
+        && let Ok(Some(owner)) = git_lex::identity::load_owner(&host)
+        && git_lex::identity::first_commit(root).is_ok_and(|g| g == owner.genesis)
+    {
+        return Some(PERSON_SUBSTRATE.to_string());
     }
     let subs = crate::harness::active_substrates(root);
     if !subs.is_empty() {

@@ -24,6 +24,8 @@ libc = "0.2"
 clap = { version = "4", features = ["derive", "wrap_help"] }
 clap_mangen = "0.2"
 oxigraph = { version = "0.5.6", features = ["rdf-12"] }
+# The parser oxigraph itself uses; here to print a saved query back as one line.
+spargebra = { version = "0.4", features = ["sparql-12"] }
 git2 = { version = "0.20", default-features = false, features = ["vendored-openssl"] }
 serde_yaml = "0.9"
 sha2 = "0.10"

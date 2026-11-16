@@ -937,6 +937,7 @@ dependencies = [
  "shacl_ir",
  "shacl_rdf",
  "shacl_validation",
+ "spargebra",
  "sparql_service",
  "ssh-key",
  "tokio",

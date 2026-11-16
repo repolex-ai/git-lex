@@ -242,7 +242,11 @@ enum IdentityCommands {
     /// Say that this folder is this agent: make its key (once) and list the public half on this machine
     Bind,
     /// Print this session's agent token, for an `Authorization: Bearer` header
-    Token,
+    Token {
+        /// Print the token of the PERSON this machine belongs to. For that person's own tools (a UI server they run); refused inside an agent's session
+        #[arg(long)]
+        owner: bool,
+    },
     /// Show which agent this session is and how long its token has left
     Show,
     /// Say that this folder's identity is the PERSON this machine belongs to (run by that person, from a plain terminal)
@@ -350,7 +354,7 @@ fn run(command: Commands) -> Outcome {
         Commands::Voice { message, list } => voice::cmd_voice(message.as_deref(), list),
         Commands::Identity { command } => match command {
             IdentityCommands::Bind => identity_cmd::cmd_bind(),
-            IdentityCommands::Token => identity_cmd::cmd_token(),
+            IdentityCommands::Token { owner } => identity_cmd::cmd_token(owner),
             IdentityCommands::Show => identity_cmd::cmd_show(),
             IdentityCommands::Owner => identity_cmd::cmd_owner(),
             IdentityCommands::Retire { id } => identity_cmd::cmd_retire(&id),

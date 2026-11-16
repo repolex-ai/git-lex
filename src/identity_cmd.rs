@@ -12,6 +12,38 @@ fn session_root() -> Outcome<std::path::PathBuf> {
     git_lex::gitlexd::session::session_soul().map(|s| s.root).map_err(|e| Failure::new(format!("fatal: {e}")))
 }
 
+/// Refuse inside an agent's harness session: what follows is a person's act.
+fn person_only(what: &str) -> Outcome {
+    if let Ok((home, how)) = git_lex::gitlexd::session::session_home()
+        && how != git_lex::gitlexd::session::TERMINAL
+    {
+        return Err(Failure::new(format!(
+            "fatal: this is {how} (started in {}). {what} is for a person to do, from a plain terminal or their own tools.",
+            home.display()
+        )));
+    }
+    Ok(())
+}
+
+/// The folder of the person this machine belongs to: the owner record names
+/// the identity, the machine's list of repos says where it lives.
+fn owner_root() -> Outcome<std::path::PathBuf> {
+    person_only("Using the owner's token")?;
+    let host = host()?;
+    let Some(owner) = identity::load_owner(&host).map_err(Failure::new)? else {
+        return Err(Failure::new(format!(
+            "No owner is recorded on this machine ({} does not exist). The person it belongs to runs, in their own repo:\n    git lex identity owner",
+            identity::owner_path(&host).display()
+        )));
+    };
+    git_lex::registry_entries()
+        .into_iter()
+        .find(|e| e.genesis.as_deref() == Some(owner.genesis.as_str()))
+        .map(|e| std::path::PathBuf::from(e.path))
+        .filter(|p| p.is_dir())
+        .ok_or_else(|| Failure::new(format!("The owner's repo ({}) is not in this machine's list of repos, so its key cannot be found.", owner.genesis)))
+}
+
 fn no_key(root: &std::path::Path) -> Failure {
     Failure::new(format!(
         "This agent has no key yet ({} holds none).\n\
@@ -46,8 +78,8 @@ pub fn cmd_bind() -> Outcome {
 }
 
 /// `git lex identity token`: print the session agent's token, nothing else.
-pub fn cmd_token() -> Outcome {
-    let root = session_root()?;
+pub fn cmd_token(owner: bool) -> Outcome {
+    let root = if owner { owner_root()? } else { session_root()? };
     if !identity::has_key(&root) {
         return Err(no_key(&root));
     }
@@ -90,17 +122,8 @@ pub fn cmd_show() -> Outcome {
 /// `git lex identity owner`: say that this folder's identity is the person
 /// this machine belongs to.
 pub fn cmd_owner() -> Outcome {
-    // A person's act. Inside an agent's session the answer is no, whatever
-    // folder the shell is in: an agent does not get to name the owner.
-    if let Ok((home, how)) = git_lex::gitlexd::session::session_home()
-        && how != git_lex::gitlexd::session::TERMINAL
-    {
-        return Err(Failure::new(format!(
-            "fatal: this is {how} (started in {}). Naming the owner of this machine is for a person to do, \
-             from a plain terminal, in their own repo:\n    git lex identity owner",
-            home.display()
-        )));
-    }
+    // An agent does not get to name the owner, whatever folder its shell is in.
+    person_only("Naming the owner of this machine")?;
     let root = require_git_root()?;
     git_lex::require_lex_repo(&root)?;
     let host = host()?;

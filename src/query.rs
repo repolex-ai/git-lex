@@ -166,101 +166,62 @@ pub(crate) fn run_query(store: &Store, query: &str, store_type: &str, json: bool
     Ok(())
 }
 
-/// Stored queries (Rob-ruled 2026-08-26): `git lex query <name>` runs the
-/// query saved in `.lex/query/<name>.md`. A stored query is plain markdown
-/// — prose anywhere in it is the details section, and the query itself is
-/// the first fenced code block (or, with no fence, the whole body). One
-/// door, the same one inline queries use. Returns None when the argument
-/// is not a stored-query name, in which case it runs as SPARQL text.
-fn resolve_stored_query(arg: &str) -> Option<String> {
-    resolve_stored_query_in(&git_lex::find_git_root()?, arg)
-}
-
-fn resolve_stored_query_in(root: &std::path::Path, arg: &str) -> Option<String> {
-    let path = git_lex::layout::query_dir(root).join(format!("{}.md", arg));
-    let md = std::fs::read_to_string(&path).ok()?;
-    eprintln!("Stored query: .lex/query/{}.md", arg);
-    Some(stored_query_text(&md))
-}
-
-/// Pure extraction of the query from a stored-query markdown file: skip
-/// YAML frontmatter if present, then the FIRST fenced code block wins
-/// (its info string — ```sparql or bare ``` — is ignored); a file with no
-/// fence is all query. A parse error downstream names the file, so a
-/// malformed stored query fails exactly like a malformed inline one.
-fn stored_query_text(md: &str) -> String {
-    // Strip frontmatter.
-    let body = if let Some(rest) = md.strip_prefix("---\n") {
-        match rest.find("\n---\n") {
-            Some(i) => &rest[i + 5..],
-            None => md,
-        }
-    } else {
-        md
-    };
-    // First fenced block, if any.
-    let mut in_fence = false;
-    let mut fence_lines: Vec<&str> = Vec::new();
-    for line in body.lines() {
-        let t = line.trim_start();
-        if t.starts_with("```") {
-            if in_fence {
-                return fence_lines.join("\n");
-            }
-            in_fence = true;
-            continue;
-        }
-        if in_fence {
-            fence_lines.push(line);
-        }
+/// Saved queries: `git lex query <name>` runs a query saved as a document.
+/// The lookup and the format are `git_lex::stored_query`: the installed
+/// kits' `Query/` folders first, `.lex/query/` after. One door, the same one
+/// inline queries use.
+///
+/// `Ok(Some(text))` is the query to run; `Ok(None)` means the argument is
+/// not a saved query's name and runs as SPARQL text; `Err` has already told
+/// the person what is wrong.
+fn resolve_stored_query(arg: &str) -> Result<Option<String>, ()> {
+    match git_lex::find_git_root() {
+        Some(root) => resolve_stored_query_in(&root, arg),
+        None => Ok(None),
     }
-    if in_fence {
-        // Unclosed fence: everything after the opener is the query.
-        return fence_lines.join("\n");
-    }
-    body.trim().to_string()
 }
 
-/// The miss surface: the argument looked like a stored-query NAME (no
-/// whitespace, no SPARQL braces) but no such file exists. Say what IS
-/// available instead of handing the name to the SPARQL parser, whose
-/// "parse error at 'recent'" would teach nothing.
-fn stored_query_miss(arg: &str) -> bool {
-    let Some(root) = git_lex::find_git_root() else { return false };
-    stored_query_miss_in(&root, arg)
-}
-
-fn stored_query_miss_in(root: &std::path::Path, arg: &str) -> bool {
+fn resolve_stored_query_in(root: &std::path::Path, arg: &str) -> Result<Option<String>, ()> {
+    use git_lex::stored_query::{find, names, Found};
+    // Anything with whitespace or a brace is SPARQL text, never a name.
     if arg.contains(char::is_whitespace) || arg.contains('{') {
-        return false;
+        return Ok(None);
     }
-    let dir = git_lex::layout::query_dir(root);
-    let mut names: Vec<String> = std::fs::read_dir(&dir)
-        .map(|entries| {
-            entries
-                .filter_map(|e| e.ok())
-                .filter_map(|e| {
-                    let name = e.file_name().to_string_lossy().to_string();
-                    name.strip_suffix(".md").map(str::to_string)
-                })
-                .collect()
-        })
-        .unwrap_or_default();
-    names.sort();
-    if names.is_empty() {
-        eprintln!(
-            "No stored query named '{}' (.lex/query/ is empty). Save one as \
-             .lex/query/{}.md — the first code block in it is the query.",
-            arg, arg
-        );
-    } else {
-        eprintln!(
-            "No stored query named '{}'. Available: {}",
-            arg,
-            names.join(", ")
-        );
+    match find(root, arg) {
+        Found::Query { text, file } => {
+            eprintln!("Saved query: {file}");
+            Ok(Some(text))
+        }
+        Found::Ambiguous(forms) => {
+            eprintln!("More than one kit has a saved query named '{arg}'. Say which: {}", forms.join(", "));
+            Err(())
+        }
+        Found::NoBlock(file) => {
+            eprintln!("{file} holds no query. The query is the first fenced code block in the document's body; add one.");
+            Err(())
+        }
+        Found::Missing => {
+            let have = names(root);
+            if have.is_empty() {
+                eprintln!(
+                    "No saved query named '{arg}', and this repo has none yet. Make one with \
+                     `git lex create query {arg}` and put the query in a code block in its body."
+                );
+            } else {
+                eprintln!("No saved query named '{arg}'. Available: {}", have.join(", "));
+            }
+            Err(())
+        }
     }
-    true
+}
+
+/// The query text of a `.lex/query/` file, the earlier format: skip YAML
+/// frontmatter, then the first fenced block; a file with no fence is all
+/// query.
+#[cfg(test)]
+fn stored_query_text(md: &str) -> String {
+    let (_, body) = git_lex::split_frontmatter(md);
+    git_lex::stored_query::first_fenced_block(body).unwrap_or_else(|| body.trim().to_string())
 }
 
 pub(crate) fn cmd_direct(query: String, json: bool) -> Outcome {
@@ -268,13 +229,9 @@ pub(crate) fn cmd_direct(query: String, json: bool) -> Outcome {
     // runs that file's query; anything else runs as SPARQL text. A name-like
     // miss gets the available list instead of a SPARQL parse error.
     let query = match resolve_stored_query(&query) {
-        Some(q) => q,
-        None => {
-            if stored_query_miss(&query) {
-                return Err(Failure::new(""));
-            }
-            query
-        }
+        Ok(Some(q)) => q,
+        Ok(None) => query,
+        Err(()) => return Err(Failure::new("")),
     };
     // B2 FIX (w4r3z, Day 40): `query` now builds the "now" view from the WORKING
     // TREE every time, so the documented `create → save → query` flow surfaces a
@@ -354,13 +311,9 @@ pub(crate) fn cmd_query(query: String, json: bool) -> Outcome {
         }
     };
     let query = match resolve_stored_query_in(&soul.root, &query) {
-        Some(q) => q,
-        None => {
-            if stored_query_miss_in(&soul.root, &query) {
-                return Err(Failure::new(""));
-            }
-            query
-        }
+        Ok(Some(q)) => q,
+        Ok(None) => query,
+        Err(()) => return Err(Failure::new("")),
     };
     if let Err(e) = git_lex::gitlexd::client::ensure_running() {
         return Err(Failure::new([e.to_string(), String::from("(`git lex direct \"...\"` reads the working tree without gitlexd.)")].join("\n")));

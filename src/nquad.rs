@@ -373,6 +373,42 @@ impl ResolverContext {
 /// `resolve::resolve_thing_reference`, everything else rejected at save.
 pub const THING_CLASS_IRI: &str = "https://repolex.ai/ontology/git-lex/Thing";
 
+/// Replace a document's authored `kit.Class.sparql` lines with the one
+/// derived from its body, when its class declares a `sparql` property (it is
+/// a `Query` class). A body with no code block, or a query that does not
+/// parse, leaves the document with no `sparql` value and says why.
+pub(crate) fn derive_query_sparql(
+    spo_lines: &mut Vec<String>,
+    content: &str,
+    relpath: &str,
+    declared_props: &HashSet<String>,
+) {
+    // The document's class: the first `kit.Class.property` key it carries.
+    let Some((kit, class)) = spo_lines.iter().find_map(|l| {
+        let key = l.split(" | ").next()?;
+        let mut parts = key.split('.');
+        let (kit, class, _prop) = (parts.next()?, parts.next()?, parts.next()?);
+        (parts.next().is_none() && class.starts_with(char::is_uppercase)).then(|| (kit.to_string(), class.to_string()))
+    }) else {
+        return;
+    };
+    if !declared_props.contains(&format!("{kit}/{class}/sparql")) {
+        return;
+    }
+    let key = format!("{kit}.{class}.sparql");
+    let authored = format!("{key} | ");
+    spo_lines.retain(|l| !l.starts_with(&authored));
+    let (_, body) = crate::split_frontmatter(content);
+    let Some(text) = crate::stored_query::first_fenced_block(body) else {
+        eprintln!("warning: {relpath} is a saved query with no query in it. Put the query in a fenced code block in the body.");
+        return;
+    };
+    match crate::stored_query::canonical_sparql(crate::find_git_root().as_deref(), &text) {
+        Ok(one_line) => spo_lines.push(format!("{key} | hasValue | {one_line}")),
+        Err(e) => eprintln!("warning: the query in {relpath} does not parse, so it is saved without a sparql value: {e}"),
+    }
+}
+
 /// The Subtexture base ontology's root class. `git-lex:Thing` is declared a
 /// subclass of it; a kit may name either as a range (goodlux, 2026-11-16).
 pub const SUBTEXTURE_THING_CLASS_IRI: &str = "https://repolex.ai/ontology/subtexture/Thing";
@@ -976,6 +1012,12 @@ pub fn generate_frontmatter_nquads_with(
                     }
                 }
             }
+
+            // A saved query's `sparql` value is DERIVED from the first fenced
+            // code block in the body (stored_query.rs), never authored: the
+            // block a person edits is the one source, and whatever the
+            // frontmatter key holds is dropped.
+            derive_query_sparql(&mut spo_lines, &content, &relpath_str, &ctx.declared_props);
 
             // Sort and dedup
             spo_lines.sort();
@@ -2179,6 +2221,32 @@ mod tests {
     /// the range is declared on the git-lex property — the lookup must go
     /// through the declared predicate IRI, and a concrete range must keep
     /// working through the same key.
+    /// A Query document's sparql value comes from its body's code block;
+    /// what the frontmatter key holds is dropped. Other classes are untouched.
+    #[test]
+    fn a_saved_querys_sparql_is_derived_from_its_body() {
+        let declared: HashSet<String> = ["soul/Query/sparql".to_string()].into();
+        let doc = "---\nsoul.Query.id: <soul/Query/q>\nsoul.Query.sparql: \"typed by hand\"\n---\n\n```sparql\n# a comment\nASK { ?s ?p ?o }\n```\n";
+        let mut lines = vec![
+            "soul.Query.id | hasValue | <soul/Query/q>".to_string(),
+            "soul.Query.sparql | hasValue | typed by hand".to_string(),
+        ];
+        derive_query_sparql(&mut lines, doc, "Soul/Query/q.md", &declared);
+        assert_eq!(lines.len(), 2, "{lines:?}");
+        let value = lines[1].strip_prefix("soul.Query.sparql | hasValue | ").expect("derived line");
+        assert!(value.starts_with("ASK") && value.contains("?s ?p ?o") && !value.contains("comment") && !value.contains("typed"), "{value}");
+
+        // No code block: no sparql value at all, authored or not.
+        let mut lines = vec!["soul.Query.sparql | hasValue | typed by hand".to_string()];
+        derive_query_sparql(&mut lines, "---\nsoul.Query.sparql: x\n---\nwords\n", "Soul/Query/q.md", &declared);
+        assert!(lines.is_empty(), "{lines:?}");
+
+        // A class that declares no sparql property is left exactly as it was.
+        let mut lines = vec!["soul.Note.title | hasValue | t".to_string()];
+        derive_query_sparql(&mut lines, "---\nsoul.Note.title: t\n---\n```\nASK {}\n```\n", "Soul/Note/n.md", &declared);
+        assert_eq!(lines, vec!["soul.Note.title | hasValue | t".to_string()]);
+    }
+
     /// Either root class as a range means "any Thing, by full address"
     /// (goodlux, 2026-11-16: subtexture:Thing underpins git-lex:Thing).
     #[test]

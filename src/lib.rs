@@ -19,6 +19,7 @@ pub mod context;
 pub mod spo_events;
 pub mod soul_md;
 pub mod identity;
+pub mod stored_query;
 
 use oxigraph::store::Store;
 use std::fs;
