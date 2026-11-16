@@ -76,6 +76,72 @@ pub fn jwks_path(host: &Path) -> PathBuf {
     host.join("jwks.json")
 }
 
+/// `~/.lex/identity/owner.json` — which identity this machine belongs to.
+pub fn owner_path(host: &Path) -> PathBuf {
+    host.join("owner.json")
+}
+
+/// The owner of this machine: the one identity that is a person's, not an
+/// agent's (goodlux, 2026-11-16). A person is identified exactly as an agent
+/// is, by a repo, its first commit and a key; this record is what tells the
+/// two apart. Services read it to answer "may this caller read a store that
+/// is not its own": the owner may read every store on the machine.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Owner {
+    /// The owner's address, the same value a token carries in `sub`.
+    pub owner: String,
+    /// The first commit of the owner's repo.
+    pub genesis: String,
+    /// Unix seconds when this was recorded.
+    pub since: u64,
+}
+
+/// The recorded owner. A missing file is no owner; a file that does not
+/// parse is an error, never "no owner".
+pub fn load_owner(host: &Path) -> Result<Option<Owner>, String> {
+    let path = owner_path(host);
+    match std::fs::read_to_string(&path) {
+        Ok(text) => serde_json::from_str(&text).map(Some).map_err(|e| format!("{} does not parse: {e}", path.display())),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(format!("cannot read {}: {e}", path.display())),
+    }
+}
+
+/// What [`set_owner`] found.
+#[derive(Debug, PartialEq)]
+pub enum OwnerSet {
+    New,
+    Already,
+}
+
+/// Record the repo at `root` as this machine's owner. It must already have
+/// a key on the list. A machine has one owner: a second, different one is
+/// refused, and the way to change it is for a person to remove the file.
+pub fn set_owner(root: &Path, host: &Path, now: u64) -> Result<OwnerSet, String> {
+    let genesis = first_commit(root)?;
+    let list = HostList::load(host)?;
+    if bound_key(root, host, now).is_none() || list.current(&genesis, now).is_none() {
+        return Err(format!(
+            "{} has no key on this machine's list yet. Run `git lex identity bind` in it first.",
+            root.display()
+        ));
+    }
+    if let Some(have) = load_owner(host)? {
+        if have.genesis == genesis {
+            return Ok(OwnerSet::Already);
+        }
+        return Err(format!(
+            "this machine already has an owner ({}). A machine has one. To change it, remove {} by hand and run this again.",
+            have.owner,
+            owner_path(host).display()
+        ));
+    }
+    let owner = Owner { owner: agent_iri(&genesis), genesis, since: now };
+    let json = serde_json::to_string_pretty(&owner).map_err(|e| e.to_string())? + "\n";
+    write_atomic(&owner_path(host), json.as_bytes(), 0o644)?;
+    Ok(OwnerSet::New)
+}
+
 /// The IRI the graph already gives an agent; the token's `sub`.
 pub fn agent_iri(genesis: &str) -> String {
     format!("https://repolex.ai/soul/Soul/{genesis}")
@@ -755,6 +821,32 @@ mod tests {
         commit(&clone, &key_path(&clone), "signed by the copy");
         let (good, said) = verify_head(&clone);
         assert!(!good, "{said}");
+    }
+
+    /// A machine has one owner, it must be an identity with a key on the
+    /// list, and a second different one is refused.
+    #[test]
+    fn a_machine_has_one_owner_and_it_must_be_bound() {
+        let (repo, host) = soul("owner");
+        assert_eq!(load_owner(&host).unwrap(), None);
+        assert!(set_owner(&repo, &host, NOW).unwrap_err().contains("no key"));
+
+        bind(&repo, &host, NOW).unwrap();
+        assert_eq!(set_owner(&repo, &host, NOW + 1).unwrap(), OwnerSet::New);
+        let genesis = first_commit(&repo).unwrap();
+        let owner = load_owner(&host).unwrap().unwrap();
+        assert_eq!(owner.owner, agent_iri(&genesis));
+        assert_eq!(owner.genesis, genesis);
+        assert_eq!(set_owner(&repo, &host, NOW + 2).unwrap(), OwnerSet::Already);
+
+        // A second identity on the same machine cannot take the place.
+        let other = repo.parent().unwrap().join("other");
+        std::fs::create_dir_all(other.join(".lex")).unwrap();
+        git(&other, &["init", "-q"]);
+        git(&other, &["commit", "-q", "--allow-empty", "-m", "another first"]);
+        bind(&other, &host, NOW + 3).unwrap();
+        assert!(set_owner(&other, &host, NOW + 4).unwrap_err().contains("already has an owner"));
+        assert_eq!(load_owner(&host).unwrap().unwrap().genesis, genesis);
     }
 
     #[test]

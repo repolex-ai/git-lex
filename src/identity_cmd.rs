@@ -68,6 +68,11 @@ pub fn cmd_show() -> Outcome {
     let list = identity::HostList::load(&host).map_err(Failure::new)?;
     println!("agent    {}", identity::agent_iri(&genesis));
     println!("folder   {}", root.display());
+    match identity::load_owner(&host).map_err(Failure::new)? {
+        Some(o) if o.genesis == genesis => println!("owner    yes, this is the person this machine belongs to"),
+        Some(o) => println!("owner    {}", o.owner),
+        None => println!("owner    none recorded on this machine"),
+    }
     match identity::verify(&token, &list, now) {
         Ok((claims, _)) => {
             let left = claims.exp.saturating_sub(now);
@@ -78,6 +83,34 @@ pub fn cmd_show() -> Outcome {
             println!("key      NOT accepted against {}: {why}", identity::list_path(&host).display());
             println!("token    services will refuse it");
         }
+    }
+    Ok(())
+}
+
+/// `git lex identity owner`: say that this folder's identity is the person
+/// this machine belongs to.
+pub fn cmd_owner() -> Outcome {
+    // A person's act. Inside an agent's session the answer is no, whatever
+    // folder the shell is in: an agent does not get to name the owner.
+    if let Ok((home, how)) = git_lex::gitlexd::session::session_home()
+        && how != git_lex::gitlexd::session::TERMINAL
+    {
+        return Err(Failure::new(format!(
+            "fatal: this is {how} (started in {}). Naming the owner of this machine is for a person to do, \
+             from a plain terminal, in their own repo:\n    git lex identity owner",
+            home.display()
+        )));
+    }
+    let root = require_git_root()?;
+    git_lex::require_lex_repo(&root)?;
+    let host = host()?;
+    let genesis = identity::first_commit(&root).map_err(Failure::new)?;
+    match identity::set_owner(&root, &host, identity::now_secs()).map_err(Failure::new)? {
+        identity::OwnerSet::New => {
+            println!("Owner: this machine belongs to {} ({}).", identity::agent_iri(&genesis), root.display());
+            println!("  recorded in  {}", identity::owner_path(&host).display());
+        }
+        identity::OwnerSet::Already => println!("Already the owner: {} ({}). Nothing changed.", &genesis[..8], root.display()),
     }
     Ok(())
 }

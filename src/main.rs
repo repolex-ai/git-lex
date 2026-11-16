@@ -245,6 +245,8 @@ enum IdentityCommands {
     Token,
     /// Show which agent this session is and how long its token has left
     Show,
+    /// Say that this folder's identity is the PERSON this machine belongs to (run by that person, from a plain terminal)
+    Owner,
     /// End an agent's current key (lost or copied); what it signed before still verifies
     Retire {
         /// The agent's id: its repo's full first-commit hash
@@ -350,6 +352,7 @@ fn run(command: Commands) -> Outcome {
             IdentityCommands::Bind => identity_cmd::cmd_bind(),
             IdentityCommands::Token => identity_cmd::cmd_token(),
             IdentityCommands::Show => identity_cmd::cmd_show(),
+            IdentityCommands::Owner => identity_cmd::cmd_owner(),
             IdentityCommands::Retire { id } => identity_cmd::cmd_retire(&id),
         },
         Commands::Session { json } => session::cmd_session(json),
