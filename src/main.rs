@@ -244,9 +244,32 @@ enum IdentityCommands {
     /// Print this session's agent token, for an `Authorization: Bearer` header
     Token {
         /// Print the token of the PERSON this machine belongs to. For that person's own tools (a UI server they run); refused inside an agent's session
-        #[arg(long)]
+        #[arg(long, conflicts_with = "service")]
         owner: bool,
+        /// Print the token of a SERVICE acting under a grant (see `identity grant`). The service's own way to get its token
+        #[arg(long, value_name = "NAME")]
+        service: Option<String>,
     },
+    /// Let a service act for you: it gets its own key, and a grant you sign saying what it may do and until when
+    Grant {
+        /// The service's name: lowercase letters, digits and dashes (subtexture-ui)
+        service: String,
+        /// What it may do, as words separated by spaces, each `engine:read` or `engine:write` (for example "pan:read pan:write syrinx:read")
+        #[arg(long)]
+        scope: String,
+        /// How many days the grant lasts (2 to 366)
+        #[arg(long, default_value_t = 90)]
+        days: u64,
+    },
+    /// List the grants on this machine: which service acts for whom, for what, until when
+    Grants,
+    /// End a service's grant now; its tokens stop being accepted at once
+    Revoke {
+        /// The service's name
+        service: String,
+    },
+    /// Check a token read from standard input and print who it speaks for (exit 1 when it is refused)
+    Check,
     /// Show which agent this session is and how long its token has left
     Show,
     /// Say that this folder's identity is the PERSON this machine belongs to (run by that person, from a plain terminal)
@@ -354,7 +377,11 @@ fn run(command: Commands) -> Outcome {
         Commands::Voice { message, list } => voice::cmd_voice(message.as_deref(), list),
         Commands::Identity { command } => match command {
             IdentityCommands::Bind => identity_cmd::cmd_bind(),
-            IdentityCommands::Token { owner } => identity_cmd::cmd_token(owner),
+            IdentityCommands::Token { owner, service } => identity_cmd::cmd_token(owner, service.as_deref()),
+            IdentityCommands::Grant { service, scope, days } => identity_cmd::cmd_grant(&service, &scope, days),
+            IdentityCommands::Grants => identity_cmd::cmd_grants(),
+            IdentityCommands::Revoke { service } => identity_cmd::cmd_revoke(&service),
+            IdentityCommands::Check => identity_cmd::cmd_check(),
             IdentityCommands::Show => identity_cmd::cmd_show(),
             IdentityCommands::Owner => identity_cmd::cmd_owner(),
             IdentityCommands::Retire { id } => identity_cmd::cmd_retire(&id),

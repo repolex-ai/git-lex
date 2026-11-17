@@ -78,7 +78,13 @@ pub fn cmd_bind() -> Outcome {
 }
 
 /// `git lex identity token`: print the session agent's token, nothing else.
-pub fn cmd_token(owner: bool) -> Outcome {
+pub fn cmd_token(owner: bool, service: Option<&str>) -> Outcome {
+    if let Some(service) = service {
+        // A service's token is the service's to ask for, whoever started it:
+        // that is what the grant is for.
+        println!("{}", identity::service_token(&host()?, service, identity::now_secs()).map_err(Failure::new)?);
+        return Ok(());
+    }
     let root = if owner { owner_root()? } else { session_root()? };
     if !identity::has_key(&root) {
         return Err(no_key(&root));
@@ -135,6 +141,88 @@ pub fn cmd_owner() -> Outcome {
         }
         identity::OwnerSet::Already => println!("Already the owner: {} ({}). Nothing changed.", &genesis[..8], root.display()),
     }
+    Ok(())
+}
+
+/// The identity a grant is signed as: inside an agent's session, that
+/// agent, whatever folder the shell is in; from a plain terminal, the repo
+/// the person is standing in.
+fn grantor_root() -> Outcome<std::path::PathBuf> {
+    match git_lex::gitlexd::session::session_soul() {
+        Ok(s) if s.from_harness() => Ok(s.root),
+        _ => require_git_root(),
+    }
+}
+
+fn days_left(exp: u64, now: u64) -> u64 {
+    exp.saturating_sub(now) / 86_400
+}
+
+/// `git lex identity grant <service> --scope "..."`
+pub fn cmd_grant(service: &str, scope: &str, days: u64) -> Outcome {
+    let root = grantor_root()?;
+    let host = host()?;
+    let now = identity::now_secs();
+    let record = identity::grant(&root, &host, service, scope, days, now).map_err(Failure::new)?;
+    println!("Granted: {service} may act for {} ({}).", identity::agent_iri(&record.grantor), root.display());
+    println!("  it may       {}", record.scope);
+    println!("  for          {} days", days_left(record.exp, now));
+    println!("  its key      {}", identity::service_dir(&host, service).join("key").display());
+    println!("  listed in    {}", identity::grants_path(&host).display());
+    println!("The service gets its token with:  git lex identity token --service {service}");
+    println!("End it at any time with:          git lex identity revoke {service}");
+    Ok(())
+}
+
+/// `git lex identity grants`
+pub fn cmd_grants() -> Outcome {
+    let host = host()?;
+    let now = identity::now_secs();
+    let list = identity::GrantList::load(&host).map_err(Failure::new)?;
+    let live: Vec<_> = list.grants.iter().filter(|g| g.ended.is_none() && g.exp > now).collect();
+    if live.is_empty() {
+        println!("No grants are in force on this machine.");
+        return Ok(());
+    }
+    for g in live {
+        println!("{}  acts for {}  may: {}  ({} days left)", g.service, identity::agent_iri(&g.grantor), g.scope, days_left(g.exp, now));
+    }
+    Ok(())
+}
+
+/// `git lex identity revoke <service>`
+pub fn cmd_revoke(service: &str) -> Outcome {
+    let host = host()?;
+    let now = identity::now_secs();
+    // Inside an agent's session, only that agent's own grants are its to end.
+    if let Ok(s) = git_lex::gitlexd::session::session_soul()
+        && s.from_harness()
+        && let Some(g) = identity::GrantList::load(&host).map_err(Failure::new)?.in_force(service, now)
+        && g.grantor != s.genesis
+    {
+        return Err(Failure::new(format!(
+            "fatal: {service} acts for {}, not for this session's agent. Its grant is theirs to end.",
+            identity::agent_iri(&g.grantor)
+        )));
+    }
+    match identity::revoke(&host, service, now).map_err(Failure::new)? {
+        Some(g) => println!("Ended: {service} no longer acts for {}. Its tokens are refused from now.", identity::agent_iri(&g.grantor)),
+        None => println!("No grant is in force for {service}. Nothing changed."),
+    }
+    Ok(())
+}
+
+/// `git lex identity check`: a token on standard input, who it speaks for
+/// on standard output as one line of JSON.
+pub fn cmd_check() -> Outcome {
+    let mut token = String::new();
+    std::io::Read::read_to_string(&mut std::io::stdin(), &mut token).map_err(|e| Failure::new(format!("cannot read standard input: {e}")))?;
+    let caller = identity::verify_caller(token.trim(), &host()?, identity::now_secs())
+        .map_err(|why| Failure::new(format!("refused: {why}")))?;
+    println!(
+        "{}",
+        serde_json::json!({ "sub": caller.sub, "actor": caller.actor, "scope": caller.scope, "expires": caller.expires })
+    );
     Ok(())
 }
 

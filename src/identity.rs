@@ -606,6 +606,9 @@ pub fn verify<'a>(token: &str, list: &'a HostList, now: u64) -> Result<(Claims, 
     if header.get("alg").and_then(|a| a.as_str()) != Some("EdDSA") {
         return Err("the token is not signed with EdDSA, the only signature type accepted".into());
     }
+    if header.get("typ").and_then(|t| t.as_str()) == Some(GRANT_TYP) {
+        return Err("this is a grant, not a token; a service presents it inside its own token".into());
+    }
     let kid = header.get("kid").and_then(|k| k.as_str()).ok_or("the token names no key (no kid)")?;
     // Only an entry with no end date verifies a token: a retired key still
     // stands behind the commits it signed, never behind a new request.
@@ -637,6 +640,499 @@ pub fn verify<'a>(token: &str, list: &'a HostList, now: u64) -> Result<(Claims, 
         return Err(format!("the token is for {:?}, not for {AUDIENCE:?}", claims.aud));
     }
     Ok((claims, entry))
+}
+
+// ─── Services acting for someone ───────────────────────────────
+//
+// A service (a UI server, a worker) must not hold a person's or an agent's
+// key. It gets its own key, and the one it acts for signs a GRANT: "this
+// service, holding this key, may act for me, for these things, until this
+// date". The service then signs short tokens with its own key and carries
+// the grant inside them. A checker sees both names: who the request is for
+// (`sub`) and which service is acting (`act.sub`, RFC 8693).
+//
+// Nothing is issued by a third party, as with agent tokens: the grant is
+// signed by the grantor's listed key and names the service's public key
+// (`cnf.jwk`, RFC 7800), so the service's key needs no list of its own.
+// The machine's list of live grants (`grants.json`) is what ends one.
+
+/// A grant lasts at least this long. Longer than any token may live, so a
+/// grant can never pass a checker as a plain token.
+pub const MIN_GRANT_SECS: u64 = 2 * 86_400;
+/// And at most this long.
+pub const MAX_GRANT_SECS: u64 = 366 * 86_400;
+/// The `typ` of a grant, so it cannot be mistaken for a token.
+pub const GRANT_TYP: &str = "grant+jwt";
+
+/// `~/.lex/identity/grants.json` — the grants in force on this machine.
+pub fn grants_path(host: &Path) -> PathBuf {
+    host.join("grants.json")
+}
+
+/// `~/.lex/identity/services/<name>/` — a service's key and its grant.
+pub fn service_dir(host: &Path, service: &str) -> PathBuf {
+    host.join("services").join(service)
+}
+
+/// A service's name: lowercase letters, digits and dashes, starting with a
+/// letter. It becomes a folder name and the `act.sub` of its tokens.
+pub fn valid_service_name(name: &str) -> bool {
+    let mut chars = name.chars();
+    chars.next().is_some_and(|c| c.is_ascii_lowercase())
+        && name.len() <= 40
+        && name.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct GrantRecord {
+    pub jti: String,
+    /// First commit of the identity that granted.
+    pub grantor: String,
+    pub service: String,
+    /// What the service may do, as space-separated words (`pan:read pan:write`).
+    pub scope: String,
+    /// The service's public key, base64url, as in the grant's `cnf.jwk.x`.
+    pub x: String,
+    pub iat: u64,
+    pub exp: u64,
+    /// Unix seconds when it was ended early; absent while in force.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ended: Option<u64>,
+}
+
+#[derive(Debug, Default, Serialize, Deserialize)]
+pub struct GrantList {
+    #[serde(default)]
+    pub grants: Vec<GrantRecord>,
+}
+
+impl GrantList {
+    /// A missing file is no grants; a file that does not parse is an error.
+    pub fn load(host: &Path) -> Result<GrantList, String> {
+        let path = grants_path(host);
+        match std::fs::read_to_string(&path) {
+            Ok(text) => serde_json::from_str(&text).map_err(|e| format!("{} does not parse: {e}", path.display())),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(GrantList::default()),
+            Err(e) => Err(format!("cannot read {}: {e}", path.display())),
+        }
+    }
+
+    pub fn save(&self, host: &Path) -> Result<(), String> {
+        std::fs::create_dir_all(host).map_err(|e| format!("cannot create {}: {e}", host.display()))?;
+        let json = serde_json::to_string_pretty(self).map_err(|e| e.to_string())? + "\n";
+        write_atomic(&grants_path(host), json.as_bytes(), 0o644)
+    }
+
+    /// The grant in force for this service now, if any.
+    pub fn in_force(&self, service: &str, now: u64) -> Option<&GrantRecord> {
+        self.grants.iter().find(|g| g.service == service && g.ended.is_none() && g.exp > now)
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize, PartialEq)]
+pub struct Jwk {
+    pub kty: String,
+    pub crv: String,
+    pub x: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, PartialEq)]
+pub struct Confirmation {
+    pub jwk: Jwk,
+}
+
+#[derive(Debug, Serialize, Deserialize, PartialEq)]
+pub struct GrantClaims {
+    pub iss: String,
+    pub sub: String,
+    pub aud: String,
+    pub iat: u64,
+    pub exp: u64,
+    pub jti: String,
+    pub service: String,
+    pub scope: String,
+    pub cnf: Confirmation,
+}
+
+#[derive(Debug, Serialize, Deserialize, PartialEq)]
+pub struct Actor {
+    pub sub: String,
+}
+
+/// The claims of a token a service signs when acting under a grant.
+#[derive(Debug, Serialize, Deserialize, PartialEq)]
+pub struct ActingClaims {
+    /// `service:<name>`: the signer.
+    pub iss: String,
+    /// Who the request is for: the grantor.
+    pub sub: String,
+    pub aud: String,
+    pub iat: u64,
+    pub exp: u64,
+    pub jti: String,
+    pub act: Actor,
+    /// The grant, whole, as the grantor signed it.
+    pub grant: String,
+}
+
+fn random_hex(bytes: usize) -> Result<String, String> {
+    let mut id = vec![0u8; bytes];
+    getrandom::getrandom(&mut id).map_err(|e| format!("no random bytes from the system: {e}"))?;
+    Ok(id.iter().map(|b| format!("{b:02x}")).collect())
+}
+
+fn sign_jwt(header: serde_json::Value, claims: &impl Serialize, key: &SigningKey) -> Result<String, String> {
+    let signed = format!(
+        "{}.{}",
+        URL_SAFE_NO_PAD.encode(header.to_string()),
+        URL_SAFE_NO_PAD.encode(serde_json::to_string(claims).map_err(|e| e.to_string())?)
+    );
+    let signature = key.sign(signed.as_bytes());
+    Ok(format!("{signed}.{}", URL_SAFE_NO_PAD.encode(signature.to_bytes())))
+}
+
+/// The three parts of a compact JWT: header JSON, claims bytes, and the
+/// signed text with its signature. Nothing here is trusted yet.
+struct Parts<'t> {
+    header: serde_json::Value,
+    claims: Vec<u8>,
+    signed: &'t str,
+    signature: ed25519_dalek::Signature,
+}
+
+fn split_jwt<'t>(token: &'t str, what: &str) -> Result<Parts<'t>, String> {
+    let mut parts = token.split('.');
+    let (Some(h), Some(c), Some(s), None) = (parts.next(), parts.next(), parts.next(), parts.next()) else {
+        return Err(format!("not a {what}: expected three parts separated by dots"));
+    };
+    let decode = |part: &str, piece: &str| {
+        URL_SAFE_NO_PAD.decode(part).map_err(|e| format!("the {what}'s {piece} is not base64url: {e}"))
+    };
+    let header: serde_json::Value =
+        serde_json::from_slice(&decode(h, "header")?).map_err(|e| format!("the {what}'s header is not JSON: {e}"))?;
+    if header.get("alg").and_then(|a| a.as_str()) != Some("EdDSA") {
+        return Err(format!("the {what} is not signed with EdDSA, the only signature type accepted"));
+    }
+    let signature = ed25519_dalek::Signature::from_slice(&decode(s, "signature")?)
+        .map_err(|_| format!("the {what}'s signature is the wrong length"))?;
+    Ok(Parts { header, claims: decode(c, "claims")?, signed: &token[..h.len() + 1 + c.len()], signature })
+}
+
+fn service_key_path(host: &Path, service: &str) -> PathBuf {
+    service_dir(host, service).join("key")
+}
+
+fn service_grant_path(host: &Path, service: &str) -> PathBuf {
+    service_dir(host, service).join("grant.jwt")
+}
+
+fn service_token_path(host: &Path, service: &str) -> PathBuf {
+    service_dir(host, service).join("token")
+}
+
+fn service_signing_key(host: &Path, service: &str) -> Result<SigningKey, String> {
+    let path = service_key_path(host, service);
+    let text = std::fs::read_to_string(&path).map_err(|e| format!("cannot read the service's key at {}: {e}", path.display()))?;
+    let seed: [u8; 32] = URL_SAFE_NO_PAD
+        .decode(text.trim())
+        .ok()
+        .and_then(|b| b.try_into().ok())
+        .ok_or_else(|| format!("the service's key at {} is not a 32-byte Ed25519 key", path.display()))?;
+    Ok(SigningKey::from_bytes(&seed))
+}
+
+/// Grant a service the right to act for the identity whose folder `root`
+/// is. Makes the service's key the first time; a later grant keeps the key
+/// and replaces the grant. A service acts for one identity: a grant to the
+/// same name from a different one is refused while the first is in force.
+pub fn grant(root: &Path, host: &Path, service: &str, scope: &str, days: u64, now: u64) -> Result<GrantRecord, String> {
+    if !valid_service_name(service) {
+        return Err(format!(
+            "{service:?} is not a usable service name: lowercase letters, digits and dashes, starting with a letter"
+        ));
+    }
+    let scope = scope.split_whitespace().collect::<Vec<_>>().join(" ");
+    if scope.is_empty() {
+        return Err("a grant must say what the service may do (for example: pan:read pan:write)".into());
+    }
+    let lifetime = days.saturating_mul(86_400);
+    if !(MIN_GRANT_SECS..=MAX_GRANT_SECS).contains(&lifetime) {
+        return Err(format!(
+            "a grant lasts between {} and {} days",
+            MIN_GRANT_SECS / 86_400,
+            MAX_GRANT_SECS / 86_400
+        ));
+    }
+    let genesis = first_commit(root)?;
+    if bound_key(root, host, now).is_none() {
+        return Err(format!("{} has no key on this machine's list, so it cannot sign a grant", root.display()));
+    }
+    let mut list = GrantList::load(host)?;
+    if let Some(have) = list.in_force(service, now)
+        && have.grantor != genesis
+    {
+        return Err(format!(
+            "the service {service} already acts for a different identity ({}). End that grant first:\n    git lex identity revoke {service}",
+            &have.grantor[..8.min(have.grantor.len())]
+        ));
+    }
+
+    let dir = service_dir(host, service);
+    std::fs::create_dir_all(&dir).map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700));
+    }
+    if !service_key_path(host, service).is_file() {
+        let mut seed = [0u8; 32];
+        getrandom::getrandom(&mut seed).map_err(|e| format!("no random bytes from the system: {e}"))?;
+        write_atomic(&service_key_path(host, service), format!("{}\n", URL_SAFE_NO_PAD.encode(seed)).as_bytes(), 0o600)?;
+    }
+    let x = URL_SAFE_NO_PAD.encode(service_signing_key(host, service)?.verifying_key().as_bytes());
+
+    let iri = agent_iri(&genesis);
+    let claims = GrantClaims {
+        iss: iri.clone(),
+        sub: iri,
+        aud: AUDIENCE.into(),
+        iat: now,
+        exp: now + lifetime,
+        jti: random_hex(16)?,
+        service: service.to_string(),
+        scope: scope.clone(),
+        cnf: Confirmation { jwk: Jwk { kty: "OKP".into(), crv: "Ed25519".into(), x: x.clone() } },
+    };
+    let header = serde_json::json!({ "alg": "EdDSA", "typ": GRANT_TYP, "kid": genesis });
+    let signed = sign_jwt(header, &claims, &signing_key(root)?)?;
+
+    for g in list.grants.iter_mut().filter(|g| g.service == service && g.ended.is_none()) {
+        g.ended = Some(now);
+    }
+    let record = GrantRecord {
+        jti: claims.jti.clone(),
+        grantor: genesis,
+        service: service.to_string(),
+        scope,
+        x,
+        iat: claims.iat,
+        exp: claims.exp,
+        ended: None,
+    };
+    list.grants.push(record.clone());
+    write_atomic(&service_grant_path(host, service), format!("{signed}\n").as_bytes(), 0o600)?;
+    let _ = std::fs::remove_file(service_token_path(host, service));
+    list.save(host)?;
+    Ok(record)
+}
+
+/// End a service's grant now. Its tokens stop being accepted at once.
+/// Returns the grant that was ended, if one was in force.
+pub fn revoke(host: &Path, service: &str, now: u64) -> Result<Option<GrantRecord>, String> {
+    let mut list = GrantList::load(host)?;
+    let mut ended = None;
+    for g in list.grants.iter_mut().filter(|g| g.service == service && g.ended.is_none()) {
+        g.ended = Some(now);
+        ended = Some(g.clone());
+    }
+    if ended.is_some() {
+        list.save(host)?;
+        let _ = std::fs::remove_file(service_grant_path(host, service));
+        let _ = std::fs::remove_file(service_token_path(host, service));
+    }
+    Ok(ended)
+}
+
+/// Sign a new token for a service acting under its grant.
+pub fn mint_service(host: &Path, service: &str, now: u64) -> Result<String, String> {
+    let grant_path = service_grant_path(host, service);
+    let grant = std::fs::read_to_string(&grant_path)
+        .map_err(|_| format!("the service {service} has no grant on this machine ({} does not exist)", grant_path.display()))?;
+    let grant = grant.trim().to_string();
+    let terms: GrantClaims = serde_json::from_slice(&split_jwt(&grant, "grant")?.claims)
+        .map_err(|e| format!("the grant at {} is incomplete: {e}", grant_path.display()))?;
+    if terms.exp <= now {
+        return Err(format!("the grant for {service} has expired; the one it acts for grants again"));
+    }
+    let claims = ActingClaims {
+        iss: format!("service:{service}"),
+        sub: terms.sub,
+        aud: AUDIENCE.into(),
+        iat: now,
+        exp: (now + TOKEN_LIFETIME_SECS).min(terms.exp),
+        jti: random_hex(16)?,
+        act: Actor { sub: service.to_string() },
+        grant,
+    };
+    sign_jwt(serde_json::json!({ "alg": "EdDSA", "typ": "JWT" }), &claims, &service_signing_key(host, service)?)
+}
+
+/// The service's token: the one on file while it is still accepted and has
+/// more than half its life left, otherwise a new one.
+pub fn service_token(host: &Path, service: &str, now: u64) -> Result<String, String> {
+    if !valid_service_name(service) {
+        return Err(format!("{service:?} is not a service name"));
+    }
+    let path = service_token_path(host, service);
+    if let Ok(text) = std::fs::read_to_string(&path) {
+        let kept = text.trim();
+        if let Ok(caller) = verify_caller(kept, host, now)
+            && caller.expires.saturating_sub(now) > TOKEN_LIFETIME_SECS / 2
+        {
+            return Ok(kept.to_string());
+        }
+    }
+    let fresh = mint_service(host, service, now)?;
+    // A token nobody would accept is not handed out.
+    verify_caller(&fresh, host, now).map_err(|why| format!("the service {service} cannot act: {why}"))?;
+    write_atomic(&path, format!("{fresh}\n").as_bytes(), 0o600)?;
+    Ok(fresh)
+}
+
+/// Who a verified token speaks for.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Caller {
+    /// The address of the one the request is for.
+    pub sub: String,
+    /// That identity's first commit.
+    pub genesis: String,
+    /// The service acting for it, when the token came from one.
+    pub actor: Option<String>,
+    /// What the grant allows, when there is an actor. None for an identity
+    /// acting for itself: nothing limits it here.
+    pub scope: Option<Vec<String>>,
+    /// When the token stops being accepted.
+    pub expires: u64,
+}
+
+impl Caller {
+    /// May this caller do `what` (for example `pan:write`)? An identity
+    /// acting for itself may; a service may when its grant says so.
+    pub fn allows(&self, what: &str) -> bool {
+        self.scope.as_ref().is_none_or(|s| s.iter().any(|w| w == what))
+    }
+}
+
+fn check_times(iat: u64, exp: u64, now: u64, min: u64, max: u64, what: &str) -> Result<(), String> {
+    if iat > now + SKEW_SECS {
+        return Err(format!("the {what} is dated in the future"));
+    }
+    if exp <= now {
+        return Err(format!("the {what} has expired"));
+    }
+    if exp < iat || exp - iat > max || exp - iat < min {
+        return Err(format!("the {what}'s lifetime is outside what is allowed"));
+    }
+    Ok(())
+}
+
+/// Check any token a service may be handed: an identity's own token, or a
+/// service's token carrying a grant. This is what a checker calls.
+///
+/// For a service's token, in order, nothing inside it choosing what is
+/// trusted:
+/// 1. The grant is checked first, exactly as a token is (EdDSA fixed, `kid`
+///    selects the listed key, signature, `sub` is that identity, `aud`),
+///    with a grant's own lifetime limits and `typ`.
+/// 2. The grant is in this machine's list of grants and has not been ended,
+///    and the list agrees with it on grantor, service and key.
+/// 3. The token's signature is verified with the key the grant names.
+/// 4. The token is for the grantor (`sub`), by the granted service
+///    (`act.sub`, `iss`).
+/// 5. The token's own dates: not future, not expired, at most
+///    `MAX_LIFETIME_SECS` long, and not outliving the grant.
+/// 6. `aud` is `AUDIENCE`.
+pub fn verify_caller(token: &str, host: &Path, now: u64) -> Result<Caller, String> {
+    let list = HostList::load(host)?;
+    let outer = split_jwt(token, "token")?;
+    let peek: serde_json::Value =
+        serde_json::from_slice(&outer.claims).map_err(|e| format!("the token's claims are not JSON: {e}"))?;
+    if peek.get("grant").is_none() && peek.get("act").is_none() {
+        if outer.header.get("typ").and_then(|t| t.as_str()) == Some(GRANT_TYP) {
+            return Err("this is a grant, not a token; a service presents it inside its own token".into());
+        }
+        let (claims, entry) = verify(token, &list, now)?;
+        return Ok(Caller { sub: claims.sub, genesis: entry.genesis.clone(), actor: None, scope: None, expires: claims.exp });
+    }
+    let claims: ActingClaims =
+        serde_json::from_slice(&outer.claims).map_err(|e| format!("the service token's claims are incomplete: {e}"))?;
+
+    // 1. The grant.
+    let g = split_jwt(&claims.grant, "grant")?;
+    if g.header.get("typ").and_then(|t| t.as_str()) != Some(GRANT_TYP) {
+        return Err("what the token carries as its grant is not a grant".into());
+    }
+    let kid = g.header.get("kid").and_then(|k| k.as_str()).ok_or("the grant names no key (no kid)")?;
+    let entry = list
+        .agents
+        .iter()
+        .find(|e| e.genesis == kid && e.valid_before.is_none() && e.valid_at(now))
+        .ok_or_else(|| format!("no identity on the list has the id {kid}"))?;
+    VerifyingKey::from_bytes(&entry.key_bytes()?)
+        .map_err(|e| format!("the listed key is not usable: {e}"))?
+        .verify(g.signed.as_bytes(), &g.signature)
+        .map_err(|_| "the grant's signature does not match the listed key of the one it says granted it".to_string())?;
+    let terms: GrantClaims =
+        serde_json::from_slice(&g.claims).map_err(|e| format!("the grant's claims are incomplete: {e}"))?;
+    if terms.sub != agent_iri(&entry.genesis) || terms.iss != terms.sub {
+        return Err("the grant says it is from a different identity than the one whose key signed it".into());
+    }
+    check_times(terms.iat, terms.exp, now, MIN_GRANT_SECS, MAX_GRANT_SECS, "grant")?;
+    if terms.aud != AUDIENCE {
+        return Err(format!("the grant is for {:?}, not for {AUDIENCE:?}", terms.aud));
+    }
+
+    // 2. Still in force on this machine.
+    let grants = GrantList::load(host)?;
+    let record = grants
+        .grants
+        .iter()
+        .find(|r| r.jti == terms.jti)
+        .ok_or("the grant is not on this machine's list of grants")?;
+    if record.ended.is_some() {
+        return Err("the grant has been ended".into());
+    }
+    if record.grantor != entry.genesis || record.service != terms.service || record.x != terms.cnf.jwk.x {
+        return Err("the grant does not match what this machine's list says was granted".into());
+    }
+
+    // 3. The service's signature, with the key the grant names.
+    if terms.cnf.jwk.kty != "OKP" || terms.cnf.jwk.crv != "Ed25519" {
+        return Err("the grant names a key that is not Ed25519".into());
+    }
+    let service_key: [u8; 32] = URL_SAFE_NO_PAD
+        .decode(&terms.cnf.jwk.x)
+        .ok()
+        .and_then(|b| b.try_into().ok())
+        .ok_or("the grant names a key of the wrong length")?;
+    VerifyingKey::from_bytes(&service_key)
+        .map_err(|e| format!("the service's key is not usable: {e}"))?
+        .verify(outer.signed.as_bytes(), &outer.signature)
+        .map_err(|_| "the token is not signed by the service the grant names".to_string())?;
+
+    // 4. For the grantor, by the granted service.
+    if claims.sub != terms.sub {
+        return Err("the token is for someone other than the one who granted".into());
+    }
+    if claims.act.sub != terms.service || claims.iss != format!("service:{}", terms.service) {
+        return Err("the token names a different service than the grant".into());
+    }
+
+    // 5 and 6.
+    check_times(claims.iat, claims.exp, now, 0, MAX_LIFETIME_SECS, "token")?;
+    if claims.exp > terms.exp {
+        return Err("the token outlives its grant".into());
+    }
+    if claims.aud != AUDIENCE {
+        return Err(format!("the token is for {:?}, not for {AUDIENCE:?}", claims.aud));
+    }
+    Ok(Caller {
+        sub: claims.sub,
+        genesis: entry.genesis.clone(),
+        actor: Some(terms.service),
+        scope: Some(terms.scope.split_whitespace().map(str::to_string).collect()),
+        expires: claims.exp,
+    })
 }
 
 #[cfg(test)]
@@ -847,6 +1343,91 @@ mod tests {
         bind(&other, &host, NOW + 3).unwrap();
         assert!(set_owner(&other, &host, NOW + 4).unwrap_err().contains("already has an owner"));
         assert_eq!(load_owner(&host).unwrap().unwrap().genesis, genesis);
+    }
+
+    /// A service acts for an identity through a grant, and every way of
+    /// cheating that the design names is refused.
+    #[test]
+    fn a_service_acts_only_through_a_grant_in_force() {
+        let (repo, host) = soul("grant");
+        // An unbound identity cannot grant.
+        assert!(grant(&repo, &host, "viewer", "pan:read", 90, NOW).unwrap_err().contains("no key"));
+        bind(&repo, &host, NOW).unwrap();
+        let genesis = first_commit(&repo).unwrap();
+
+        assert!(grant(&repo, &host, "Bad Name", "pan:read", 90, NOW).is_err());
+        assert!(grant(&repo, &host, "viewer", "  ", 90, NOW).is_err());
+        assert!(grant(&repo, &host, "viewer", "pan:read", 1, NOW).is_err());
+        assert!(mint_service(&host, "viewer", NOW).unwrap_err().contains("no grant"));
+
+        let record = grant(&repo, &host, "viewer", "pan:read  pan:write", 90, NOW + 1).unwrap();
+        assert_eq!(record.scope, "pan:read pan:write");
+        let token = service_token(&host, "viewer", NOW + 2).unwrap();
+        let caller = verify_caller(&token, &host, NOW + 3).unwrap();
+        assert_eq!(caller.sub, agent_iri(&genesis));
+        assert_eq!(caller.actor.as_deref(), Some("viewer"));
+        assert!(caller.allows("pan:write") && !caller.allows("ravel:read"));
+        // Kept while fresh.
+        assert_eq!(service_token(&host, "viewer", NOW + 60).unwrap(), token);
+
+        // The identity's own token still verifies, with no actor and no limit.
+        let own = mint(&repo, NOW + 2).unwrap();
+        let me = verify_caller(&own, &host, NOW + 3).unwrap();
+        assert_eq!((me.actor.clone(), me.scope.clone()), (None, None));
+        assert!(me.allows("ravel:read"));
+
+        // A checker that only knows plain tokens refuses a service's token,
+        // and nobody accepts the grant itself as a token.
+        let list = HostList::load(&host).unwrap();
+        assert!(verify(&token, &list, NOW + 3).is_err());
+        let grant_jwt = std::fs::read_to_string(service_grant_path(&host, "viewer")).unwrap();
+        assert!(verify(grant_jwt.trim(), &list, NOW + 3).unwrap_err().contains("grant"));
+        assert!(verify_caller(grant_jwt.trim(), &host, NOW + 3).unwrap_err().contains("grant"));
+
+        // Expired token; token altered after signing.
+        assert!(verify_caller(&token, &host, NOW + 2 + TOKEN_LIFETIME_SECS).unwrap_err().contains("expired"));
+        let mut parts: Vec<String> = token.split('.').map(str::to_string).collect();
+        let mut claims: serde_json::Value = serde_json::from_slice(&URL_SAFE_NO_PAD.decode(&parts[1]).unwrap()).unwrap();
+        claims["act"]["sub"] = "other".into();
+        parts[1] = URL_SAFE_NO_PAD.encode(claims.to_string());
+        assert!(verify_caller(&parts.join("."), &host, NOW + 3).unwrap_err().contains("not signed by the service"));
+
+        // A different key in the service's folder: the grant does not name it.
+        let key_file = service_key_path(&host, "viewer");
+        let real = std::fs::read_to_string(&key_file).unwrap();
+        std::fs::write(&key_file, URL_SAFE_NO_PAD.encode([7u8; 32])).unwrap();
+        let forged = mint_service(&host, "viewer", NOW + 4).unwrap();
+        assert!(verify_caller(&forged, &host, NOW + 5).unwrap_err().contains("not signed by the service"));
+        std::fs::write(&key_file, real).unwrap();
+
+        // A second identity cannot take over the service's name, and a grant
+        // it signs for itself does not make the service speak for the first.
+        let other = repo.parent().unwrap().join("other");
+        std::fs::create_dir_all(other.join(".lex")).unwrap();
+        git(&other, &["init", "-q"]);
+        git(&other, &["commit", "-q", "--allow-empty", "-m", "another first"]);
+        bind(&other, &host, NOW).unwrap();
+        assert!(grant(&other, &host, "viewer", "pan:read", 90, NOW + 6).unwrap_err().contains("different identity"));
+
+        // Granting again keeps the key, replaces the grant, and the old token dies.
+        let again = grant(&repo, &host, "viewer", "pan:read", 30, NOW + 10).unwrap();
+        assert_eq!(again.x, record.x);
+        assert!(verify_caller(&token, &host, NOW + 11).unwrap_err().contains("ended"));
+        let narrower = verify_caller(&service_token(&host, "viewer", NOW + 11).unwrap(), &host, NOW + 12).unwrap();
+        assert!(narrower.allows("pan:read") && !narrower.allows("pan:write"));
+
+        // Revoked: nothing the service signs is accepted, and it cannot mint.
+        let live = service_token(&host, "viewer", NOW + 12).unwrap();
+        assert!(revoke(&host, "viewer", NOW + 13).unwrap().is_some());
+        assert!(verify_caller(&live, &host, NOW + 14).unwrap_err().contains("ended"));
+        assert!(service_token(&host, "viewer", NOW + 14).is_err());
+        assert!(revoke(&host, "viewer", NOW + 15).unwrap().is_none());
+
+        // The grantor's key is retired: its grants stop with it.
+        grant(&repo, &host, "viewer", "pan:read", 30, NOW + 20).unwrap();
+        let t = service_token(&host, "viewer", NOW + 21).unwrap();
+        retire(&genesis, &host, NOW + 22).unwrap();
+        assert!(verify_caller(&t, &host, NOW + 23).is_err());
     }
 
     #[test]
