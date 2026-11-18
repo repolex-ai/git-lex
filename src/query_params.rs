@@ -1,8 +1,14 @@
 //! Parameters on saved queries (goodlux, 2026-11-17).
 //!
 //! A saved query declares what it takes in its frontmatter, under its class's
-//! `parameter` property: one value per parameter, `name` (must be given) or
-//! `name=default`. The query text uses it as the variable `?name`.
+//! `parameter` property: one value per parameter, written
+//! `name[:kind][=default]`. No default means it must be given. The query
+//! text uses it as the variable `?name`.
+//!
+//! The KIND is the author's to state, because the author knows what the
+//! query compares the value with and the caller often does not. With no kind
+//! a value is text, always: nothing is guessed from how a value looks, so an
+//! id of `42` stays the text 42. A stated kind is checked.
 //! It is run as `git lex query copia/being-description being=sylkie-glitch`.
 //!
 //! A parameter is a VALUE. It is put into the parsed query in place of the
@@ -27,7 +33,37 @@ const XSD: &str = "http://www.w3.org/2001/XMLSchema#";
 #[derive(Debug, Clone, PartialEq)]
 pub struct Param {
     pub name: String,
+    pub kind: Kind,
     pub default: Option<String>,
+}
+
+/// What kind of value a parameter takes. The words are the XML Schema names
+/// the ontology already uses for ranges, plus `iri` for a document's address.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Kind {
+    String,
+    Integer,
+    Decimal,
+    Boolean,
+    Date,
+    DateTime,
+    Iri,
+}
+
+const KINDS: &[(&str, Kind)] = &[
+    ("string", Kind::String),
+    ("integer", Kind::Integer),
+    ("decimal", Kind::Decimal),
+    ("boolean", Kind::Boolean),
+    ("date", Kind::Date),
+    ("dateTime", Kind::DateTime),
+    ("iri", Kind::Iri),
+];
+
+impl Kind {
+    fn word(self) -> &'static str {
+        KINDS.iter().find(|(_, k)| *k == self).map(|(w, _)| *w).unwrap_or("string")
+    }
 }
 
 fn valid_name(name: &str) -> bool {
@@ -67,11 +103,26 @@ pub fn declared(frontmatter: Option<&str>) -> Result<Vec<Param>, String> {
             }
         };
         for entry in entries {
-            let (name, default) = match entry.split_once('=') {
-                Some((n, d)) => (n.trim().to_string(), Some(d.trim().to_string())),
-                None => (entry.trim().to_string(), None),
+            let (head, default) = match entry.split_once('=') {
+                Some((h, d)) => (h.trim(), Some(d.trim().to_string())),
+                None => (entry.trim(), None),
             };
-            let name = name.strip_prefix('?').unwrap_or(&name).to_string();
+            let (name, kind) = match head.split_once(':') {
+                Some((n, k)) => {
+                    let k = k.trim();
+                    let Some((_, kind)) = KINDS.iter().find(|(word, _)| *word == k) else {
+                        let words: Vec<&str> = KINDS.iter().map(|(w, _)| *w).collect();
+                        return Err(format!(
+                            "`{key}` gives the parameter '{}' the kind '{k}', which is not one. The kinds are: {}.",
+                            n.trim(),
+                            words.join(", ")
+                        ));
+                    };
+                    (n.trim(), *kind)
+                }
+                None => (head, Kind::String),
+            };
+            let name = name.strip_prefix('?').unwrap_or(name).to_string();
             if !valid_name(&name) {
                 return Err(format!(
                     "`{key}` declares a parameter named '{name}'. A name is letters, digits and underscores, starting with a letter."
@@ -80,7 +131,12 @@ pub fn declared(frontmatter: Option<&str>) -> Result<Vec<Param>, String> {
             if out.iter().any(|p| p.name == name) {
                 return Err(format!("`{key}` declares the parameter '{name}' twice."));
             }
-            out.push(Param { name, default });
+            // A default that does not fit its own kind is the author's
+            // mistake: say so when the document is read, not at a later run.
+            if let Some(d) = &default {
+                read_value(&name, kind, d).map_err(|e| format!("`{key}`: the default is wrong. {e}"))?;
+            }
+            out.push(Param { name, kind, default });
         }
     }
     Ok(out)
@@ -103,45 +159,75 @@ fn is_digits(s: &str) -> bool {
 
 fn is_date(s: &str) -> bool {
     let b = s.as_bytes();
-    b.len() == 10 && b[4] == b'-' && b[7] == b'-' && is_digits(&s[..4]) && is_digits(&s[5..7]) && is_digits(&s[8..])
+    b.len() == 10
+        && b[4] == b'-'
+        && b[7] == b'-'
+        && is_digits(&s[..4])
+        && matches!(s[5..7].parse::<u8>(), Ok(1..=12))
+        && s.is_char_boundary(8)
+        && matches!(s[8..].parse::<u8>(), Ok(1..=31))
+        && is_digits(&s[5..7])
+        && is_digits(&s[8..])
 }
 
-/// Read a value from how it is written:
+fn is_time(s: &str) -> bool {
+    // hh:mm:ss, an optional fraction, an optional Z or +hh:mm / -hh:mm.
+    let b = s.as_bytes();
+    if b.len() < 8 || b[2] != b':' || b[5] != b':' || !is_digits(&s[..2]) || !is_digits(&s[3..5]) || !is_digits(&s[6..8]) {
+        return false;
+    }
+    let mut rest = &s[8..];
+    if let Some(fraction) = rest.strip_prefix('.') {
+        let digits = fraction.bytes().take_while(u8::is_ascii_digit).count();
+        if digits == 0 {
+            return false;
+        }
+        rest = &fraction[digits..];
+    }
+    match rest {
+        "" | "Z" => true,
+        zone => {
+            let z = zone.as_bytes();
+            z.len() == 6 && (z[0] == b'+' || z[0] == b'-') && z[3] == b':' && is_digits(&zone[1..3]) && is_digits(&zone[4..])
+        }
+    }
+}
+
+/// Read a value as the kind its parameter declares. Text is taken exactly as
+/// written. Every other kind is checked, and a value that does not fit is an
+/// `Err` saying what the parameter takes.
 ///
-/// - `<...>` is a document's address. One without a scheme
-///   (`<soul/Query/recent>`) is the short form used in frontmatter.
-/// - a whole number, a decimal, `true`/`false`, a date (`2026-11-17`) or a
-///   date and time (`2026-11-17T09:00:00-08:00`) is that kind of value.
-/// - anything else is text. Text in double quotes is text whatever it looks
-///   like, so `"42"` is the text 42, not the number.
-pub fn read_value(name: &str, raw: &str) -> Result<Value, String> {
-    if let Some(inner) = raw.strip_prefix('<').and_then(|r| r.strip_suffix('>')) {
-        let full = if inner.contains("://") || inner.starts_with("urn:") { inner.to_string() } else { format!("{ADDRESS_ROOT}{inner}") };
-        return NamedNode::new(&full).map(Value::Iri).map_err(|e| format!("The value of '{name}', {raw}, is not a usable address: {e}"));
-    }
-    if raw.len() >= 2 && raw.starts_with('"') && raw.ends_with('"') {
-        return Ok(Value::Literal(Literal::new_simple_literal(&raw[1..raw.len() - 1])));
-    }
+/// An address is written with or without `<...>`. One without a scheme
+/// (`soul/Query/recent`) is the short form used in frontmatter.
+pub fn read_value(name: &str, kind: Kind, raw: &str) -> Result<Value, String> {
+    let wrong = |takes: &str| format!("The parameter '{name}' takes {takes}, and was given '{raw}'.");
     let unsigned = raw.strip_prefix('-').unwrap_or(raw);
-    if is_digits(unsigned) {
-        return Ok(typed(raw, "integer"));
+    match kind {
+        Kind::String => Ok(Value::Literal(Literal::new_simple_literal(raw))),
+        Kind::Integer if is_digits(unsigned) => Ok(typed(raw, "integer")),
+        Kind::Integer => Err(wrong("a whole number")),
+        Kind::Decimal => match unsigned.split_once('.') {
+            Some((whole, fraction)) if is_digits(whole) && is_digits(fraction) => Ok(typed(raw, "decimal")),
+            None if is_digits(unsigned) => Ok(typed(raw, "decimal")),
+            _ => Err(wrong("a number, such as 1.5")),
+        },
+        Kind::Boolean if raw == "true" || raw == "false" => Ok(typed(raw, "boolean")),
+        Kind::Boolean => Err(wrong("true or false")),
+        Kind::Date if is_date(raw) => Ok(typed(raw, "date")),
+        Kind::Date => Err(wrong("a date, such as 2026-11-17")),
+        Kind::DateTime if raw.len() > 11 && raw.is_char_boundary(10) && is_date(&raw[..10]) && raw.as_bytes()[10] == b'T' && is_time(&raw[11..]) => {
+            Ok(typed(raw, "dateTime"))
+        }
+        Kind::DateTime => Err(wrong("a date and time, such as 2026-11-17T09:00:00-08:00")),
+        Kind::Iri => {
+            let inner = raw.strip_prefix('<').and_then(|r| r.strip_suffix('>')).unwrap_or(raw);
+            let full = if inner.contains("://") || inner.starts_with("urn:") { inner.to_string() } else { format!("{ADDRESS_ROOT}{inner}") };
+            if inner.is_empty() {
+                return Err(wrong("a document's address"));
+            }
+            NamedNode::new(&full).map(Value::Iri).map_err(|_| wrong("a document's address"))
+        }
     }
-    if let Some((whole, fraction)) = unsigned.split_once('.')
-        && is_digits(whole)
-        && is_digits(fraction)
-    {
-        return Ok(typed(raw, "decimal"));
-    }
-    if raw == "true" || raw == "false" {
-        return Ok(typed(raw, "boolean"));
-    }
-    if is_date(raw) {
-        return Ok(typed(raw, "date"));
-    }
-    if raw.len() > 11 && raw.is_char_boundary(10) && is_date(&raw[..10]) && raw.as_bytes()[10] == b'T' {
-        return Ok(typed(raw, "dateTime"));
-    }
-    Ok(Value::Literal(Literal::new_simple_literal(raw)))
 }
 
 /// Split the `name=value` words a caller gave.
@@ -165,9 +251,12 @@ fn describe(declared: &[Param]) -> String {
     }
     let list: Vec<String> = declared
         .iter()
-        .map(|p| match &p.default {
-            Some(d) => format!("{} (default {d})", p.name),
-            None => format!("{} (must be given)", p.name),
+        .map(|p| {
+            let kind = if p.kind == Kind::String { String::new() } else { format!("{}, ", p.kind.word()) };
+            match &p.default {
+                Some(d) => format!("{} ({kind}default {d})", p.name),
+                None => format!("{} ({kind}must be given)", p.name),
+            }
         })
         .collect();
     format!("It takes: {}.", list.join(", "))
@@ -193,7 +282,7 @@ pub fn bind(root: Option<&std::path::Path>, text: &str, declared: &[Param], give
         let Some(raw) = raw else {
             return Err(format!("The parameter '{0}' is missing and has no default. Give it as {0}=value. {1}", p.name, describe(declared)));
         };
-        values.push((Variable::new_unchecked(p.name.clone()), read_value(&p.name, raw)?));
+        values.push((Variable::new_unchecked(p.name.clone()), read_value(&p.name, p.kind, raw)?));
     }
     let with_prefixes = crate::add_prefixes_at(root, text);
     let mut query = spargebra::SparqlParser::new().parse_query(&with_prefixes).map_err(|e| format!("The query does not parse: {e}"))?;
@@ -237,7 +326,7 @@ impl Binder<'_> {
     }
 
     fn must_be_address(v: &Variable, place: &str) -> String {
-        format!("The query uses ?{0} as {place}, so '{0}' must be a document's address, written <...>.", v.as_str())
+        format!("The query uses ?{0} as {place}, so the parameter '{0}' must be declared as an address: {0}:iri.", v.as_str())
     }
 
     fn sets_it_itself(v: &Variable) -> String {
@@ -428,7 +517,11 @@ mod tests {
     use super::*;
 
     fn p(name: &str, default: Option<&str>) -> Param {
-        Param { name: name.into(), default: default.map(str::to_string) }
+        Param { name: name.into(), kind: Kind::String, default: default.map(str::to_string) }
+    }
+
+    fn pk(name: &str, kind: Kind) -> Param {
+        Param { name: name.into(), kind, default: None }
     }
 
     fn given(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
@@ -442,6 +535,17 @@ mod tests {
         let fm = "type: Query\ncopia.Query.parameter:\n  - \"being=sylkie\"\n  - \"set\"\n";
         assert_eq!(declared(Some(fm)).unwrap(), vec![p("being", Some("sylkie")), p("set", None)]);
         assert_eq!(declared(Some("soul.Query.parameter: \"n=5\"\n")).unwrap(), vec![p("n", Some("5"))]);
+        let kinds = "a.Query.parameter:\n  - \"count:integer=10\"\n  - \"since:date\"\n  - \"doc:iri=<soul/Query/recent>\"\n";
+        assert_eq!(
+            declared(Some(kinds)).unwrap(),
+            vec![
+                Param { name: "count".into(), kind: Kind::Integer, default: Some("10".into()) },
+                pk("since", Kind::Date),
+                Param { name: "doc".into(), kind: Kind::Iri, default: Some("<soul/Query/recent>".into()) },
+            ]
+        );
+        assert!(declared(Some("a.Query.parameter: \"n:number\"\n")).unwrap_err().contains("The kinds are: string, integer"));
+        assert!(declared(Some("a.Query.parameter: \"n:integer=ten\"\n")).unwrap_err().contains("the default is wrong"));
         assert_eq!(declared(Some("type: Query\n")).unwrap(), vec![]);
         assert_eq!(declared(None).unwrap(), vec![]);
         assert!(declared(Some("a.Query.parameter:\n  - \"x\"\n  - \"x=1\"\n")).unwrap_err().contains("twice"));
@@ -491,21 +595,52 @@ mod tests {
     }
 
     #[test]
-    fn a_value_is_read_from_how_it_is_written() {
-        let kind = |raw: &str| match read_value("x", raw).unwrap() {
+    fn a_value_is_read_as_the_kind_declared_and_nothing_is_guessed() {
+        let kind = |k: Kind, raw: &str| match read_value("x", k, raw).unwrap() {
             Value::Iri(n) => format!("<{}>", n.as_str()),
             Value::Literal(l) => format!("{}^^{}", l.value(), l.datatype().as_str().rsplit('#').next().unwrap()),
         };
-        assert_eq!(kind("sylkie"), "sylkie^^string");
-        assert_eq!(kind("42"), "42^^integer");
-        assert_eq!(kind("\"42\""), "42^^string");
-        assert_eq!(kind("-1.5"), "-1.5^^decimal");
-        assert_eq!(kind("true"), "true^^boolean");
-        assert_eq!(kind("2026-11-17"), "2026-11-17^^date");
-        assert_eq!(kind("2026-11-17T09:00:00-08:00"), "2026-11-17T09:00:00-08:00^^dateTime");
-        assert_eq!(kind("<soul/Query/recent>"), "<https://repolex.ai/soul/Query/recent>");
-        assert_eq!(kind("<http://e/x>"), "<http://e/x>");
-        assert_eq!(kind("1.2.3"), "1.2.3^^string");
+        // With no kind, everything is text, whatever it looks like.
+        for looks_like_something in ["sylkie", "42", "true", "2026-11-17", "<a/b>", "\"quoted\""] {
+            assert_eq!(kind(Kind::String, looks_like_something), format!("{looks_like_something}^^string"));
+        }
+        assert_eq!(kind(Kind::Integer, "-42"), "-42^^integer");
+        assert_eq!(kind(Kind::Decimal, "1.5"), "1.5^^decimal");
+        assert_eq!(kind(Kind::Decimal, "2"), "2^^decimal");
+        assert_eq!(kind(Kind::Boolean, "true"), "true^^boolean");
+        assert_eq!(kind(Kind::Date, "2026-11-17"), "2026-11-17^^date");
+        assert_eq!(kind(Kind::DateTime, "2026-11-17T09:00:00-08:00"), "2026-11-17T09:00:00-08:00^^dateTime");
+        assert_eq!(kind(Kind::DateTime, "2026-11-17T09:00:00.25Z"), "2026-11-17T09:00:00.25Z^^dateTime");
+        assert_eq!(kind(Kind::Iri, "<soul/Query/recent>"), "<https://repolex.ai/soul/Query/recent>");
+        assert_eq!(kind(Kind::Iri, "soul/Query/recent"), "<https://repolex.ai/soul/Query/recent>");
+        assert_eq!(kind(Kind::Iri, "http://e/x"), "<http://e/x>");
+        // A value that does not fit its kind is refused, saying what fits.
+        for (k, bad, takes) in [
+            (Kind::Integer, "abc", "a whole number"),
+            (Kind::Integer, "1.5", "a whole number"),
+            (Kind::Decimal, "1.", "a number"),
+            (Kind::Boolean, "yes", "true or false"),
+            (Kind::Date, "2026-13-01", "a date"),
+            (Kind::Date, "tomorrow", "a date"),
+            (Kind::DateTime, "2026-11-17", "a date and time"),
+            (Kind::DateTime, "2026-11-17T9am", "a date and time"),
+            (Kind::Iri, "two words", "a document's address"),
+        ] {
+            let err = read_value("x", k, bad).unwrap_err();
+            assert!(err.contains(takes) && err.contains(bad), "{err}");
+        }
+    }
+
+    #[test]
+    fn an_id_that_looks_like_a_number_still_finds_its_text() {
+        // The case that made kinds the author's to state: a Being named 42.
+        let out = bind(None, Q, &[p("being", None)], &given(&[("being", "42")])).unwrap();
+        assert!(out.contains("<http://e/name> \"42\""), "{out}");
+        let counted = "SELECT ?d WHERE { ?b <http://e/n> ?being ; <http://e/desc> ?d }";
+        let out = bind(None, counted, &[pk("being", Kind::Integer)], &given(&[("being", "42")])).unwrap();
+        assert!(out.contains("<http://e/n> \"42\"^^<http://www.w3.org/2001/XMLSchema#integer>"), "{out}");
+        let err = bind(None, counted, &[pk("being", Kind::Integer)], &given(&[("being", "x")])).unwrap_err();
+        assert!(err.contains("'being' takes a whole number"), "{err}");
     }
 
     #[test]
@@ -527,8 +662,8 @@ mod tests {
     fn a_value_that_cannot_go_where_the_query_uses_it_is_refused() {
         let as_property = "SELECT ?o WHERE { ?s ?prop ?o }";
         let err = bind(None, as_property, &[p("prop", None)], &given(&[("prop", "name")])).unwrap_err();
-        assert!(err.contains("as a property") && err.contains("<...>"), "{err}");
-        assert!(bind(None, as_property, &[p("prop", None)], &given(&[("prop", "<http://e/name>")])).unwrap().contains("<http://e/name>"));
+        assert!(err.contains("as a property") && err.contains("prop:iri"), "{err}");
+        assert!(bind(None, as_property, &[pk("prop", Kind::Iri)], &given(&[("prop", "<http://e/name>")])).unwrap().contains("<http://e/name>"));
         let sets = "SELECT ?x WHERE { ?s ?p ?o BIND(1 AS ?x) }";
         assert!(bind(None, sets, &[p("x", None)], &given(&[("x", "2")])).unwrap_err().contains("gives ?x a value itself"));
     }

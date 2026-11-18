@@ -82,9 +82,9 @@ enum Commands {
         /// `kit/name` when two kits share a name)
         query: String,
         /// Values for a saved query's parameters, each written name=value
-        /// (`being=sylkie`). The query document declares what it takes.
-        /// A value is text unless it reads as a number, true/false, a date,
-        /// or an address in <...>; put it in double quotes to force text.
+        /// (`being=sylkie`). The query document declares what it takes,
+        /// and of what kind; a value is text unless its parameter says
+        /// otherwise.
         params: Vec<String>,
         /// Emit SPARQL 1.1 JSON Results format on stdout. Suppresses the
         /// human-readable table and the trailing stats line (stats go to stderr).
@@ -108,9 +108,9 @@ enum Commands {
         /// `kit/name` when two kits share a name)
         query: String,
         /// Values for a saved query's parameters, each written name=value
-        /// (`being=sylkie`). The query document declares what it takes.
-        /// A value is text unless it reads as a number, true/false, a date,
-        /// or an address in <...>; put it in double quotes to force text.
+        /// (`being=sylkie`). The query document declares what it takes,
+        /// and of what kind; a value is text unless its parameter says
+        /// otherwise.
         params: Vec<String>,
         /// Emit SPARQL 1.1 JSON Results format on stdout. Suppresses the
         /// human-readable table and the trailing stats line (stats go to stderr).
