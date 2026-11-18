@@ -947,26 +947,48 @@ fn reap_orphan_hook_registrations(settings: &mut serde_json::Value, hooks_dir: &
 /// A `hooks` block or an event list of the wrong shape is an `Err` naming it:
 /// the value is the user's, so it is reported, never replaced.
 fn register_hook_in_settings(settings: &mut serde_json::Value, event: &str, command: &str) -> Result<(), String> {
-    let hook_entry = serde_json::json!({
-        "hooks": [{"type": "command", "command": command}]
-    });
+    let limit = hook_time_limit_secs(event);
+    let mut hook = serde_json::json!({"type": "command", "command": command});
+    if let Some(secs) = limit {
+        hook["timeout"] = serde_json::json!(secs);
+    }
+    let hook_entry = serde_json::json!({ "hooks": [hook] });
 
     let hooks_obj = settings_block(settings, "hooks", r#"an object, like {"Stop": []}"#)?;
     let event_hooks = match hooks_obj.entry(event.to_string()).or_insert_with(|| serde_json::json!([])) {
         serde_json::Value::Array(list) => list,
         other => return Err(wrong_shape_msg(&format!("`hooks.{event}`"), other, "a list, like []")),
     };
-    let already = event_hooks.iter().any(|entry| {
-        entry.get("hooks")
-            .and_then(|h| h.as_array())
-            .map(|arr| arr.iter().any(|h| h.get("command").and_then(|c| c.as_str()) == Some(command)))
-            .unwrap_or(false)
-    });
+    let mut already = false;
+    for registered in event_hooks
+        .iter_mut()
+        .filter_map(|entry| entry.get_mut("hooks").and_then(|h| h.as_array_mut()))
+        .flatten()
+        .filter(|h| h.get("command").and_then(|c| c.as_str()) == Some(command))
+    {
+        already = true;
+        // An entry written before the limit existed gets it now. A limit
+        // someone set by hand is theirs and stays.
+        if let (Some(secs), Some(obj)) = (limit, registered.as_object_mut()) {
+            obj.entry("timeout").or_insert_with(|| serde_json::json!(secs));
+        }
+    }
     if !already {
         event_hooks.push(hook_entry);
     }
     Ok(())
 }
+
+/// Seconds Claude Code is asked to wait for a kit hook on `event`, where its
+/// own default is too short for what the hook does. A session-end hook gets
+/// 1.5 seconds by default and is cancelled after that, which is shorter than a
+/// `git lex save`; the per-hook `timeout` raises it (60 is the most a
+/// session-end hook is given).
+fn hook_time_limit_secs(event: &str) -> Option<u64> {
+    (event == "SessionEnd").then_some(SESSION_END_HOOK_SECS)
+}
+
+const SESSION_END_HOOK_SECS: u64 = 30;
 
 /// The object under `key` in a settings value, created empty when absent.
 /// `Err` when the settings value, or what already sits under `key`, is not an
@@ -1239,6 +1261,30 @@ mod hook_registration_tests {
         let mut s = serde_json::json!([]);
         let err = settings_block(&mut s, "env", "an object").unwrap_err();
         assert!(err.starts_with("the file as a whole is a list"), "{err}");
+    }
+
+    #[test]
+    fn a_session_end_hook_is_given_time_to_finish_a_save() {
+        // New entry: written with the limit.
+        let mut s = serde_json::json!({});
+        register_hook_in_settings(&mut s, "SessionEnd", "c").unwrap();
+        assert_eq!(s["hooks"]["SessionEnd"][0]["hooks"][0]["timeout"], 30);
+
+        // An entry from before the limit existed gains it, and is not doubled.
+        let mut s = serde_json::json!({"hooks": {"SessionEnd": [{"hooks": [{"type": "command", "command": "c"}]}]}});
+        register_hook_in_settings(&mut s, "SessionEnd", "c").unwrap();
+        assert_eq!(s["hooks"]["SessionEnd"].as_array().unwrap().len(), 1);
+        assert_eq!(s["hooks"]["SessionEnd"][0]["hooks"][0]["timeout"], 30);
+
+        // A limit set by hand stays.
+        let mut s = serde_json::json!({"hooks": {"SessionEnd": [{"hooks": [{"type": "command", "command": "c", "timeout": 55}]}]}});
+        register_hook_in_settings(&mut s, "SessionEnd", "c").unwrap();
+        assert_eq!(s["hooks"]["SessionEnd"][0]["hooks"][0]["timeout"], 55);
+
+        // Other events keep Claude Code's own default.
+        let mut s = serde_json::json!({});
+        register_hook_in_settings(&mut s, "Stop", "c").unwrap();
+        assert!(s["hooks"]["Stop"][0]["hooks"][0].get("timeout").is_none());
     }
 
     #[test]
