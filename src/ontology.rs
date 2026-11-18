@@ -492,12 +492,41 @@ pub fn get_object_properties_all_kits() -> HashSet<String> {
 pub fn get_kit_types(kit: &str) -> Vec<(String, Vec<(String, String, bool, String)>)> {
     let parsed = parse_kit_shapes(kit);
     parsed.shapes.iter().map(|s| {
-        let props = s.props.iter().map(|p| {
+        let listed = s.props.iter().map(|p| {
             let kind = if p.is_iri { "reference".to_string() } else { "string".to_string() };
             (p.name.clone(), kind, p.required, p.comment.clone())
-        }).collect();
-        (s.class_name.clone(), props)
+        });
+        (s.class_name.clone(), one_entry_per_property(listed))
     }).collect()
+}
+
+/// A shape may hold several property shapes for ONE property: the ordinary
+/// one, and one more for each qualified restriction on it ("at least one
+/// Brief" on `relatedToId` is its own property shape with the same path).
+/// A caller listing a class's properties wants each property once, or
+/// `git lex create` writes the key once per restriction and the new document
+/// is refused at save for repeating it (found by th34, 2026-11-18).
+///
+/// The entries are merged: the first one's place in the list; a reference if
+/// any says so; required if any says so; the first comment that is not empty
+/// (a qualified property shape carries none).
+fn one_entry_per_property(listed: impl Iterator<Item = (String, String, bool, String)>) -> Vec<(String, String, bool, String)> {
+    let mut out: Vec<(String, String, bool, String)> = Vec::new();
+    for (name, kind, required, comment) in listed {
+        match out.iter_mut().find(|(n, ..)| *n == name) {
+            Some(seen) => {
+                if kind == "reference" {
+                    seen.1 = kind;
+                }
+                seen.2 |= required;
+                if seen.3.is_empty() {
+                    seen.3 = comment;
+                }
+            }
+            None => out.push((name, kind, required, comment)),
+        }
+    }
+    out
 }
 
 /// Resolve a frontmatter class segment against the kit's declared classes.
@@ -1563,6 +1592,36 @@ copia:CameraAngle a owl:Class ; rdfs:label "Camera Angle" .
         assert_eq!(
             resolve_class_against(&classes, "whatever"),
             ClassMatch::PassThrough("whatever".to_string())
+        );
+    }
+}
+
+#[cfg(test)]
+mod one_entry_per_property_tests {
+    use super::one_entry_per_property;
+
+    #[test]
+    fn a_property_with_qualified_restrictions_is_listed_once() {
+        let e = |name: &str, kind: &str, required: bool, comment: &str| (name.to_string(), kind.to_string(), required, comment.to_string());
+        // What a shape with two "at least one X" restrictions on relatedToId
+        // yields: two bare entries, then the ordinary one with its comment.
+        let merged = one_entry_per_property(
+            vec![
+                e("id", "reference", true, "which Thing this is"),
+                e("relatedToId", "string", true, ""),
+                e("relatedToId", "string", false, ""),
+                e("title", "string", false, "a short name"),
+                e("relatedToId", "reference", false, "Another Thing this one relates to"),
+            ]
+            .into_iter(),
+        );
+        assert_eq!(
+            merged,
+            vec![
+                e("id", "reference", true, "which Thing this is"),
+                e("relatedToId", "reference", true, "Another Thing this one relates to"),
+                e("title", "string", false, "a short name"),
+            ]
         );
     }
 }
