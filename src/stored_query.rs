@@ -90,8 +90,10 @@ pub fn kit_query_dirs(root: &Path) -> Vec<(String, PathBuf)> {
 /// What a name resolved to.
 #[derive(Debug, PartialEq)]
 pub enum Found {
-    /// The query text and the file it came from, relative to the repo root.
-    Query { text: String, file: String },
+    /// The query text, the file it came from (relative to the repo root) and
+    /// the parameters its frontmatter declares (`Err` when the declaration
+    /// itself is wrong).
+    Query { text: String, file: String, params: Result<Vec<crate::query_params::Param>, String> },
     /// More than one kit has a query of this name: the `kit/name` forms.
     Ambiguous(Vec<String>),
     /// The file is there and holds no fenced code block.
@@ -124,9 +126,9 @@ pub fn find(root: &Path, name: &str) -> Found {
     match hits.as_slice() {
         [(_, file)] => {
             let Ok(md) = std::fs::read_to_string(file) else { return Found::Missing };
-            let (_, body) = crate::split_frontmatter(&md);
+            let (frontmatter, body) = crate::split_frontmatter(&md);
             match first_fenced_block(body) {
-                Some(text) => Found::Query { text, file: rel(file) },
+                Some(text) => Found::Query { text, file: rel(file), params: crate::query_params::declared(frontmatter) },
                 None => Found::NoBlock(rel(file)),
             }
         }
@@ -137,9 +139,9 @@ pub fn find(root: &Path, name: &str) -> Found {
             let file = crate::layout::query_dir(root).join(format!("{id}.md"));
             let Ok(md) = std::fs::read_to_string(&file) else { return Found::Missing };
             // The earlier format: no fence means the whole body is the query.
-            let (_, body) = crate::split_frontmatter(&md);
+            let (frontmatter, body) = crate::split_frontmatter(&md);
             let text = first_fenced_block(body).unwrap_or_else(|| body.trim().to_string());
-            Found::Query { text, file: rel(&file) }
+            Found::Query { text, file: rel(&file), params: crate::query_params::declared(frontmatter) }
         }
         many => Found::Ambiguous(many.iter().map(|(kit, _)| format!("{kit}/{id}")).collect()),
     }
@@ -234,9 +236,9 @@ mod tests {
 
         assert_eq!(
             find(&root, "recent"),
-            Found::Query { text: "SELECT ?new WHERE { ?new ?p ?o }".into(), file: "Soul/Query/recent.md".into() }
+            Found::Query { text: "SELECT ?new WHERE { ?new ?p ?o }".into(), file: "Soul/Query/recent.md".into(), params: Ok(vec![]) }
         );
-        assert_eq!(find(&root, "legacy"), Found::Query { text: "ASK { ?s ?p ?o }".into(), file: ".lex/query/legacy.md".into() });
+        assert_eq!(find(&root, "legacy"), Found::Query { text: "ASK { ?s ?p ?o }".into(), file: ".lex/query/legacy.md".into(), params: Ok(vec![]) });
         assert_eq!(find(&root, "__Query"), Found::Missing);
         assert_eq!(find(&root, "nope"), Found::Missing);
         assert_eq!(names(&root), vec!["legacy", "recent"]);
@@ -246,7 +248,7 @@ mod tests {
         assert_eq!(find(&root, "recent"), Found::Ambiguous(vec!["soul/recent".into(), "copia/recent".into()]));
         assert_eq!(
             find(&root, "copia/recent"),
-            Found::Query { text: "ASK { ?c ?p ?o }".into(), file: "Copia/Query/recent.md".into() }
+            Found::Query { text: "ASK { ?c ?p ?o }".into(), file: "Copia/Query/recent.md".into(), params: Ok(vec![]) }
         );
         assert_eq!(names(&root), vec!["copia/recent", "legacy", "soul/recent"]);
 

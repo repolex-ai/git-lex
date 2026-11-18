@@ -174,23 +174,46 @@ pub(crate) fn run_query(store: &Store, query: &str, store_type: &str, json: bool
 /// `Ok(Some(text))` is the query to run; `Ok(None)` means the argument is
 /// not a saved query's name and runs as SPARQL text; `Err` has already told
 /// the person what is wrong.
-fn resolve_stored_query(arg: &str) -> Result<Option<String>, ()> {
+fn resolve_stored_query(arg: &str, params: &[String]) -> Result<Option<String>, ()> {
     match git_lex::find_git_root() {
-        Some(root) => resolve_stored_query_in(&root, arg),
-        None => Ok(None),
+        Some(root) => resolve_stored_query_in(&root, arg, params),
+        None if params.is_empty() => Ok(None),
+        None => {
+            eprintln!("{PARAMS_NEED_A_NAME}");
+            Err(())
+        }
     }
 }
 
-fn resolve_stored_query_in(root: &std::path::Path, arg: &str) -> Result<Option<String>, ()> {
+const PARAMS_NEED_A_NAME: &str =
+    "Parameters (name=value) go with a saved query's name. Query text written on the command line takes none: put the value in the text.";
+
+/// `params` are the `name=value` words after the name. They are put into the
+/// query as values (git_lex::query_params), never as text.
+fn resolve_stored_query_in(root: &std::path::Path, arg: &str, params: &[String]) -> Result<Option<String>, ()> {
     use git_lex::stored_query::{find, names, Found};
     // Anything with whitespace or a brace is SPARQL text, never a name.
     if arg.contains(char::is_whitespace) || arg.contains('{') {
+        if !params.is_empty() {
+            eprintln!("{PARAMS_NEED_A_NAME}");
+            return Err(());
+        }
         return Ok(None);
     }
     match find(root, arg) {
-        Found::Query { text, file } => {
+        Found::Query { text, file, params: declared } => {
             eprintln!("Saved query: {file}");
-            Ok(Some(text))
+            let bound = declared
+                .map_err(|e| format!("{file}: {e}"))
+                .and_then(|declared| Ok((git_lex::query_params::read_given(params)?, declared)))
+                .and_then(|(given, declared)| git_lex::query_params::bind(Some(root), &text, &declared, &given));
+            match bound {
+                Ok(query) => Ok(Some(query)),
+                Err(why) => {
+                    eprintln!("{why}");
+                    Err(())
+                }
+            }
         }
         Found::Ambiguous(forms) => {
             eprintln!("More than one kit has a saved query named '{arg}'. Say which: {}", forms.join(", "));
@@ -224,11 +247,11 @@ fn stored_query_text(md: &str) -> String {
     git_lex::stored_query::first_fenced_block(body).unwrap_or_else(|| body.trim().to_string())
 }
 
-pub(crate) fn cmd_direct(query: String, json: bool) -> Outcome {
+pub(crate) fn cmd_direct(query: String, params: Vec<String>, json: bool) -> Outcome {
     // Stored-query resolution first: a name that matches .lex/query/<name>.md
     // runs that file's query; anything else runs as SPARQL text. A name-like
     // miss gets the available list instead of a SPARQL parse error.
-    let query = match resolve_stored_query(&query) {
+    let query = match resolve_stored_query(&query, &params) {
         Ok(Some(q)) => q,
         Ok(None) => query,
         Err(()) => return Err(Failure::new("")),
@@ -303,14 +326,14 @@ pub(crate) fn cmd_direct(query: String, json: bool) -> Outcome {
 /// Ask gitlexd for the soul this session is bound to. The soul is resolved
 /// from the process that started the session (gitlexd::session), never from
 /// a flag, a setting or the shell's current directory.
-pub(crate) fn cmd_query(query: String, json: bool) -> Outcome {
+pub(crate) fn cmd_query(query: String, params: Vec<String>, json: bool) -> Outcome {
     let soul = match git_lex::gitlexd::session::session_soul() {
         Ok(s) => s,
         Err(e) => {
             return Err(Failure::new(e.to_string()));
         }
     };
-    let query = match resolve_stored_query_in(&soul.root, &query) {
+    let query = match resolve_stored_query_in(&soul.root, &query, &params) {
         Ok(Some(q)) => q,
         Ok(None) => query,
         Err(()) => return Err(Failure::new("")),

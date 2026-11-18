@@ -78,8 +78,14 @@ enum Commands {
     /// A bare name runs the STORED query saved as .lex/query/<name>.md in
     /// the soul — plain markdown whose first code block is the query.
     Query {
-        /// SPARQL text, or the name of a stored query in .lex/query/
+        /// SPARQL text, or the name of a saved query (`recent`, or
+        /// `kit/name` when two kits share a name)
         query: String,
+        /// Values for a saved query's parameters, each written name=value
+        /// (`being=sylkie`). The query document declares what it takes.
+        /// A value is text unless it reads as a number, true/false, a date,
+        /// or an address in <...>; put it in double quotes to force text.
+        params: Vec<String>,
         /// Emit SPARQL 1.1 JSON Results format on stdout. Suppresses the
         /// human-readable table and the trailing stats line (stats go to stderr).
         #[arg(long)]
@@ -98,8 +104,14 @@ enum Commands {
     ///   git lex direct "SELECT * WHERE { ?s ?p ?o } LIMIT 10"
     ///   git lex direct recent
     Direct {
-        /// SPARQL text, or the name of a stored query in .lex/query/
+        /// SPARQL text, or the name of a saved query (`recent`, or
+        /// `kit/name` when two kits share a name)
         query: String,
+        /// Values for a saved query's parameters, each written name=value
+        /// (`being=sylkie`). The query document declares what it takes.
+        /// A value is text unless it reads as a number, true/false, a date,
+        /// or an address in <...>; put it in double quotes to force text.
+        params: Vec<String>,
         /// Emit SPARQL 1.1 JSON Results format on stdout. Suppresses the
         /// human-readable table and the trailing stats line (stats go to stderr).
         #[arg(long)]
@@ -356,8 +368,8 @@ fn run(command: Commands) -> Outcome {
             Ok(())
         }
         Commands::Save { message, dry_run, no_restamp } => save::cmd_save(&message, dry_run, no_restamp),
-        Commands::Query { query, json } => query::cmd_query(query, json),
-        Commands::Direct { query, json } => query::cmd_direct(query, json),
+        Commands::Query { query, params, json } => query::cmd_query(query, params, json),
+        Commands::Direct { query, params, json } => query::cmd_direct(query, params, json),
         Commands::Hook { event } => {
             match event.as_str() {
                 "pre-commit" => save::hook_pre_commit(),
