@@ -78,9 +78,11 @@ pub(crate) fn run_query(store: &Store, query: &str, store_type: &str, json: bool
                 for solution in solutions {
                     let solution = match solution {
                         Ok(s) => s,
+                        // A row that cannot be read is a failed query, not
+                        // a shorter answer: stop, never print "0 results".
                         Err(e) => {
-                            eprintln!("Error reading solution: {}", e);
-                            continue;
+                            eprintln!("SPARQL evaluation error: {}", git_lex::service_hint(e.to_string()));
+                            return Err(Failure::new(""));
                         }
                     };
                     count += 1;

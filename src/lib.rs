@@ -312,14 +312,17 @@ pub fn eval_query_union_at<'a>(
     store: &'a Store,
     q: &str,
 ) -> Result<oxigraph::sparql::QueryResults<'a>, W3cQueryError> {
+    // No SERVICE calls, the same as the daemon's path (eval_w3c): a query
+    // run here never leaves the machine's own store.
     let mut parsed = oxigraph::sparql::SparqlEvaluator::new()
+        .without_default_http_service_handler()
         .parse_query(q)
         .map_err(|e| W3cQueryError::Parse(e.to_string()))?;
     parsed.dataset_mut().set_default_graph_as_union();
     parsed
         .on_store(store)
         .execute()
-        .map_err(|e| W3cQueryError::Eval(e.to_string()))
+        .map_err(|e| W3cQueryError::Eval(service_hint(e.to_string())))
 }
 
 
@@ -1566,9 +1569,12 @@ fn w3c_query_with(
 
 /// A query that names a SERVICE is asking to cross stores. git-lex no longer
 /// evaluates other stores in process; the one line says where that went.
-fn service_hint(e: String) -> String {
+pub fn service_hint(e: String) -> String {
     if e.to_ascii_lowercase().contains("service") {
-        format!("{e} — git-lex answers for its own store only; a query across stores (pan, ravel) goes to syrinxd")
+        format!(
+            "{e} — git-lex answers for its own store only; a query across stores (pan, ravel) goes to Syrinx: \
+             `syrinx query <name>` runs a saved one"
+        )
     } else {
         e
     }
@@ -1733,10 +1739,25 @@ mod service_tests {
             match outcome {
                 Err(W3cQueryError::Eval(e)) => {
                     assert!(e.contains("not supported"), "{e}");
-                    assert!(e.contains("syrinxd"), "{e}");
+                    assert!(e.contains("Syrinx"), "{e}");
                 }
                 other => panic!("expected an evaluation error, got {:?}", other.is_ok()),
             }
+        }
+        // `git lex direct` runs through this one: it refuses the same way,
+        // and never sends the pattern over HTTP.
+        let direct = eval_query_union_at(None, &store, q).and_then(|r| match r {
+            oxigraph::sparql::QueryResults::Solutions(rows) => {
+                for row in rows {
+                    row.map_err(|e| W3cQueryError::Eval(service_hint(e.to_string())))?;
+                }
+                Ok(())
+            }
+            _ => Ok(()),
+        });
+        match direct {
+            Err(W3cQueryError::Eval(e)) => assert!(e.contains("not supported") && e.contains("Syrinx"), "{e}"),
+            other => panic!("expected an evaluation error, got {:?}", other.is_ok()),
         }
     }
 }
