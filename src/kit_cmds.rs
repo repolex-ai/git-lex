@@ -595,6 +595,23 @@ pub(crate) fn cmd_kit_update(kit_arg: Option<String>) -> Outcome {
         }
     }
     git_lex::soul_md::heal_store_lines(&root);
+    // A soul with no username keeps its old address, and nothing else in
+    // this run would say why (w3bl0rd, 2026-11-19).
+    if git_lex::soul_md::soul_kit_installed(&root) && root.join("SOUL.md").is_file() {
+        match git_lex::soul_md::username_at(&root) {
+            Some(name) if git_lex::identity::valid_username(&name) => {}
+            Some(name) => println!(
+                "SOUL.md: soul.Soul.username is {name:?}, which cannot be used: a username is one word of lowercase \
+                 letters and digits with at least one letter from g to z. Until it is, this soul keeps its old address."
+            ),
+            None => println!(
+                "SOUL.md has no soul.Soul.username line, so this soul keeps its old address \
+                 (https://repolex.ai/soul/Soul/<first commit>) and its store stays under https://repolex.ai/. \
+                 The name is permanent once taken, so it is the soul's human who says what it is. \
+                 Then add `soul.Soul.username: \"<name>\"` to SOUL.md's frontmatter and run `git lex kit-update` again."
+            ),
+        }
+    }
 
     if already_current > 0 {
         println!("{} of {} kit(s) were already current — nothing changed for those.",

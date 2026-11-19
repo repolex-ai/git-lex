@@ -428,7 +428,10 @@ fn cmd_sync(rebuild: bool) -> Outcome {
         std::fs::write(&note, "asked for by `git lex sync --rebuild`\n")
             .map_err(|e| Failure::new(format!("fatal: cannot write {}: {e}", note.display())))?;
     }
-    if git_lex::gitlexd::client::running()
+    // Start gitlexd if it is down: after a stop, a sync or a save used to
+    // leave it down, and callers over HTTP got no answer until someone ran
+    // a query (m4xx, 2026-11-19).
+    if git_lex::gitlexd::client::ensure_running().is_ok()
         && let Some(genesis) = git_lex::git::genesis_sha_at(&root) {
             match git_lex::gitlexd::client::sync_and_wait(&genesis) {
                 Ok(state) => {
