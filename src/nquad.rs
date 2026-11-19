@@ -463,7 +463,21 @@ pub struct FileSubjects {
 /// `https://repolex.ai/ontology/soul/` → `https://repolex.ai/soul/` — the
 /// universal instance law (`<application>/<Class>/<id>`, Rob Day-50),
 /// derived from the installed TTL's own declaration, never hardcoded.
+///
+/// A kit under the platform's own ontology address lands under THIS STORE's
+/// root (`https://repolex.ai/{squad}/{store}/soul/`), the same root an
+/// authored `<soul/Note/x>` is read against. Before this, a bare id with a
+/// class range (`copia.Item.equippedByBeingId: sylkie`) was looked up at the
+/// platform root while every Thing sat under the store's, and save refused
+/// each one as a reference to nothing (s3lk13, 2026-11-19: 195 of them).
 fn app_base_from_kit_ns(kit_ns: &str) -> String {
+    app_base_under(kit_ns, crate::git::store_root())
+}
+
+fn app_base_under(kit_ns: &str, store_root: &str) -> String {
+    if let Some(app) = kit_ns.strip_prefix(crate::PLATFORM_ROOT).and_then(|rest| rest.strip_prefix("ontology/")) {
+        return format!("{store_root}{app}");
+    }
     match kit_ns.find("/ontology/") {
         Some(i) => format!("{}/{}", &kit_ns[..i], &kit_ns[i + "/ontology/".len()..]),
         None => kit_ns.to_string(),
@@ -2457,6 +2471,17 @@ mod tests {
     /// The a-box base derives from the kit's ontology namespace by dropping
     /// the /ontology/ tier — the universal instance law
     /// (`<application>/<Class>/<id>`), never a second hardcoded pattern.
+    #[test]
+    fn a_bare_id_lands_under_the_stores_own_root() {
+        let root = "https://repolex.ai/7r1pl3f0rc3/s3lk13/";
+        assert_eq!(app_base_under("https://repolex.ai/ontology/copia/", root), "https://repolex.ai/7r1pl3f0rc3/s3lk13/copia/");
+        assert_eq!(app_base_under("https://repolex.ai/ontology/git-lex/git2/", root), "https://repolex.ai/7r1pl3f0rc3/s3lk13/git-lex/git2/");
+        assert_eq!(app_base_under("https://repolex.ai/ontology/copia/", "https://repolex.ai/"), "https://repolex.ai/copia/");
+        // A kit whose ontology lives elsewhere keeps its own address.
+        assert_eq!(app_base_under("https://example.org/ontology/x/", root), "https://example.org/x/");
+        assert_eq!(app_base_under("https://example.org/vocab/", root), "https://example.org/vocab/");
+    }
+
     #[test]
     fn app_base_drops_the_ontology_tier() {
         assert_eq!(
