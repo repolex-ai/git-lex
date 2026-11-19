@@ -104,7 +104,15 @@ pub fn cmd_sync_into(store_dir: Option<&std::path::Path>) -> Outcome {
         return Ok(());
     }
 
+    // A store built under another root (before this repo had a squad and a
+    // store name, or under different ones) holds graphs this build never
+    // reads. Drop them; with them gone nothing is found to resume from, and
+    // the store is rebuilt from the first commit under its own names.
+    drop_foreign_graphs(&store);
+
     if fast_path_hit(&store, &root, &head_sha) {
+        // An older build left only one graph described.
+        describe_graphs(&store).map_err(|e| Failure::new(format!("ERROR: {e}")))?;
         let elapsed = start.elapsed();
         println!(
             "Already synced at {} ({:.1}ms).",
@@ -133,7 +141,7 @@ pub fn cmd_sync_into(store_dir: Option<&std::path::Path>) -> Outcome {
     // walk updates them to exactly what a fresh load would hold (#45).
     clear_derived_graphs(&store, !full_rebuild);
     let now_present = store
-        .contains_named_graph(&oxigraph::model::NamedNode::new_unchecked(NOW_GRAPH_IRI))
+        .contains_named_graph(&oxigraph::model::NamedNode::new_unchecked(now_graph_iri()))
         .unwrap_or(false);
 
     // The ontology graph is reloaded from the installed kit TTLs on every
@@ -302,8 +310,8 @@ fn fast_path_hit(store: &Store, root: &std::path::Path, head_sha: &str) -> bool 
     // The ordinal, not "any fact about HEAD": the ordinals are the sync
     // marker (SYNC_MARKER_PREDICATE), written last by a batched rebuild.
     let probe = format!(
-        "ASK {{ GRAPH <{}> {{ <https://repolex.ai/git-lex/git2/Commit/{}> <{}> ?o }} }}",
-        graph_uri("commits"), head_sha, SYNC_MARKER_PREDICATE
+        "ASK {{ GRAPH <{}> {{ <{}> <{}> ?o }} }}",
+        graph_uri("commits"), crate::git2_nquads::git2_uri(&format!("Commit/{head_sha}")), SYNC_MARKER_PREDICATE
     );
     let already_synced = oxigraph::sparql::SparqlEvaluator::new()
         .parse_query(&probe)
@@ -318,7 +326,7 @@ fn fast_path_hit(store: &Store, root: &std::path::Path, head_sha: &str) -> bool 
     let onegraph_present = {
         let probe = format!(
             "ASK {{ GRAPH <{}> {{ ?s ?p ?o }} }}",
-            spo_events::LEXHISTORY_GRAPH_IRI
+            spo_events::lexhistory_graph_iri()
         );
         oxigraph::sparql::SparqlEvaluator::new()
             .parse_query(&probe)
@@ -338,7 +346,7 @@ fn fast_path_hit(store: &Store, root: &std::path::Path, head_sha: &str) -> bool 
         let probe = format!(
             "ASK {{ GRAPH <{}> {{ ?s <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> \
              <https://repolex.ai/ontology/git-lex/File> }} }}",
-            spo_events::LEXHISTORY_GRAPH_IRI
+            spo_events::lexhistory_graph_iri()
         );
         oxigraph::sparql::SparqlEvaluator::new()
             .parse_query(&probe)
@@ -400,7 +408,7 @@ fn rewound_event_commits(store: &Store, root: &std::path::Path, head_sha: &str) 
     let q = format!(
         "SELECT DISTINCT ?c WHERE {{ GRAPH <{}> {{ \
            {{ ?e <{}> ?c }} UNION {{ ?e <{}> ?c }} }} }}",
-        spo_events::LEXHISTORY_GRAPH_IRI,
+        spo_events::lexhistory_graph_iri(),
         spo_events::ONEGRAPH_ASSERTED_IN,
         spo_events::ONEGRAPH_RETRACTED_IN
     );
@@ -546,7 +554,7 @@ fn resume_point(store: &Store, root: &std::path::Path, head_sha: &str) -> Option
             let probe = format!(
                 "ASK {{ GRAPH <{}> {{ ?s <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> \
                  <https://repolex.ai/ontology/git-lex/File> }} }}",
-                spo_events::LEXHISTORY_GRAPH_IRI
+                spo_events::lexhistory_graph_iri()
             );
             let file_typed = oxigraph::sparql::SparqlEvaluator::new()
                 .parse_query(&probe)
@@ -598,9 +606,9 @@ fn clear_derived_graphs(store: &Store, keep_diffed_git_graphs: bool) {
         // the walk from what the walk changed). EVERYTHING else is derived and
         // regenerated — including the retired sync/<sha>, history, and meta
         // families, which this sweep removes from pre-cutover stores.
-        if graph_uri != "https://repolex.ai/git-lex/NamedGraph/repo-ontology"
-            && graph_uri != spo_events::LEXHISTORY_GRAPH_IRI
-            && graph_uri != NOW_GRAPH_IRI
+        if *graph_uri != crate::git::graph_uri("repo-ontology")
+            && graph_uri != spo_events::lexhistory_graph_iri()
+            && graph_uri != now_graph_iri()
             && !(keep_diffed_git_graphs && diffed.contains(graph_uri))
             && let Ok(graph) = oxigraph::model::NamedNode::new(graph_uri) {
                 // remove (not clear): drops the graph's registration too, so a
@@ -620,7 +628,15 @@ fn clear_derived_graphs(store: &Store, keep_diffed_git_graphs: bool) {
     // one graph"): derived, disposable, rebuilt every sync, never edited.
     // It exists so downstream consumers (Syrinx, viz, agents) can query
     // current state as plain triples without filtering event machinery.
-const NOW_GRAPH_IRI: &str = "https://repolex.ai/git-lex/NamedGraph/now";
+fn commits_graph_iri() -> &'static str {
+    static IRI: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    IRI.get_or_init(|| crate::git::graph_uri("commits"))
+}
+
+fn now_graph_iri() -> &'static str {
+    static IRI: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    IRI.get_or_init(|| crate::git::graph_uri("now"))
+}
 
 /// The now view restricted to some subjects: exactly what
 /// `materialize_now_view` would copy for them. That query filters per
@@ -631,8 +647,8 @@ fn refresh_now_view(store: &Store, subjects: &std::collections::HashSet<String>)
     use oxigraph::model::{GraphNameRef, NamedNodeRef, NamedOrBlankNodeRef, Quad};
     // A stale now view silently lies to every downstream consumer.
     let fail = |e: String| Failure::new(format!("ERROR: now-view refresh failed: {e}"));
-    let now = NamedNodeRef::new_unchecked(NOW_GRAPH_IRI);
-    let one = NamedNodeRef::new_unchecked(spo_events::LEXHISTORY_GRAPH_IRI);
+    let now = NamedNodeRef::new_unchecked(now_graph_iri());
+    let one = NamedNodeRef::new_unchecked(spo_events::lexhistory_graph_iri());
     let rdf_type = NamedNodeRef::new_unchecked("http://www.w3.org/1999/02/22-rdf-syntax-ns#type");
     let reifies = NamedNodeRef::new_unchecked("http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies");
     let spo_event = NamedNodeRef::new_unchecked("https://repolex.ai/ontology/git-lex/SpoEvent");
@@ -971,8 +987,8 @@ fn materialize_now_view_in_batches(store: &Store) -> Outcome {
 
 fn now_view_in_batches(store: &Store, batch_quads: usize) -> Result<(), String> {
     use oxigraph::model::{GraphNameRef, NamedNode, NamedNodeRef, NamedOrBlankNode, Quad, QuadRef};
-    let now = NamedNode::new_unchecked(NOW_GRAPH_IRI);
-    let one = NamedNodeRef::new_unchecked(spo_events::LEXHISTORY_GRAPH_IRI);
+    let now = NamedNode::new_unchecked(now_graph_iri());
+    let one = NamedNodeRef::new_unchecked(spo_events::lexhistory_graph_iri());
     let rdf_type = NamedNodeRef::new_unchecked("http://www.w3.org/1999/02/22-rdf-syntax-ns#type");
     let reifies = NamedNodeRef::new_unchecked("http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies");
     let spo_event = NamedNodeRef::new_unchecked("https://repolex.ai/ontology/git-lex/SpoEvent");
@@ -1015,7 +1031,7 @@ fn now_view_in_batches(store: &Store, batch_quads: usize) -> Result<(), String> 
 fn materialize_now_view(store: &Store) -> Outcome {
     let update = "PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>              PREFIX gl: <https://repolex.ai/ontology/git-lex/>              DROP SILENT GRAPH <https://repolex.ai/git-lex/NamedGraph/now> ;              INSERT { GRAPH <https://repolex.ai/git-lex/NamedGraph/now> { ?s ?p ?o } }              WHERE { GRAPH <https://repolex.ai/git-lex/LexHistoryGraph> { ?s ?p ?o .                        FILTER NOT EXISTS { ?s a gl:SpoEvent }                        FILTER(?p != rdf:reifies) } }";
     let u = oxigraph::sparql::SparqlEvaluator::new()
-        .parse_update(update)
+        .parse_update(&crate::git::scoped(update))
         .map_err(|e| Failure::new(format!("ERROR: now-view update did not parse (binary bug): {e}")))?;
     // A stale now view silently lies to every downstream consumer (Syrinx,
     // viz, agents) — fail the sync.
@@ -1118,7 +1134,7 @@ fn validated_resume(root: &std::path::Path, resume_sha: Option<String>, head_sha
 /// no resume point, rebuild the graph from the first commit). `resume_sha`
 /// has been through [`validated_resume`].
 fn sync_onegraph_walk(store: &Store, root: &std::path::Path, resume_sha: Option<String>, ctx: &crate::nquad::ResolverContext, head_sha: &str) -> Outcome<OnegraphPhase> {
-    let one_graph_uri = format!("<{}>", spo_events::LEXHISTORY_GRAPH_IRI);
+    let one_graph_uri = format!("<{}>", spo_events::lexhistory_graph_iri());
 
     // A rev-list failure must NOT read as "no new commits" — that would make
     // sync print "up to date" over a range it never walked. Fail the sync.
@@ -1261,8 +1277,8 @@ fn history_counts(store: &Store) -> Result<HistoryCounts, String> {
     use std::collections::{HashMap, HashSet};
 
     const XSD_INTEGER: &str = "http://www.w3.org/2001/XMLSchema#integer";
-    let lh = GraphNameRef::from(NamedNodeRef::new_unchecked(spo_events::LEXHISTORY_GRAPH_IRI));
-    let cg = GraphNameRef::from(NamedNodeRef::new_unchecked("https://repolex.ai/git-lex/NamedGraph/commits"));
+    let lh = GraphNameRef::from(NamedNodeRef::new_unchecked(spo_events::lexhistory_graph_iri()));
+    let cg = GraphNameRef::from(NamedNodeRef::new_unchecked(commits_graph_iri()));
     let reifies = NamedNodeRef::new_unchecked("http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies");
     let asserted_in = NamedNodeRef::new_unchecked(spo_events::ONEGRAPH_ASSERTED_IN);
     let retracted_in = NamedNodeRef::new_unchecked(spo_events::ONEGRAPH_RETRACTED_IN);
@@ -1396,20 +1412,97 @@ fn history_counts(store: &Store) -> Result<HistoryCounts, String> {
 /// steps as "Rebuilding" in docs/using/history.md.
 const REBUILD_HINT: &str = "To rebuild the store from your git history: run `gitlexd stop`, delete .lex/_ignore/oxigraph, then run `git lex sync`.";
 
+/// Remove every named graph that is not under this store's own git-lex
+/// names. A plain repo's root is the platform root, where this removes
+/// nothing.
+fn drop_foreign_graphs(store: &Store) {
+    let mine = format!("{}git-lex/", crate::git::store_root());
+    let foreign: Vec<oxigraph::model::NamedNode> = store
+        .named_graphs()
+        .filter_map(|g| match g.ok()? {
+            oxigraph::model::NamedOrBlankNode::NamedNode(n) if !n.as_str().starts_with(&mine) => Some(n),
+            _ => None,
+        })
+        .collect();
+    if foreign.is_empty() {
+        return;
+    }
+    println!("  This store was built under another address. Rebuilding it under {}.", crate::git::store_root());
+    // The exported spine is named by commit and holds the old addresses.
+    if let Some(root) = crate::find_git_root() {
+        let _ = std::fs::remove_dir_all(crate::layout::spine_dir(&root));
+    }
+    for g in &foreign {
+        if let Err(e) = store.remove_named_graph(g) {
+            eprintln!("  warning: could not remove the graph {}: {e}", g.as_str());
+        }
+    }
+}
+
+/// The store says what its own named graphs are: one description per graph,
+/// in the unnamed graph, which holds nothing else (subtexture/docs/stack,
+/// named graph descriptions, goodlux 2026-11-19). The description's subject
+/// is the graph's name. Its class says what the graph is; the store does no
+/// inference, so the parent class is stated too. A query with no GRAPH sees
+/// the graphs typed `git-lex:CurrentGraph`, and a query inside one typed
+/// `git-lex:OntologyGraph` is never rewritten (`crate::public_query`).
+///
+/// Written whole each time from the graphs the store holds, so a graph that
+/// is gone leaves no description behind.
+fn describe_graphs(store: &Store) -> Result<(), String> {
+    use oxigraph::model::{GraphNameRef, NamedOrBlankNode};
+    const GL: &str = "https://repolex.ai/ontology/git-lex/";
+    const A: &str = "<http://www.w3.org/1999/02/22-rdf-syntax-ns#type>";
+    let (owner, visibility) = match crate::find_git_root() {
+        Some(root) => {
+            let y = crate::RepoYml::load(&root);
+            let owner = crate::soul_md::soul_kit_installed(&root)
+                .then(|| y.username.clone().filter(|n| crate::identity::valid_username(n)))
+                .flatten()
+                .map(|user| format!("{}soul/Soul/{user}", crate::git::store_root()));
+            (owner, y.visibility.clone().filter(|v| ["private", "shared", "public"].contains(&v.as_str())))
+        }
+        None => (None, None),
+    };
+    let (history, now, ontology) =
+        (spo_events::lexhistory_graph_iri(), now_graph_iri(), crate::git::graph_uri("repo-ontology"));
+    let mut nq = String::new();
+    for graph in store.named_graphs() {
+        let NamedOrBlankNode::NamedNode(graph) = graph.map_err(|e| format!("cannot list the store's graphs: {e}"))? else {
+            continue;
+        };
+        let g = graph.as_str();
+        let kind = if g == history {
+            Some("LexHistoryGraph")
+        } else if g == now {
+            Some("CurrentGraph")
+        } else if g == ontology {
+            Some("OntologyGraph")
+        } else {
+            None
+        };
+        nq.push_str(&format!("<{g}> {A} <{GL}NamedGraph> .\n"));
+        if let Some(kind) = kind {
+            nq.push_str(&format!("<{g}> {A} <{GL}{kind}> .\n"));
+        }
+        if let Some(owner) = &owner {
+            nq.push_str(&format!("<{g}> <{GL}owner> <{owner}> .\n"));
+        }
+        if let Some(visibility) = &visibility {
+            nq.push_str(&format!("<{g}> <{GL}visibility> \"{visibility}\" .\n"));
+        }
+    }
+    store.clear_graph(GraphNameRef::DefaultGraph).map_err(|e| format!("cannot clear the graph descriptions: {e}"))?;
+    store
+        .load_from_reader(RdfFormat::NQuads, Cursor::new(nq.as_bytes()))
+        .map_err(|e| format!("the graph descriptions failed to load: {e}"))?;
+    Ok(())
+}
+
 /// `scope`: None proves the whole store (a full rebuild); Some proves just
 /// these statements (an append: what its walk asserted or retracted).
 fn verify_onegraph(store: &Store, scope: Option<&std::collections::HashSet<String>>) -> Outcome {
-    // Discovery typing (default graph, idempotent): the graph's NamedGraph
-    // object, dual-typed — the store does no inference, so both the class and
-    // its NamedGraph parent are stated explicitly.
-    let typing = format!(
-        "<{g}> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://repolex.ai/ontology/git-lex/LexHistoryGraph> .\n\
-         <{g}> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://repolex.ai/ontology/git-lex/NamedGraph> .\n",
-        g = spo_events::LEXHISTORY_GRAPH_IRI
-    );
-    if let Err(e) = store.load_from_reader(RdfFormat::NQuads, Cursor::new(typing.as_bytes())) {
-        return Err(Failure::new(format!("ERROR: one-graph discovery typing failed to load: {e}")));
-    }
+    describe_graphs(store).map_err(|e| Failure::new(format!("ERROR: {e}")))?;
 
     if let Some(statements) = scope {
         let checks = match statement_checks(store, statements) {
@@ -1452,7 +1545,7 @@ fn verify_onegraph(store: &Store, scope: Option<&std::collections::HashSet<Strin
     // check, the base-fact count (a SPARQL anti-join), runs alongside it.
     let (counts, base_count) = std::thread::scope(|sc| {
         let pass = sc.spawn(|| history_counts(store));
-        let base = count_q(BASE_COUNT_Q);
+        let base = count_q(&crate::git::scoped(BASE_COUNT_Q));
         (pass.join().unwrap_or_else(|_| Err("the one-pass check panicked".into())), base)
     });
     let counts = match counts {
@@ -1518,8 +1611,8 @@ fn statement_checks(store: &Store, statements: &std::collections::HashSet<String
     use std::collections::HashSet;
 
     const XSD_INTEGER: &str = "http://www.w3.org/2001/XMLSchema#integer";
-    let lh = GraphNameRef::from(NamedNodeRef::new_unchecked(spo_events::LEXHISTORY_GRAPH_IRI));
-    let cg = GraphNameRef::from(NamedNodeRef::new_unchecked("https://repolex.ai/git-lex/NamedGraph/commits"));
+    let lh = GraphNameRef::from(NamedNodeRef::new_unchecked(spo_events::lexhistory_graph_iri()));
+    let cg = GraphNameRef::from(NamedNodeRef::new_unchecked(commits_graph_iri()));
     let reifies = NamedNodeRef::new_unchecked("http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies");
     let asserted_in = NamedNodeRef::new_unchecked(spo_events::ONEGRAPH_ASSERTED_IN);
     let retracted_in = NamedNodeRef::new_unchecked(spo_events::ONEGRAPH_RETRACTED_IN);
@@ -2263,7 +2356,7 @@ mod batched_rebuild_tests {
 
     const CG: &str = "https://repolex.ai/git-lex/NamedGraph/commits";
     const FT: &str = "https://repolex.ai/git-lex/NamedGraph/filetree/abc";
-    const LH: &str = spo_events::LEXHISTORY_GRAPH_IRI;
+    const LH: &str = "https://repolex.ai/git-lex/LexHistoryGraph";
     const G2: &str = "https://repolex.ai/ontology/git-lex/git2/";
     const GL: &str = "https://repolex.ai/ontology/git-lex/";
     const RDF: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#";
@@ -2379,7 +2472,7 @@ mod batched_rebuild_tests {
             if stale_now {
                 let stale: String = ["gone", "gone2", "gone3"]
                     .iter()
-                    .map(|s| format!("<https://e/{s}> <{GL}title> \"stale\" <{NOW_GRAPH_IRI}> .\n"))
+                    .map(|s| format!("<https://e/{s}> <{GL}title> \"stale\" <{}> .\n", now_graph_iri()))
                     .collect();
                 store.load_from_reader(RdfFormat::NQuads, Cursor::new(stale.as_bytes())).unwrap();
             }
@@ -2388,7 +2481,7 @@ mod batched_rebuild_tests {
         let whole = build(true);
         materialize_now_view(&whole).unwrap();
         let expected = quads(&whole);
-        assert_eq!(expected.iter().filter(|q| q.ends_with(&format!("<{NOW_GRAPH_IRI}>"))).count(), 14);
+        assert_eq!(expected.iter().filter(|q| q.ends_with(&format!("<{}>", now_graph_iri()))).count(), 14);
 
         for batch_quads in [1, 3, 1000] {
             let store = build(true);
@@ -2446,7 +2539,7 @@ mod diffed_git_load_tests {
     fn diffed_load_equals_clear_and_reload() {
         let (c, r, repo) = (g("commits"), g("refs"), g("repo"));
         let (ft_old, ft_new) = (g("filetree/aaa"), g("filetree/bbb"));
-        let lh = spo_events::LEXHISTORY_GRAPH_IRI;
+        let lh = spo_events::lexhistory_graph_iri();
         let int = "^^<http://www.w3.org/2001/XMLSchema#integer>";
         // Before: two commits, a file link from the old HEAD, one branch, and
         // the old HEAD's file tree. Plus history, which the git load never touches.

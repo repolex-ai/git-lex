@@ -142,7 +142,7 @@ pub fn resolve_frontmatter_value(raw: &str) -> ResolveResult {
         }
         return ResolveResult::Iri(format!(
             "<{}{}>",
-            crate::git::RESOURCE_ROOT,
+            crate::git::store_root(),
             crate::nquad::uri_encode_path(inner)
         ));
     }
@@ -232,7 +232,7 @@ pub fn resolve_thing_reference(raw: &str) -> Result<String, String> {
     }
     Ok(format!(
         "<{}{}>",
-        crate::git::RESOURCE_ROOT,
+        crate::git::store_root(),
         crate::nquad::uri_encode_path(inner)
     ))
 }

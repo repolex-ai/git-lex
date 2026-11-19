@@ -133,6 +133,9 @@ pub fn context_hash(root: &Path) -> String {
     let mut acc = Vec::new();
     acc.extend_from_slice(binary_identity().as_bytes());
     acc.push(b'\n');
+    // The store's root is in every address a fragment holds.
+    acc.extend_from_slice(crate::store_root_at(root).as_bytes());
+    acc.push(b'\n');
     // Every byte of the installed kits' ontology, path-sorted. Installed
     // means listed in repo.yml, so removing a kit changes this hash even
     // when its folder is still on disk.

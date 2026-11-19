@@ -46,14 +46,22 @@ pub fn first_fenced_block(body: &str) -> Option<String> {
 /// message: a query that does not parse has no `sparql` value.
 pub fn canonical_sparql(root: Option<&Path>, text: &str) -> Result<String, String> {
     let with_prefixes = crate::add_prefixes_at(root, text);
-    let parsed = spargebra::SparqlParser::new().parse_query(&with_prefixes).map_err(|e| e.to_string())?;
+    // A query writes this store's addresses short (`<soul/Note/x>`,
+    // `GRAPH <git-lex/NamedGraph/now>`), read against the store's root. The
+    // stored line keeps them short, so it is the same text in every store
+    // and is read the same way when it is run.
+    let base = root.map_or_else(|| crate::PLATFORM_ROOT.to_string(), crate::store_root_at);
+    let parser = || spargebra::SparqlParser::new().with_base_iri(&base).map_err(|e| format!("the store's address {base} is not usable: {e}"));
+    let parsed = parser()?.parse_query(&with_prefixes).map_err(|e| e.to_string())?;
     let one_line = parsed.to_string().split_whitespace().collect::<Vec<_>>().join(" ");
+    // The printer writes the base it was given as a BASE line. The stored
+    // line carries none: whoever runs it supplies the store's root.
+    let one_line = one_line.strip_prefix(&format!("BASE <{base}> ")).map(str::to_string).unwrap_or(one_line);
+    let one_line = if base == crate::PLATFORM_ROOT { one_line } else { one_line.replace(&format!("<{base}"), "<") };
     // The printed form is what gets stored and later run, so it must itself
     // parse. If the printer ever writes something the parser refuses, store
     // nothing and say so.
-    spargebra::SparqlParser::new()
-        .parse_query(&one_line)
-        .map_err(|e| format!("its one-line form does not parse back ({e})"))?;
+    parser()?.parse_query(&one_line).map_err(|e| format!("its one-line form does not parse back ({e})"))?;
     Ok(one_line)
 }
 

@@ -308,21 +308,150 @@ pub fn eval_query_union<'a>(
 /// handler it once attached is gone (cross-store questions are syrinxd's,
 /// goodlux 2026-09-22). Kept so callers that know their root keep saying so.
 pub fn eval_query_union_at<'a>(
-    _root: Option<&std::path::Path>,
+    root: Option<&std::path::Path>,
     store: &'a Store,
     q: &str,
 ) -> Result<oxigraph::sparql::QueryResults<'a>, W3cQueryError> {
-    // No SERVICE calls, the same as the daemon's path (eval_w3c): a query
-    // run here never leaves the machine's own store.
-    let mut parsed = oxigraph::sparql::SparqlEvaluator::new()
-        .without_default_http_service_handler()
+    public_query(root, store, q)
+}
+
+const RDF_TYPE: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type";
+/// The class of a graph a query with no GRAPH sees, and of a graph that
+/// holds an ontology (git-lex.ttl 0.22.0; each sits under the base class of
+/// the same meaning in subtexture.ttl 0.6.0).
+pub const CURRENT_GRAPH_CLASS: &str = "https://repolex.ai/ontology/git-lex/CurrentGraph";
+pub const ONTOLOGY_GRAPH_CLASS: &str = "https://repolex.ai/ontology/git-lex/OntologyGraph";
+pub const NAMED_GRAPH_CLASS: &str = "https://repolex.ai/ontology/git-lex/NamedGraph";
+
+/// The graphs this store describes as being of `class`: the subjects typed
+/// with it in the store's unnamed graph, which holds one description per
+/// named graph and nothing else.
+pub fn described_graphs(store: &Store, class: &str) -> Vec<oxigraph::model::NamedNode> {
+    use oxigraph::model::{GraphNameRef, NamedNodeRef, NamedOrBlankNode};
+    store
+        .quads_for_pattern(
+            None,
+            Some(NamedNodeRef::new_unchecked(RDF_TYPE)),
+            Some(NamedNodeRef::new_unchecked(class).into()),
+            Some(GraphNameRef::DefaultGraph),
+        )
+        .filter_map(|q| match q.ok()?.subject {
+            NamedOrBlankNode::NamedNode(n) => Some(n),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The ontology index for a repo's installed kits, kept while the files it
+/// was built from are unchanged. It is built from the ontology alone, never
+/// from what a store holds.
+fn ontology_index(root: &std::path::Path) -> Result<std::sync::Arc<calamus::Index>, String> {
+    use std::sync::{Arc, Mutex, OnceLock};
+    type Stamp = Vec<(PathBuf, u64, Option<std::time::SystemTime>)>;
+    static MEMO: OnceLock<Mutex<std::collections::HashMap<PathBuf, (Stamp, Arc<calamus::Index>)>>> = OnceLock::new();
+    let files = installed_vocabulary_ttls(root);
+    let stamp: Stamp = files
+        .iter()
+        .map(|f| {
+            let m = fs::metadata(f).ok();
+            (f.clone(), m.as_ref().map_or(0, |m| m.len()), m.and_then(|m| m.modified().ok()))
+        })
+        .collect();
+    let memo = MEMO.get_or_init(|| Mutex::new(std::collections::HashMap::new()));
+    if let Some((seen, index)) = memo.lock().unwrap().get(root)
+        && *seen == stamp
+    {
+        return Ok(Arc::clone(index));
+    }
+    let texts: Vec<String> = files.iter().filter_map(|f| fs::read_to_string(f).ok()).collect();
+    let refs: Vec<&str> = texts.iter().map(String::as_str).collect();
+    let index = Arc::new(
+        calamus::Index::from_turtle(&refs, &[SUBTEXTURE_NS]).map_err(|e| format!("the installed ontology does not load: {}", e.0))?,
+    );
+    memo.lock().unwrap().insert(root.to_path_buf(), (stamp, Arc::clone(&index)));
+    Ok(index)
+}
+
+/// An address in the query written the way it was before stores had a squad
+/// and a name: straight under the platform root, in git-lex's own names or
+/// an installed kit's. In a store that has a root of its own such an address
+/// matches nothing, and saying so beats an empty answer.
+fn old_address_in(root: &std::path::Path, base: &str, printed: &str) -> Option<String> {
+    if base == PLATFORM_ROOT {
+        return None;
+    }
+    let mut namespaces: Vec<String> = installed_kit_specs(root).iter().map(|k| resolve_kit_spec(k).2).collect();
+    namespaces.push("git-lex".to_string());
+    let opener = format!("<{PLATFORM_ROOT}");
+    printed.match_indices(&opener).find_map(|(at, _)| {
+        let address = printed[at + 1..].split('>').next()?;
+        let first = address[PLATFORM_ROOT.len()..].split('/').next()?;
+        namespaces.iter().any(|n| n == first).then(|| address.to_string())
+    })
+}
+
+/// The shared layer of names that no store holds; a query may use them and
+/// the rewrite asks for each engine's own spelling.
+pub const SUBTEXTURE_NS: &str = "https://repolex.ai/ontology/subtexture/";
+
+/// Run a query that came from outside git-lex: `git lex query`, a saved
+/// query, gitlexd's HTTP route. git-lex's own working queries do not come
+/// through here.
+///
+/// 1. It is parsed with the store's root as its base, so `<soul/Note/x>` and
+///    `GRAPH <git-lex/NamedGraph/now>` mean "in the store being asked".
+/// 2. calamus rewrites shared (`subtexture:`) names to the spellings the
+///    ontology declares for them. Inside a graph the store describes as
+///    holding an ontology, the query is left as written.
+/// 3. A pattern with no GRAPH sees the unnamed graph, where the store
+///    describes its graphs, plus every graph described as a current graph
+///    (goodlux, 2026-11-19). History, the git layer and the ontology are
+///    read by naming their graph. A store written before graphs were
+///    described has no such description, and there the pattern sees every
+///    graph, as it did.
+/// 4. No SERVICE call leaves the machine (see `service_hint`).
+pub fn public_query<'a>(
+    root: Option<&std::path::Path>,
+    store: &'a Store,
+    q: &str,
+) -> Result<oxigraph::sparql::QueryResults<'a>, W3cQueryError> {
+    let base = root.map_or_else(|| PLATFORM_ROOT.to_string(), store_root_at);
+    let mut query = spargebra::SparqlParser::new()
+        .with_base_iri(&base)
+        .map_err(|e| W3cQueryError::Parse(format!("the store's address {base} is not usable: {e}")))?
         .parse_query(q)
         .map_err(|e| W3cQueryError::Parse(e.to_string()))?;
-    parsed.dataset_mut().set_default_graph_as_union();
-    parsed
-        .on_store(store)
-        .execute()
-        .map_err(|e| W3cQueryError::Eval(service_hint(e.to_string())))
+    if let Some(root) = root {
+        if let Some(old) = old_address_in(root, &base, &query.to_string()) {
+            let short = old.strip_prefix(PLATFORM_ROOT).unwrap_or(&old);
+            return Err(W3cQueryError::Parse(format!(
+                "This query names <{old}>. Addresses in this store now begin {base}, so that address is in no graph here. \
+                 Write it short, <{short}>: a short address is read as being in the store that is asked."
+            )));
+        }
+        let index = ontology_index(root).map_err(W3cQueryError::Eval)?;
+        let options = calamus::Options {
+            ontology_graph_prefixes: vec![format!("{PLATFORM_ROOT}ontology/")],
+            ontology_graphs: described_graphs(store, ONTOLOGY_GRAPH_CLASS).into_iter().map(|g| g.into_string()).collect(),
+        };
+        let report = calamus::rewrite(&mut query, &index, &options).map_err(|e| W3cQueryError::Parse(e.0))?;
+        for name in &report.left_as_written {
+            eprintln!(
+                "note: {} is a shared name that no store holds, and inside FILTER or BIND it is compared as written, so it will match nothing. Use it in a pattern, or write the stored spelling.",
+                name.as_str()
+            );
+        }
+    }
+    let mut prepared = oxigraph::sparql::SparqlEvaluator::new().without_default_http_service_handler().for_query(query);
+    let current = described_graphs(store, CURRENT_GRAPH_CLASS);
+    if current.is_empty() {
+        prepared.dataset_mut().set_default_graph_as_union();
+    } else {
+        let mut view = vec![oxigraph::model::GraphName::DefaultGraph];
+        view.extend(current.into_iter().map(oxigraph::model::GraphName::from));
+        prepared.dataset_mut().set_default_graph(view);
+    }
+    prepared.on_store(store).execute().map_err(|e| W3cQueryError::Eval(service_hint(e.to_string())))
 }
 
 
@@ -362,7 +491,7 @@ pub struct RepoYml {
     #[serde(default)]
     pub dev_history_horizon: Option<String>,
     /// Which store this is (goodlux, 2026-11-19): the squad it belongs to,
-    /// its one-word name, and `personal` or `shared`. In a soul repo the
+    /// its one-word name, and `private`, `shared` or `public`. In a soul repo the
     /// username is the one SOUL.md declares, kept in step at kit-update.
     #[serde(default)]
     pub squad: Option<String>,
@@ -669,6 +798,25 @@ pub fn conventional_kit_namespace(short: &str) -> String {
 ///   2. else the repo.yml `name:`, slugified — kit-less repos get their
 ///      own namespace instead of being wrongly stamped `soul`;
 ///   3. else `repo` — a last-resort constant so IRIs stay valid.
+/// The address every instance and graph in this repo's store sits under
+/// (goodlux, 2026-11-19): `https://repolex.ai/{squad}/{store}/` when
+/// `.lex/repo.yml` names both, where the store name is the username for a
+/// soul's store. A repo that names neither is a plain repo of markdown and
+/// keeps `https://repolex.ai/`. Ontology addresses never carry it.
+pub fn store_root_at(root: &std::path::Path) -> String {
+    let y = RepoYml::load(root);
+    match (y.squad.as_deref(), y.username.as_deref()) {
+        (Some(squad), Some(user)) if identity::valid_username(squad) && identity::valid_username(user) => {
+            format!("{PLATFORM_ROOT}{squad}/{user}/")
+        }
+        _ => PLATFORM_ROOT.to_string(),
+    }
+}
+
+/// Where every address begins, and where the ontology lives
+/// (`https://repolex.ai/ontology/...`).
+pub const PLATFORM_ROOT: &str = "https://repolex.ai/";
+
 pub fn resource_base_at(root: &std::path::Path) -> String {
     let y = RepoYml::load(root);
     let ns = y
@@ -676,7 +824,7 @@ pub fn resource_base_at(root: &std::path::Path) -> String {
         .map(|k| resolve_kit_spec(&k).2)
         .or_else(|| y.name.as_deref().map(slugify_ns).filter(|s| !s.is_empty()))
         .unwrap_or_else(|| "repo".to_string());
-    format!("https://repolex.ai/{ns}")
+    format!("{}{ns}", store_root_at(root))
 }
 
 /// Slugify a repo name into a namespace segment: lowercase, spaces → `-`,
@@ -1544,20 +1692,20 @@ fn w3c_query_with(
     union: bool,
 ) -> Result<W3cQueryOutcome, W3cQueryError> {
     let prefixed = add_prefixes_at(root, query);
-    // No SERVICE calls: oxigraph would otherwise send a SERVICE pattern over
-    // HTTP to whatever IRI the query names. A soul's query never leaves the
-    // machine; a cross-store question is syrinxd's (service_hint below).
-    let mut parsed = oxigraph::sparql::SparqlEvaluator::new()
-        .without_default_http_service_handler()
-        .parse_query(&prefixed)
-        .map_err(|e| W3cQueryError::Parse(e.to_string()))?;
-    if union {
-        parsed.dataset_mut().set_default_graph_as_union();
-    }
-    let results = parsed
-        .on_store(store)
-        .execute()
-        .map_err(|e| W3cQueryError::Eval(service_hint(e.to_string())))?;
+    let results = if union {
+        // What gitlexd serves: the public view (see `public_query`).
+        public_query(root, store, &prefixed)?
+    } else {
+        // No SERVICE calls: oxigraph would otherwise send a SERVICE pattern
+        // over HTTP to whatever IRI the query names.
+        oxigraph::sparql::SparqlEvaluator::new()
+            .without_default_http_service_handler()
+            .parse_query(&prefixed)
+            .map_err(|e| W3cQueryError::Parse(e.to_string()))?
+            .on_store(store)
+            .execute()
+            .map_err(|e| W3cQueryError::Eval(service_hint(e.to_string())))?
+    };
     // Evaluation is lazy: a failure (a SERVICE, say) surfaces while the
     // rows are read, so the hint is applied on that path too.
     match results {
@@ -2213,5 +2361,108 @@ mod lex_repo_check_tests {
         std::fs::write(crate::layout::repo_yml(&dir), "name: x\n").unwrap();
         assert!(lex_repo_check(&dir).is_ok());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod store_root_and_public_view_tests {
+    use super::*;
+    use oxigraph::io::RdfFormat;
+
+    fn repo(tag: &str, yml: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!("glx-root-{tag}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&d);
+        fs::create_dir_all(d.join(".lex")).unwrap();
+        fs::write(layout::repo_yml(&d), yml).unwrap();
+        d
+    }
+
+    #[test]
+    fn a_store_with_a_squad_and_a_name_has_a_root_of_its_own() {
+        let named = repo("named", "name: W4R3Z\nsquad: 7r1pl3f0rc3\nusername: w4r3z\n");
+        assert_eq!(store_root_at(&named), "https://repolex.ai/7r1pl3f0rc3/w4r3z/");
+        // A plain repo of markdown, and one with half a name or an unusable
+        // one, keep the platform root.
+        for yml in ["name: docs\n", "name: x\nusername: w4r3z\n", "name: x\nsquad: 7r1pl3f0rc3\nusername: W4R3Z\n", "name: x\nsquad: ontology\nusername: w4r3z\n"] {
+            assert_eq!(store_root_at(&repo("plain", yml)), PLATFORM_ROOT, "{yml}");
+        }
+    }
+
+    fn rows(root: Option<&std::path::Path>, store: &Store, q: &str) -> usize {
+        match public_query(root, store, q).unwrap() {
+            oxigraph::sparql::QueryResults::Solutions(s) => s.map(|r| r.unwrap()).count(),
+            _ => panic!("not a SELECT"),
+        }
+    }
+
+    /// A query with no GRAPH sees the graphs the store describes as current,
+    /// plus the descriptions themselves. History is read by naming its graph,
+    /// and a store that describes nothing is read whole, as before.
+    #[test]
+    fn a_query_with_no_graph_sees_the_current_graphs_and_the_descriptions() {
+        let store = Store::new().unwrap();
+        let data = "\
+<https://repolex.ai/soul/Note/a> <https://ex/title> \"now\" <https://repolex.ai/git-lex/NamedGraph/now> .\n\
+<https://repolex.ai/soul/Note/a> <https://ex/title> \"then\" <https://repolex.ai/git-lex/LexHistoryGraph> .\n";
+        store.load_from_slice(RdfFormat::NQuads, data.as_bytes()).unwrap();
+        let titles = "SELECT ?t WHERE { ?s <https://ex/title> ?t }";
+        assert_eq!(rows(None, &store, titles), 2, "nothing described: every graph");
+
+        let described = format!(
+            "<https://repolex.ai/git-lex/NamedGraph/now> <{RDF_TYPE}> <{CURRENT_GRAPH_CLASS}> .\n\
+             <https://repolex.ai/git-lex/NamedGraph/now> <{RDF_TYPE}> <{NAMED_GRAPH_CLASS}> .\n\
+             <https://repolex.ai/git-lex/LexHistoryGraph> <{RDF_TYPE}> <{NAMED_GRAPH_CLASS}> .\n"
+        );
+        store.load_from_slice(RdfFormat::NQuads, described.as_bytes()).unwrap();
+        assert_eq!(rows(None, &store, titles), 1, "the current graph only");
+        assert_eq!(rows(None, &store, &format!("SELECT ?g WHERE {{ ?g a <{NAMED_GRAPH_CLASS}> }}")), 2, "the descriptions are in view");
+        // Named in full or short, a graph is read whatever it is.
+        assert_eq!(rows(None, &store, "SELECT ?t WHERE { GRAPH <https://repolex.ai/git-lex/LexHistoryGraph> { ?s <https://ex/title> ?t } }"), 1);
+        assert_eq!(rows(None, &store, "SELECT ?t WHERE { GRAPH <git-lex/LexHistoryGraph> { <soul/Note/a> <https://ex/title> ?t } }"), 1);
+        assert_eq!(described_graphs(&store, CURRENT_GRAPH_CLASS).len(), 1);
+    }
+
+    /// In a store with a root of its own, an address written the old way is
+    /// in no graph. The query is refused with the short form to write.
+    #[test]
+    fn an_address_written_the_old_way_is_refused_and_the_short_form_named() {
+        let root = repo("old", "name: W4R3Z\nsquad: 7r1pl3f0rc3\nusername: w4r3z\n");
+        let store = Store::new().unwrap();
+        let mine = "<https://repolex.ai/7r1pl3f0rc3/w4r3z/soul/Note/a> <https://ex/title> \"now\" <https://repolex.ai/7r1pl3f0rc3/w4r3z/git-lex/NamedGraph/now> .\n";
+        store.load_from_slice(RdfFormat::NQuads, mine.as_bytes()).unwrap();
+        assert_eq!(rows(Some(&root), &store, "SELECT ?t WHERE { GRAPH <git-lex/NamedGraph/now> { <soul/Note/a> <https://ex/title> ?t } }"), 1);
+        let Err(W3cQueryError::Parse(why)) =
+            public_query(Some(&root), &store, "SELECT ?t WHERE { GRAPH <https://repolex.ai/git-lex/NamedGraph/now> { ?s ?p ?t } }")
+        else {
+            panic!("an old address must be refused");
+        };
+        assert!(why.contains("<git-lex/NamedGraph/now>") && why.contains("https://repolex.ai/7r1pl3f0rc3/w4r3z/"), "{why}");
+        // Ontology names are not instance addresses and are left alone.
+        assert_eq!(rows(Some(&root), &store, "SELECT ?s WHERE { ?s a <https://repolex.ai/ontology/git-lex/Thing> }"), 0);
+        // The stored one-line form of a saved query keeps addresses short.
+        let line = stored_query::canonical_sparql(Some(&root), "SELECT ?t WHERE {\n  GRAPH <git-lex/NamedGraph/now> { <soul/Note/a> <https://ex/title> ?t } # c\n}").unwrap();
+        assert!(line.contains("GRAPH <git-lex/NamedGraph/now>") && line.contains("<soul/Note/a>") && !line.contains("7r1pl3f0rc3"), "{line}");
+    }
+
+    /// Run by hand against a store built elsewhere:
+    /// GITLEX_TRIAL_ROOT=<repo> GITLEX_TRIAL_STORE=<dir> GITLEX_TRIAL_QUERY=<sparql>
+    #[test]
+    fn trial_query_against_a_store_named_in_the_environment() {
+        let (Ok(root), Ok(dir), Ok(q)) = (std::env::var("GITLEX_TRIAL_ROOT"), std::env::var("GITLEX_TRIAL_STORE"), std::env::var("GITLEX_TRIAL_QUERY")) else {
+            return;
+        };
+        let store = Store::open_read_only(&dir).unwrap();
+        let root = PathBuf::from(root);
+        match w3c_query_union_at(Some(&root), &store, &q) {
+            Ok(W3cQueryOutcome::Solutions(v)) => {
+                let rows = v["results"]["bindings"].as_array().cloned().unwrap_or_default();
+                println!("TRIAL rows: {}", rows.len());
+                for r in rows.iter().take(8) {
+                    println!("TRIAL {}", r.as_object().unwrap().iter().map(|(k, v)| format!("{k}={}", v["value"].as_str().unwrap_or("?"))).collect::<Vec<_>>().join("  "));
+                }
+            }
+            Ok(_) => println!("TRIAL other result"),
+            Err(W3cQueryError::Parse(e)) | Err(W3cQueryError::Eval(e)) => println!("TRIAL refused: {e}"),
+        }
     }
 }

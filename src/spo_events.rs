@@ -975,7 +975,10 @@ fn read_sidecar_at_commit(sha: &str, sidecar_path: &str) -> Result<Vec<String>, 
 /// considered and backed out — which-repo provenance is a FACT on the Repo
 /// node, not something IRIs carry.) Class-in-path per the universal law; NOT
 /// under NamedGraph/ like the machinery graphs.
-pub const LEXHISTORY_GRAPH_IRI: &str = "https://repolex.ai/git-lex/LexHistoryGraph";
+pub fn lexhistory_graph_iri() -> &'static str {
+    static IRI: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    IRI.get_or_init(|| format!("{}git-lex/LexHistoryGraph", crate::git::store_root()))
+}
 
 /// The statement-lifecycle predicates, declared in git-lex.ttl v0.5+
 /// (kit-base 9e6f4bf): domain git-lex:SpoEvent, range git2:Commit.
@@ -1041,7 +1044,7 @@ pub fn onegraph_event(
     // Thing — one temporal event in a statement's lifecycle. Its IRI derives
     // under the universal law (t-box minus `ontology/`), and its id is the
     // event's composite identity (triple + commit + direction), encoded.
-    let event = format!("<https://repolex.ai/git-lex/SpoEvent/{}>", &hash[..16]);
+    let event = format!("<{}git-lex/SpoEvent/{}>", crate::git::store_root(), &hash[..16]);
 
     let event_pred = if op == '+' {
         ONEGRAPH_ASSERTED_IN
@@ -1770,7 +1773,7 @@ fn note_file_id(walk_file_ids: &mut HashMap<String, HashMap<String, char>>, line
 /// is not a File node. Inverse of `file_iri(uri_encode_path(path))`: the
 /// encoder escapes `%` itself, so percent-decoding is exact.
 fn file_iri_document(iri: &str) -> Option<String> {
-    let encoded = iri.strip_prefix(crate::git::FILE_BASE)?;
+    let encoded = iri.strip_prefix(crate::git::file_base())?;
     let bytes = encoded.as_bytes();
     let mut out = Vec::with_capacity(bytes.len());
     let mut i = 0;
@@ -2348,7 +2351,7 @@ mod batched_walk_tests {
     }
 
     fn one_graph() -> String {
-        format!("<{LEXHISTORY_GRAPH_IRI}>")
+        format!("<{}>", lexhistory_graph_iri())
     }
 
     fn walk(root: &Path, store: &oxigraph::store::Store, commits: &[WalkCommit], clear_first: bool, batch_quads: usize) -> WalkOutcome {

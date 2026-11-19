@@ -170,7 +170,20 @@ fn strip_managed_header(content: &str) -> &str {
 /// oxigraph rejects it at the model level and SPARQL won't parse `<now>` —
 /// probed Day-50. Absolute-and-identical is the standard shape that delivers
 /// the portability requirement.)
-pub const GRAPH_BASE: &str = "https://repolex.ai/git-lex/NamedGraph/";
+pub fn graph_base() -> &'static str {
+    static BASE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    BASE.get_or_init(|| format!("{}git-lex/NamedGraph/", store_root()))
+}
+
+/// The address this process's store sits under: [`crate::store_root_at`] for
+/// the repo the process is in, read once. Since 2026-11-19 it carries the
+/// squad and the store name, so graph names and instance addresses are no
+/// longer the same in every store; a query stays the same text everywhere
+/// because it is parsed with this as its base (`GRAPH <git-lex/NamedGraph/now>`).
+pub fn store_root() -> &'static str {
+    static ROOT: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    ROOT.get_or_init(|| find_git_root().map_or_else(|| crate::PLATFORM_ROOT.to_string(), |r| crate::store_root_at(&r)))
+}
 
 /// The a-box (instance) base for soul-repo subjects. Subtexture-wide shape
 /// (Rob, Day-50): `https://repolex.ai/<application>/<Class>/<instanceId>` —
@@ -190,7 +203,7 @@ fn resource_base() -> &'static (String, String) {
     BASE.get_or_init(|| {
         let base = find_git_root()
             .map(|r| crate::resource_base_at(&r))
-            .unwrap_or_else(|| "https://repolex.ai/repo".to_string());
+            .unwrap_or_else(|| format!("{}repo", crate::PLATFORM_ROOT));
         let ns = base.rsplit('/').next().unwrap_or("repo");
         let mut cap = ns.to_string();
         if let Some(first) = cap.get_mut(0..1) {
@@ -209,7 +222,10 @@ fn resource_base() -> &'static (String, String) {
 /// stripping here (that is a Thing-plane derivation nicety): the path is
 /// the id, verbatim, so `git-lex/File/Soul/Journal/day-1.md` and a
 /// no-kit repo's `git-lex/File/README.md` follow one rule.
-pub const FILE_BASE: &str = "https://repolex.ai/git-lex/File/";
+pub fn file_base() -> &'static str {
+    static BASE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    BASE.get_or_init(|| format!("{}git-lex/File/", store_root()))
+}
 
 /// THE one base every instance address resolves against.
 ///
@@ -222,11 +238,23 @@ pub const FILE_BASE: &str = "https://repolex.ai/git-lex/File/";
 /// namespace comes from the VALUE — so it must NOT resolve against the
 /// document's own kit base, or a copia Texture referenced from a soul Note
 /// lands under soul and joins to nothing.
+#[deprecated(note = "use store_root(): the root now carries the squad and store name")]
 pub const RESOURCE_ROOT: &str = "https://repolex.ai/";
+
+/// git-lex's own working queries are written with its graph and instance
+/// names at the platform root (`https://repolex.ai/git-lex/...`). This moves
+/// those names under this store's root. Ontology names are not touched.
+pub fn scoped(text: &str) -> std::borrow::Cow<'_, str> {
+    let root = store_root();
+    if root == crate::PLATFORM_ROOT {
+        return std::borrow::Cow::Borrowed(text);
+    }
+    std::borrow::Cow::Owned(text.replace("https://repolex.ai/git-lex/", &format!("{root}git-lex/")))
+}
 
 /// A File node's IRI from its (already uri-encoded) repo-relative path.
 pub fn file_iri(encoded_path: &str) -> String {
-    format!("{FILE_BASE}{encoded_path}")
+    format!("{}{encoded_path}", file_base())
 }
 
 /// Mint a graph name: `https://repolex.ai/git-lex/NamedGraph/<name>`.
@@ -235,7 +263,7 @@ pub fn file_iri(encoded_path: &str) -> String {
 /// NamedGraph objects. The ontology graph's instance name is
 /// `repo-ontology` (renamed from `ontology`, Rob Day-50).
 pub fn graph_uri(name: &str) -> String {
-    format!("{GRAPH_BASE}{name}")
+    format!("{}{name}", graph_base())
 }
 
 /// Mint an instance-subject IRI under the soul a-box base.

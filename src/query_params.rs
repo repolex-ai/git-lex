@@ -25,7 +25,7 @@ use spargebra::Query;
 pub const PARAMETER_KEY: &str = "parameter";
 
 /// Where a relative document address (`<soul/Query/recent>`) is rooted.
-const ADDRESS_ROOT: &str = "https://repolex.ai/";
+const ADDRESS_ROOT: &str = crate::PLATFORM_ROOT;
 
 const XSD: &str = "http://www.w3.org/2001/XMLSchema#";
 
@@ -200,6 +200,12 @@ fn is_time(s: &str) -> bool {
 /// An address is written with or without `<...>`. One without a scheme
 /// (`soul/Query/recent`) is the short form used in frontmatter.
 pub fn read_value(name: &str, kind: Kind, raw: &str) -> Result<Value, String> {
+    read_value_at(name, kind, raw, ADDRESS_ROOT)
+}
+
+/// [`read_value`] with the address a short `iri` value is read against: the
+/// root of the store being asked.
+pub fn read_value_at(name: &str, kind: Kind, raw: &str, base: &str) -> Result<Value, String> {
     let wrong = |takes: &str| format!("The parameter '{name}' takes {takes}, and was given '{raw}'.");
     let unsigned = raw.strip_prefix('-').unwrap_or(raw);
     match kind {
@@ -221,7 +227,7 @@ pub fn read_value(name: &str, kind: Kind, raw: &str) -> Result<Value, String> {
         Kind::DateTime => Err(wrong("a date and time, such as 2026-11-17T09:00:00-08:00")),
         Kind::Iri => {
             let inner = raw.strip_prefix('<').and_then(|r| r.strip_suffix('>')).unwrap_or(raw);
-            let full = if inner.contains("://") || inner.starts_with("urn:") { inner.to_string() } else { format!("{ADDRESS_ROOT}{inner}") };
+            let full = if inner.contains("://") || inner.starts_with("urn:") { inner.to_string() } else { format!("{base}{inner}") };
             if inner.is_empty() {
                 return Err(wrong("a document's address"));
             }
@@ -276,16 +282,23 @@ pub fn bind(root: Option<&std::path::Path>, text: &str, declared: &[Param], give
     if let Some((name, _)) = given.iter().find(|(n, _)| !declared.iter().any(|p| &p.name == n)) {
         return Err(format!("This query has no parameter named '{name}'. {}", describe(declared)));
     }
+    // Short addresses, in a value and in the query's own text, are read
+    // against the root of the store being asked.
+    let base = root.map_or_else(|| crate::PLATFORM_ROOT.to_string(), crate::store_root_at);
     let mut values: Vec<(Variable, Value)> = Vec::new();
     for p in declared {
         let raw = given.iter().find(|(n, _)| n == &p.name).map(|(_, v)| v.as_str()).or(p.default.as_deref());
         let Some(raw) = raw else {
             return Err(format!("The parameter '{0}' is missing and has no default. Give it as {0}=value. {1}", p.name, describe(declared)));
         };
-        values.push((Variable::new_unchecked(p.name.clone()), read_value(&p.name, p.kind, raw)?));
+        values.push((Variable::new_unchecked(p.name.clone()), read_value_at(&p.name, p.kind, raw, &base)?));
     }
     let with_prefixes = crate::add_prefixes_at(root, text);
-    let mut query = spargebra::SparqlParser::new().parse_query(&with_prefixes).map_err(|e| format!("The query does not parse: {e}"))?;
+    let mut query = spargebra::SparqlParser::new()
+        .with_base_iri(&base)
+        .map_err(|e| format!("The store's address {base} is not usable: {e}"))?
+        .parse_query(&with_prefixes)
+        .map_err(|e| format!("The query does not parse: {e}"))?;
     let mut binder = Binder { values: &values, used: vec![false; values.len()] };
     match &mut query {
         Query::Select { pattern, .. } | Query::Describe { pattern, .. } | Query::Ask { pattern, .. } => binder.pattern(pattern)?,

@@ -557,7 +557,7 @@ pub fn derive_file_subjects(
                 }
                 let thing_uri = format!(
                     "<{}{}>",
-                    crate::git::RESOURCE_ROOT,
+                    crate::git::store_root(),
                     uri_encode_path(&inner)
                 );
                 return FileSubjects {

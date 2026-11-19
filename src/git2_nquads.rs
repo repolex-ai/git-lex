@@ -44,7 +44,7 @@ use crate::find_git_root;
 /// Instance-IRI base for git2 machinery objects (universal law: the git2
 /// t-box minus `ontology/`).
 pub fn git2_uri(path: &str) -> String {
-    format!("https://repolex.ai/git-lex/git2/{path}")
+    format!("{}git-lex/git2/{path}", crate::git::store_root())
 }
 
 const GIT2_NS: &str = "https://repolex.ai/ontology/git-lex/git2/";
@@ -253,6 +253,10 @@ pub fn emit_git2_nquads_at(nq: &mut impl NqSink, head: Option<&str>) {
                     "optional_kits" => current_list = Some("optionalKit"),
                     "substrates" => current_list = Some("substrate"),
                     "name" | "kit" | "version" | "agent_name" | "agent_email" | "created" => {} // known key, empty value
+                    // Which store this is. They decide the store's root and
+                    // each graph's description (sync::describe_graphs); they
+                    // are not facts about the Repo node.
+                    "squad" | "username" | "visibility" => {}
                     other => eprintln!(
                         "warning: repo.yml key `{other}` has no declared git-lex: property — NOT emitted (declare it or remove it)"
                     ),

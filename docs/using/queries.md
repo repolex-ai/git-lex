@@ -44,16 +44,19 @@ missing data, ask the graph what vocabulary it actually uses:
 SELECT DISTINCT ?p WHERE { ?s ?p ?o } ORDER BY ?p
 ```
 
-Both doors search across all graphs by default, so a bare `?s ?p ?o`
-matches everything. The store keeps its data in **named** graphs; name one
-with `GRAPH <…> { … }` to keep to it: current state lives in
-`<https://repolex.ai/git-lex/NamedGraph/now>`, history in
-`<https://repolex.ai/git-lex/LexHistoryGraph>`, commits in
-`<https://repolex.ai/git-lex/NamedGraph/commits>`.
+`git lex query` shows how things stand now by default: a bare `?s ?p ?o`
+matches your current documents and files, and the list of the store's
+graphs (`?g a git-lex:NamedGraph`). History, git itself and the ontology
+are read by naming their graph. (`git lex direct` builds a fresh view and
+searches all of it.) The store keeps its data in **named** graphs; name one
+with `GRAPH <…> { … }`, written short: current state lives in
+`<git-lex/NamedGraph/now>`, history in
+`<git-lex/LexHistoryGraph>`, commits in
+`<git-lex/NamedGraph/commits>`.
 
 ## Every Named Graph, and Which Door Has It
 
-All graph names share the base `https://repolex.ai/git-lex/NamedGraph/`
+Graph names are written short and are read as being in the store that is asked; most are under `git-lex/NamedGraph/`
 except the history graph, which has its own IRI.
 
 | Graph | Holds | `git lex direct` | `git lex query` |
@@ -70,7 +73,7 @@ The `repo-ontology` graph contains the ontology of every installed kit, loaded a
 
 ```sparql
 SELECT ?property ?range WHERE {
-  GRAPH <https://repolex.ai/git-lex/NamedGraph/repo-ontology> {
+  GRAPH <git-lex/NamedGraph/repo-ontology> {
     ?property rdfs:domain soul:Journal .
     OPTIONAL { ?property rdfs:range ?range }
   }
@@ -145,7 +148,7 @@ SELECT ?fromFile ?toFile WHERE { ?fromFile md:linksTo ?toFile } LIMIT 20
 
 # Which documents link to a specific file (bridging File plane to Thing plane)
 SELECT ?doc ?fromFile WHERE {
-  ?fromFile md:linksTo <https://repolex.ai/git-lex/File/Soul/Note/example.md> .
+  ?fromFile md:linksTo <git-lex/File/Soul/Note/example.md> .
   OPTIONAL { ?doc git-lex:fileId ?fromFile }
 }
 
@@ -165,7 +168,7 @@ PREFIX gl:  <https://repolex.ai/ontology/git-lex/>
 PREFIX g2:  <https://repolex.ai/ontology/git-lex/git2/>
 
 SELECT ?when ?event ?doc ?property ?value ?author WHERE {
-  GRAPH <https://repolex.ai/git-lex/LexHistoryGraph> {
+  GRAPH <git-lex/LexHistoryGraph> {
     { ?e rdf:reifies <<( ?doc ?property ?value )>> ; gl:assertedIn ?c .
       BIND("ASSERT" AS ?event) }
     UNION
@@ -173,7 +176,7 @@ SELECT ?when ?event ?doc ?property ?value ?author WHERE {
       BIND("RETRACT" AS ?event) }
     FILTER(CONTAINS(STR(?doc), "day-56"))
   }
-  GRAPH <https://repolex.ai/git-lex/NamedGraph/commits> {
+  GRAPH <git-lex/NamedGraph/commits> {
     ?c g2:ordinalDerived ?ordinal ; g2:author ?sig .
     ?sig g2:xsdDateTimeDerived ?when .
     OPTIONAL { ?sig g2:signatureName ?author }
@@ -194,19 +197,19 @@ PREFIX gl:  <https://repolex.ai/ontology/git-lex/>
 PREFIX g2:  <https://repolex.ai/ontology/git-lex/git2/>
 
 SELECT ?doc ?property ?value ?born (MIN(?retracted) AS ?died) WHERE {
-  GRAPH <https://repolex.ai/git-lex/LexHistoryGraph> {
+  GRAPH <git-lex/LexHistoryGraph> {
     ?e1 rdf:reifies <<( ?doc ?property ?value )>> ; gl:assertedIn ?ca .
     FILTER(CONTAINS(STR(?doc), "SOUL.md"))
   }
-  GRAPH <https://repolex.ai/git-lex/NamedGraph/commits> {
+  GRAPH <git-lex/NamedGraph/commits> {
     ?ca g2:ordinalDerived ?oa ; g2:author ?sigA .
     ?sigA g2:xsdDateTimeDerived ?born .
   }
   OPTIONAL {
-    GRAPH <https://repolex.ai/git-lex/LexHistoryGraph> {
+    GRAPH <git-lex/LexHistoryGraph> {
       ?e2 rdf:reifies <<( ?doc ?property ?value )>> ; gl:retractedIn ?cr .
     }
-    GRAPH <https://repolex.ai/git-lex/NamedGraph/commits> {
+    GRAPH <git-lex/NamedGraph/commits> {
       ?cr g2:ordinalDerived ?or ; g2:author ?sigR .
       ?sigR g2:xsdDateTimeDerived ?retracted .
     }

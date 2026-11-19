@@ -57,9 +57,11 @@ use crate::require_git_root;
 /// that explains it. Everything else is plumbing.
 const EXPORT_GRAPHS: [&str; 2] = ["now", "repo-ontology"];
 
-/// The platform base every git-lex IRI is minted under — the `@base` the
-/// spine relativizes instance IRIs against.
-const SPINE_BASE: &str = "https://repolex.ai/";
+/// The store's root, which every instance address in it sits under — the
+/// `@base` the spine relativizes instance IRIs against.
+fn spine_base() -> &'static str {
+    crate::git::store_root()
+}
 
 /// Pocket dir for the spine — same shape as `.lex/_ignore/oxigraph` and
 /// `.lex/_ignore/walkcache`.
@@ -207,7 +209,7 @@ fn write_spine_file(
         // T-box/A-box split). Turtle's own answer, no minted prefix:
         // relativize against @base — `<copia/Being/w4r3z>` reads back to
         // the full IRI by the standard rule.
-        if let Some(rel) = iri.strip_prefix(SPINE_BASE)
+        if let Some(rel) = iri.strip_prefix(spine_base())
             && !rel.is_empty() {
                 base_used = true;
                 return format!("<{rel}>");
@@ -258,7 +260,7 @@ fn write_spine_file(
     writeln!(out, "# repo: {}", org_repo(root))?;
 
     if base_used {
-        writeln!(out, "@base <{SPINE_BASE}>")?;
+        writeln!(out, "@base <{}>", spine_base())?;
     }
     used.sort();
     for i in used {

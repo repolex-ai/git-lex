@@ -105,8 +105,12 @@ fn with_store_lines(content: &str, squad: Option<&str>, username: &str) -> Optio
         Some(_) => {}
         None => add.push(want.clone()),
     }
-    if find(&lines, "visibility").is_none() {
-        add.push("visibility: personal".to_string());
+    // `private`, `shared` or `public`, the words of subtexture:visibility.
+    // An earlier build wrote `personal` for the first.
+    match find(&lines, "visibility") {
+        Some(i) if lines[i] == "visibility: personal" => lines[i] = "visibility: private".to_string(),
+        Some(_) => {}
+        None => add.push("visibility: private".to_string()),
     }
     // Beside the first commit they are read with, else at the end.
     let at = find(&lines, "genesis_sha").map_or(lines.len(), |i| i + 1);
@@ -409,14 +413,15 @@ mod tests {
         let after = with_store_lines(before, Some("7r1pl3f0rc3"), "w4r3z").unwrap();
         assert_eq!(
             after,
-            "# managed\nname: W4R3Z\ngenesis_sha: abc\nsquad: 7r1pl3f0rc3\nusername: w4r3z\nvisibility: personal\n\noptional_kits:\n  - a/b\n"
+            "# managed\nname: W4R3Z\ngenesis_sha: abc\nsquad: 7r1pl3f0rc3\nusername: w4r3z\nvisibility: private\n\noptional_kits:\n  - a/b\n"
         );
         assert_eq!(with_store_lines(&after, Some("7r1pl3f0rc3"), "w4r3z"), None, "a second run changes nothing");
         // The username follows SOUL.md; squad and visibility, once there, are kept.
         let set = "squad: elsewhere\nusername: old\nvisibility: shared\n";
         assert_eq!(with_store_lines(set, Some("7r1pl3f0rc3"), "w4r3z").unwrap(), "squad: elsewhere\nusername: w4r3z\nvisibility: shared\n");
+        assert_eq!(with_store_lines("username: w4r3z\nvisibility: personal\n", None, "w4r3z").unwrap(), "username: w4r3z\nvisibility: private\n");
         // No usable folder name: no squad line is invented.
-        assert_eq!(with_store_lines("name: x\n", None, "w4r3z").unwrap(), "name: x\nusername: w4r3z\nvisibility: personal\n");
+        assert_eq!(with_store_lines("name: x\n", None, "w4r3z").unwrap(), "name: x\nusername: w4r3z\nvisibility: private\n");
     }
 
     #[test]

@@ -179,51 +179,63 @@ pub fn valid_username(name: &str) -> bool {
 /// the agent has none there yet. Returns the username the list holds
 /// afterwards.
 ///
+/// The squad in `.lex/repo.yml` is taken the same way, once the agent has a
+/// username; the two together are the agent's store, and its address.
+///
 /// The list's word is final: once an agent has a username, a different one
 /// in SOUL.md changes nothing. Only the folder holding the agent's listed
 /// key can do this, a name another agent holds is refused, and from this
 /// moment the agent's tokens and grants carry the new address, so the token
 /// on file is dropped and grants it signed before must be granted again.
 pub fn adopt_username(root: &Path, host: &Path, now: u64) -> Result<Option<String>, String> {
+    // `.lex/repo.yml` first: it is where the squad is read from below.
+    crate::soul_md::heal_store_lines(root);
     let genesis = first_commit(root)?;
     let mut list = HostList::load(host)?;
-    let Some(current) = list.current(&genesis, now) else {
+    let Some(current) = list.current(&genesis, now).cloned() else {
         return Ok(None);
     };
-    if let Some(have) = &current.username {
-        return Ok(Some(have.clone()));
+    let mut username = current.username.clone();
+    if username.is_none() {
+        let Some(declared) = crate::soul_md::username_at(root) else {
+            return Ok(None);
+        };
+        if !valid_username(&declared) {
+            return Err(format!(
+                "soul.Soul.username in {} is {declared:?}. A username is one word of lowercase letters and digits, \
+                 with at least one letter from g to z, and not the name of a kit or engine.",
+                root.join("SOUL.md").display()
+            ));
+        }
+        if let Some(other) = list.agents.iter().find(|e| e.genesis != genesis && e.username.as_deref() == Some(declared.as_str())) {
+            return Err(format!(
+                "the username {declared} already belongs to another agent on this machine ({}). Two agents cannot share one.",
+                &other.genesis[..8.min(other.genesis.len())]
+            ));
+        }
+        username = Some(declared);
     }
-    let Some(declared) = crate::soul_md::username_at(root) else {
-        return Ok(None);
-    };
-    if !valid_username(&declared) {
-        return Err(format!(
-            "soul.Soul.username in {} is {declared:?}. A username is one word of lowercase letters and digits,              with at least one letter from g to z, and not the name of a kit or engine.",
-            root.join("SOUL.md").display()
-        ));
-    }
-    if let Some(other) = list.agents.iter().find(|e| e.genesis != genesis && e.username.as_deref() == Some(declared.as_str())) {
-        return Err(format!(
-            "the username {declared} already belongs to another agent on this machine ({}). Two agents cannot share one.",
-            &other.genesis[..8.min(other.genesis.len())]
-        ));
+    let squad = current.squad.clone().or_else(|| crate::RepoYml::load(root).squad.filter(|s| valid_username(s)));
+    if username == current.username && squad == current.squad {
+        return Ok(username);
     }
     if bound_key(root, host, now).is_none() {
-        return Ok(None);
+        return Ok(current.username);
     }
     for e in list.agents.iter_mut().filter(|e| e.genesis == genesis) {
-        e.username = Some(declared.clone());
+        e.username = username.clone();
+        e.squad = squad.clone();
     }
     list.save(host)?;
     if let Some(mut owner) = load_owner(host)?
         && owner.genesis == genesis
     {
-        owner.owner = agent_iri(&declared);
+        owner.owner = address_of(&list, &genesis);
         let json = serde_json::to_string_pretty(&owner).map_err(|e| e.to_string())? + "\n";
         write_atomic(&owner_path(host), json.as_bytes(), 0o644)?;
     }
     let _ = std::fs::remove_file(token_path(root));
-    Ok(Some(declared))
+    Ok(username)
 }
 
 pub fn now_secs() -> u64 {
@@ -272,6 +284,10 @@ pub struct Entry {
     /// after that. Absent for an agent that has not declared one yet.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub username: Option<String>,
+    /// The squad the agent's store belongs to, `squad` in its
+    /// `.lex/repo.yml`, taken onto the list the same way and as final.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub squad: Option<String>,
     /// `ssh-ed25519 <base64>`, as in the `.pub` file, without the comment.
     pub public_key: String,
     /// Seconds since 1970, UTC.
@@ -284,8 +300,14 @@ impl Entry {
     /// The agent's address: what its tokens and grants carry in `sub`, and
     /// what its SOUL.md says in `soul.Soul.id`. Named by username once it
     /// has one (goodlux, 2026-11-19), by first commit until then.
+    ///
+    /// With a squad as well it is the address the agent's own store gives
+    /// its Soul: `https://repolex.ai/{squad}/{username}/soul/Soul/{username}`.
     pub fn address(&self) -> String {
-        agent_iri(self.username.as_deref().unwrap_or(&self.genesis))
+        match (&self.squad, &self.username) {
+            (Some(squad), Some(user)) => format!("{}{squad}/{user}/soul/Soul/{user}", crate::PLATFORM_ROOT),
+            (_, user) => agent_iri(user.as_deref().unwrap_or(&self.genesis)),
+        }
     }
 
     pub fn valid_at(&self, now: u64) -> bool {
@@ -595,6 +617,7 @@ pub fn bind(root: &Path, host: &Path, now: u64) -> Result<Bound, String> {
         genesis,
         name: crate::RepoYml::load(root).name,
         username: None,
+        squad: None,
         public_key: public_key(root)?,
         valid_after: now,
         valid_before: None,
@@ -678,9 +701,10 @@ pub fn token(root: &Path, host: &Path, now: u64) -> Result<String, String> {
 /// address the list gives this agent now?
 fn check_own(root: &Path, host: &Path, token: &str, now: u64) -> Result<Claims, String> {
     let genesis = first_commit(root)?;
-    let username = HostList::load(host)?.current(&genesis, now).and_then(|e| e.username.clone());
+    let (username, squad) =
+        HostList::load(host)?.current(&genesis, now).map_or((None, None), |e| (e.username.clone(), e.squad.clone()));
     let list = HostList {
-        agents: vec![Entry { genesis, name: None, username, public_key: public_key(root)?, valid_after: 0, valid_before: None }],
+        agents: vec![Entry { genesis, name: None, username, squad, public_key: public_key(root)?, valid_after: 0, valid_before: None }],
     };
     verify(token, &list, now).map(|(claims, _)| claims)
 }
@@ -1582,6 +1606,11 @@ mod tests {
         grant(&repo, &host, "viewer", "pan:read", 90, NOW + 5).unwrap();
         let acting = verify_caller(&service_token(&host, "viewer", NOW + 6).unwrap(), &host, NOW + 7).unwrap();
         assert_eq!((acting.sub.as_str(), acting.actor.as_deref()), (new, Some("viewer")));
+
+        // With the squad its store belongs to, the address is the one that
+        // store gives its own Soul.
+        let both = Entry { squad: Some("7r1pl3f0rc3".into()), ..HostList::load(&host).unwrap().agents[0].clone() };
+        assert_eq!(both.address(), "https://repolex.ai/7r1pl3f0rc3/w4r3z/soul/Soul/w4r3z");
 
         // The list's word is final: a different name in SOUL.md changes nothing.
         std::fs::write(repo.join("SOUL.md"), "---\nsoul.Soul.username: warez\n---\n").unwrap();

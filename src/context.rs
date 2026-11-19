@@ -443,13 +443,16 @@ fn query_guide(m: &Model) -> String {
   every document of every class.
 - Optional properties are often absent on real documents (many have no title).
   Put them in `OPTIONAL { }`, or the documents without them silently drop out.
-- Named graphs, all under `https://repolex.ai/git-lex/NamedGraph/`: `now` holds
-  your documents and one `git-lex:File` per file; `commits`, `refs`, `repo` and
-  `filetree/<sha>` hold git itself (`git2:Commit`, `git2:Signature`, `git2:Blob`,
-  `git2:IndexEntry`, `git2:Branch`, `git2:Repository`, `git-lex:Repo`). A query
-  sees all of them at once, and the git layer is most of the graph, so an open
-  pattern like `?s a ?class` is mostly git. Require `git-lex:id` to keep to
-  documents.
+- A query with no GRAPH sees how things stand now: your documents and one
+  `git-lex:File` per file. Everything else is read by naming its graph, written
+  short: `GRAPH <git-lex/LexHistoryGraph>` for every past statement,
+  `GRAPH <git-lex/NamedGraph/commits>` (also `refs`, `repo`, `filetree`) for git
+  itself (`git2:Commit`, `git2:Signature`, `git2:Blob`, `git2:IndexEntry`,
+  `git2:Branch`, `git2:Repository`, `git-lex:Repo`), and
+  `GRAPH <git-lex/NamedGraph/repo-ontology>` for the ontology.
+- Write this store's addresses short: `<soul/Note/my-id>`, not a full
+  `https://...` address. A short address means: in the store being asked.
+- `?g a git-lex:NamedGraph` lists the store's graphs.
 - Body links run FILE to FILE: `?fromFile md:linksTo ?toFile`. A document
   points at its file with `git-lex:fileId`; hop through it to get documents.
 - Not every file is a document. A markdown file whose header has no `id` (or
@@ -464,7 +467,7 @@ fn query_guide(m: &Model) -> String {
     let kit = class.split(':').next().unwrap_or_default();
     let doc = crate::nquad::thing_iri_from_range(&c.iri, "my-id").unwrap_or_default();
     let doc = doc.trim_matches(['<', '>']);
-    let file = format!("{}{}my-id.md", crate::git::FILE_BASE, c.folder.as_deref().unwrap_or_default());
+    let file = format!("{}{}my-id.md", crate::git::file_base(), c.folder.as_deref().unwrap_or_default());
     out.push_str(&format!(
 "
 Addresses, for the class `{class}`:
@@ -477,7 +480,7 @@ Addresses, for the class `{class}`:
 - A document's address comes from the `id` in its header, never from where its
   file sits. A document at the repo root is addressed like any other.
 ",
-        iri = c.iri, file_base = crate::git::FILE_BASE));
+        iri = c.iri, file_base = crate::git::file_base()));
     let own_id = format!("{}{}Id", local[..1].to_lowercase(), &local[1..]);
     if c.props.iter().any(|p| p.iri.rsplit(['/', '#']).next() == Some(own_id.as_str())) {
         out.push_str(&format!(

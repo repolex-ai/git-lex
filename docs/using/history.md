@@ -23,10 +23,9 @@ History lives in the **synced store**, which [gitlexd](gitlexd.md) holds:
   tree and does not open the synced store, so a history pattern there returns
   zero rows.
 
-History sits in one named graph,
-`<https://repolex.ai/git-lex/LexHistoryGraph>`; a pattern with no GRAPH
-clause sees it along with everything else, and `GRAPH <…> { ... }` keeps a
-pattern to it. The ready-made history queries in [Querying](queries.md)
+History sits in one named graph, `<git-lex/LexHistoryGraph>`. A pattern
+with no GRAPH clause sees only how things stand now, so a history pattern
+goes inside `GRAPH <git-lex/LexHistoryGraph> { ... }`. The ready-made history queries in [Querying](queries.md)
 provide templates for this.
 
 ## The Event Model and Joins
