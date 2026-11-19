@@ -491,6 +491,7 @@ fn head_sha(root: &Path) -> Option<String> {
 /// catch-up, and a HEAD the nudge already synced asks for nothing.
 async fn watch_loop(d: Arc<Daemon>, soul: Arc<Soul>) {
     let mut last: Option<String> = None;
+    let mut last_root: Option<String> = None;
     loop {
         if soul.gone.load(Ordering::SeqCst) {
             return;
@@ -498,6 +499,19 @@ async fn watch_loop(d: Arc<Daemon>, soul: Arc<Soul>) {
         if !crate::layout::lex_dir(&soul.path).is_dir() {
             d.forget(&soul.genesis).await;
             return;
+        }
+        // The store's root is read from .lex/repo.yml. When it is not the
+        // one the store was built under (the repo just gained a squad and a
+        // name), every query would be read against a root the store does not
+        // hold, so the store is rebuilt without waiting for a commit.
+        let root = crate::store_root_at(&soul.path);
+        if last_root.as_deref() != Some(root.as_str()) {
+            last_root = Some(root.clone());
+            let current = oxigraph::model::NamedNode::new_unchecked(format!("{root}git-lex/NamedGraph/now"));
+            let built_under_it = soul.store.read().await.as_ref().map(|s| s.contains_named_graph(&current).unwrap_or(true));
+            if built_under_it == Some(false) {
+                soul.request_sync();
+            }
         }
         let now = head_sha(&soul.path);
         if now != last {

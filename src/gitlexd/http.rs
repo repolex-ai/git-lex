@@ -146,10 +146,17 @@ async fn sparql_post(
 
 fn soul_json(s: &Soul) -> serde_json::Value {
     let st = s.status();
+    let y = crate::RepoYml::load(&s.path);
     serde_json::json!({
         "genesis": s.genesis,
         "path": s.path.display().to_string(),
         "name": s.name,
+        // The address every instance and graph of this store sits under,
+        // and the base its queries are read against. `squad` and `username`
+        // are absent for a plain repo, whose root is the platform's.
+        "root": crate::store_root_at(&s.path),
+        "squad": y.squad,
+        "username": y.username,
         "synced_to": st.synced_to,
         "syncing": st.syncing,
         "last_error": st.last_error,
