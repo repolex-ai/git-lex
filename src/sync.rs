@@ -473,12 +473,15 @@ fn rewound_event_commits(store: &Store, root: &std::path::Path, head_sha: &str) 
 /// graph, by ordinal. The ordinals are the sync marker (a batched rebuild
 /// writes them last), so a store with none has never completed a sync.
 pub fn synced_marker(store: &Store) -> Option<String> {
+    // Whatever graph holds it: gitlexd calls this for every soul it serves,
+    // and a graph's name now depends on whose store it is. Naming the
+    // commits graph of the process's own repo found nothing in any other
+    // soul's store, so gitlexd reported them all as never synced.
     let q = format!(
-        "SELECT ?sha WHERE {{ GRAPH <{}> {{ \
+        "SELECT ?sha WHERE {{ GRAPH ?g {{ \
            ?c <{SYNC_MARKER_PREDICATE}> ?o ; \
               <https://repolex.ai/ontology/git-lex/git2/id> ?sha }} \
-         }} ORDER BY DESC(?o) LIMIT 1",
-        graph_uri("commits")
+         }} ORDER BY DESC(?o) LIMIT 1"
     );
     let results = oxigraph::sparql::SparqlEvaluator::new()
         .parse_query(&q)
