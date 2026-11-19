@@ -136,7 +136,13 @@ enum Commands {
     /// triggers a loud FULL rebuild. Also refreshes the .spo sidecars from
     /// the working tree. Hand-authored `.lex/**/*.nq` files are read by
     /// `direct`, not by sync.
-    Sync,
+    Sync {
+        /// Build the whole store again from git, from the first commit.
+        /// The old store keeps answering until the new one is ready, and
+        /// nothing is stopped or deleted by hand.
+        #[arg(long)]
+        rebuild: bool,
+    },
     /// Write the repo's semantic index as one TSV file built for an LLM's
     /// context cache (the neural KV-cache: hold a whole soul's graph
     /// resident for zero-latency recall).
@@ -380,7 +386,7 @@ fn run(command: Commands) -> Outcome {
         Commands::KitUpdate { kit } => kit_cmds::cmd_kit_update(kit),
         Commands::KitAdd { kit } => kit_cmds::cmd_kit_add(kit),
         Commands::KitRemove { kit, force } => kit_cmds::cmd_kit_remove(kit, force),
-        Commands::Sync => cmd_sync(),
+        Commands::Sync { rebuild } => cmd_sync(rebuild),
         Commands::ExportSpine => export_spine::cmd_export_spine(),
         Commands::Soul { command } => match command {
             SoulCommands::Session { json } => session::cmd_session(json),
@@ -410,8 +416,18 @@ fn run(command: Commands) -> Outcome {
 /// writer, so the work is handed to it and waited for; a repo gitlexd does
 /// not hold (not in the registry) syncs here. Without gitlexd the
 /// engine runs in this process, as it always has.
-fn cmd_sync() -> Outcome {
+fn cmd_sync(rebuild: bool) -> Outcome {
     let root = require_git_root()?;
+    if rebuild {
+        // A note for whichever process does the sync, here or gitlexd's
+        // worker: it is read, acted on, and removed when the rebuild is done.
+        let note = git_lex::sync::rebuild_note(&root);
+        if let Some(dir) = note.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        std::fs::write(&note, "asked for by `git lex sync --rebuild`\n")
+            .map_err(|e| Failure::new(format!("fatal: cannot write {}: {e}", note.display())))?;
+    }
     if git_lex::gitlexd::client::running()
         && let Some(genesis) = git_lex::git::genesis_sha_at(&root) {
             match git_lex::gitlexd::client::sync_and_wait(&genesis) {

@@ -104,6 +104,20 @@ pub fn cmd_sync_into(store_dir: Option<&std::path::Path>) -> Outcome {
         return Ok(());
     }
 
+    // `git lex sync --rebuild`: start from nothing. In gitlexd this runs on
+    // a copy, so the store being read is untouched until the swap.
+    let rebuild_note = rebuild_note(&root);
+    let rebuild_asked = rebuild_note.is_file();
+    if rebuild_asked {
+        println!("  Rebuilding the whole store from git, as asked.");
+        let all: Vec<_> = store.named_graphs().filter_map(|g| g.ok()).collect();
+        for g in &all {
+            if let Err(e) = store.remove_named_graph(g) {
+                return Err(Failure::new(format!("ERROR: could not clear the store for a rebuild: {e}")));
+            }
+        }
+    }
+
     // A store built under another root (before this repo had a squad and a
     // store name, or under different ones) holds graphs this build never
     // reads. Drop them; with them gone nothing is found to resume from, and
@@ -243,6 +257,10 @@ These are in your WORKING FILES, not history — fix the listed files and the wa
         .flush()
         .map_err(|e| Failure::new(format!("ERROR: failed to write the store to disk: {e}")))?;
     clock.mark("flush");
+    if rebuild_asked {
+        // Only now: a rebuild that failed above is asked for again next time.
+        let _ = std::fs::remove_file(&rebuild_note);
+    }
 
     let elapsed = start.elapsed();
 
@@ -1411,6 +1429,11 @@ fn history_counts(store: &Store) -> Result<HistoryCounts, String> {
 /// What to type when the end-of-sync check finds a broken store: the same
 /// steps as "Rebuilding" in docs/using/history.md.
 const REBUILD_HINT: &str = "To rebuild the store from your git history: run `gitlexd stop`, delete .lex/_ignore/oxigraph, then run `git lex sync`.";
+
+/// Where `git lex sync --rebuild` leaves its request for the next sync.
+pub fn rebuild_note(root: &std::path::Path) -> std::path::PathBuf {
+    crate::layout::ignore_dir(root).join("rebuild-asked")
+}
 
 /// Remove every named graph that is not under this store's own git-lex
 /// names. A plain repo's root is the platform root, where this removes
