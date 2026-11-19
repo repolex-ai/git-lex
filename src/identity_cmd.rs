@@ -44,6 +44,20 @@ fn owner_root() -> Outcome<std::path::PathBuf> {
         .ok_or_else(|| Failure::new(format!("The owner's repo ({}) is not in this machine's list of repos, so its key cannot be found.", owner.genesis)))
 }
 
+/// The address the machine's list gives the agent with this first commit.
+fn address(host: &std::path::Path, genesis: &str) -> String {
+    identity::HostList::load(host).map_or_else(|_| identity::agent_iri(genesis), |list| identity::address_of(&list, genesis))
+}
+
+/// Take the username SOUL.md declares onto the list if the agent has none
+/// there yet. A username that cannot be taken is said, and is no reason to
+/// refuse the token: the agent keeps the address it had.
+fn adopt_username(root: &std::path::Path, host: &std::path::Path) {
+    if let Err(why) = identity::adopt_username(root, host, identity::now_secs()) {
+        eprintln!("warning: {why}");
+    }
+}
+
 fn no_key(root: &std::path::Path) -> Failure {
     Failure::new(format!(
         "This agent has no key yet ({} holds none).\n\
@@ -89,7 +103,9 @@ pub fn cmd_token(owner: bool, service: Option<&str>) -> Outcome {
     if !identity::has_key(&root) {
         return Err(no_key(&root));
     }
-    println!("{}", identity::token(&root, identity::now_secs()).map_err(Failure::new)?);
+    let host = host()?;
+    adopt_username(&root, &host);
+    println!("{}", identity::token(&root, &host, identity::now_secs()).map_err(Failure::new)?);
     Ok(())
 }
 
@@ -102,9 +118,11 @@ pub fn cmd_show() -> Outcome {
     let now = identity::now_secs();
     let host = host()?;
     let genesis = identity::first_commit(&root).map_err(Failure::new)?;
-    let token = identity::token(&root, now).map_err(Failure::new)?;
+    adopt_username(&root, &host);
+    let token = identity::token(&root, &host, now).map_err(Failure::new)?;
     let list = identity::HostList::load(&host).map_err(Failure::new)?;
-    println!("agent    {}", identity::agent_iri(&genesis));
+    println!("agent    {}", identity::address_of(&list, &genesis));
+    println!("id       {genesis}");
     println!("folder   {}", root.display());
     match identity::load_owner(&host).map_err(Failure::new)? {
         Some(o) if o.genesis == genesis => println!("owner    yes, this is the person this machine belongs to"),
@@ -136,7 +154,7 @@ pub fn cmd_owner() -> Outcome {
     let genesis = identity::first_commit(&root).map_err(Failure::new)?;
     match identity::set_owner(&root, &host, identity::now_secs()).map_err(Failure::new)? {
         identity::OwnerSet::New => {
-            println!("Owner: this machine belongs to {} ({}).", identity::agent_iri(&genesis), root.display());
+            println!("Owner: this machine belongs to {} ({}).", address(&host, &genesis), root.display());
             println!("  recorded in  {}", identity::owner_path(&host).display());
         }
         identity::OwnerSet::Already => println!("Already the owner: {} ({}). Nothing changed.", &genesis[..8], root.display()),
@@ -163,8 +181,9 @@ pub fn cmd_grant(service: &str, scope: &str, days: u64) -> Outcome {
     let root = grantor_root()?;
     let host = host()?;
     let now = identity::now_secs();
+    adopt_username(&root, &host);
     let record = identity::grant(&root, &host, service, scope, days, now).map_err(Failure::new)?;
-    println!("Granted: {service} may act for {} ({}).", identity::agent_iri(&record.grantor), root.display());
+    println!("Granted: {service} may act for {} ({}).", address(&host, &record.grantor), root.display());
     println!("  it may       {}", record.scope);
     println!("  for          {} days", days_left(record.exp, now));
     println!("  its key      {}", identity::service_dir(&host, service).join("key").display());
@@ -185,7 +204,7 @@ pub fn cmd_grants() -> Outcome {
         return Ok(());
     }
     for g in live {
-        println!("{}  acts for {}  may: {}  ({} days left)", g.service, identity::agent_iri(&g.grantor), g.scope, days_left(g.exp, now));
+        println!("{}  acts for {}  may: {}  ({} days left)", g.service, address(&host, &g.grantor), g.scope, days_left(g.exp, now));
     }
     Ok(())
 }
@@ -202,11 +221,11 @@ pub fn cmd_revoke(service: &str) -> Outcome {
     {
         return Err(Failure::new(format!(
             "fatal: {service} acts for {}, not for this session's agent. Its grant is theirs to end.",
-            identity::agent_iri(&g.grantor)
+            address(&host, &g.grantor)
         )));
     }
     match identity::revoke(&host, service, now).map_err(Failure::new)? {
-        Some(g) => println!("Ended: {service} no longer acts for {}. Its tokens are refused from now.", identity::agent_iri(&g.grantor)),
+        Some(g) => println!("Ended: {service} no longer acts for {}. Its tokens are refused from now.", address(&host, &g.grantor)),
         None => println!("No grant is in force for {service}. Nothing changed."),
     }
     Ok(())

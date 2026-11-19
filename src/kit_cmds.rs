@@ -586,6 +586,15 @@ pub(crate) fn cmd_kit_update(kit_arg: Option<String>) -> Outcome {
         eprintln!("warning: root SOUL.md is missing and the kit scaffold did not restore it —");
         eprintln!("`git lex sync`/`save` will refuse to run until it exists.");
     }
+    // The username SOUL.md declares goes onto the machine's list of keys
+    // (once; it is permanent there) and into .lex/repo.yml.
+    if let Some(host) = git_lex::identity::host_dir() {
+        match git_lex::identity::adopt_username(&root, &host, git_lex::identity::now_secs()) {
+            Ok(_) => {}
+            Err(why) => eprintln!("warning: {why}"),
+        }
+    }
+    git_lex::soul_md::heal_store_lines(&root);
 
     if already_current > 0 {
         println!("{} of {} kit(s) were already current — nothing changed for those.",

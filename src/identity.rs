@@ -136,15 +136,94 @@ pub fn set_owner(root: &Path, host: &Path, now: u64) -> Result<OwnerSet, String>
             owner_path(host).display()
         ));
     }
-    let owner = Owner { owner: agent_iri(&genesis), genesis, since: now };
+    let owner = Owner { owner: address_of(&list, &genesis), genesis, since: now };
     let json = serde_json::to_string_pretty(&owner).map_err(|e| e.to_string())? + "\n";
     write_atomic(&owner_path(host), json.as_bytes(), 0o644)?;
     Ok(OwnerSet::New)
 }
 
-/// The IRI the graph already gives an agent; the token's `sub`.
-pub fn agent_iri(genesis: &str) -> String {
-    format!("https://repolex.ai/soul/Soul/{genesis}")
+/// The address of the agent with this id. The id is the agent's username,
+/// or its first commit while it has no username on the list. Ask
+/// [`Entry::address`] or [`address_of`] which of the two applies; do not
+/// build an address from a first commit by hand.
+pub fn agent_iri(id: &str) -> String {
+    format!("https://repolex.ai/soul/Soul/{id}")
+}
+
+/// The address the list gives the agent with this first commit: its current
+/// entry's, else any entry's, else the first-commit form for an agent the
+/// list has never seen.
+pub fn address_of(list: &HostList, genesis: &str) -> String {
+    let mine = || list.agents.iter().filter(|e| e.genesis == genesis);
+    mine()
+        .find(|e| e.valid_before.is_none())
+        .or_else(|| mine().next())
+        .map_or_else(|| agent_iri(genesis), Entry::address)
+}
+
+/// Words a username may not be: each is the first segment of some other
+/// kind of address.
+const RESERVED_NAMES: &[&str] = &["ontology", "subtexture", "soul", "copia", "pan", "ravel", "horae", "pool", "syrinx"];
+
+/// One word of lowercase letters and digits, with at least one letter that
+/// is not a hex digit, so a name can never be read as the start of a first
+/// commit (goodlux, 2026-11-18).
+pub fn valid_username(name: &str) -> bool {
+    !name.is_empty()
+        && name.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit())
+        && name.chars().any(|c| ('g'..='z').contains(&c))
+        && !RESERVED_NAMES.contains(&name)
+}
+
+/// Take the username this folder's SOUL.md declares onto the host list, if
+/// the agent has none there yet. Returns the username the list holds
+/// afterwards.
+///
+/// The list's word is final: once an agent has a username, a different one
+/// in SOUL.md changes nothing. Only the folder holding the agent's listed
+/// key can do this, a name another agent holds is refused, and from this
+/// moment the agent's tokens and grants carry the new address, so the token
+/// on file is dropped and grants it signed before must be granted again.
+pub fn adopt_username(root: &Path, host: &Path, now: u64) -> Result<Option<String>, String> {
+    let genesis = first_commit(root)?;
+    let mut list = HostList::load(host)?;
+    let Some(current) = list.current(&genesis, now) else {
+        return Ok(None);
+    };
+    if let Some(have) = &current.username {
+        return Ok(Some(have.clone()));
+    }
+    let Some(declared) = crate::soul_md::username_at(root) else {
+        return Ok(None);
+    };
+    if !valid_username(&declared) {
+        return Err(format!(
+            "soul.Soul.username in {} is {declared:?}. A username is one word of lowercase letters and digits,              with at least one letter from g to z, and not the name of a kit or engine.",
+            root.join("SOUL.md").display()
+        ));
+    }
+    if let Some(other) = list.agents.iter().find(|e| e.genesis != genesis && e.username.as_deref() == Some(declared.as_str())) {
+        return Err(format!(
+            "the username {declared} already belongs to another agent on this machine ({}). Two agents cannot share one.",
+            &other.genesis[..8.min(other.genesis.len())]
+        ));
+    }
+    if bound_key(root, host, now).is_none() {
+        return Ok(None);
+    }
+    for e in list.agents.iter_mut().filter(|e| e.genesis == genesis) {
+        e.username = Some(declared.clone());
+    }
+    list.save(host)?;
+    if let Some(mut owner) = load_owner(host)?
+        && owner.genesis == genesis
+    {
+        owner.owner = agent_iri(&declared);
+        let json = serde_json::to_string_pretty(&owner).map_err(|e| e.to_string())? + "\n";
+        write_atomic(&owner_path(host), json.as_bytes(), 0o644)?;
+    }
+    let _ = std::fs::remove_file(token_path(root));
+    Ok(Some(declared))
 }
 
 pub fn now_secs() -> u64 {
@@ -188,6 +267,11 @@ pub struct Entry {
     /// For a person reading the list. Never used to decide anything.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
+    /// The agent's one-word name, `soul.Soul.username` in its SOUL.md, once
+    /// the list has taken it (see [`adopt_username`]). It never changes
+    /// after that. Absent for an agent that has not declared one yet.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub username: Option<String>,
     /// `ssh-ed25519 <base64>`, as in the `.pub` file, without the comment.
     pub public_key: String,
     /// Seconds since 1970, UTC.
@@ -197,6 +281,13 @@ pub struct Entry {
 }
 
 impl Entry {
+    /// The agent's address: what its tokens and grants carry in `sub`, and
+    /// what its SOUL.md says in `soul.Soul.id`. Named by username once it
+    /// has one (goodlux, 2026-11-19), by first commit until then.
+    pub fn address(&self) -> String {
+        agent_iri(self.username.as_deref().unwrap_or(&self.genesis))
+    }
+
     pub fn valid_at(&self, now: u64) -> bool {
         self.valid_after <= now + SKEW_SECS && self.valid_before.is_none_or(|end| now < end)
     }
@@ -254,19 +345,27 @@ impl HostList {
     }
 
     /// The keys valid for tokens now, as a JSON Web Key Set. `kid` is the
-    /// agent's id. Only keys with no end date: a retired key still verifies
+    /// agent's first commit; `sub` is its address. Only keys with no end date: a retired key still verifies
     /// old commits, but must not verify a new token.
     pub fn jwks(&self) -> Result<String, String> {
         let mut keys = Vec::new();
         for e in self.agents.iter().filter(|e| e.valid_before.is_none()) {
-            keys.push(serde_json::json!({
+            let mut key = serde_json::json!({
                 "kty": "OKP",
                 "crv": "Ed25519",
                 "alg": "EdDSA",
                 "use": "sig",
                 "kid": e.genesis,
                 "x": URL_SAFE_NO_PAD.encode(e.key_bytes()?),
-            }));
+                // What a token or grant signed with this key must carry in
+                // `sub`. A checker compares against this and never builds
+                // the address itself.
+                "sub": e.address(),
+            });
+            if let Some(name) = &e.username {
+                key["username"] = name.clone().into();
+            }
+            keys.push(key);
         }
         serde_json::to_string_pretty(&serde_json::json!({ "keys": keys }))
             .map(|s| s + "\n")
@@ -477,6 +576,7 @@ pub fn bind(root: &Path, host: &Path, now: u64) -> Result<Bound, String> {
     let had_key = has_key(root);
     if let Some(current) = list.current(&genesis, now) {
         if had_key && public_key(root)? == current.public_key {
+            adopt_username(root, host, now)?;
             return Ok(Bound::Already);
         }
         return Err(format!(
@@ -494,11 +594,13 @@ pub fn bind(root: &Path, host: &Path, now: u64) -> Result<Bound, String> {
     list.agents.push(Entry {
         genesis,
         name: crate::RepoYml::load(root).name,
+        username: None,
         public_key: public_key(root)?,
         valid_after: now,
         valid_before: None,
     });
     list.save(host)?;
+    adopt_username(root, host, now)?;
     Ok(Bound::New)
 }
 
@@ -532,12 +634,12 @@ pub struct Claims {
 }
 
 /// Sign a new token for the agent whose folder this is.
-pub fn mint(root: &Path, now: u64) -> Result<String, String> {
+pub fn mint(root: &Path, host: &Path, now: u64) -> Result<String, String> {
     let genesis = first_commit(root)?;
     let key = signing_key(root)?;
     let mut id = [0u8; 16];
     getrandom::getrandom(&mut id).map_err(|e| format!("no random bytes from the system: {e}"))?;
-    let iri = agent_iri(&genesis);
+    let iri = address_of(&HostList::load(host)?, &genesis);
     let claims = Claims {
         iss: iri.clone(),
         sub: iri,
@@ -558,25 +660,27 @@ pub fn mint(root: &Path, now: u64) -> Result<String, String> {
 
 /// The agent's token: the one on file while it is this key's and has more
 /// than half its life left, otherwise a new one, written to the file.
-pub fn token(root: &Path, now: u64) -> Result<String, String> {
+pub fn token(root: &Path, host: &Path, now: u64) -> Result<String, String> {
     let path = token_path(root);
     if let Ok(text) = std::fs::read_to_string(&path) {
         let kept = text.trim();
-        if let Ok(claims) = check_own(root, kept, now)
+        if let Ok(claims) = check_own(root, host, kept, now)
             && claims.exp.saturating_sub(now) > TOKEN_LIFETIME_SECS / 2 {
                 return Ok(kept.to_string());
             }
     }
-    let fresh = mint(root, now)?;
+    let fresh = mint(root, host, now)?;
     write_atomic(&path, format!("{fresh}\n").as_bytes(), 0o600)?;
     Ok(fresh)
 }
 
-/// Is this token signed by the key in this folder, and in date?
-fn check_own(root: &Path, token: &str, now: u64) -> Result<Claims, String> {
+/// Is this token signed by the key in this folder, in date, and for the
+/// address the list gives this agent now?
+fn check_own(root: &Path, host: &Path, token: &str, now: u64) -> Result<Claims, String> {
     let genesis = first_commit(root)?;
+    let username = HostList::load(host)?.current(&genesis, now).and_then(|e| e.username.clone());
     let list = HostList {
-        agents: vec![Entry { genesis, name: None, public_key: public_key(root)?, valid_after: 0, valid_before: None }],
+        agents: vec![Entry { genesis, name: None, username, public_key: public_key(root)?, valid_after: 0, valid_before: None }],
     };
     verify(token, &list, now).map(|(claims, _)| claims)
 }
@@ -624,7 +728,7 @@ pub fn verify<'a>(token: &str, list: &'a HostList, now: u64) -> Result<(Claims, 
         .map_err(|_| "the signature does not match the listed key for this agent".to_string())?;
     let claims: Claims =
         serde_json::from_slice(&decode(c, "claims")?).map_err(|e| format!("the token's claims are incomplete: {e}"))?;
-    if claims.sub != agent_iri(&entry.genesis) {
+    if claims.sub != entry.address() {
         return Err("the token says it is a different agent than the one whose key signed it".into());
     }
     if claims.iat > now + SKEW_SECS {
@@ -891,7 +995,7 @@ pub fn grant(root: &Path, host: &Path, service: &str, scope: &str, days: u64, no
     }
     let x = URL_SAFE_NO_PAD.encode(service_signing_key(host, service)?.verifying_key().as_bytes());
 
-    let iri = agent_iri(&genesis);
+    let iri = address_of(&HostList::load(host)?, &genesis);
     let claims = GrantClaims {
         iss: iri.clone(),
         sub: iri,
@@ -1074,7 +1178,7 @@ pub fn verify_caller(token: &str, host: &Path, now: u64) -> Result<Caller, Strin
         .map_err(|_| "the grant's signature does not match the listed key of the one it says granted it".to_string())?;
     let terms: GrantClaims =
         serde_json::from_slice(&g.claims).map_err(|e| format!("the grant's claims are incomplete: {e}"))?;
-    if terms.sub != agent_iri(&entry.genesis) || terms.iss != terms.sub {
+    if terms.sub != entry.address() || terms.iss != terms.sub {
         return Err("the grant says it is from a different identity than the one whose key signed it".into());
     }
     check_times(terms.iat, terms.exp, now, MIN_GRANT_SECS, MAX_GRANT_SECS, "grant")?;
@@ -1172,14 +1276,14 @@ mod tests {
         assert_eq!(bind(&repo, &host, NOW).unwrap(), Bound::Already);
         let list = HostList::load(&host).unwrap();
         let genesis = first_commit(&repo).unwrap();
-        let t = token(&repo, NOW).unwrap();
+        let t = token(&repo, &host, NOW).unwrap();
         let (claims, entry) = verify(&t, &list, NOW).unwrap();
         assert_eq!(entry.genesis, genesis);
         assert_eq!(claims.sub, agent_iri(&genesis));
         assert_eq!(claims.exp - claims.iat, TOKEN_LIFETIME_SECS);
         // Kept while fresh, replaced past half its life.
-        assert_eq!(token(&repo, NOW + 60).unwrap(), t);
-        assert_ne!(token(&repo, NOW + TOKEN_LIFETIME_SECS / 2 + 1).unwrap(), t);
+        assert_eq!(token(&repo, &host, NOW + 60).unwrap(), t);
+        assert_ne!(token(&repo, &host, NOW + TOKEN_LIFETIME_SECS / 2 + 1).unwrap(), t);
         // The derived files name the same key.
         assert!(std::fs::read_to_string(allowed_signers_path(&host)).unwrap().contains(&entry.public_key));
         assert!(std::fs::read_to_string(jwks_path(&host)).unwrap().contains(&genesis));
@@ -1200,7 +1304,7 @@ mod tests {
         assert!(!has_key(&clone), "a refused bind leaves no key behind");
         // A key it makes for itself signs nothing a verifier accepts.
         create_key(&clone, &first_commit(&clone).unwrap()).unwrap();
-        let forged = mint(&clone, NOW).unwrap();
+        let forged = mint(&clone, &host, NOW).unwrap();
         let list = HostList::load(&host).unwrap();
         assert!(verify(&forged, &list, NOW).unwrap_err().contains("does not match"));
     }
@@ -1210,7 +1314,7 @@ mod tests {
         let (repo, host) = soul("verify");
         bind(&repo, &host, NOW - 7200).unwrap();
         let list = HostList::load(&host).unwrap();
-        let t = mint(&repo, NOW).unwrap();
+        let t = mint(&repo, &host, NOW).unwrap();
         assert!(verify(&t, &list, NOW + TOKEN_LIFETIME_SECS).unwrap_err().contains("expired"));
         assert!(verify(&t, &list, NOW - 3600).unwrap_err().contains("future"));
         assert!(verify(&t, &HostList::default(), NOW).unwrap_err().contains("no agent on the list"));
@@ -1255,7 +1359,7 @@ mod tests {
         let (repo, host) = soul("retire");
         bind(&repo, &host, NOW).unwrap();
         let genesis = first_commit(&repo).unwrap();
-        let t = mint(&repo, NOW).unwrap();
+        let t = mint(&repo, &host, NOW).unwrap();
         assert!(retire(&genesis, &host, NOW + 10).unwrap());
         assert!(!retire(&genesis, &host, NOW + 11).unwrap());
         let list = HostList::load(&host).unwrap();
@@ -1371,7 +1475,7 @@ mod tests {
         assert_eq!(service_token(&host, "viewer", NOW + 60).unwrap(), token);
 
         // The identity's own token still verifies, with no actor and no limit.
-        let own = mint(&repo, NOW + 2).unwrap();
+        let own = mint(&repo, &host, NOW + 2).unwrap();
         let me = verify_caller(&own, &host, NOW + 3).unwrap();
         assert_eq!((me.actor.clone(), me.scope.clone()), (None, None));
         assert!(me.allows("ravel:read"));
@@ -1428,6 +1532,77 @@ mod tests {
         let t = service_token(&host, "viewer", NOW + 21).unwrap();
         retire(&genesis, &host, NOW + 22).unwrap();
         assert!(verify_caller(&t, &host, NOW + 23).is_err());
+    }
+
+    /// An agent that declares a username is addressed by it from then on:
+    /// in its tokens, in the key list a checker reads, in the owner record
+    /// and in grants. Before that it keeps the first-commit address, and a
+    /// name is taken once, by one agent, for good.
+    #[test]
+    fn an_agent_is_addressed_by_its_username_once_it_declares_one() {
+        let (repo, host) = soul("username");
+        bind(&repo, &host, NOW).unwrap();
+        let genesis = first_commit(&repo).unwrap();
+        set_owner(&repo, &host, NOW).unwrap();
+        grant(&repo, &host, "viewer", "pan:read", 90, NOW).unwrap();
+        let old_token = token(&repo, &host, NOW).unwrap();
+        let old_service = service_token(&host, "viewer", NOW + 1).unwrap();
+        let sub_of = |host: &Path| -> serde_json::Value {
+            serde_json::from_str::<serde_json::Value>(&std::fs::read_to_string(jwks_path(host)).unwrap()).unwrap()["keys"][0].clone()
+        };
+        // No username yet: the first-commit address, and the list says so.
+        assert_eq!(adopt_username(&repo, &host, NOW).unwrap(), None);
+        assert_eq!(sub_of(&host)["sub"], agent_iri(&genesis));
+        assert!(sub_of(&host).get("username").is_none());
+        assert_eq!(verify_caller(&old_token, &host, NOW + 1).unwrap().sub, agent_iri(&genesis));
+
+        // A name that is not one usable word is refused and changes nothing.
+        for bad in ["c0ffee", "tr1p-l3x", "W4R3Z", "pan"] {
+            std::fs::write(repo.join("SOUL.md"), format!("---\nsoul.Soul.username: {bad}\n---\n")).unwrap();
+            assert!(adopt_username(&repo, &host, NOW).is_err(), "{bad}");
+        }
+        assert_eq!(sub_of(&host)["sub"], agent_iri(&genesis));
+
+        std::fs::write(repo.join("SOUL.md"), "---\nsoul.Soul.username: \"w4r3z\"\n---\n").unwrap();
+        assert_eq!(adopt_username(&repo, &host, NOW + 2).unwrap().as_deref(), Some("w4r3z"));
+        let new = "https://repolex.ai/soul/Soul/w4r3z";
+        let key = sub_of(&host);
+        assert_eq!((key["sub"].as_str(), key["username"].as_str(), key["kid"].as_str()), (Some(new), Some("w4r3z"), Some(genesis.as_str())));
+        assert_eq!(load_owner(&host).unwrap().unwrap().owner, new);
+        assert_eq!(load_owner(&host).unwrap().unwrap().genesis, genesis);
+
+        // The old token and the old grant are refused; new ones carry the name.
+        assert!(verify_caller(&old_token, &host, NOW + 3).unwrap_err().contains("different agent"));
+        assert!(verify_caller(&old_service, &host, NOW + 3).unwrap_err().contains("different identity"));
+        assert!(service_token(&host, "viewer", NOW + 3).is_err(), "a grant from before the switch is granted again");
+        let fresh = token(&repo, &host, NOW + 3).unwrap();
+        assert_ne!(fresh, old_token);
+        let me = verify_caller(&fresh, &host, NOW + 4).unwrap();
+        assert_eq!((me.sub.as_str(), me.genesis.as_str()), (new, genesis.as_str()));
+        grant(&repo, &host, "viewer", "pan:read", 90, NOW + 5).unwrap();
+        let acting = verify_caller(&service_token(&host, "viewer", NOW + 6).unwrap(), &host, NOW + 7).unwrap();
+        assert_eq!((acting.sub.as_str(), acting.actor.as_deref()), (new, Some("viewer")));
+
+        // The list's word is final: a different name in SOUL.md changes nothing.
+        std::fs::write(repo.join("SOUL.md"), "---\nsoul.Soul.username: warez\n---\n").unwrap();
+        assert_eq!(adopt_username(&repo, &host, NOW + 8).unwrap().as_deref(), Some("w4r3z"));
+
+        // Another agent cannot take the same name, and keeps its old address.
+        let other = repo.parent().unwrap().join("other");
+        std::fs::create_dir_all(other.join(".lex")).unwrap();
+        git(&other, &["init", "-q"]);
+        git(&other, &["commit", "-q", "--allow-empty", "-m", "another first"]);
+        std::fs::write(other.join("SOUL.md"), "---\nsoul.Soul.username: w4r3z\n---\n").unwrap();
+        assert!(bind(&other, &host, NOW + 9).unwrap_err().contains("already belongs to another agent"));
+        let theirs = verify_caller(&token(&other, &host, NOW + 10).unwrap(), &host, NOW + 11).unwrap();
+        assert_eq!(theirs.sub, agent_iri(&first_commit(&other).unwrap()));
+
+        // A copy of the repo, holding no listed key, cannot name the agent.
+        let (lone, lone_host) = soul("username-copy");
+        bind(&lone, &lone_host, NOW).unwrap();
+        std::fs::remove_file(key_path(&lone)).unwrap();
+        std::fs::write(lone.join("SOUL.md"), "---\nsoul.Soul.username: thief\n---\n").unwrap();
+        assert_eq!(adopt_username(&lone, &lone_host, NOW + 1).unwrap(), None);
     }
 
     #[test]

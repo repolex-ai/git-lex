@@ -361,6 +361,15 @@ pub struct RepoYml {
     /// this.
     #[serde(default)]
     pub dev_history_horizon: Option<String>,
+    /// Which store this is (goodlux, 2026-11-19): the squad it belongs to,
+    /// its one-word name, and `personal` or `shared`. In a soul repo the
+    /// username is the one SOUL.md declares, kept in step at kit-update.
+    #[serde(default)]
+    pub squad: Option<String>,
+    #[serde(default)]
+    pub username: Option<String>,
+    #[serde(default)]
+    pub visibility: Option<String>,
     #[serde(default)]
     pub optional_kits: Vec<String>,
     #[serde(default)]
@@ -446,6 +455,9 @@ impl RepoYml {
         put("agent_email", &self.agent_email);
         put("first_commit", &self.first_commit);
         put("genesis_sha", &self.genesis_sha);
+        put("squad", &self.squad);
+        put("username", &self.username);
+        put("visibility", &self.visibility);
         for (k, v) in &self.extra {
             let s = match v {
                 serde_yaml::Value::String(s) => s.clone(),

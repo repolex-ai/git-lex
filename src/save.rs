@@ -127,7 +127,7 @@ pub(crate) fn cmd_save(message: &str, dry_run: bool, no_restamp: bool) -> Outcom
                  correct it to the genesis sha. soulId is derived; never edit it by hand."
             ),
             soul_md::HealOutcome::Filled => eprintln!(
-                "DRY RUN: SOUL.md has no soulId — a real save would fill it from the genesis sha."
+                "DRY RUN: SOUL.md's soulId or soul.Soul.id line is missing or out of date — a real save would write it."
             ),
             _ => {}
         }

@@ -21,25 +21,60 @@ const SOUL_ID_KEY: &str = "soul.Soul.soulId";
 /// soulId, so git-lex writes it; the kit's template cannot.
 const SOUL_THING_ID_KEY: &str = "soul.Soul.id";
 
-fn soul_thing_id(sha: &str) -> String {
-    format!("<soul/Soul/{sha}>")
+/// The soul's one-word name, which the soul's own human or the soul writes
+/// once. git-lex reads it and never writes it.
+const USERNAME_KEY: &str = "soul.Soul.username";
+
+fn soul_thing_id(id: &str) -> String {
+    format!("<soul/Soul/{id}>")
 }
 
-/// Pure transform: the content with a `soul.Soul.id` line added, derived
-/// from the first commit. None when the file already has the line, and when
-/// there is no well-formed frontmatter to put it in (the soulId fill runs
-/// first and makes one).
+/// The value of a one-line frontmatter key: quotes and a trailing comment
+/// removed. None when the key is absent or its value is empty.
+fn line_value(block: &str, key: &str) -> Option<String> {
+    let prefix = format!("{key}:");
+    let line = block.lines().find(|l| l.trim_start().starts_with(&prefix))?;
+    let after = &line[line.find(':')? + 1..];
+    let value = after.split(" #").next().unwrap_or("").trim().trim_matches('"').trim_matches('\'').trim();
+    (!value.is_empty() && !value.starts_with('#')).then(|| value.to_string())
+}
+
+/// The username a SOUL.md declares, exactly as written. Whether it is a
+/// usable one is `identity::valid_username`'s to say.
+pub fn declared_username(content: &str) -> Option<String> {
+    line_value(crate::split_frontmatter(content).0?, USERNAME_KEY)
+}
+
+/// [`declared_username`] for the SOUL.md at a repo's root.
+pub fn username_at(root: &Path) -> Option<String> {
+    declared_username(&fs::read_to_string(root.join("SOUL.md")).ok()?)
+}
+
+/// Pure transform: the content with its `soul.Soul.id` line added or moved
+/// to the soul's username.
+///
+/// A soul is addressed by its username (goodlux, 2026-11-19); `soulId`
+/// keeps the first commit. So the line is `<soul/Soul/{username}>` when the
+/// file declares a usable username, and `<soul/Soul/{first commit}>` for a
+/// soul that has not declared one yet. An existing line is rewritten in one
+/// case only: it holds the first-commit form this function wrote earlier
+/// and a username is now declared. Any other line is left exactly as it is.
+/// None when nothing changes, and when there is no well-formed frontmatter.
 fn with_thing_id(content: &str, sha: &str) -> Option<String> {
     let (fm, body) = crate::split_frontmatter(content);
     let block = fm?;
-    let want = soul_thing_id(sha);
+    let username = line_value(block, USERNAME_KEY).filter(|n| crate::identity::valid_username(n));
+    let want = soul_thing_id(username.as_deref().unwrap_or(sha));
     let prefix = format!("{SOUL_THING_ID_KEY}:");
     let mut lines: Vec<String> = block.lines().map(String::from).collect();
     match lines.iter().position(|l| l.trim_start().starts_with(&prefix)) {
-        // A line that is there is left exactly as it is, whatever it says.
-        // This only fills the gap a new soul starts with; it never rewrites
-        // an existing soul's identity file.
-        Some(_) => return None,
+        Some(i) => {
+            let old = soul_thing_id(sha);
+            if username.is_none() || line_value(block, SOUL_THING_ID_KEY).as_deref() != Some(old.as_str()) {
+                return None;
+            }
+            lines[i] = format!("{SOUL_THING_ID_KEY}: {want}");
+        }
         None => {
             // Beside the soulId line it is derived with, else first.
             let soul_id = format!("{SOUL_ID_KEY}:");
@@ -48,6 +83,65 @@ fn with_thing_id(content: &str, sha: &str) -> Option<String> {
         }
     }
     Some(format!("---\n{}\n---\n{}", lines.join("\n"), body))
+}
+
+/// Pure transform: `.lex/repo.yml` with the three lines that say which
+/// store this is (goodlux, 2026-11-19). `username` follows SOUL.md, so a
+/// line that differs is corrected. `squad` and `visibility` are written
+/// only when absent: a line that is there is someone's answer. None when
+/// nothing changes.
+fn with_store_lines(content: &str, squad: Option<&str>, username: &str) -> Option<String> {
+    let mut lines: Vec<String> = content.lines().map(String::from).collect();
+    let find = |lines: &[String], key: &str| lines.iter().position(|l| l.starts_with(&format!("{key}:")));
+    let mut add = Vec::new();
+    if let Some(squad) = squad
+        && find(&lines, "squad").is_none()
+    {
+        add.push(format!("squad: {squad}"));
+    }
+    let want = format!("username: {username}");
+    match find(&lines, "username") {
+        Some(i) if lines[i] != want => lines[i] = want.clone(),
+        Some(_) => {}
+        None => add.push(want.clone()),
+    }
+    if find(&lines, "visibility").is_none() {
+        add.push("visibility: personal".to_string());
+    }
+    // Beside the first commit they are read with, else at the end.
+    let at = find(&lines, "genesis_sha").map_or(lines.len(), |i| i + 1);
+    lines.splice(at..at, add);
+    let out = lines.join("\n") + "\n";
+    (out != content).then_some(out)
+}
+
+/// Keep a soul repo's `.lex/repo.yml` saying which store it is: `squad`,
+/// `username`, `visibility`. The username is the one SOUL.md declares; the
+/// squad is the name of the folder the soul's folder sits in, when that is
+/// one lowercase word. A soul with no usable username is left alone, and so
+/// is a repo that is not a soul: nothing in it says what its name is.
+pub fn heal_store_lines(root: &Path) {
+    if !soul_kit_installed(root) {
+        return;
+    }
+    let Some(username) = username_at(root).filter(|n| crate::identity::valid_username(n)) else {
+        return;
+    };
+    let squad = root
+        .canonicalize()
+        .ok()
+        .and_then(|p| p.parent()?.file_name()?.to_str().map(String::from))
+        .filter(|s| crate::identity::valid_username(s));
+    let path = crate::layout::repo_yml(root);
+    let Ok(content) = fs::read_to_string(&path) else {
+        return;
+    };
+    if let Some(updated) = with_store_lines(&content, squad.as_deref(), &username) {
+        match fs::write(&path, updated) {
+            Ok(()) => println!(".lex/repo.yml: this store is {}{username}.", squad.map(|s| s + "/").unwrap_or_default()),
+            Err(e) => eprintln!("warning: could not write {}: {e}", path.display()),
+        }
+    }
 }
 
 /// Is this a soul repo? True when the repo's domain kit resolves to the
@@ -116,7 +210,23 @@ fn heal_soul_id_inner(root: &Path, write: bool) -> HealOutcome {
         (None, None) => None,
         (Some((_, previous)), Some(both)) => Some((both, previous)),
         (Some(only_soul_id), None) => Some(only_soul_id),
-        (None, Some(only_thing_id)) => Some((only_thing_id, None)),
+        (None, Some(only_thing_id)) => {
+            // soulId was right; only the `.id` line moves. Say that, not
+            // "soulId filled".
+            if write {
+                match fs::write(&path, &only_thing_id) {
+                    Ok(()) => println!(
+                        "SOUL.md: {SOUL_THING_ID_KEY} is now {}.",
+                        line_value(crate::split_frontmatter(&only_thing_id).0.unwrap_or(""), SOUL_THING_ID_KEY).unwrap_or_default()
+                    ),
+                    Err(e) => {
+                        eprintln!("warning: could not write SOUL.md {SOUL_THING_ID_KEY}: {e}");
+                        return HealOutcome::Unchanged;
+                    }
+                }
+            }
+            return HealOutcome::Filled;
+        }
     };
     match fix {
         None => HealOutcome::Unchanged,
@@ -265,8 +375,48 @@ mod tests {
         );
         assert_eq!(with_thing_id(&filled, SHA), None, "there already: untouched");
         let other = filled.replace(&format!("<soul/Soul/{SHA}>"), "<soul/Soul/kira>");
-        assert_eq!(with_thing_id(&other, SHA), None, "an existing line is never rewritten");
+        assert_eq!(with_thing_id(&other, SHA), None, "a line git-lex did not write is never rewritten");
         assert_eq!(with_thing_id("no frontmatter\n", SHA), None);
+    }
+
+    #[test]
+    fn a_soul_that_declares_a_username_is_addressed_by_it() {
+        let old = format!("---\n{SOUL_ID_KEY}: {SHA}\nsoul.Soul.id: <soul/Soul/{SHA}>\nsoul.Soul.username: \"w4r3z\" # one word\n---\n\nbody\n");
+        let moved = with_thing_id(&old, SHA).expect("the first-commit form moves to the username");
+        assert_eq!(
+            moved,
+            format!("---\n{SOUL_ID_KEY}: {SHA}\nsoul.Soul.id: <soul/Soul/w4r3z>\nsoul.Soul.username: \"w4r3z\" # one word\n---\n\nbody\n")
+        );
+        assert!(moved.contains(&format!("{SOUL_ID_KEY}: {SHA}\n")), "soulId keeps the first commit");
+        assert_eq!(with_thing_id(&moved, SHA), None, "and then it is left alone");
+
+        // A new soul with a username gets the username form straight away.
+        let new = format!("---\n{SOUL_ID_KEY}: {SHA}\nsoul.Soul.username: kira\n---\n");
+        assert!(with_thing_id(&new, SHA).unwrap().contains("soul.Soul.id: <soul/Soul/kira>\n"));
+
+        // A name that is not usable changes nothing: all hex digits, two
+        // words, a kit's name, an empty line.
+        for bad in ["c0ffee", "tr1p-l3x", "TR1P", "soul", ""] {
+            let file = old.replace("\"w4r3z\" # one word", bad);
+            assert_eq!(with_thing_id(&file, SHA), None, "{bad:?}");
+        }
+        assert_eq!(declared_username(&old).as_deref(), Some("w4r3z"));
+    }
+
+    #[test]
+    fn repo_yml_says_which_store_this_is() {
+        let before = "# managed\nname: W4R3Z\ngenesis_sha: abc\n\noptional_kits:\n  - a/b\n";
+        let after = with_store_lines(before, Some("7r1pl3f0rc3"), "w4r3z").unwrap();
+        assert_eq!(
+            after,
+            "# managed\nname: W4R3Z\ngenesis_sha: abc\nsquad: 7r1pl3f0rc3\nusername: w4r3z\nvisibility: personal\n\noptional_kits:\n  - a/b\n"
+        );
+        assert_eq!(with_store_lines(&after, Some("7r1pl3f0rc3"), "w4r3z"), None, "a second run changes nothing");
+        // The username follows SOUL.md; squad and visibility, once there, are kept.
+        let set = "squad: elsewhere\nusername: old\nvisibility: shared\n";
+        assert_eq!(with_store_lines(set, Some("7r1pl3f0rc3"), "w4r3z").unwrap(), "squad: elsewhere\nusername: w4r3z\nvisibility: shared\n");
+        // No usable folder name: no squad line is invented.
+        assert_eq!(with_store_lines("name: x\n", None, "w4r3z").unwrap(), "name: x\nusername: w4r3z\nvisibility: personal\n");
     }
 
     #[test]
