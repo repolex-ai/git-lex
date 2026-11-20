@@ -806,7 +806,7 @@ pub fn conventional_kit_namespace(short: &str) -> String {
 pub fn store_root_at(root: &std::path::Path) -> String {
     let y = RepoYml::load(root);
     match (y.squad.as_deref(), y.username.as_deref()) {
-        (Some(squad), Some(user)) if identity::valid_username(squad) && identity::valid_username(user) => {
+        (Some(squad), Some(user)) if identity::valid_username(squad) && identity::valid_store_name(user) => {
             format!("{PLATFORM_ROOT}{squad}/{user}/")
         }
         _ => PLATFORM_ROOT.to_string(),
@@ -2383,7 +2383,13 @@ mod store_root_and_public_view_tests {
         assert_eq!(store_root_at(&named), "https://repolex.ai/7r1pl3f0rc3/w4r3z/");
         // A plain repo of markdown, and one with half a name or an unusable
         // one, keep the platform root.
-        for yml in ["name: docs\n", "name: x\nusername: w4r3z\n", "name: x\nsquad: 7r1pl3f0rc3\nusername: W4R3Z\n", "name: x\nsquad: ontology\nusername: w4r3z\n"] {
+        // A plain repository is stored under `default` and its folder name,
+        // dashes and all; an agent's reserved words do not apply to a store.
+        for (store, root) in [("repolex-development-docs", "https://repolex.ai/default/repolex-development-docs/"), ("subtexture", "https://repolex.ai/default/subtexture/")] {
+            let yml = format!("name: x\nsquad: default\nusername: {store}\n");
+            assert_eq!(store_root_at(&repo("folder", &yml)), root);
+        }
+        for yml in ["name: docs\n", "name: x\nusername: w4r3z\n", "name: x\nsquad: default\nusername: -docs\n", "name: x\nsquad: default\nusername: abc123\n", "name: x\nsquad: 7r1pl3f0rc3\nusername: W4R3Z\n", "name: x\nsquad: ontology\nusername: w4r3z\n"] {
             assert_eq!(store_root_at(&repo("plain", yml)), PLATFORM_ROOT, "{yml}");
         }
     }

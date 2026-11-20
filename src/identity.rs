@@ -175,6 +175,20 @@ pub fn valid_username(name: &str) -> bool {
         && !RESERVED_NAMES.contains(&name)
 }
 
+/// A store's name, the second part of its address
+/// (`https://repolex.ai/{squad}/{store}/`). An agent's username is one; so
+/// is the folder name of a plain repository, which is why dashes are let
+/// through here and the reserved words are not looked at: under a squad a
+/// store collides with nothing. Lowercase, so one store has one spelling,
+/// and with a letter from g to z, so it is never mistaken for a commit id.
+pub fn valid_store_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+        && !name.starts_with('-')
+        && !name.ends_with('-')
+        && name.chars().any(|c| ('g'..='z').contains(&c))
+}
+
 /// Take the username this folder's SOUL.md declares onto the host list, if
 /// the agent has none there yet. Returns the username the list holds
 /// afterwards.
