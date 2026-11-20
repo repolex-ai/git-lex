@@ -60,31 +60,40 @@ fi
 \"$_glx\" hook pre-commit || exit 1
 # --- end git-lex managed ---";
 
-/// Find where git looks for hooks. Checks `core.hooksPath` first,
-/// falls back to `.git/hooks/`.
-fn hooks_dir() -> Option<PathBuf> {
-    let root = find_git_root()?;
-
-    // Check if core.hooksPath is set
+/// Ask Git for the effective hook directory (including linked worktrees,
+/// separate git dirs and core.hooksPath). Pre-commit runs at the worktree
+/// root, so resolve relative paths there, never at the caller's nested cwd.
+/// Do not fall back to a guessed path when discovery fails.
+fn hooks_dir() -> std::io::Result<PathBuf> {
+    let root = find_git_root()
+        .ok_or_else(|| std::io::Error::other("could not locate git worktree root"))?;
     let output = Command::new("git")
-        .args(["config", "core.hooksPath"])
-        .output()
-        .ok()?;
-
-    if output.status.success() {
-        let custom = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        if !custom.is_empty() {
-            let path = PathBuf::from(&custom);
-            // Could be absolute or relative to repo root
-            if path.is_absolute() {
-                return Some(path);
-            } else {
-                return Some(root.join(path));
-            }
-        }
+        .current_dir(&root)
+        .args(["rev-parse", "--git-path", "hooks"])
+        .output()?;
+    if !output.status.success() {
+        return Err(std::io::Error::other(format!(
+            "git rev-parse --git-path hooks failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim_end()
+        )));
     }
-
-    Some(root.join(".git").join("hooks"))
+    // Git emits one unquoted path followed by LF. Preserve legitimate spaces;
+    // reject ambiguous/control-containing output instead of trimming it into
+    // a different (potentially unguarded) directory.
+    let path = std::str::from_utf8(&output.stdout)
+        .map_err(|_| std::io::Error::other("git returned a non-UTF-8 hooks path"))?;
+    let path = path.strip_suffix('\n').unwrap_or(path);
+    if path.is_empty() || path.chars().any(char::is_control) {
+        return Err(std::io::Error::other(
+            "git returned an empty or malformed hooks path",
+        ));
+    }
+    let path = PathBuf::from(path);
+    Ok(if path.is_absolute() {
+        path
+    } else {
+        root.join(path)
+    })
 }
 
 /// Install or update the git-lex managed section in the pre-commit hook.
@@ -132,21 +141,20 @@ fn scrub_legacy_lines(content: &str) -> String {
 /// (e.g. a damaged managed section) — the caller must refuse to save,
 /// because a save without the hook is a save without gates.
 pub(crate) fn converge_hook() -> std::io::Result<bool> {
-    let before = hooks_dir()
-        .map(|d| fs::read_to_string(d.join("pre-commit")).unwrap_or_default())
-        .unwrap_or_default();
-    install_hook()?;
-    let after = hooks_dir()
-        .map(|d| fs::read_to_string(d.join("pre-commit")).unwrap_or_default())
-        .unwrap_or_default();
+    let dir = hooks_dir()?;
+    let hook_path = dir.join("pre-commit");
+    let before = fs::read_to_string(&hook_path).unwrap_or_default();
+    install_hook_at(&dir)?;
+    let after = fs::read_to_string(&hook_path)?;
     Ok(before != after)
 }
 
 pub(crate) fn install_hook() -> std::io::Result<()> {
-    let dir = hooks_dir().ok_or_else(|| std::io::Error::other(
-        "could not locate .git/hooks (not a git repo?)",
-    ))?;
-    fs::create_dir_all(&dir)?;
+    install_hook_at(&hooks_dir()?)
+}
+
+fn install_hook_at(dir: &std::path::Path) -> std::io::Result<()> {
+    fs::create_dir_all(dir)?;
 
     let hook_path = dir.join("pre-commit");
     let existing = fs::read_to_string(&hook_path).unwrap_or_default();
@@ -156,7 +164,10 @@ pub(crate) fn install_hook() -> std::io::Result<()> {
     // present" — that combination made install report success while
     // installing nothing, silently disabling the extract+validate gate
     // (adversarial finding 2b).
-    let starts = existing.lines().filter(|l| l.trim() == MARKER_START).count();
+    let starts = existing
+        .lines()
+        .filter(|l| l.trim() == MARKER_START)
+        .count();
     let ends = existing.lines().filter(|l| l.trim() == MARKER_END).count();
     if starts != ends || starts > 1 {
         // Mangled managed section (deleted marker line, merge damage,
@@ -214,8 +225,8 @@ pub(crate) fn install_hook() -> std::io::Result<()> {
 /// Returns true when a git-lex section was found and removed.
 pub(crate) fn remove_hook() -> bool {
     let dir = match hooks_dir() {
-        Some(d) => d,
-        None => return false,
+        Ok(d) => d,
+        Err(_) => return false,
     };
 
     let hook_path = dir.join("pre-commit");
@@ -328,15 +339,20 @@ mod hook_marker_damage_tests {
         // Substring detection used to see this as "section present" and
         // install nothing while reporting success (finding 2b). Exact-line
         // counting sees zero real markers → the append path runs instead.
-        let hook = format!("#!/bin/sh\n## {}\nmy-linter\n## {}\n", MARKER_START, MARKER_END);
+        let hook = format!(
+            "#!/bin/sh\n## {}\nmy-linter\n## {}\n",
+            MARKER_START, MARKER_END
+        );
         let starts = hook.lines().filter(|l| l.trim() == MARKER_START).count();
         assert_eq!(starts, 0);
     }
 
     #[test]
     fn replace_preserves_user_content_when_markers_are_intact() {
-        let hook = format!("#!/bin/sh\nuser-before\n{}\nold body\n{}\nuser-after\n",
-            MARKER_START, MARKER_END);
+        let hook = format!(
+            "#!/bin/sh\nuser-before\n{}\nold body\n{}\nuser-after\n",
+            MARKER_START, MARKER_END
+        );
         let out = replace_managed_section(&hook, MANAGED_SECTION);
         assert!(out.contains("user-before"));
         assert!(out.contains("user-after"));
