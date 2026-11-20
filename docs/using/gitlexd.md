@@ -66,20 +66,21 @@ No restart.
 
 ## HTTP interface
 
-All under `http://127.0.0.1:7880`. `<genesis>` is the first commit hash,
-full or an unambiguous prefix.
+All under `http://127.0.0.1:7880`. A store is named by the two names in its
+repository's `.lex/repo.yml`: `squad` and `username`. A repository without
+them is listed but cannot be addressed until it has both.
 
 | Method and path | What it does |
 |:---|:---|
-| `GET` / `POST /soul/<genesis>/sparql` | The W3C SPARQL 1.1 protocol over that soul's store (SPARQL 1.2 triple terms included). `application/sparql-query`, form `query=`, or JSON `{"query": …}`. SELECT/ASK answer `application/sparql-results+json`; CONSTRUCT/DESCRIBE `application/n-triples`. A pattern with no GRAPH clause sees every graph. |
-| `GET /soul/<genesis>/info` | Synced-to commit, whether a sync is in flight, quad count, the graph inventory, kits. |
-| `POST /soul/<genesis>/sync` | Ask for a sync. Returns `202` at once; with `?wait=1` returns when the sync is done, with the soul's state. |
-| `DELETE /soul/<genesis>` | Drop the soul: close its store and stop watching the repository. `git lex nuke` sends this before deleting `.lex/`. A soul whose `.lex/` vanishes by any other hand is dropped by the watcher on its own. |
-| `GET /souls` | Every soul gitlexd holds: genesis, path, name, synced-to commit, errors. |
-| `GET /health` | gitlexd is up; uptime, pid, number of souls. |
+| `GET` / `POST /git-lex/<squad>/<username>/sparql` | The W3C SPARQL 1.1 protocol over that store (SPARQL 1.2 triple terms included). `application/sparql-query`, form `query=`, or JSON `{"query": …}`. SELECT/ASK answer `application/sparql-results+json`; CONSTRUCT/DESCRIBE `application/n-triples`. A pattern with no GRAPH clause sees the store's current data. |
+| `GET /git-lex/<squad>/<username>/info` | Synced-to commit, whether a sync is in flight, quad count, the graph inventory, kits. |
+| `POST /git-lex/<squad>/<username>/sync` | Ask for a sync. Returns `202` at once; with `?wait=1` returns when the sync is done, with the store's state. |
+| `DELETE /git-lex/<squad>/<username>` | Drop the store: close it and stop watching the repository. `git lex nuke` sends this before deleting `.lex/`. A store whose `.lex/` vanishes by any other hand is dropped by the watcher on its own. |
+| `GET /git-lex/stores` | Every store gitlexd holds: `squad`, `username`, `base` (the address everything in the store starts with), `folder`, `as_of`, and its sync state and errors. |
+| `GET /git-lex/health` | gitlexd is up; uptime, pid, number of stores. |
 
 ```bash
-curl -X POST http://127.0.0.1:7880/soul/495d8c70/sparql \
+curl -X POST http://127.0.0.1:7880/git-lex/7r1pl3f0rc3/w4r3z/sparql \
   -H "Content-Type: application/sparql-query" \
   --data "SELECT * WHERE { ?s ?p ?o } LIMIT 10"
 ```

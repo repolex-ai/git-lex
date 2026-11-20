@@ -338,9 +338,7 @@ pub(crate) fn cmd_save(message: &str, dry_run: bool, no_restamp: bool) -> Outcom
             // Tell gitlexd, if it runs, that HEAD moved: one request, no
             // wait, and nothing said when no gitlexd is there. The sync
             // that used to run in this process now runs in the daemon.
-            if let Some(genesis) = git_lex::git::genesis_sha_at(&root) {
-                git_lex::gitlexd::client::nudge(&genesis);
-            }
+            git_lex::gitlexd::client::nudge(&root);
 
             // The commit is real, but it must not be the last word when part
             // of the save did not happen. @w3bl0rd carried four dead skills

@@ -431,9 +431,8 @@ fn cmd_sync(rebuild: bool) -> Outcome {
     // Start gitlexd if it is down: after a stop, a sync or a save used to
     // leave it down, and callers over HTTP got no answer until someone ran
     // a query (m4xx, 2026-11-19).
-    if git_lex::gitlexd::client::ensure_running().is_ok()
-        && let Some(genesis) = git_lex::git::genesis_sha_at(&root) {
-            match git_lex::gitlexd::client::sync_and_wait(&genesis) {
+    if git_lex::gitlexd::client::ensure_running().is_ok() {
+            match git_lex::gitlexd::client::sync_and_wait(&root) {
                 Ok(state) => {
                     let to = state["synced_to"].as_str().unwrap_or("(nothing)");
                     println!(
@@ -553,9 +552,7 @@ fn cmd_nuke() -> Outcome {
     // gitlexd first: it holds this store open and syncs on every commit,
     // and the commits below would otherwise make it recreate `.lex/` in
     // the repository being cleaned. Nothing to say when it is not running.
-    if let Some(genesis) = git_lex::git::genesis_sha_at(&root) {
-        git_lex::gitlexd::client::forget(&genesis);
-    }
+    git_lex::gitlexd::client::forget(&root);
 
     // Remove our section from the pre-commit hook
     let _ = hooks::remove_hook();

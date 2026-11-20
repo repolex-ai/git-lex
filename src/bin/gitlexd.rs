@@ -188,11 +188,10 @@ fn status() -> i32 {
                 uptime(h["uptime_secs"].as_u64().unwrap_or(0)),
                 h["version"].as_str().unwrap_or("?")
             );
-            println!("  serving {} for {} soul(s), {} syncing now", gitlexd::base_url(), h["souls"], h["syncing"]);
-            if let Ok(list) = gitlexd::client::souls()
-                && let Some(souls) = list["souls"].as_array() {
+            println!("  serving {} for {} soul(s), {} syncing now", gitlexd::base_url(), h["stores"], h["syncing"]);
+            if let Ok(list) = gitlexd::client::stores()
+                && let Some(souls) = list["stores"].as_array() {
                     for s in souls {
-                        let g = s["genesis"].as_str().unwrap_or("?");
                         let synced = s["synced_to"].as_str().map(|x| x[..8.min(x.len())].to_string());
                         let state = if s["syncing"].as_bool() == Some(true) {
                             "syncing".to_string()
@@ -206,7 +205,11 @@ fn status() -> i32 {
                                 None => "no store yet".to_string(),
                             }
                         };
-                        println!("  {}  {}  {}", &g[..8.min(g.len())], s["path"].as_str().unwrap_or("?"), state);
+                        let named = match (s["squad"].as_str(), s["username"].as_str()) {
+                            (Some(q), Some(u)) => format!("{q}/{u}"),
+                            _ => "(no squad and username)".to_string(),
+                        };
+                        println!("  {}  {}  {}", named, s["folder"].as_str().unwrap_or("?"), state);
                     }
                 }
             if let Some(p) = gitlexd::log_path() {

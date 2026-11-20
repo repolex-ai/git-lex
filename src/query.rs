@@ -344,7 +344,7 @@ pub(crate) fn cmd_query(query: String, params: Vec<String>, json: bool) -> Outco
         return Err(Failure::new([e.to_string(), String::from("(`git lex direct \"...\"` reads the working tree without gitlexd.)")].join("\n")));
     }
     let start = Instant::now();
-    let response = match git_lex::gitlexd::client::query(&soul.genesis, &query) {
+    let response = match git_lex::gitlexd::client::query(&soul.root, &query) {
         Ok(r) => r,
         Err(e) => {
             let friendly = e

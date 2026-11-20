@@ -2,6 +2,7 @@
 //! localhost, short timeouts: a daemon that is not there must cost the
 //! caller milliseconds, not seconds.
 
+use std::path::Path;
 use std::time::Duration;
 
 fn agent(timeout: Duration) -> ureq::Agent {
@@ -100,9 +101,24 @@ fn gitlexd_exe() -> Option<std::path::PathBuf> {
     std::env::split_paths(&path).map(|d| d.join(name)).find(|p| p.is_file())
 }
 
+/// Where gitlexd serves the store of the repository at `root`:
+/// `/git-lex/{squad}/{username}`, the two names in its `.lex/repo.yml`.
+/// A repository without them has no address, and is told how to get one.
+fn store_url(root: &Path) -> Result<String, String> {
+    let y = crate::RepoYml::load(root);
+    match (y.squad, y.username) {
+        (Some(squad), Some(username)) => Ok(format!("{}/git-lex/{squad}/{username}", super::base_url())),
+        _ => Err(format!(
+            "{} has no squad and username in .lex/repo.yml, so gitlexd cannot serve it.\n\
+             What to do: add two lines to .lex/repo.yml, `squad: <name>` and `username: <name>`, then run `git lex sync`.",
+            root.display()
+        )),
+    }
+}
+
 pub fn health() -> Option<serde_json::Value> {
     let resp = agent(Duration::from_millis(800))
-        .get(format!("{}/health", super::base_url()))
+        .get(format!("{}/git-lex/health", super::base_url()))
         .call()
         .ok()?;
     let (status, _, body) = read(resp);
@@ -111,26 +127,28 @@ pub fn health() -> Option<serde_json::Value> {
 
 /// Tell gitlexd this soul's HEAD moved. Fire and forget: the caller does not
 /// wait, and a gitlexd that is not running is not an error here.
-pub fn nudge(genesis: &str) {
+pub fn nudge(root: &Path) {
+    let Ok(store) = store_url(root) else { return };
     let _ = agent(Duration::from_millis(800))
-        .post(format!("{}/soul/{genesis}/sync", super::base_url()))
+        .post(format!("{store}/sync"))
         .send_empty();
 }
 
 /// Tell gitlexd to drop this soul: close its store and stop watching the
 /// repository. Waits (briefly) for the answer, because the caller is about
 /// to delete the store's directory. A gitlexd that is not running is fine.
-pub fn forget(genesis: &str) {
+pub fn forget(root: &Path) {
+    let Ok(store) = store_url(root) else { return };
     let _ = agent(Duration::from_secs(10))
-        .delete(format!("{}/soul/{genesis}", super::base_url()))
+        .delete(store)
         .call();
 }
 
 /// Ask gitlexd to sync this soul and wait until it has. Returns the soul's
 /// state as gitlexd reports it.
-pub fn sync_and_wait(genesis: &str) -> Result<serde_json::Value, String> {
+pub fn sync_and_wait(root: &Path) -> Result<serde_json::Value, String> {
     let resp = agent(Duration::from_secs(3600))
-        .post(format!("{}/soul/{genesis}/sync?wait=1", super::base_url()))
+        .post(format!("{}/sync?wait=1", store_url(root)?))
         .send_empty()
         .map_err(|e| format!("gitlexd did not answer: {e}"))?;
     let (status, _, body) = read(resp);
@@ -149,9 +167,9 @@ pub struct QueryResponse {
     pub body: String,
 }
 
-pub fn query(genesis: &str, sparql: &str) -> Result<QueryResponse, String> {
+pub fn query(root: &Path, sparql: &str) -> Result<QueryResponse, String> {
     let resp = agent(Duration::from_secs(3600))
-        .post(format!("{}/soul/{genesis}/sparql", super::base_url()))
+        .post(format!("{}/sparql", store_url(root)?))
         .header("content-type", "application/sparql-query")
         .send(sparql)
         .map_err(|e| format!("gitlexd did not answer: {e}"))?;
@@ -163,9 +181,9 @@ pub fn query(genesis: &str, sparql: &str) -> Result<QueryResponse, String> {
     }
 }
 
-pub fn souls() -> Result<serde_json::Value, String> {
+pub fn stores() -> Result<serde_json::Value, String> {
     let resp = agent(Duration::from_secs(5))
-        .get(format!("{}/souls", super::base_url()))
+        .get(format!("{}/git-lex/stores", super::base_url()))
         .call()
         .map_err(|e| format!("gitlexd did not answer: {e}"))?;
     let (status, _, body) = read(resp);

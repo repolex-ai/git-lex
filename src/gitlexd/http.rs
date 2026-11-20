@@ -1,19 +1,22 @@
 //! gitlexd's HTTP interface. Everything is under localhost:PORT.
 //!
-//! | `GET`/`POST /soul/<genesis>/sparql` | W3C SPARQL protocol over that soul's store |
-//! | `GET /soul/<genesis>/info`          | synced-to commit, sync in flight, counts, graphs |
-//! | `POST /soul/<genesis>/sync`         | nudge; `?wait=1` returns when the sync is done |
-//! | `GET /souls`                        | every soul held, with its state |
-//! | `GET /health`                       | up, uptime, souls open |
+//! | `GET`/`POST /git-lex/<squad>/<username>/sparql` | W3C SPARQL protocol over that store |
+//! | `GET /git-lex/<squad>/<username>/info`          | synced-to commit, sync in flight, counts, graphs |
+//! | `POST /git-lex/<squad>/<username>/sync`         | nudge; `?wait=1` returns when the sync is done |
+//! | `GET /git-lex/stores`                           | every store held, with its state |
+//! | `GET /git-lex/health`                           | up, uptime, stores open |
 //!
-//! `<genesis>` is the soul's first-commit hash, full or an unambiguous
-//! prefix. A query for a soul whose sync is in flight waits for it.
+//! `<squad>` and `<username>` are the two names in the repository's
+//! `.lex/repo.yml`, and the only way a store is named here: the shape every
+//! daemon of the stack shares (goodlux, 2026-11-20). The first-commit hash is
+//! never in an address or an answer. A query for a store whose sync is in
+//! flight waits for it.
 //!
 //! Queries see the union of every named graph unless they say GRAPH
 //! themselves (`w3c_query_union_at`): the one door has no empty default
 //! graph to fall into.
 
-use super::daemon::{Daemon, FindError, Soul};
+use super::daemon::{Daemon, Soul};
 use axum::extract::{Path as AxPath, Query as AxQuery, Request, State};
 use axum::middleware::{self, Next};
 use axum::http::{header, HeaderMap, HeaderValue, Method, StatusCode};
@@ -27,36 +30,67 @@ fn err(status: StatusCode, msg: String) -> Response {
     (status, Json(serde_json::json!({ "error": msg }))).into_response()
 }
 
-/// The soul a request names. A miss looks at the registry once more
+/// The two names a store goes by, read from its `.lex/repo.yml` each time:
+/// a repository can be given them while gitlexd runs.
+fn names(s: &Soul) -> Option<(String, String)> {
+    let y = crate::RepoYml::load(&s.path);
+    Some((y.squad?, y.username?))
+}
+
+/// `squad/username`, or the folder for a repository that has no names yet.
+fn label(s: &Soul) -> String {
+    match names(s) {
+        Some((squad, username)) => format!("{squad}/{username}"),
+        None => s.path.display().to_string(),
+    }
+}
+
+/// Every store held under these two names. More than one is a fault in the
+/// repositories, said rather than settled by picking one.
+fn held(d: &Arc<Daemon>, squad: &str, username: &str) -> Vec<Arc<Soul>> {
+    d.souls()
+        .into_iter()
+        .filter(|s| names(s).is_some_and(|(q, u)| q == squad && u == username))
+        .collect()
+}
+
+fn two_folders(squad: &str, username: &str, hits: &[Arc<Soul>]) -> Response {
+    let folders: Vec<String> = hits.iter().map(|s| s.path.display().to_string()).collect();
+    err(
+        StatusCode::CONFLICT,
+        format!(
+            "{squad}/{username} is the name of more than one repository: {}. Give one of them a different username in its .lex/repo.yml.",
+            folders.join(", ")
+        ),
+    )
+}
+
+/// The store a request names. A miss looks at the registry once more
 /// before it is a miss: a repository initialized after gitlexd started
 /// joins here, on the first request that names it.
-fn find(d: &Arc<Daemon>, genesis: &str) -> Result<Arc<Soul>, Box<Response>> {
+fn find(d: &Arc<Daemon>, squad: &str, username: &str) -> Result<Arc<Soul>, Box<Response>> {
     // Look again after the re-read whatever it reports: when several
     // requests miss at once, another one's re-read may be the one that
-    // takes the soul in, and this one's then finds nothing new to join.
-    let found = match d.find(genesis) {
-        Err(FindError::NotFound) => {
-            d.refresh();
-            d.find(genesis)
-        }
-        other => other,
-    };
-    found.map_err(|e| Box::new(match e {
-        FindError::NotFound => err(
+    // takes the store in, and this one's then finds nothing new to join.
+    let mut hits = held(d, squad, username);
+    if hits.is_empty() {
+        d.refresh();
+        hits = held(d, squad, username);
+    }
+    match hits.as_slice() {
+        [one] => Ok(Arc::clone(one)),
+        [] => Err(Box::new(err(
             StatusCode::NOT_FOUND,
-            format!("no soul with first commit {genesis} — GET /souls lists the ones gitlexd holds"),
-        ),
-        FindError::Ambiguous(all) => err(
-            StatusCode::CONFLICT,
-            format!("{genesis} matches more than one soul: {}", all.join(", ")),
-        ),
-    }))
+            format!("no store named {squad}/{username} — GET /git-lex/stores lists the ones gitlexd holds"),
+        ))),
+        many => Err(Box::new(two_folders(squad, username, many))),
+    }
 }
 
 /// Run one query against a soul's store, waiting for a sync in flight, and
 /// starting one when the soul has never been synced.
-async fn run_query(d: Arc<Daemon>, genesis: String, query: String) -> Response {
-    let soul = match find(&d, &genesis) {
+async fn run_query(d: Arc<Daemon>, (squad, username): (String, String), query: String) -> Response {
+    let soul = match find(&d, &squad, &username) {
         Ok(s) => s,
         Err(r) => return *r,
     };
@@ -71,7 +105,7 @@ async fn run_query(d: Arc<Daemon>, genesis: String, query: String) -> Response {
                     .open_error
                     .or(st.last_error)
                     .unwrap_or_else(|| "the store does not exist and the sync did not create it".to_string());
-                return err(StatusCode::SERVICE_UNAVAILABLE, format!("{}: no store: {why}", soul.short()));
+                return err(StatusCode::SERVICE_UNAVAILABLE, format!("{}: no store: {why}", label(&soul)));
             }
             soul.sync_and_wait().await;
             synced_once = true;
@@ -102,18 +136,18 @@ async fn run_query(d: Arc<Daemon>, genesis: String, query: String) -> Response {
 
 async fn sparql_get(
     State(d): State<Arc<Daemon>>,
-    AxPath(genesis): AxPath<String>,
+    AxPath(store): AxPath<(String, String)>,
     AxQuery(params): AxQuery<HashMap<String, String>>,
 ) -> Response {
     match params.get("query") {
-        Some(q) => run_query(d, genesis, q.clone()).await,
+        Some(q) => run_query(d, store, q.clone()).await,
         None => err(StatusCode::BAD_REQUEST, "missing ?query= parameter".to_string()),
     }
 }
 
 async fn sparql_post(
     State(d): State<Arc<Daemon>>,
-    AxPath(genesis): AxPath<String>,
+    AxPath(store): AxPath<(String, String)>,
     headers: HeaderMap,
     body: axum::body::Bytes,
 ) -> Response {
@@ -141,22 +175,24 @@ async fn sparql_post(
     } else {
         text
     };
-    run_query(d, genesis, query).await
+    run_query(d, store, query).await
 }
 
 fn soul_json(s: &Soul) -> serde_json::Value {
     let st = s.status();
     let y = crate::RepoYml::load(&s.path);
     serde_json::json!({
-        "genesis": s.genesis,
-        "path": s.path.display().to_string(),
-        "name": s.name,
-        // The address every instance and graph of this store sits under,
-        // and the base its queries are read against. `squad` and `username`
-        // are absent for a plain repo, whose root is the platform's.
-        "root": crate::store_root_at(&s.path),
+        // The five fields every daemon of the stack gives for a store.
+        // `squad` and `username` are absent for a repository that has not
+        // been given them; it cannot be addressed until it has.
         "squad": y.squad,
         "username": y.username,
+        // The address every instance and graph of this store sits under,
+        // and the BASE its queries are read against.
+        "base": crate::store_root_at(&s.path),
+        "folder": s.path.display().to_string(),
+        "as_of": { "commit": st.synced_to, "syncing": st.syncing },
+        "name": s.name,
         "synced_to": st.synced_to,
         "syncing": st.syncing,
         "last_error": st.last_error,
@@ -166,8 +202,8 @@ fn soul_json(s: &Soul) -> serde_json::Value {
     })
 }
 
-async fn info(State(d): State<Arc<Daemon>>, AxPath(genesis): AxPath<String>) -> Response {
-    let soul = match find(&d, &genesis) {
+async fn info(State(d): State<Arc<Daemon>>, AxPath(store): AxPath<(String, String)>) -> Response {
+    let soul = match find(&d, &store.0, &store.1) {
         Ok(s) => s,
         Err(r) => return *r,
     };
@@ -200,17 +236,17 @@ async fn info(State(d): State<Arc<Daemon>>, AxPath(genesis): AxPath<String>) -> 
 
 async fn sync(
     State(d): State<Arc<Daemon>>,
-    AxPath(genesis): AxPath<String>,
+    AxPath(store): AxPath<(String, String)>,
     AxQuery(params): AxQuery<HashMap<String, String>>,
 ) -> Response {
-    let soul = match find(&d, &genesis) {
+    let soul = match find(&d, &store.0, &store.1) {
         Ok(s) => s,
         Err(r) => return *r,
     };
     let ticket = soul.request_sync();
     let wait = matches!(params.get("wait").map(|s| s.as_str()), Some("1") | Some("true"));
     if !wait {
-        return (StatusCode::ACCEPTED, Json(serde_json::json!({ "accepted": true, "genesis": soul.genesis }))).into_response();
+        return (StatusCode::ACCEPTED, Json(serde_json::json!({ "accepted": true, "squad": store.0, "username": store.1 }))).into_response();
     }
     soul.wait_for(ticket).await;
     let st = soul.status();
@@ -222,25 +258,22 @@ async fn sync(
     (status, Json(soul_json(&soul))).into_response()
 }
 
-/// `DELETE /soul/{genesis}`: drop the soul. `git lex nuke` sends this
+/// `DELETE /git-lex/{squad}/{username}`: drop the store. `git lex nuke` sends this
 /// before it deletes `.lex/`, so the daemon closes the store first and
 /// never syncs the repository again.
-async fn forget(State(d): State<Arc<Daemon>>, AxPath(genesis): AxPath<String>) -> Response {
-    let soul = match d.find(&genesis) {
-        Ok(s) => s,
-        Err(FindError::NotFound) => {
-            return (StatusCode::OK, Json(serde_json::json!({ "forgotten": false, "reason": "not held" }))).into_response()
-        }
-        Err(FindError::Ambiguous(all)) => {
-            return err(StatusCode::CONFLICT, format!("{genesis} matches more than one soul: {}", all.join(", ")))
-        }
+async fn forget(State(d): State<Arc<Daemon>>, AxPath(store): AxPath<(String, String)>) -> Response {
+    let hits = held(&d, &store.0, &store.1);
+    let soul = match hits.as_slice() {
+        [one] => Arc::clone(one),
+        [] => return (StatusCode::OK, Json(serde_json::json!({ "forgotten": false, "reason": "not held" }))).into_response(),
+        many => return two_folders(&store.0, &store.1, many),
     };
     d.forget(&soul.genesis).await;
-    (StatusCode::OK, Json(serde_json::json!({ "forgotten": true, "genesis": soul.genesis }))).into_response()
+    (StatusCode::OK, Json(serde_json::json!({ "forgotten": true, "squad": store.0, "username": store.1 }))).into_response()
 }
 
-async fn souls(State(d): State<Arc<Daemon>>) -> Json<serde_json::Value> {
-    Json(serde_json::json!({ "souls": d.souls().iter().map(|s| soul_json(s)).collect::<Vec<_>>() }))
+async fn stores(State(d): State<Arc<Daemon>>) -> Json<serde_json::Value> {
+    Json(serde_json::json!({ "stores": d.souls().iter().map(|s| soul_json(s)).collect::<Vec<_>>() }))
 }
 
 async fn health(State(d): State<Arc<Daemon>>) -> Json<serde_json::Value> {
@@ -250,19 +283,19 @@ async fn health(State(d): State<Arc<Daemon>>) -> Json<serde_json::Value> {
         "version": env!("CARGO_PKG_VERSION"),
         "uptime_secs": d.started.elapsed().as_secs(),
         "port": super::PORT,
-        "souls": d.souls().len(),
+        "stores": d.souls().len(),
         "syncing": d.souls().iter().filter(|s| s.status().syncing).count(),
     }))
 }
 
 pub fn router(d: Arc<Daemon>) -> Router {
     Router::new()
-        .route("/soul/{genesis}/sparql", get(sparql_get).post(sparql_post))
-        .route("/soul/{genesis}/info", get(info))
-        .route("/soul/{genesis}/sync", post(sync))
-        .route("/soul/{genesis}", delete(forget))
-        .route("/souls", get(souls))
-        .route("/health", get(health))
+        .route("/git-lex/{squad}/{username}/sparql", get(sparql_get).post(sparql_post))
+        .route("/git-lex/{squad}/{username}/info", get(info))
+        .route("/git-lex/{squad}/{username}/sync", post(sync))
+        .route("/git-lex/{squad}/{username}", delete(forget))
+        .route("/git-lex/stores", get(stores))
+        .route("/git-lex/health", get(health))
         .with_state(d)
         .layer(middleware::from_fn(local_only))
 }
@@ -411,8 +444,8 @@ mod local_only_tests {
 
     fn app() -> Router {
         Router::new()
-            .route("/health", get(|| async { "ok" }))
-            .route("/soul/{g}/sparql", get(|| async { "rows" }).post(|| async { "rows" }))
+            .route("/git-lex/health", get(|| async { "ok" }))
+            .route("/git-lex/{q}/{u}/sparql", get(|| async { "rows" }).post(|| async { "rows" }))
             .layer(middleware::from_fn(local_only))
     }
 
@@ -445,21 +478,21 @@ mod local_only_tests {
 
     #[tokio::test]
     async fn programs_without_an_origin_pass_unchanged() {
-        let r = send("GET", "/health", Some("127.0.0.1:7880"), None).await;
+        let r = send("GET", "/git-lex/health", Some("127.0.0.1:7880"), None).await;
         assert_eq!(r.status(), StatusCode::OK);
         assert!(acao(&r).is_none());
     }
 
     #[tokio::test]
     async fn a_localhost_page_may_read() {
-        let r = send("GET", "/health", Some("127.0.0.1:7880"), Some("http://localhost:5173")).await;
+        let r = send("GET", "/git-lex/health", Some("127.0.0.1:7880"), Some("http://localhost:5173")).await;
         assert_eq!(r.status(), StatusCode::OK);
         assert_eq!(acao(&r), Some("http://localhost:5173"));
     }
 
     #[tokio::test]
     async fn the_browser_preflight_is_answered() {
-        let r = send("OPTIONS", "/soul/abc/sparql", Some("localhost:7880"), Some("http://127.0.0.1:8000")).await;
+        let r = send("OPTIONS", "/git-lex/sq/abc/sparql", Some("localhost:7880"), Some("http://127.0.0.1:8000")).await;
         assert_eq!(r.status(), StatusCode::NO_CONTENT);
         assert_eq!(acao(&r), Some("http://127.0.0.1:8000"));
         assert_eq!(r.headers().get(header::ACCESS_CONTROL_ALLOW_METHODS).unwrap(), "GET, POST");
@@ -468,7 +501,7 @@ mod local_only_tests {
     #[tokio::test]
     async fn other_websites_are_refused_before_any_route_runs() {
         for o in ["http://evil.com", "null"] {
-            let r = send("POST", "/soul/abc/sparql", Some("127.0.0.1:7880"), Some(o)).await;
+            let r = send("POST", "/git-lex/sq/abc/sparql", Some("127.0.0.1:7880"), Some(o)).await;
             assert_eq!(r.status(), StatusCode::FORBIDDEN, "{o}");
             assert!(acao(&r).is_none());
         }
@@ -477,9 +510,9 @@ mod local_only_tests {
     #[tokio::test]
     async fn a_request_addressed_elsewhere_is_refused() {
         // DNS rebinding: an outside domain pointed at 127.0.0.1 keeps its own Host.
-        let r = send("GET", "/health", Some("rebind.evil.com:7880"), Some("http://rebind.evil.com:7880")).await;
+        let r = send("GET", "/git-lex/health", Some("rebind.evil.com:7880"), Some("http://rebind.evil.com:7880")).await;
         assert_eq!(r.status(), StatusCode::FORBIDDEN);
-        let r = send("GET", "/health", None, None).await;
+        let r = send("GET", "/git-lex/health", None, None).await;
         assert_eq!(r.status(), StatusCode::FORBIDDEN);
     }
 }

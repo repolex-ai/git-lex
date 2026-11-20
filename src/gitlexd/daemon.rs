@@ -118,11 +118,6 @@ impl Soul {
     }
 }
 
-pub enum FindError {
-    NotFound,
-    Ambiguous(Vec<String>),
-}
-
 pub struct Daemon {
     /// Every soul held, in registry order. Behind a lock because a soul
     /// registered after start joins on the first request that names it.
@@ -137,7 +132,7 @@ pub struct Daemon {
 
 impl Daemon {
     /// Read the registry and open every registered soul's store. A store
-    /// that fails to open is kept, with the error, so `/souls` shows it.
+    /// that fails to open is kept, with the error, so `/git-lex/stores` shows it.
     pub fn open() -> Result<Daemon, String> {
         let worker_exe = std::env::current_exe().map_err(|e| format!("cannot find my own executable: {e}"))?;
         let log_path = super::log_path();
@@ -274,17 +269,6 @@ impl Daemon {
             && let Some(f) = f.as_mut() {
                 let _ = writeln!(f, "{text}");
             }
-    }
-
-    /// The soul whose genesis hash starts with `prefix`.
-    pub fn find(&self, prefix: &str) -> Result<Arc<Soul>, FindError> {
-        let souls = self.souls.read().unwrap();
-        let hits: Vec<&Arc<Soul>> = souls.iter().filter(|s| s.genesis.starts_with(prefix)).collect();
-        match hits.as_slice() {
-            [one] => Ok(Arc::clone(one)),
-            [] => Err(FindError::NotFound),
-            many => Err(FindError::Ambiguous(many.iter().map(|s| s.genesis.clone()).collect())),
-        }
     }
 
     /// Start the per-soul sync loops and HEAD watchers. The watcher's first
