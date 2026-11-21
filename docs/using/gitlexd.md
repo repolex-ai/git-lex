@@ -78,6 +78,7 @@ them is listed but cannot be addressed until it has both.
 | `DELETE /git-lex/<squad>/<username>` | Drop the store: close it and stop watching the repository. `git lex nuke` sends this before deleting `.lex/`. A store whose `.lex/` vanishes by any other hand is dropped by the watcher on its own. |
 | `GET /git-lex/stores` | Every store gitlexd holds: `squad`, `username`, `base` (the address everything in the store starts with), `folder`, `as_of`, and its sync state and errors. |
 | `GET /git-lex/health` | gitlexd is up; uptime, pid, number of stores. |
+| `GET /git-lex/whoami` | Who gitlexd takes the caller to be, from the `Authorization: Bearer` token it sent (the one `git lex identity token` prints). `git lex query` sends it on every query. gitlexd reads it and refuses nobody for it yet. |
 
 ```bash
 curl -X POST http://127.0.0.1:7880/git-lex/7r1pl3f0rc3/w4r3z/sparql \

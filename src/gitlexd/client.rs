@@ -167,10 +167,33 @@ pub struct QueryResponse {
     pub body: String,
 }
 
+/// The token of whoever is at this command: the session's agent, or, from a
+/// plain terminal, the person this machine belongs to. None when neither
+/// has a key, and the query is then sent as a caller nobody knows.
+fn caller_token() -> Option<String> {
+    use crate::identity;
+    let host = identity::host_dir()?;
+    let session = super::session::session_soul().ok()?;
+    let persons = (!session.from_harness())
+        .then(|| identity::load_owner(&host).ok().flatten())
+        .flatten()
+        .and_then(|owner| crate::registry_entries().into_iter().find(|e| e.genesis.as_deref() == Some(owner.genesis.as_str())))
+        .map(|e| std::path::PathBuf::from(e.path))
+        .filter(|p| identity::has_key(p));
+    let root = persons.unwrap_or(session.root);
+    identity::has_key(&root).then(|| identity::token(&root, &host, identity::now_secs()).ok()).flatten()
+}
+
 pub fn query(root: &Path, sparql: &str) -> Result<QueryResponse, String> {
-    let resp = agent(Duration::from_secs(3600))
+    // Every query says who is asking. gitlexd reads the token and does not
+    // yet act on it: no caller is refused (goodlux, 2026-11-21).
+    let mut request = agent(Duration::from_secs(3600))
         .post(format!("{}/sparql", store_url(root)?))
-        .header("content-type", "application/sparql-query")
+        .header("content-type", "application/sparql-query");
+    if let Some(token) = caller_token() {
+        request = request.header("authorization", format!("Bearer {token}"));
+    }
+    let resp = request
         .send(sparql)
         .map_err(|e| format!("gitlexd did not answer: {e}"))?;
     let (status, content_type, body) = read(resp);

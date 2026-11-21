@@ -342,6 +342,55 @@ pub fn described_graphs(store: &Store, class: &str) -> Vec<oxigraph::model::Name
         .collect()
 }
 
+/// May this caller read this store? Asked by gitlexd before it runs an
+/// outside query (tessera does the checking; goodlux, 2026-11-19).
+///
+/// - The store's own agent always may. It is known by its first commit,
+///   which no change of address moves.
+/// - Otherwise the store's own description decides: the owner and the
+///   visibility written on its current graph in the unnamed graph, and
+///   whoever it is shared with. No visibility means private. The person the
+///   machine belongs to may read every store.
+/// - A store written before graphs were described says nothing, so it is
+///   private: its own agent and the machine's owner.
+pub fn may_read_store(
+    caller: Option<&tessera::Caller>,
+    store_genesis: &str,
+    store: &Store,
+    machine_owner: Option<&tessera::Owner>,
+) -> Result<(), tessera::Denial> {
+    use oxigraph::model::{GraphNameRef, NamedNodeRef, Term};
+    if caller.is_some_and(|c| c.genesis == store_genesis) {
+        return Ok(());
+    }
+    let described = described_graphs(store, CURRENT_GRAPH_CLASS).into_iter().next().or_else(|| described_graphs(store, NAMED_GRAPH_CLASS).into_iter().next());
+    let said = |property: &str| -> Vec<String> {
+        let Some(graph) = &described else { return Vec::new() };
+        store
+            .quads_for_pattern(
+                Some(graph.as_ref().into()),
+                Some(NamedNodeRef::new_unchecked(&format!("{PLATFORM_ROOT}ontology/git-lex/{property}"))),
+                None,
+                Some(GraphNameRef::DefaultGraph),
+            )
+            .filter_map(|q| match q.ok()?.object {
+                Term::NamedNode(n) => Some(n.into_string()),
+                Term::Literal(l) => Some(l.value().to_string()),
+                _ => None,
+            })
+            .collect()
+    };
+    let (owner, visibility, readable_by) = (said("owner"), said("visibility"), said("readableBy"));
+    let readable_by: Vec<&str> = readable_by.iter().map(String::as_str).collect();
+    let policy = tessera::GraphAccess {
+        owner: owner.first().map(String::as_str),
+        // A word that is not one of the three is read as the strictest.
+        visibility: tessera::Visibility::parse(visibility.first().map(String::as_str)).unwrap_or(tessera::Visibility::Private),
+        readable_by: &readable_by,
+    };
+    tessera::check_read(caller, &policy, machine_owner)
+}
+
 /// The ontology index for a repo's installed kits, kept while the files it
 /// was built from are unchanged. It is built from the ontology alone, never
 /// from what a store holds.
@@ -2470,5 +2519,76 @@ mod store_root_and_public_view_tests {
             Ok(_) => println!("TRIAL other result"),
             Err(W3cQueryError::Parse(e)) | Err(W3cQueryError::Eval(e)) => println!("TRIAL refused: {e}"),
         }
+    }
+}
+
+#[cfg(test)]
+mod may_read_store_tests {
+    use super::*;
+    use oxigraph::io::RdfFormat;
+
+    fn caller(genesis: &str, subject: &str, squad: Option<&str>) -> tessera::Caller {
+        tessera::Caller {
+            subject: subject.into(),
+            genesis: genesis.into(),
+            username: None,
+            squad: squad.map(str::to_string),
+            actor: None,
+            scope: None,
+            expires: u64::MAX,
+        }
+    }
+
+    const MINE: &str = "1111111111111111111111111111111111111111";
+    const THEIRS: &str = "2222222222222222222222222222222222222222";
+    const NOW: &str = "https://repolex.ai/sq/me/git-lex/NamedGraph/now";
+    const ME: &str = "https://repolex.ai/sq/me/soul/Soul/me";
+
+    fn store(visibility: Option<&str>, readable_by: Option<&str>) -> Store {
+        let store = Store::new().unwrap();
+        let mut nq = format!(
+            "<{NOW}> <{RDF_TYPE}> <{CURRENT_GRAPH_CLASS}> .\n<{NOW}> <{RDF_TYPE}> <{NAMED_GRAPH_CLASS}> .\n<{NOW}> <https://repolex.ai/ontology/git-lex/owner> <{ME}> .\n"
+        );
+        if let Some(v) = visibility {
+            nq.push_str(&format!("<{NOW}> <https://repolex.ai/ontology/git-lex/visibility> \"{v}\" .\n"));
+        }
+        if let Some(r) = readable_by {
+            nq.push_str(&format!("<{NOW}> <https://repolex.ai/ontology/git-lex/readableBy> <{r}> .\n"));
+        }
+        store.load_from_slice(RdfFormat::NQuads, nq.as_bytes()).unwrap();
+        store
+    }
+
+    /// A store answers its own agent, the machine's owner, and whoever its
+    /// description lets in. Nothing said means private.
+    #[test]
+    fn a_store_answers_its_own_agent_and_whoever_its_description_lets_in() {
+        let me = caller(MINE, ME, Some("sq"));
+        let other = caller(THEIRS, "https://repolex.ai/sq/them/soul/Soul/them", Some("sq"));
+        let stranger = caller(THEIRS, "https://repolex.ai/elsewhere/x/soul/Soul/x", Some("elsewhere"));
+        let person = tessera::Owner { owner: "https://repolex.ai/sq/person/soul/Soul/person".into(), genesis: THEIRS.into(), since: 0 };
+        let status = |r: Result<(), tessera::Denial>| r.map_err(|d| d.http_status());
+
+        for said in [None, Some("private"), Some("not-a-word")] {
+            let s = store(said, None);
+            assert_eq!(status(may_read_store(Some(&me), MINE, &s, None)), Ok(()), "{said:?}");
+            assert_eq!(status(may_read_store(Some(&other), MINE, &s, None)), Err(403), "{said:?}");
+            assert_eq!(status(may_read_store(None, MINE, &s, None)), Err(401), "{said:?}");
+            // The person the machine belongs to reads every store.
+            assert_eq!(status(may_read_store(Some(&other), MINE, &s, Some(&person))), Ok(()), "{said:?}");
+        }
+        // Its own agent is known by first commit, whatever address it carries.
+        let renamed = caller(MINE, "https://repolex.ai/soul/Soul/old-address", None);
+        assert_eq!(status(may_read_store(Some(&renamed), MINE, &store(None, None), None)), Ok(()));
+
+        let shared = store(Some("shared"), Some("https://repolex.ai/sq"));
+        assert_eq!(status(may_read_store(Some(&other), MINE, &shared, None)), Ok(()), "a squad it is shared with");
+        assert_eq!(status(may_read_store(Some(&stranger), MINE, &shared, None)), Err(403));
+        assert_eq!(status(may_read_store(None, MINE, &store(Some("public"), None), None)), Ok(()));
+
+        // A store with no description at all: its own agent and the owner.
+        let bare = Store::new().unwrap();
+        assert_eq!(status(may_read_store(Some(&me), MINE, &bare, None)), Ok(()));
+        assert_eq!(status(may_read_store(Some(&other), MINE, &bare, None)), Err(403));
     }
 }

@@ -5,6 +5,7 @@
 //! | `POST /git-lex/<squad>/<username>/sync`         | nudge; `?wait=1` returns when the sync is done |
 //! | `GET /git-lex/stores`                           | every store held, with its state |
 //! | `GET /git-lex/health`                           | up, uptime, stores open |
+//! | `GET /git-lex/whoami`                           | who the caller is, from its token |
 //!
 //! `<squad>` and `<username>` are the two names in the repository's
 //! `.lex/repo.yml`, and the only way a store is named here: the shape every
@@ -178,6 +179,47 @@ async fn sparql_post(
     run_query(d, store, query).await
 }
 
+/// The machine's key list, grants, owner and limits, as git-lex writes them
+/// under `~/.lex/identity/` and as tessera, the stack's shared checker,
+/// reads them. Off when there is no key list: nobody has an identity on
+/// this machine, so nobody can be asked for one.
+fn keyring() -> &'static tessera::Keyring {
+    static KEYS: std::sync::OnceLock<tessera::Keyring> = std::sync::OnceLock::new();
+    KEYS.get_or_init(|| match crate::identity::host_dir() {
+        Some(host) if crate::identity::jwks_path(&host).is_file() => tessera::Keyring::subtexture_at(crate::identity::jwks_path(&host)),
+        _ => tessera::Keyring::Off,
+    })
+}
+
+/// `GET /git-lex/whoami`: who gitlexd takes the caller to be, from the
+/// `Authorization: Bearer` token it sent. The same answer every daemon of
+/// the stack gives, so a caller can see its identity arrive.
+///
+/// gitlexd reads who is asking and refuses nobody for it yet: a query is
+/// answered whatever this says. Turning that into a refusal is a separate
+/// step, taken once every caller sends a token (goodlux, 2026-11-21).
+async fn whoami(headers: HeaderMap) -> Json<serde_json::Value> {
+    let authorization = headers.get(header::AUTHORIZATION).and_then(|v| v.to_str().ok());
+    let keys = keyring();
+    let out = match keys.identify(authorization, crate::identity::now_secs()) {
+        Ok(Some(c)) => serde_json::json!({
+            "known": true,
+            "subject": c.subject,
+            "squad": c.squad,
+            "username": c.username,
+            "actor": c.actor,
+            "scope": c.scope,
+            "expires": c.expires,
+        }),
+        Ok(None) => serde_json::json!({ "known": false, "why": "no token was sent" }),
+        Err(why) => serde_json::json!({ "known": false, "why": why.0 }),
+    };
+    let mut out = out;
+    out["provider"] = serde_json::json!(keys.provider_name());
+    out["enforcing"] = serde_json::json!(false);
+    Json(out)
+}
+
 fn soul_json(s: &Soul) -> serde_json::Value {
     let st = s.status();
     let y = crate::RepoYml::load(&s.path);
@@ -296,6 +338,7 @@ pub fn router(d: Arc<Daemon>) -> Router {
         .route("/git-lex/{squad}/{username}", delete(forget))
         .route("/git-lex/stores", get(stores))
         .route("/git-lex/health", get(health))
+        .route("/git-lex/whoami", get(whoami))
         .with_state(d)
         .layer(middleware::from_fn(local_only))
 }
@@ -380,7 +423,7 @@ async fn local_only(req: Request, next: Next) -> Response {
         let mut r = StatusCode::NO_CONTENT.into_response();
         let h = r.headers_mut();
         h.insert(header::ACCESS_CONTROL_ALLOW_METHODS, HeaderValue::from_static("GET, POST"));
-        h.insert(header::ACCESS_CONTROL_ALLOW_HEADERS, HeaderValue::from_static("Content-Type, Accept"));
+        h.insert(header::ACCESS_CONTROL_ALLOW_HEADERS, HeaderValue::from_static("Content-Type, Accept, Authorization"));
         h.insert(header::ACCESS_CONTROL_MAX_AGE, HeaderValue::from_static("600"));
         r
     } else {

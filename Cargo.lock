@@ -951,6 +951,7 @@ dependencies = [
  "spargebra",
  "sparql_service",
  "ssh-key",
+ "tessera",
  "tokio",
  "tower",
  "tree-sitter",
@@ -3297,6 +3298,17 @@ checksum = "230a1b821ccbd75b185820a1f1ff7b14d21da1e442e22c0863ea5f08771a8874"
 dependencies = [
  "rustix",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "tessera"
+version = "0.1.1"
+source = "git+https://github.com/repolex-ai/tessera#1142eb66066624ebfa405b7679b3731e72b8fc4f"
+dependencies = [
+ "base64 0.22.1",
+ "ed25519-dalek",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

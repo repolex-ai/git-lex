@@ -28,6 +28,8 @@ oxigraph = { version = "0.5.6", features = ["rdf-12"] }
 spargebra = { version = "0.4", features = ["sparql-12"] }
 # The stack's shared query preparation (m4xx): ontology rewriting and names.
 calamus = { git = "https://github.com/repolex-ai/calamus", features = ["turtle"] }
+# The stack's shared check of who is asking and what they may read (tr1pl3x).
+tessera = { git = "https://github.com/repolex-ai/tessera" }
 git2 = { version = "0.20", default-features = false, features = ["vendored-openssl"] }
 serde_yaml = "0.9"
 sha2 = "0.10"

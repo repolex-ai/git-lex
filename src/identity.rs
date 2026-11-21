@@ -37,6 +37,21 @@ pub const AUDIENCE: &str = "subtexture";
 /// finally done, days later if the machine was off. Long on purpose while
 /// the stack is being built; to be shortened again (goodlux, 2026-11-21).
 pub const TOKEN_LIFETIME_SECS: u64 = 7 * 86_400;
+/// How long a token made on this machine lasts: `token_lifetime_secs` in
+/// `~/.lex/identity/policy.json` when that file gives one, else
+/// `TOKEN_LIFETIME_SECS`. The file is the one tessera reads its limits from
+/// at every check, so the length of a token is changed by editing it, with
+/// no program rebuilt (goodlux, 2026-11-21). A value no checker here would
+/// accept is not used.
+pub fn token_lifetime(host: &Path) -> u64 {
+    std::fs::read_to_string(host.join("policy.json"))
+        .ok()
+        .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
+        .and_then(|v| v.get("token_lifetime_secs")?.as_u64())
+        .filter(|secs| (1..=MAX_LIFETIME_SECS).contains(secs))
+        .unwrap_or(TOKEN_LIFETIME_SECS)
+}
+
 /// The longest lifetime a verifier accepts. The agent writes its own expiry,
 /// so the verifier caps it.
 pub const MAX_LIFETIME_SECS: u64 = 7 * 86_400;
@@ -685,7 +700,7 @@ pub fn mint(root: &Path, host: &Path, now: u64) -> Result<String, String> {
         sub: iri,
         aud: AUDIENCE.into(),
         iat: now,
-        exp: now + TOKEN_LIFETIME_SECS,
+        exp: now + token_lifetime(host),
         jti: id.iter().map(|b| format!("{b:02x}")).collect(),
     };
     let header = serde_json::json!({ "alg": "EdDSA", "typ": "JWT", "kid": genesis });
@@ -705,7 +720,7 @@ pub fn token(root: &Path, host: &Path, now: u64) -> Result<String, String> {
     if let Ok(text) = std::fs::read_to_string(&path) {
         let kept = text.trim();
         if let Ok(claims) = check_own(root, host, kept, now)
-            && claims.exp.saturating_sub(now) > TOKEN_LIFETIME_SECS / 2 {
+            && claims.exp.saturating_sub(now) > token_lifetime(host) / 2 {
                 return Ok(kept.to_string());
             }
     }
@@ -1104,7 +1119,7 @@ pub fn mint_service(host: &Path, service: &str, now: u64) -> Result<String, Stri
         sub: terms.sub,
         aud: AUDIENCE.into(),
         iat: now,
-        exp: (now + TOKEN_LIFETIME_SECS).min(terms.exp),
+        exp: (now + token_lifetime(host)).min(terms.exp),
         jti: random_hex(16)?,
         act: Actor { sub: service.to_string() },
         grant,
@@ -1122,7 +1137,7 @@ pub fn service_token(host: &Path, service: &str, now: u64) -> Result<String, Str
     if let Ok(text) = std::fs::read_to_string(&path) {
         let kept = text.trim();
         if let Ok(caller) = verify_caller(kept, host, now)
-            && caller.expires.saturating_sub(now) > TOKEN_LIFETIME_SECS / 2
+            && caller.expires.saturating_sub(now) > token_lifetime(host) / 2
         {
             return Ok(kept.to_string());
         }
