@@ -32,11 +32,14 @@ use std::path::{Path, PathBuf};
 
 /// The `aud` claim: one value for every Subtexture service.
 pub const AUDIENCE: &str = "subtexture";
-/// How long a token made here lasts.
-pub const TOKEN_LIFETIME_SECS: u64 = 12 * 3600;
+/// How long a token made here lasts: seven days. A token handed to a
+/// queue (a render waiting in Horae) has to still be good when the work is
+/// finally done, days later if the machine was off. Long on purpose while
+/// the stack is being built; to be shortened again (goodlux, 2026-11-21).
+pub const TOKEN_LIFETIME_SECS: u64 = 7 * 86_400;
 /// The longest lifetime a verifier accepts. The agent writes its own expiry,
 /// so the verifier caps it.
-pub const MAX_LIFETIME_SECS: u64 = 24 * 3600;
+pub const MAX_LIFETIME_SECS: u64 = 7 * 86_400;
 /// Clock difference tolerated between the signer and the verifier.
 pub const SKEW_SECS: u64 = 60;
 
@@ -776,7 +779,7 @@ pub fn verify<'a>(token: &str, list: &'a HostList, now: u64) -> Result<(Claims, 
         return Err("the token has expired".into());
     }
     if claims.exp < claims.iat || claims.exp - claims.iat > MAX_LIFETIME_SECS {
-        return Err(format!("the token's lifetime is longer than the {} hours allowed", MAX_LIFETIME_SECS / 3600));
+        return Err(format!("the token's lifetime is longer than the {} days allowed", MAX_LIFETIME_SECS / 86_400));
     }
     if claims.aud != AUDIENCE {
         return Err(format!("the token is for {:?}, not for {AUDIENCE:?}", claims.aud));
@@ -800,7 +803,7 @@ pub fn verify<'a>(token: &str, list: &'a HostList, now: u64) -> Result<(Claims, 
 
 /// A grant lasts at least this long. Longer than any token may live, so a
 /// grant can never pass a checker as a plain token.
-pub const MIN_GRANT_SECS: u64 = 2 * 86_400;
+pub const MIN_GRANT_SECS: u64 = 8 * 86_400;
 /// And at most this long.
 pub const MAX_GRANT_SECS: u64 = 366 * 86_400;
 /// The `typ` of a grant, so it cannot be mistaken for a token.

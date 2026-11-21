@@ -275,7 +275,7 @@ enum IdentityCommands {
         /// What it may do, as words separated by spaces, each `engine:read` or `engine:write` (for example "pan:read pan:write syrinx:read")
         #[arg(long)]
         scope: String,
-        /// How many days the grant lasts (2 to 366)
+        /// How many days the grant lasts (8 to 366)
         #[arg(long, default_value_t = 90)]
         days: u64,
     },
