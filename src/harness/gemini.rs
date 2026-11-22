@@ -202,6 +202,7 @@ fn transform_skill(content: &str, name: &str) -> String {
     if let Some(val) = super::claude::skill_value(&soul_fm, "description", "skillDescription") {
         description = val;
     }
+    let description = super::claude::with_cue(description, super::claude::skill_value(&soul_fm, "cue", "cue"));
 
     let mut fm = format!("---\nname: {}\n", name);
     if !description.is_empty() {

@@ -131,6 +131,17 @@ pub(super) fn skill_value(frontmatter: &str, name: &str, older_name: &str) -> Op
     under(name).or_else(|| under(older_name))
 }
 
+/// A skill's description as the harness gets it: the description, then the
+/// cue when the file has one. A dash joins them, not a colon, because the
+/// line is written into YAML frontmatter as plain text.
+pub(super) fn with_cue(description: String, cue: Option<String>) -> String {
+    match cue.map(|c| c.trim().to_string()).filter(|c| !c.is_empty() && !c.starts_with('#')) {
+        None => description,
+        Some(cue) if description.is_empty() => cue,
+        Some(cue) => format!("{description} Cue — {cue}"),
+    }
+}
+
 /// Sync all soul documents into Claude Code's harness directories.
 pub fn sync_all(root: &Path) {
     sync_skills(root);
@@ -487,6 +498,10 @@ fn transform_skill(content: &str, name: &str) -> String {
     if let Some(val) = skill_value(&soul_fm, "description", "skillDescription") {
         description = val;
     }
+    // The cue goes to the harness with the description: the harness offers
+    // a skill from its description alone, and the cue is the line written to
+    // say when the skill is wanted (goodlux, 2026-11-22).
+    description = with_cue(description, skill_value(&soul_fm, "cue", "cue"));
     if let Some(val) = skill_value(&soul_fm, "invocability", "skillInvocability") {
         invocability = val;
     }
@@ -1389,6 +1404,10 @@ mod prune_tests {
         let deployed = transform_skill(&fs::read_to_string(root.join("Copia/Skill/pose.md")).unwrap(), "pose");
         assert!(deployed.contains("description: strike one"), "{deployed}");
         assert!(deployed.contains("user-invocable: false"), "{deployed}");
+        let cued = transform_skill("---\nsoul.Skill.description: Write the day.\nsoul.Skill.cue: sitting down at the start of a session\n---\nbody\n", "journal");
+        assert!(cued.contains("description: Write the day. Cue — sitting down at the start of a session\n"), "{cued}");
+        // An unfilled template line is not a cue.
+        assert!(transform_skill("---\nsoul.Skill.description: d\nsoul.Skill.cue: # optional, str\n---\n", "x").contains("description: d\n"));
         // The names without the `skill` prefix are read first; the older
         // ones still work where a file has not been rewritten.
         let newer = transform_skill("---\ncopia.Skill.description: new words\ncopia.Skill.skillDescription: old words\ncopia.Skill.invocability: agent\ncopia.Skill.allowedTools: Read\ncopia.Skill.argumentHint: <id>\n---\nbody\n", "pose");
