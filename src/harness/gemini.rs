@@ -16,31 +16,9 @@
 //!   Target: .agents/subagents/{name}.md  (Antigravity subagent definition)
 
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use super::claude::record_harness_failure;
-
-fn find_class_dir(root: &Path, class_name: &str) -> Option<PathBuf> {
-    // Check root first (legacy flat layout)
-    let flat = root.join(class_name);
-    if flat.exists() && flat.is_dir() {
-        return Some(flat);
-    }
-    // Scan namespace folders
-    let entries = fs::read_dir(root).ok()?;
-    for entry in entries.filter_map(|e| e.ok()) {
-        let path = entry.path();
-        let name = entry.file_name().to_string_lossy().to_string();
-        if !path.is_dir() || name.starts_with('.') {
-            continue;
-        }
-        let candidate = path.join(class_name);
-        if candidate.exists() && candidate.is_dir() {
-            return Some(candidate);
-        }
-    }
-    None
-}
 
 /// Set up Antigravity / Gemini substrate: copy hooks, rules, and configurations
 /// shipped by installed kits under `.lex/kit/*/*/harness/.agents/`.
@@ -99,35 +77,22 @@ fn sync_skills(root: &Path) {
     let target_dir = root.join(".agents").join("skills");
 
     // Find Skill/ under any namespace folder (e.g., Soul/Skill/)
-    let skill_dir = match find_class_dir(root, "Skill") {
-        Some(d) => d,
-        None => return,
-    };
-
-    let entries = match fs::read_dir(&skill_dir) {
-        Ok(e) => e,
-        Err(_) => return,
-    };
+    let Some(sources) = super::claude::class_sources(root, "Skill") else { return };
 
     let mut synced = 0;
     let mut failed = 0;
     let mut source_names: std::collections::HashSet<String> = std::collections::HashSet::new();
 
-    for entry in entries.filter_map(|e| e.ok()) {
-        let path = entry.path();
-
-        if path.is_dir() {
-            continue;
-        }
-        let fname = match path.file_name().and_then(|n| n.to_str()) {
-            Some(n) => n.to_string(),
-            None => continue,
-        };
-        if !fname.ends_with(".md") || fname.starts_with("__") || fname.starts_with('.') {
-            continue;
-        }
-
-        let name = fname.strip_suffix(".md").unwrap();
+    // A name two folders both hold is deployed from neither (see
+    // `class_sources`); it still counts as a source, so nothing is pruned.
+    for (name, paths) in &sources.clashes {
+        let files: Vec<String> = paths.iter().map(|p| p.strip_prefix(root).unwrap_or(p).display().to_string()).collect();
+        eprintln!("harness: {name} is the name of more than one file: {}. Rename one; neither is deployed until then.", files.join(", "));
+        failed += 1;
+        source_names.insert(name.clone());
+    }
+    for (name, path) in &sources.files {
+        let name = name.as_str();
         source_names.insert(name.to_string());
         let content = match fs::read_to_string(&path) {
             Ok(c) => c,
@@ -170,35 +135,23 @@ fn sync_skills(root: &Path) {
 fn sync_subagents(root: &Path) {
     let target_dir = root.join(".agents").join("subagents");
 
-    let subagent_dir = match find_class_dir(root, "Subagent") {
-        Some(d) => d,
-        None => return,
-    };
-
-    let entries = match fs::read_dir(&subagent_dir) {
-        Ok(e) => e,
-        Err(_) => return,
-    };
+    let Some(sources) = super::claude::class_sources(root, "Subagent") else { return };
 
     let mut synced = 0;
     let mut failed = 0;
     let mut source_names: std::collections::HashSet<String> = std::collections::HashSet::new();
 
-    for entry in entries.filter_map(|e| e.ok()) {
-        let path = entry.path();
-
-        if path.is_dir() {
-            continue;
-        }
-        let fname = match path.file_name().and_then(|n| n.to_str()) {
-            Some(n) => n.to_string(),
-            None => continue,
-        };
-        if !fname.ends_with(".md") || fname.starts_with("__") || fname.starts_with('.') {
-            continue;
-        }
-
-        let name = fname.strip_suffix(".md").unwrap();
+    // A name two folders both hold is deployed from neither (see
+    // `class_sources`); it still counts as a source, so nothing is pruned.
+    for (name, paths) in &sources.clashes {
+        let files: Vec<String> = paths.iter().map(|p| p.strip_prefix(root).unwrap_or(p).display().to_string()).collect();
+        eprintln!("harness: {name} is the name of more than one file: {}. Rename one; neither is deployed until then.", files.join(", "));
+        failed += 1;
+        source_names.insert(name.clone());
+    }
+    for (name, path) in &sources.files {
+        let name = name.as_str();
+        let fname = format!("{name}.md");
         source_names.insert(name.to_string());
         let content = match fs::read_to_string(&path) {
             Ok(c) => c,
@@ -240,7 +193,7 @@ fn transform_skill(content: &str, name: &str) -> String {
 
     for line in soul_fm.lines() {
         let line = line.trim();
-        if let Some(val) = strip_fm_key(line, "soul.Skill.skillDescription") {
+        if let Some(val) = super::claude::class_key(line, "Skill", "skillDescription") {
             description = val;
         } else if description.is_empty() {
             if let Some(val) = strip_fm_key(line, "git-lex.Skill.description") {

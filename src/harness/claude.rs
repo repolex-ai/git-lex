@@ -54,24 +54,71 @@ pub(crate) fn harness_failure_count() -> usize {
     HARNESS_FAILURES.load(std::sync::atomic::Ordering::Relaxed)
 }
 
-fn find_class_dir(root: &Path, class_name: &str) -> Option<PathBuf> {
-    // Check root first (legacy flat layout)
+/// The source files of one class (`Skill`, `Subagent`) across the whole
+/// repository: `<class>/` at the root, then `<Folder>/<class>/` for every
+/// top-level folder in name order (`Copia/Skill/`, `Soul/Skill/`). Every
+/// kit keeps its classes under its own folder, and all of them deploy into
+/// the harness's one flat list (goodlux, 2026-11-22).
+///
+/// `files` is each name held by exactly one file; `clashes` is each name
+/// held by more than one. None when no such folder exists at all, which is
+/// what keeps the prune from arming in a repository with no source of truth.
+pub(super) struct ClassSources {
+    pub files: Vec<(String, PathBuf)>,
+    pub clashes: Vec<(String, Vec<PathBuf>)>,
+}
+
+pub(super) fn class_sources(root: &Path, class_name: &str) -> Option<ClassSources> {
+    let mut dirs: Vec<PathBuf> = Vec::new();
     let flat = root.join(class_name);
-    if flat.exists() && flat.is_dir() {
-        return Some(flat);
+    if flat.is_dir() {
+        dirs.push(flat);
     }
-    // Scan namespace folders
-    let entries = fs::read_dir(root).ok()?;
-    for entry in entries.filter_map(|e| e.ok()) {
-        let path = entry.path();
-        let name = entry.file_name().to_string_lossy().to_string();
-        if !path.is_dir() || name.starts_with('.') { continue; }
-        let candidate = path.join(class_name);
-        if candidate.exists() && candidate.is_dir() {
-            return Some(candidate);
+    let mut folders: Vec<PathBuf> = fs::read_dir(root)
+        .ok()?
+        .filter_map(|e| e.ok())
+        .filter(|e| !e.file_name().to_string_lossy().starts_with('.'))
+        .map(|e| e.path().join(class_name))
+        .filter(|candidate| candidate.is_dir())
+        .collect();
+    folders.sort();
+    dirs.extend(folders);
+    if dirs.is_empty() {
+        return None;
+    }
+    let mut by_name: std::collections::BTreeMap<String, Vec<PathBuf>> = std::collections::BTreeMap::new();
+    for dir in &dirs {
+        let mut paths: Vec<PathBuf> = fs::read_dir(dir).map(|es| es.filter_map(|e| e.ok()).map(|e| e.path()).collect()).unwrap_or_default();
+        paths.sort();
+        for path in paths {
+            let Some(fname) = path.file_name().and_then(|n| n.to_str()) else { continue };
+            if path.is_dir() || !fname.ends_with(".md") || fname.starts_with("__") || fname.starts_with('.') {
+                continue;
+            }
+            by_name.entry(fname.trim_end_matches(".md").to_string()).or_default().push(path);
         }
     }
-    None
+    let (mut files, mut clashes) = (Vec::new(), Vec::new());
+    for (name, mut paths) in by_name {
+        if paths.len() == 1 {
+            files.push((name, paths.remove(0)));
+        } else {
+            clashes.push((name, paths));
+        }
+    }
+    Some(ClassSources { files, clashes })
+}
+
+/// The value of one of a class's frontmatter keys, whichever kit's prefix
+/// the file writes it with: `soul.Skill.skillDescription` in `Soul/Skill/`,
+/// `copia.Skill.skillDescription` in `Copia/Skill/`.
+pub(super) fn class_key(line: &str, class_name: &str, property: &str) -> Option<String> {
+    let (key, value) = line.split_once(':')?;
+    if !key.trim().ends_with(&format!(".{class_name}.{property}")) {
+        return None;
+    }
+    let value = value.trim();
+    Some(value.strip_prefix('"').and_then(|v| v.strip_suffix('"')).unwrap_or(value).to_string())
 }
 
 /// Sync all soul documents into Claude Code's harness directories.
@@ -95,15 +142,7 @@ fn sync_skills(root: &Path) {
     let target_dir = root.join(".claude").join("skills");
 
     // Find Skill/ under any namespace folder (e.g., Soul/Skill/)
-    let skill_dir = match find_class_dir(root, "Skill") {
-        Some(d) => d,
-        None => return,
-    };
-
-    let entries = match fs::read_dir(&skill_dir) {
-        Ok(e) => e,
-        Err(_) => return,
-    };
+    let Some(sources) = class_sources(root, "Skill") else { return };
 
     let mut synced = 0;
     let mut failed = 0;
@@ -112,21 +151,18 @@ fn sync_skills(root: &Path) {
     // from the prune (a read blip is not a deletion).
     let mut source_names: std::collections::HashSet<String> =
         std::collections::HashSet::new();
-    for entry in entries.filter_map(|e| e.ok()) {
-        let path = entry.path();
-
-        if path.is_dir() {
-            continue;
-        }
-        let fname = match path.file_name().and_then(|n| n.to_str()) {
-            Some(n) => n.to_string(),
-            None => continue,
-        };
-        if !fname.ends_with(".md") || fname.starts_with("__") || fname.starts_with('.') {
-            continue;
-        }
-
-        let name = fname.strip_suffix(".md").unwrap();
+    // A name two folders both hold is deployed from neither: the harness
+    // keeps one flat list, so one of them would silently win. Both files are
+    // named, the save reports a failure, and the name is still counted as a
+    // source so a copy already deployed is not pruned.
+    for (name, paths) in &sources.clashes {
+        let files: Vec<String> = paths.iter().map(|p| p.strip_prefix(root).unwrap_or(p).display().to_string()).collect();
+        eprintln!("harness: {name} is the name of more than one file: {}. Rename one; neither is deployed until then.", files.join(", "));
+        failed += 1;
+        source_names.insert(name.clone());
+    }
+    for (name, path) in &sources.files {
+        let name = name.as_str();
         source_names.insert(name.to_string());
         let content = match fs::read_to_string(&path) {
             Ok(c) => c,
@@ -204,35 +240,25 @@ fn sync_skills(root: &Path) {
 fn sync_subagents(root: &Path) {
     let target_dir = root.join(".claude").join("agents");
 
-    let subagent_dir = match find_class_dir(root, "Subagent") {
-        Some(d) => d,
-        None => return,
-    };
-
-    let entries = match fs::read_dir(&subagent_dir) {
-        Ok(e) => e,
-        Err(_) => return,
-    };
+    let Some(sources) = class_sources(root, "Subagent") else { return };
 
     let mut synced = 0;
     let mut failed = 0;
     let mut source_names: std::collections::HashSet<String> =
         std::collections::HashSet::new();
-    for entry in entries.filter_map(|e| e.ok()) {
-        let path = entry.path();
-
-        if path.is_dir() {
-            continue;
-        }
-        let fname = match path.file_name().and_then(|n| n.to_str()) {
-            Some(n) => n.to_string(),
-            None => continue,
-        };
-        if !fname.ends_with(".md") || fname.starts_with("__") || fname.starts_with('.') {
-            continue;
-        }
-
-        let name = fname.strip_suffix(".md").unwrap();
+    // A name two folders both hold is deployed from neither: the harness
+    // keeps one flat list, so one of them would silently win. Both files are
+    // named, the save reports a failure, and the name is still counted as a
+    // source so a copy already deployed is not pruned.
+    for (name, paths) in &sources.clashes {
+        let files: Vec<String> = paths.iter().map(|p| p.strip_prefix(root).unwrap_or(p).display().to_string()).collect();
+        eprintln!("harness: {name} is the name of more than one file: {}. Rename one; neither is deployed until then.", files.join(", "));
+        failed += 1;
+        source_names.insert(name.clone());
+    }
+    for (name, path) in &sources.files {
+        let name = name.as_str();
+        let fname = format!("{name}.md");
         source_names.insert(name.to_string());
         let content = match fs::read_to_string(&path) {
             Ok(c) => c,
@@ -450,13 +476,13 @@ fn transform_skill(content: &str, name: &str) -> String {
 
     for line in soul_fm.lines() {
         let line = line.trim();
-        if let Some(val) = strip_fm_key(line, "soul.Skill.skillDescription") {
+        if let Some(val) = class_key(line, "Skill", "skillDescription") {
             description = val;
-        } else if let Some(val) = strip_fm_key(line, "soul.Skill.skillInvocability") {
+        } else if let Some(val) = class_key(line, "Skill", "skillInvocability") {
             invocability = val;
-        } else if let Some(val) = strip_fm_key(line, "soul.Skill.skillAllowedTools") {
+        } else if let Some(val) = class_key(line, "Skill", "skillAllowedTools") {
             allowed_tools = val;
-        } else if let Some(val) = strip_fm_key(line, "soul.Skill.skillArgumentHint") {
+        } else if let Some(val) = class_key(line, "Skill", "skillArgumentHint") {
             argument_hint = val;
         }
     }
@@ -493,13 +519,13 @@ fn transform_subagent(content: &str, name: &str) -> String {
 
     for line in soul_fm.lines() {
         let line = line.trim();
-        if let Some(val) = strip_fm_key(line, "soul.Subagent.subagentDescription") {
+        if let Some(val) = class_key(line, "Subagent", "subagentDescription") {
             description = val;
-        } else if let Some(val) = strip_fm_key(line, "soul.Subagent.subagentTools") {
+        } else if let Some(val) = class_key(line, "Subagent", "subagentTools") {
             tools = val;
-        } else if let Some(val) = strip_fm_key(line, "soul.Subagent.subagentModel") {
+        } else if let Some(val) = class_key(line, "Subagent", "subagentModel") {
             model = val;
-        } else if let Some(val) = strip_fm_key(line, "soul.Subagent.subagentMaxTurns") {
+        } else if let Some(val) = class_key(line, "Subagent", "subagentMaxTurns") {
             max_turns = val;
         }
     }
@@ -552,16 +578,6 @@ fn split_frontmatter(content: &str) -> (String, String) {
 }
 
 /// Extract a value from a YAML frontmatter line like `key: "value"` or `key: value`.
-fn strip_fm_key(line: &str, key: &str) -> Option<String> {
-    let prefix = format!("{}:", key);
-    if !line.starts_with(&prefix) {
-        return None;
-    }
-    let val = line[prefix.len()..].trim();
-    let val = val.strip_prefix('"').and_then(|v| v.strip_suffix('"')).unwrap_or(val);
-    Some(val.to_string())
-}
-
 /// The canonical set of Claude Code hook event names, per the docs
 /// (https://code.claude.com/docs/en/hooks.md, verified Day 48). A hook file's
 /// event is the segment of its filename BEFORE the first '-' (or the whole stem if
@@ -1338,6 +1354,35 @@ mod prune_tests {
     /// kit-shipped survives, tracked orphan is pruned (recoverable),
     /// never-committed orphan is refused (unrecoverable), and a dir
     /// without SKILL.md is not a skill and is never touched.
+    #[test]
+    fn skills_come_from_every_namespace_folder_and_a_shared_name_from_neither() {
+        let root = std::env::temp_dir().join(format!("gitlex-skill-folders-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        for (file, body) in [
+            ("Soul/Skill/journal.md", "---\nsoul.Skill.skillDescription: write the day\n---\nbody\n"),
+            ("Copia/Skill/pose.md", "---\ncopia.Skill.skillDescription: strike one\ncopia.Skill.skillInvocability: agent\n---\nbody\n"),
+            ("Soul/Skill/both.md", "---\n---\nsoul\n"),
+            ("Copia/Skill/both.md", "---\n---\ncopia\n"),
+            ("Copia/Skill/__Skill.md", "---\n---\ntemplate\n"),
+        ] {
+            let path = root.join(file);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, body).unwrap();
+        }
+        let sources = class_sources(&root, "Skill").unwrap();
+        let names: Vec<&str> = sources.files.iter().map(|(n, _)| n.as_str()).collect();
+        assert_eq!(names, ["journal", "pose"]);
+        assert_eq!(sources.clashes.len(), 1);
+        assert_eq!(sources.clashes[0].0, "both");
+        assert_eq!(sources.clashes[0].1, [root.join("Copia/Skill/both.md"), root.join("Soul/Skill/both.md")]);
+        // A key is read whichever kit's prefix it carries.
+        let deployed = transform_skill(&fs::read_to_string(root.join("Copia/Skill/pose.md")).unwrap(), "pose");
+        assert!(deployed.contains("description: strike one"), "{deployed}");
+        assert!(deployed.contains("user-invocable: false"), "{deployed}");
+        assert!(class_sources(&root, "Subagent").is_none());
+        let _ = fs::remove_dir_all(&root);
+    }
+
     #[test]
     fn skill_prune_is_source_or_kit_backed_and_tracked_only() {
         let root = git_repo("skills");
