@@ -963,6 +963,84 @@ pub fn compose_agents_hooks(root: &Path) -> ComposedHooks {
     report
 }
 
+/// Does this document say a kit planted it? True when its frontmatter has a
+/// key ending in `kitManaged` (bare, or dotted like `soul.Skill.kitManaged`)
+/// whose value is `true`. Only the frontmatter is read.
+pub fn says_kit_managed(path: &Path) -> bool {
+    let Ok(text) = fs::read_to_string(path) else { return false };
+    let mut lines = text.lines();
+    if lines.next().map(str::trim_end) != Some("---") {
+        return false;
+    }
+    for line in lines {
+        if line.trim_end() == "---" {
+            break;
+        }
+        let Some((key, value)) = line.split_once(':') else { continue };
+        let key = key.trim();
+        if (key == "kitManaged" || key.ends_with(".kitManaged"))
+            && value.trim().trim_matches('"') == "true"
+        {
+            return true;
+        }
+    }
+    false
+}
+
+/// Delete every document that says a kit planted it (`kitManaged: true`) and
+/// that no installed kit ships any more: a skill the kit renamed or dropped.
+/// A document without the line is never touched, whatever its name or
+/// folder, so only what a kit delivered can be removed (goodlux, 2026-11-22;
+/// spec 2026_08_26_KITMANAGED_REAP_SPEC). Returns the paths removed,
+/// relative to the repository.
+///
+/// `kit_dirs` must be every installed kit. If any of them is not a complete
+/// fetch (no `kit.yml`), nothing is deleted: a kit that failed to download
+/// would otherwise look like a kit that dropped all its files.
+pub fn remove_dropped_kit_files(root: &Path, kit_dirs: &[PathBuf]) -> Vec<String> {
+    if kit_dirs.is_empty() || kit_dirs.iter().any(|k| !k.join("kit.yml").is_file()) {
+        return Vec::new();
+    }
+    let shipped = |rel: &Path| {
+        kit_dirs.iter().any(|k| {
+            k.join("content").join(rel).is_file() || k.join("scaffold").join(rel).is_file()
+        })
+    };
+    fn walk(dir: &Path, out: &mut Vec<PathBuf>) {
+        let Ok(entries) = fs::read_dir(dir) else { return };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            let Ok(ft) = entry.file_type() else { continue };
+            if ft.is_dir() {
+                // Dot folders hold git, .lex and the harness copies, none of
+                // which are documents.
+                if !name.starts_with('.') && name != "target" && name != "node_modules" {
+                    walk(&path, out);
+                }
+            } else if ft.is_file() && name.ends_with(".md") {
+                out.push(path);
+            }
+        }
+    }
+    let mut docs = Vec::new();
+    walk(root, &mut docs);
+    docs.sort();
+    let mut removed = Vec::new();
+    for doc in docs {
+        let Ok(rel) = doc.strip_prefix(root) else { continue };
+        if shipped(rel) || !says_kit_managed(&doc) {
+            continue;
+        }
+        match fs::remove_file(&doc) {
+            Ok(_) => removed.push(rel.to_string_lossy().to_string()),
+            Err(e) => eprintln!("ERROR: could not remove {}: {e}", rel.display()),
+        }
+    }
+    removed
+}
+
 /// Report from `install_scaffold_files_from_skip_existing`.
 ///
 /// - `installed`: files that were missing locally, copied from the kit.
@@ -1467,6 +1545,38 @@ mod tests {
         assert!(tmp.join(".git").join("x.kit-latest").exists(), ".git/ never entered");
 
         std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    #[test]
+    fn a_dropped_kit_file_is_removed_and_an_authored_one_is_not() {
+        let tmp = std::env::temp_dir().join(format!("glx_dropped_{}_{}", std::process::id(), timestamp_now_utc()));
+        let kit = tmp.join(".lex/kit/org/git-lex-kit-soul");
+        let skills = tmp.join("Soul/Skill");
+        std::fs::create_dir_all(kit.join("content/Soul/Skill")).unwrap();
+        std::fs::create_dir_all(&skills).unwrap();
+        std::fs::write(kit.join("kit.yml"), "name: soul\n").unwrap();
+        let managed = "---\nsoul.Skill.kitManaged: true\n---\nbody\n";
+        // Still shipped: stays. Dropped by the kit: goes. Written by the
+        // agent, in the same folder: stays. Says kitManaged only in its
+        // body, not its frontmatter: stays.
+        std::fs::write(kit.join("content/Soul/Skill/soul-kit-journal.md"), managed).unwrap();
+        std::fs::write(skills.join("soul-kit-journal.md"), managed).unwrap();
+        std::fs::write(skills.join("soul-kit-gone.md"), managed).unwrap();
+        std::fs::write(skills.join("mine.md"), "---\nsoul.Skill.title: \"mine\"\n---\nbody\n").unwrap();
+        std::fs::write(skills.join("talks-about-it.md"), "---\ntitle: x\n---\nkitManaged: true\n").unwrap();
+
+        let removed = remove_dropped_kit_files(&tmp, std::slice::from_ref(&kit));
+        assert_eq!(removed, vec!["Soul/Skill/soul-kit-gone.md".to_string()]);
+        assert!(skills.join("soul-kit-journal.md").exists());
+        assert!(skills.join("mine.md").exists());
+        assert!(skills.join("talks-about-it.md").exists());
+
+        // A kit that did not download (no kit.yml) removes nothing.
+        std::fs::write(skills.join("soul-kit-gone.md"), managed).unwrap();
+        std::fs::remove_file(kit.join("kit.yml")).unwrap();
+        assert!(remove_dropped_kit_files(&tmp, std::slice::from_ref(&kit)).is_empty());
+        assert!(skills.join("soul-kit-gone.md").exists());
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 
     #[test]

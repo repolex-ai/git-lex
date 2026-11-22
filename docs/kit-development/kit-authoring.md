@@ -71,6 +71,35 @@ kit-update`.** The rules, in full:
   kit. (If it's *missing*, the kit's scaffold restores it, and kit-update
   self-heals its `soulId` from the repo's genesis commit.)
 
+- A document that says `kitManaged: true` and that **no installed kit ships
+  any more** → **deleted**, and its path is printed. This is how a kit takes
+  back a skill or query it renamed or dropped. A document without that line
+  is never deleted, whatever its name or folder.
+
+### Documents a kit delivers: skills, queries and the rest
+
+A kit delivers a document by shipping it under `content/` at the path it
+should have in the repository: `content/Soul/Skill/soul-kit-journal.md` in the
+soul kit lands at `Soul/Skill/soul-kit-journal.md`; a Copia skill ships at
+`content/Copia/Skill/copia-kit-<name>.md`. Three rules, all of them the kit
+author's to keep (goodlux, 2026-11-22):
+
+1. **The file name starts with `<kit>-kit-`**: `soul-kit-journal.md`,
+   `copia-kit-make-a-scene.md`. Someone looking at a folder can tell at a
+   glance which files came from a kit. The name is for readers; git-lex does
+   not act on it.
+2. **The frontmatter says `kitManaged: true`**, spelled with the class like
+   any other key (`soul.Skill.kitManaged: true`). This line is what git-lex
+   acts on when it deletes. Never put it in a document an agent wrote.
+3. **The body opens by saying so**: that the kit delivers this file, that
+   every `git lex kit-update` replaces it, and that a changed version belongs
+   in a new file under another name.
+
+Deliver what explains the kit and its tools to someone on their first day.
+A kit-delivered document that has gone out of date is worse than none, so
+drop it from the kit when nobody keeps it current; the next kit-update removes
+it everywhere.
+
 There is no `--force`, no drift sidecar, no `.bak` stash for kit-shipped
 files. Any `<file>.bak` left beside a kit-owned path by the retired backup
 mechanism is swept on the next kit-update. (The one place a `.bak` is still

@@ -472,6 +472,27 @@ pub(crate) fn cmd_kit_update(kit_arg: Option<String>) -> Outcome {
         }
         all_updated.extend(report.updated);
     }
+    // What a kit planted and no longer ships is removed, and each path is
+    // printed: a renamed kit skill must not leave its old name behind.
+    // Every installed kit is asked, not only the one being updated: a file
+    // another kit ships has not been dropped.
+    let kit_dirs: Vec<std::path::PathBuf> = all_installed_kits
+        .iter()
+        .map(|spec| {
+            let (org, repo, _) = resolve_kit_spec(spec);
+            lex_dir.join("kit").join(org).join(repo)
+        })
+        .collect();
+    let dropped = git_lex::kit::remove_dropped_kit_files(&root, &kit_dirs);
+    if !dropped.is_empty() {
+        println!(
+            "Removed {} kit file(s) that no installed kit ships any more (the old copies are in git history):",
+            dropped.len()
+        );
+        for path in &dropped {
+            println!("  {path}");
+        }
+    }
     if total_swept_baks > 0 {
         println!(
             "Swept {} retired .bak convergence backup(s) — git history is the backup",
