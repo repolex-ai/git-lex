@@ -193,15 +193,14 @@ fn transform_skill(content: &str, name: &str) -> String {
 
     for line in soul_fm.lines() {
         let line = line.trim();
-        if let Some(val) = super::claude::class_key(line, "Skill", "skillDescription") {
-            description = val;
-        } else if description.is_empty() {
-            if let Some(val) = strip_fm_key(line, "git-lex.Skill.description") {
-                description = val;
-            } else if let Some(val) = strip_fm_key(line, "description") {
+        if description.is_empty()
+            && let Some(val) = strip_fm_key(line, "description") {
                 description = val;
             }
-        }
+    }
+    // The class's own key wins over a bare `description:` line.
+    if let Some(val) = super::claude::skill_value(&soul_fm, "description", "skillDescription") {
+        description = val;
     }
 
     let mut fm = format!("---\nname: {}\n", name);

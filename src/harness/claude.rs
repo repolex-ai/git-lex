@@ -121,6 +121,16 @@ pub(super) fn class_key(line: &str, class_name: &str, property: &str) -> Option<
     Some(value.strip_prefix('"').and_then(|v| v.strip_suffix('"')).unwrap_or(value).to_string())
 }
 
+/// One of a skill's frontmatter values. The property is read under its name
+/// on `git-lex:Skill` (`description`, `invocability`, `allowedTools`,
+/// `argumentHint`) first, and under the older `skill`-prefixed name a file
+/// may still carry when the first is absent (goodlux, 2026-11-22: the
+/// prefix is dropped; files written before that keep working).
+pub(super) fn skill_value(frontmatter: &str, name: &str, older_name: &str) -> Option<String> {
+    let under = |property: &str| frontmatter.lines().find_map(|line| class_key(line.trim(), "Skill", property));
+    under(name).or_else(|| under(older_name))
+}
+
 /// Sync all soul documents into Claude Code's harness directories.
 pub fn sync_all(root: &Path) {
     sync_skills(root);
@@ -474,17 +484,17 @@ fn transform_skill(content: &str, name: &str) -> String {
     let mut allowed_tools = String::new();
     let mut argument_hint = String::new();
 
-    for line in soul_fm.lines() {
-        let line = line.trim();
-        if let Some(val) = class_key(line, "Skill", "skillDescription") {
-            description = val;
-        } else if let Some(val) = class_key(line, "Skill", "skillInvocability") {
-            invocability = val;
-        } else if let Some(val) = class_key(line, "Skill", "skillAllowedTools") {
-            allowed_tools = val;
-        } else if let Some(val) = class_key(line, "Skill", "skillArgumentHint") {
-            argument_hint = val;
-        }
+    if let Some(val) = skill_value(&soul_fm, "description", "skillDescription") {
+        description = val;
+    }
+    if let Some(val) = skill_value(&soul_fm, "invocability", "skillInvocability") {
+        invocability = val;
+    }
+    if let Some(val) = skill_value(&soul_fm, "allowedTools", "skillAllowedTools") {
+        allowed_tools = val;
+    }
+    if let Some(val) = skill_value(&soul_fm, "argumentHint", "skillArgumentHint") {
+        argument_hint = val;
     }
 
     let user_invocable = match invocability.as_str() {
@@ -1379,6 +1389,12 @@ mod prune_tests {
         let deployed = transform_skill(&fs::read_to_string(root.join("Copia/Skill/pose.md")).unwrap(), "pose");
         assert!(deployed.contains("description: strike one"), "{deployed}");
         assert!(deployed.contains("user-invocable: false"), "{deployed}");
+        // The names without the `skill` prefix are read first; the older
+        // ones still work where a file has not been rewritten.
+        let newer = transform_skill("---\ncopia.Skill.description: new words\ncopia.Skill.skillDescription: old words\ncopia.Skill.invocability: agent\ncopia.Skill.allowedTools: Read\ncopia.Skill.argumentHint: <id>\n---\nbody\n", "pose");
+        for line in ["description: new words", "user-invocable: false", "allowed-tools: Read", "argument-hint: \"<id>\""] {
+            assert!(newer.contains(line), "{line}: {newer}");
+        }
         assert!(class_sources(&root, "Subagent").is_none());
         let _ = fs::remove_dir_all(&root);
     }
