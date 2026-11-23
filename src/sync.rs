@@ -748,17 +748,22 @@ struct FileDates {
     updated: String,
 }
 
-/// Read `git log --reverse --format=%x01%cI -z --name-status -M50%` output
+/// Read `git log --reverse --format=%x01<date>%x02<mechanical trailer> -z --name-status -M50%` output
 /// (oldest commit first) into the dates of every markdown file still
 /// present at the end. A rename carries the date the file was created; a
 /// deleted file is dropped; a file added again starts over.
 fn parse_file_dates(raw: &str) -> std::collections::HashMap<String, FileDates> {
     let mut files: std::collections::HashMap<String, FileDates> = std::collections::HashMap::new();
     let mut date = String::new();
+    // A commit that only reshaped files (`git lex save --mechanical`)
+    // adds, renames and deletes like any other, and changes no date.
+    let mut mechanical = false;
     let mut tokens = raw.split('\0').map(|t| t.trim_start_matches('\n'));
     while let Some(token) = tokens.next() {
-        if let Some(d) = token.strip_prefix('\u{1}') {
+        if let Some(header) = token.strip_prefix('\u{1}') {
+            let (d, trailer) = header.split_once('\u{2}').unwrap_or((header, ""));
             date = d.trim().to_string();
+            mechanical = trailer.trim() == "true";
             continue;
         }
         let Some(status) = token.chars().next() else { continue };
@@ -766,8 +771,13 @@ fn parse_file_dates(raw: &str) -> std::collections::HashMap<String, FileDates> {
             'R' | 'C' => {
                 let (Some(old), Some(new)) = (tokens.next(), tokens.next()) else { break };
                 let carried = if status == 'R' { files.remove(old) } else { files.get(old).cloned() };
+                let updated = match (&carried, mechanical) {
+                    (Some(f), true) => f.updated.clone(),
+                    (None, true) => continue,
+                    _ => date.clone(),
+                };
                 let created = carried.and_then(|f| f.created).or_else(|| (status == 'C').then(|| date.clone()));
-                files.insert(new.to_string(), FileDates { created, updated: date.clone() });
+                files.insert(new.to_string(), FileDates { created, updated });
             }
             'D' => {
                 if let Some(path) = tokens.next() {
@@ -780,7 +790,9 @@ fn parse_file_dates(raw: &str) -> std::collections::HashMap<String, FileDates> {
                 }
             }
             _ => {
-                if let Some(path) = tokens.next() {
+                if let Some(path) = tokens.next()
+                    && !mechanical
+                {
                     files
                         .entry(path.to_string())
                         .and_modify(|f| f.updated = date.clone())
@@ -811,6 +823,12 @@ mod file_dates_tests {
         assert_eq!(get("Note/b2.md"), Some(FileDates { created: Some("2026-01-01T10:00:00-08:00".into()), updated: "2026-02-01T10:00:00-08:00".into() }));
         // Deleted: gone.
         assert_eq!(get("Note/c.md"), None);
+        // A commit marked mechanical moves no date, whatever it touched.
+        let swept = format!("{raw}\u{1}2026-04-01T10:00:00-08:00\u{2}true\0\nM\0Note/a.md\0R090\0Note/b2.md\0Note/b3.md\0A\0Note/new.md\0");
+        let files2 = parse_file_dates(&swept);
+        assert_eq!(files2.get("Note/a.md").map(|f| f.updated.as_str()), Some("2026-02-01T10:00:00-08:00"));
+        assert_eq!(files2.get("Note/b3.md").map(|f| f.updated.as_str()), Some("2026-02-01T10:00:00-08:00"));
+        assert_eq!(files2.get("Note/new.md").map(|f| f.updated.as_str()), Some("2026-04-01T10:00:00-08:00"));
         // Changed but added before the commits read: no created date claimed.
         assert_eq!(get("Note/old.md"), Some(FileDates { created: None, updated: "2026-03-01T10:00:00-08:00".into() }));
     }
@@ -830,7 +848,11 @@ fn write_document_dates(store: &Store, root: &std::path::Path, from: Option<&str
     use oxigraph::model::{GraphNameRef, Literal, NamedNode, NamedNodeRef, NamedOrBlankNode, Quad, TermRef};
     let fail = |e: String| Failure::new(format!("ERROR: could not write the documents' dates into the store: {e}"));
     let exclude = from.map(|sha| format!("^{sha}"));
-    let mut args = vec!["log", "--reverse", "--format=%x01%cI", "-z", "--name-status", "-M50%"];
+    let format = format!(
+        "--format=%x01%cI%x02%(trailers:key={},valueonly,separator=%x20)",
+        crate::MECHANICAL_TRAILER
+    );
+    let mut args = vec!["log", "--reverse", format.as_str(), "-z", "--name-status", "-M50%"];
     if let Some(x) = &exclude {
         args.push(x);
     }

@@ -83,7 +83,16 @@ fn resolve_agent_identity(root: &std::path::Path) -> Option<(String, String)> {
     None
 }
 
-pub(crate) fn cmd_save(message: &str, dry_run: bool) -> Outcome {
+pub(crate) fn cmd_save(message: &str, dry_run: bool, mechanical: bool) -> Outcome {
+    // A commit that only reshapes files says so in a trailer, which is what
+    // sync reads when it dates each document (sync::write_document_dates).
+    let marked;
+    let message = if mechanical {
+        marked = format!("{}\n\n{}: true", message.trim_end(), git_lex::MECHANICAL_TRAILER);
+        marked.as_str()
+    } else {
+        message
+    };
     let root = require_git_root()?;
     // Only `git lex init` creates `.lex/` (git-lex#47). A save in a
     // repository that was never set up used to create `.lex/`, install the

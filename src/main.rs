@@ -187,6 +187,11 @@ enum Commands {
         /// nothing. Exit 0 means a real save would pass its gates.
         #[arg(long)]
         dry_run: bool,
+        /// Say that this commit only reshapes files (a key renamed by a
+        /// script, a bulk cleanup): it then does not count as a change to
+        /// any document, and their updatedDate stays where it was.
+        #[arg(long)]
+        mechanical: bool,
     },
     /// Remove .lex/ entirely (content files and git history are preserved).
     Nuke,
@@ -370,7 +375,7 @@ fn run(command: Commands) -> Outcome {
             create::cmd_list(json);
             Ok(())
         }
-        Commands::Save { message, dry_run } => save::cmd_save(&message, dry_run),
+        Commands::Save { message, dry_run, mechanical } => save::cmd_save(&message, dry_run, mechanical),
         Commands::Query { query, params, json } => query::cmd_query(query, params, json),
         Commands::Direct { query, params, json } => query::cmd_direct(query, params, json),
         Commands::Hook { event } => {

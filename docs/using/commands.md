@@ -7,7 +7,7 @@ page), and every subcommand answers `--help` too.
 |---|---|
 | `git lex init [<dir>] [--kit <kit>]` | Set up git-lex in a repository (offers Git initialization if needed; base kit always installed). Only `init` creates `.lex/` — `sync` and `query` refuse in a repository without `.lex/repo.yml`. |
 | `git lex create <type> [id] [--list] [--json]` | Scaffold a new document of a kit type; `--list` lists creatable classes. |
-| `git lex save ["msg"] [--dry-run]` | Stage, validate, extract, commit; `--dry-run` runs every gate, commits nothing. Nudges `gitlexd` after committing. |
+| `git lex save ["msg"] [--dry-run] [--mechanical]` | Stage, validate, extract, commit; `--dry-run` runs every gate, commits nothing; `--mechanical` marks a commit that only reshapes files (a key renamed by a script), so it does not move any document's `updatedDate`. Nudges `gitlexd` after committing. |
 | `git lex sync` | Compile committed history into the persistent store (Oxigraph). Handed to `gitlexd` when running (waits for result); prints a per-phase elapsed timing breakdown. Refuses without `.lex/repo.yml`. |
 | `git lex export-spine` | Write the semantic index as one TSV spine for LLM context caches (`.lex/_ignore/spine/<synced-commit>.spine.tsv`). |
 | `git lex --skill` | Print the agent manual plus this repo's compact ontology (every class and property of the installed kits). The same text is kept current in `.lex/COMPACT-ONTOLOGY.md`. |

@@ -2598,3 +2598,8 @@ mod may_read_store_tests {
 /// there reads as something to fill in (goodlux, 2026-11-22).
 pub const NOT_FOR_THE_WRITER: [&str; 6] =
     ["fileId", "sparql", "createdDate", "updatedDate", "substrate", "kitManaged"];
+
+/// The commit trailer `git lex save --mechanical` writes. A commit carrying
+/// it reshaped files without changing what any document says, so it does
+/// not move a document's updatedDate.
+pub const MECHANICAL_TRAILER: &str = "Lex-Mechanical";
