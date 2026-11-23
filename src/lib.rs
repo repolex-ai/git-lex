@@ -2592,3 +2592,9 @@ mod may_read_store_tests {
         assert_eq!(status(may_read_store(Some(&other), MINE, &bare, None)), Err(403));
     }
 }
+
+/// Properties whose value git-lex works out, or that only a kit sets. A new
+/// document and a class template carry no line for them: a blank line
+/// there reads as something to fill in (goodlux, 2026-11-22).
+pub const NOT_FOR_THE_WRITER: [&str; 6] =
+    ["fileId", "sparql", "createdDate", "updatedDate", "substrate", "kitManaged"];

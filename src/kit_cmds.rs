@@ -292,6 +292,9 @@ pub(crate) fn emit_class_templates(kit_name: &str, root: &std::path::Path, creat
         // line each is not.
         let mut emitted_keys: std::collections::HashSet<String> = std::collections::HashSet::new();
         for (prop_name, prop_type, _required, _comment) in properties {
+            if git_lex::NOT_FOR_THE_WRITER.contains(&prop_name.as_str()) {
+                continue;
+            }
             let key = format!("{}.{}.{}", short, type_name, prop_name);
             if !emitted_keys.insert(key.clone()) {
                 continue;

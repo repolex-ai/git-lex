@@ -251,7 +251,10 @@ pub fn emit_git2_nquads_at(nq: &mut impl NqSink, head: Option<&str>) {
                     "dev_history_horizon" => {} // CONFIG, not a fact (dev-only walk stopgap) — never emitted
                     "link_semantics" => {} // RETIRED wikilink-era key, still in old repo.ymls — never emitted
                     "optional_kits" => current_list = Some("optionalKit"),
-                    "substrates" => current_list = Some("substrate"),
+                    // Which harnesses this repository is set up for:
+                    // configuration git-lex reads, not a fact about the
+                    // Repo node (goodlux, 2026-11-22).
+                    "substrates" => {}
                     "name" | "kit" | "version" | "agent_name" | "agent_email" | "created" => {} // known key, empty value
                     // Which store this is. They decide the store's root and
                     // each graph's description (sync::describe_graphs); they
@@ -539,7 +542,7 @@ mod tests {
         // git-lex.ttl terms THIS module may emit (the repo node, v0.6).
         const GITLEX_DECLARED: &[&str] = &[
             "Repo", "genesisSha", "name", "kit", "created", "agentName",
-            "agentEmail", "version", "optionalKit", "substrate",
+            "agentEmail", "version", "optionalKit",
         ];
         let nq = generate_git2_nquads();
         for line in nq.lines() {

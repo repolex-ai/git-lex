@@ -55,7 +55,7 @@ Running `git lex init` configures `git-lex` in the current directory:
 The `git lex create <type> <id>` command initializes a new Markdown document of the specified class. It generates the required YAML frontmatter structure and prints the location of the new file. Use `--list` to see all creatable classes.
 
 ### Committing (`save`)
-`git lex save "message"` is the unified entrypoint for committing changes. It stages your files, updates timestamps, extracts frontmatter attributes into `.lex/extract/` sidecars, runs SHACL validation checks, commits the result, and nudges `gitlexd` when it is running. Use `--no-restamp` to preserve `updatedDate` during bulk sweeps or mechanical migrations.
+`git lex save "message"` is the unified entrypoint for committing changes. It stages your files, extracts frontmatter attributes into `.lex/extract/` sidecars, runs SHACL validation checks, commits the result, and nudges `gitlexd` when it is running.
 
 ### Syncing (`sync`)
 `git lex sync` processes your Git history, compiling committed facts and events into the persistent Oxigraph store. When `gitlexd` is running, `sync` hands the work to the daemon and waits for completion. Every sync reports a per-phase elapsed timing breakdown.

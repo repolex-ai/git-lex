@@ -22,7 +22,7 @@ pub fn cmd_session(as_json: bool) -> Outcome {
         .or_else(|_| std::env::var("CONVERSATION_ID"))
         .unwrap_or_else(|_| "untracked".to_string());
 
-    let substrate = crate::save::detect_runtime_substrate(&root)
+    let substrate = crate::save::runtime_model()
         .unwrap_or_else(|| "none".to_string());
 
     let session_hash = {

@@ -261,7 +261,11 @@ pub(crate) fn cmd_create(
     // teaching.
     let class_id_field = format!("{}Id", lower_first(&class_name));
 
+    let author = crate::save::author_name();
     for (prop_name, prop_type, _required, comment) in &properties {
+        if git_lex::NOT_FOR_THE_WRITER.contains(&prop_name.as_str()) {
+            continue;
+        }
         // Property names pass through as-is from the ontology (camelCase).
         // Class name is capitalized to match the ontology exactly.
         let key = format!("{}.{}.{}", short, class_name, prop_name);
@@ -286,6 +290,11 @@ pub(crate) fn cmd_create(
                 "{}: <{}/{}/{}>{}\n",
                 key, short, class_name, id_str, comment_suffix
             ));
+        } else if prop_name == "author" && let Some(author) = &author {
+            // Who is writing, and on what model when that can be read.
+            // Filled in here once; save never touches it, so a second
+            // author can be added by hand (goodlux, 2026-11-22).
+            fm.push_str(&format!("{}: \"{}\"{}\n", key, author, comment_suffix));
         } else if prop_name == "agentEmail" && class_name == "Agent" {
             // Auto-fill agentEmail for Agent type
             fm.push_str(&format!("{}: \"{}\"{}\n", key, agent_email, comment_suffix));

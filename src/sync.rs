@@ -195,6 +195,7 @@ These are in your WORKING FILES, not history — fix the listed files and the wa
     // Shares the SAME resolver context, so one-graph facts resolve
     // identically to now-view facts (and the indexes build once per sync,
     // not twice). ───
+    let dates_from = onegraph_resume.clone();
     let onegraph = sync_onegraph_walk(&store, &root, onegraph_resume, &resolver_ctx, &head_sha)?;
     clock.mark("history (one graph)");
 
@@ -252,6 +253,14 @@ These are in your WORKING FILES, not history — fix the listed files and the wa
         }
         clock.mark("now view (refresh)");
     }
+
+    // Each document's created and changed dates come from the commits that
+    // touched its file, and are written into the now view after it is built
+    // (goodlux, 2026-11-22). A store with no now view yet has no dates to
+    // keep, so it reads the whole history like a rebuild.
+    let whole_history = full_rebuild || !now_present;
+    write_document_dates(&store, &root, if whole_history { None } else { dates_from.as_deref() }, &head_sha)?;
+    clock.mark("document dates");
 
     store
         .flush()
@@ -686,6 +695,13 @@ fn refresh_now_view(store: &Store, subjects: &std::collections::HashSet<String>)
         for q in &stale {
             store.remove(q).map_err(|e| fail(e.to_string()))?;
         }
+        // The dates git gave this document are not in the history graph, so
+        // the copy below would lose them. They are put back when the
+        // document still exists and its own file states no such date.
+        let kept_dates: Vec<&Quad> = stale
+            .iter()
+            .filter(|q| DOCUMENT_DATE_PREDICATES.contains(&q.predicate.as_str()))
+            .collect();
         let is_event = store
             .contains(oxigraph::model::QuadRef::new(subject_ref, rdf_type, spo_event, one))
             .map_err(|e| fail(e.to_string()))?;
@@ -702,6 +718,187 @@ fn refresh_now_view(store: &Store, subjects: &std::collections::HashSet<String>)
             }
             let copy = Quad::new(q.subject, q.predicate, q.object, now);
             store.insert(&copy).map_err(|e| fail(e.to_string()))?;
+        }
+        let still_exists = store
+            .quads_for_pattern(Some(subject_ref), None, None, Some(GraphNameRef::from(now)))
+            .next()
+            .is_some();
+        for q in kept_dates {
+            let stated = store
+                .quads_for_pattern(Some(subject_ref), Some(q.predicate.as_ref()), None, Some(GraphNameRef::from(now)))
+                .next()
+                .is_some();
+            if still_exists && !stated {
+                store.insert(q).map_err(|e| fail(e.to_string()))?;
+            }
+        }
+    }
+    Ok(())
+}
+
+const CREATED_DATE: &str = "https://repolex.ai/ontology/git-lex/createdDate";
+const UPDATED_DATE: &str = "https://repolex.ai/ontology/git-lex/updatedDate";
+const DOCUMENT_DATE_PREDICATES: [&str; 2] = [CREATED_DATE, UPDATED_DATE];
+
+/// What the commits say about one markdown file: when it was added, if
+/// that happened in the commits read, and when it last changed.
+#[derive(Debug, Clone, PartialEq)]
+struct FileDates {
+    created: Option<String>,
+    updated: String,
+}
+
+/// Read `git log --reverse --format=%x01%cI -z --name-status -M50%` output
+/// (oldest commit first) into the dates of every markdown file still
+/// present at the end. A rename carries the date the file was created; a
+/// deleted file is dropped; a file added again starts over.
+fn parse_file_dates(raw: &str) -> std::collections::HashMap<String, FileDates> {
+    let mut files: std::collections::HashMap<String, FileDates> = std::collections::HashMap::new();
+    let mut date = String::new();
+    let mut tokens = raw.split('\0').map(|t| t.trim_start_matches('\n'));
+    while let Some(token) = tokens.next() {
+        if let Some(d) = token.strip_prefix('\u{1}') {
+            date = d.trim().to_string();
+            continue;
+        }
+        let Some(status) = token.chars().next() else { continue };
+        match status {
+            'R' | 'C' => {
+                let (Some(old), Some(new)) = (tokens.next(), tokens.next()) else { break };
+                let carried = if status == 'R' { files.remove(old) } else { files.get(old).cloned() };
+                let created = carried.and_then(|f| f.created).or_else(|| (status == 'C').then(|| date.clone()));
+                files.insert(new.to_string(), FileDates { created, updated: date.clone() });
+            }
+            'D' => {
+                if let Some(path) = tokens.next() {
+                    files.remove(path);
+                }
+            }
+            'A' => {
+                if let Some(path) = tokens.next() {
+                    files.insert(path.to_string(), FileDates { created: Some(date.clone()), updated: date.clone() });
+                }
+            }
+            _ => {
+                if let Some(path) = tokens.next() {
+                    files
+                        .entry(path.to_string())
+                        .and_modify(|f| f.updated = date.clone())
+                        .or_insert(FileDates { created: None, updated: date.clone() });
+                }
+            }
+        }
+    }
+    files
+}
+
+#[cfg(test)]
+mod file_dates_tests {
+    use super::*;
+
+    #[test]
+    fn dates_follow_a_file_through_edits_a_rename_and_a_delete() {
+        // Three commits, oldest first, as `git log -z --name-status` prints them.
+        let raw = "\u{1}2026-01-01T10:00:00-08:00\0\nA\0Note/a.md\0A\0Note/b.md\0A\0Note/c.md\0\
+                   \u{1}2026-02-01T10:00:00-08:00\0\nM\0Note/a.md\0R100\0Note/b.md\0Note/b2.md\0\
+                   \u{1}2026-03-01T10:00:00-08:00\0\nD\0Note/c.md\0M\0Note/old.md\0";
+        let files = parse_file_dates(raw);
+        let get = |p: &str| files.get(p).cloned();
+        // Edited: created stays, changed moves.
+        assert_eq!(get("Note/a.md"), Some(FileDates { created: Some("2026-01-01T10:00:00-08:00".into()), updated: "2026-02-01T10:00:00-08:00".into() }));
+        // Renamed: the new name keeps the day the file was created.
+        assert_eq!(get("Note/b.md"), None);
+        assert_eq!(get("Note/b2.md"), Some(FileDates { created: Some("2026-01-01T10:00:00-08:00".into()), updated: "2026-02-01T10:00:00-08:00".into() }));
+        // Deleted: gone.
+        assert_eq!(get("Note/c.md"), None);
+        // Changed but added before the commits read: no created date claimed.
+        assert_eq!(get("Note/old.md"), Some(FileDates { created: None, updated: "2026-03-01T10:00:00-08:00".into() }));
+    }
+}
+
+/// Write `git-lex:createdDate` and `git-lex:updatedDate` into the now view
+/// for every document whose file the commits after `from` touched (every
+/// commit, when `from` is None). The dates are the commits' own, so a
+/// document needs no date line and a change to its text alone still counts
+/// (goodlux, 2026-11-22). One `git log` for the range: a save of one commit
+/// reads one commit.
+///
+/// The date goes on the Thing the file expresses (whatever names the file
+/// as its `fileId`), or on the File itself when no Thing does. A markdown
+/// file the store does not hold is skipped.
+fn write_document_dates(store: &Store, root: &std::path::Path, from: Option<&str>, head_sha: &str) -> Outcome {
+    use oxigraph::model::{GraphNameRef, Literal, NamedNode, NamedNodeRef, NamedOrBlankNode, Quad, TermRef};
+    let fail = |e: String| Failure::new(format!("ERROR: could not write the documents' dates into the store: {e}"));
+    let exclude = from.map(|sha| format!("^{sha}"));
+    let mut args = vec!["log", "--reverse", "--format=%x01%cI", "-z", "--name-status", "-M50%"];
+    if let Some(x) = &exclude {
+        args.push(x);
+    }
+    args.extend([head_sha, "--", "*.md"]);
+    let out = Command::new("git")
+        .args(&args)
+        .current_dir(root)
+        .output()
+        .map_err(|e| fail(format!("git log did not start: {e}")))?;
+    if !out.status.success() {
+        return Err(fail(format!("git log failed: {}", String::from_utf8_lossy(&out.stderr).trim())));
+    }
+    let files = parse_file_dates(&String::from_utf8_lossy(&out.stdout));
+
+    let now = NamedNode::new_unchecked(now_graph_iri());
+    let now_ref = GraphNameRef::from(now.as_ref());
+    let file_id = NamedNodeRef::new_unchecked("https://repolex.ai/ontology/git-lex/fileId");
+    let created_p = NamedNode::new_unchecked(CREATED_DATE);
+    let updated_p = NamedNode::new_unchecked(UPDATED_DATE);
+    let date_time = NamedNodeRef::new_unchecked("http://www.w3.org/2001/XMLSchema#dateTime");
+    let whole_history = from.is_none();
+
+    for (path, dates) in &files {
+        let Ok(file) = NamedNode::new(crate::git::file_iri(&crate::nquad::uri_encode_path(path))) else { continue };
+        let mut subjects: Vec<NamedOrBlankNode> = store
+            .quads_for_pattern(None, Some(file_id), Some(TermRef::from(file.as_ref())), Some(now_ref))
+            .map(|q| q.map(|q| q.subject))
+            .collect::<Result<_, _>>()
+            .map_err(|e| fail(e.to_string()))?;
+        if subjects.is_empty() {
+            let held = store
+                .quads_for_pattern(Some(file.as_ref().into()), None, None, Some(now_ref))
+                .next()
+                .is_some();
+            if !held {
+                continue;
+            }
+            subjects.push(file.clone().into());
+        }
+        for subject in subjects {
+            let existing = |p: &NamedNode| -> Result<Vec<Quad>, Failure> {
+                store
+                    .quads_for_pattern(Some(subject.as_ref()), Some(p.as_ref()), None, Some(now_ref))
+                    .collect::<Result<_, _>>()
+                    .map_err(|e| fail(e.to_string()))
+            };
+            for q in existing(&updated_p)? {
+                store.remove(&q).map_err(|e| fail(e.to_string()))?;
+            }
+            let updated = Literal::new_typed_literal(dates.updated.as_str(), date_time);
+            store
+                .insert(&Quad::new(subject.clone(), updated_p.clone(), updated, now.clone()))
+                .map_err(|e| fail(e.to_string()))?;
+            let Some(created) = &dates.created else { continue };
+            let had = existing(&created_p)?;
+            // Reading every commit, git's answer replaces whatever was
+            // there. Reading only the new ones, a date already held is the
+            // older and stays.
+            if !whole_history && !had.is_empty() {
+                continue;
+            }
+            for q in had {
+                store.remove(&q).map_err(|e| fail(e.to_string()))?;
+            }
+            let created = Literal::new_typed_literal(created.as_str(), date_time);
+            store
+                .insert(&Quad::new(subject.clone(), created_p.clone(), created, now.clone()))
+                .map_err(|e| fail(e.to_string()))?;
         }
     }
     Ok(())

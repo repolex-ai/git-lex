@@ -111,11 +111,14 @@ These properties serve separate roles:
 * `description` is authored by humans or primary agents as a static, authoritative summary.
 * `abstract` is designated as scratch space for machine-derived summaries. Automation tools are permitted to overwrite the `abstract` field, so other systems should treat it as transient and avoid relying on its persistence.
 
-#### Timestamps (`createdDate` and `updatedDate`)
-Both properties are parsed as XML schema `xsd:dateTime` values representing a precise timestamp rather than a plain calendar date (`YYYY-MM-DD`). 
-* You should not edit these values manually.
-* `git lex save` automatically writes `updatedDate` on every commit, and initializes `createdDate` if it is the document's first save. (Use `git lex save --no-restamp` to suppress bumping `updatedDate` during bulk sweeps or mechanical migrations).
-* If a document is moved or migrated from an external location, the `createdDate` property preserves its original creation timestamp, which would otherwise be lost in Git history.
+#### Dates (`createdDate` and `updatedDate`)
+A document carries no date line. The store works both dates out from the commits that touched the file, each time it syncs:
+* `createdDate` is the date of the commit that added the file. A rename keeps it.
+* `updatedDate` is the date of the last commit that changed the file, its text included.
+* Query them like any other property (`?doc git-lex:updatedDate ?date`). Do not write them into frontmatter.
+
+#### Author (`author`)
+`git lex create` fills in who is writing: `w4r3z-on-claude-fable-5-2` when the session's model can be read, the bare username when it cannot, and a person's bare username. It is a statement by the writer, not a proof; the commit's signature is the proof. `git lex save` never changes it, and a second author is added by hand as a second list entry.
 
 #### Cross-Namespace References
 The `<namespace/Class/identifier>` form in `id` and `relatedToId` allows documents to reference objects defined in entirely different kits without requiring compile-time coordination. The namespace resolution is driven dynamically by the referenced value.
