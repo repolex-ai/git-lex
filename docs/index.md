@@ -10,7 +10,7 @@ git lex init --kit soul          # initialize .lex/ in the repo with a domain ki
 git lex create Note "first"      # scaffold a typed document
 git lex save "my first note"     # extract + SHACL-validate + commit; nudges gitlexd
 git lex sync                     # compile committed history into the persistent store
-git lex query "SELECT * WHERE { ?s ?p ?o } LIMIT 10"  # query via gitlexd (auto-starts if needed)
+git lex sparql "SELECT * WHERE { ?s ?p ?o } LIMIT 10"  # query via gitlexd (auto-starts if needed)
 git lex direct "SELECT * WHERE { ?s ?p ?o } LIMIT 10" # query working tree in memory
 ```
 

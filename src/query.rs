@@ -328,18 +328,48 @@ pub(crate) fn cmd_direct(query: String, params: Vec<String>, json: bool) -> Outc
 /// Ask gitlexd for the soul this session is bound to. The soul is resolved
 /// from the process that started the session (gitlexd::session), never from
 /// a flag, a setting or the shell's current directory.
-pub(crate) fn cmd_query(query: String, params: Vec<String>, json: bool) -> Outcome {
-    let soul = match git_lex::gitlexd::session::session_soul() {
-        Ok(s) => s,
-        Err(e) => {
-            return Err(Failure::new(e.to_string()));
+pub(crate) fn cmd_query(name: Option<String>, params: Vec<String>, json: bool) -> Outcome {
+    use git_lex::stored_query::{self, GIT_LEX_SERVICE};
+    let soul = git_lex::gitlexd::session::session_soul().map_err(|e| Failure::new(e.to_string()))?;
+    let Some(name) = name else {
+        let all = stored_query::list(&soul.root);
+        if json {
+            println!("{}", serde_json::json!({ "queries": all }));
+        } else if all.is_empty() {
+            println!("This soul has no stored queries yet. Make one with `git lex create query <name>`.");
+        } else {
+            for q in &all {
+                println!("{:<28} {:<9} {}", q.name, q.service.as_deref().unwrap_or("(none)"), q.title.as_deref().unwrap_or(""));
+            }
         }
+        return Ok(());
     };
-    let query = match resolve_stored_query_in(&soul.root, &query, &params) {
-        Ok(Some(q)) => q,
-        Ok(None) => query,
-        Err(()) => return Err(Failure::new("")),
-    };
+    // Anything with whitespace or a brace is SPARQL text, never a name.
+    if name.contains(char::is_whitespace) || name.contains('{') {
+        return Err(Failure::new(
+            "That is SPARQL text. `git lex query` runs a stored query by name; run text with `git lex sparql \"...\"`.",
+        ));
+    }
+    let given = git_lex::query_params::read_given(&params).map_err(Failure::new)?;
+    let found = stored_query::resolve(&soul.root, &name, &given).map_err(Failure::new)?;
+    if found.service != GIT_LEX_SERVICE {
+        return Err(Failure::new(format!(
+            "This query runs against {}. git-lex runs only git-lex queries.\nRun it with: syrinx query {name}",
+            found.service
+        )));
+    }
+    eprintln!("Stored query: {}", found.file);
+    run_through_gitlexd(&soul, found.sparql, json)
+}
+
+/// `git lex sparql "<text>"`: SPARQL typed on the command line, asked of the
+/// soul's own store through gitlexd.
+pub(crate) fn cmd_sparql(query: String, json: bool) -> Outcome {
+    let soul = git_lex::gitlexd::session::session_soul().map_err(|e| Failure::new(e.to_string()))?;
+    run_through_gitlexd(&soul, query, json)
+}
+
+fn run_through_gitlexd(soul: &git_lex::gitlexd::session::SessionSoul, query: String, json: bool) -> Outcome {
     if let Err(e) = git_lex::gitlexd::client::ensure_running() {
         return Err(Failure::new([e.to_string(), String::from("(`git lex direct \"...\"` reads the working tree without gitlexd.)")].join("\n")));
     }

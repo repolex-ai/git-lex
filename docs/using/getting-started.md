@@ -36,7 +36,7 @@ git lex init --kit soul          # Initialize git-lex with your choice of domain
 git lex create note "my-note"    # Scaffold a new document (e.g. note, journal)
 git lex save "first save"        # Commit changes; validation + extraction run automatically
 git lex sync                     # Build and update the synced knowledge graph store
-git lex query "SELECT * WHERE { ?s ?p ?o } LIMIT 10"   # Query via gitlexd (auto-starts if needed)
+git lex sparql "SELECT * WHERE { ?s ?p ?o } LIMIT 10"   # Query via gitlexd (auto-starts if needed)
 git lex direct "SELECT * WHERE { ?s ?p ?o } LIMIT 10"  # Query working tree directly in memory
 ```
 
@@ -61,7 +61,7 @@ The `git lex create <type> <id>` command initializes a new Markdown document of 
 `git lex sync` processes your Git history, compiling committed facts and events into the persistent Oxigraph store. When `gitlexd` is running, `sync` hands the work to the daemon and waits for completion. Every sync reports a per-phase elapsed timing breakdown.
 
 ### Querying (`query` and `direct`)
-* **`git lex query "<sparql>"`**: Queries your repository's persistent store through `gitlexd`. Includes statement history, full commits, and document facts. Starts `gitlexd` automatically if none is running.
+* **`git lex sparql "<sparql>"`**: Queries your repository's persistent store through `gitlexd`. Includes statement history, full commits, and document facts. Starts `gitlexd` automatically if none is running.
 * **`git lex direct "<sparql>"`**: Queries an ephemeral, in-memory graph of your current working tree (uncommitted edits included). Requires no running daemon, but has no statement history.
 
 ---

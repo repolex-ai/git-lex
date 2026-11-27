@@ -30,7 +30,7 @@ git lex save "my first note"     # stage + validate + commit; nudges gitlexd
 git lex sync                     # compile committed history into the persistent store
 
 # Query through gitlexd (starts gitlexd automatically if needed):
-git lex query "SELECT * WHERE { ?s ?p ?o } LIMIT 10"
+git lex sparql "SELECT * WHERE { ?s ?p ?o } LIMIT 10"
 
 # Or query a live in-memory view of the working tree without a daemon:
 git lex direct "SELECT * WHERE { ?s ?p ?o } LIMIT 10"

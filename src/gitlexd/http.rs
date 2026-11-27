@@ -2,6 +2,8 @@
 //!
 //! | `GET`/`POST /git-lex/<squad>/<username>/sparql` | W3C SPARQL protocol over that store |
 //! | `GET /git-lex/<squad>/<username>/info`          | synced-to commit, sync in flight, counts, graphs |
+//! | `GET /git-lex/<squad>/<username>/query`         | the soul's stored queries: name, service, title, parameters |
+//! | `POST /git-lex/<squad>/<username>/query/<name>` | one stored query, parameters put in (`{"params":{...}}`) |
 //! | `POST /git-lex/<squad>/<username>/sync`         | nudge; `?wait=1` returns when the sync is done |
 //! | `GET /git-lex/stores`                           | every store held, with its state |
 //! | `GET /git-lex/health`                           | up, uptime, stores open |
@@ -179,6 +181,65 @@ async fn sparql_post(
     run_query(d, store, query).await
 }
 
+/// `GET /git-lex/<squad>/<username>/query`: the soul's stored queries, each
+/// with its service, title and parameters. Read from the soul's files, the
+/// same way `git lex query` reads them.
+async fn stored_list(State(d): State<Arc<Daemon>>, AxPath((squad, username)): AxPath<(String, String)>) -> Response {
+    let soul = match find(&d, &squad, &username) {
+        Ok(s) => s,
+        Err(r) => return *r,
+    };
+    let root = soul.path.clone();
+    match tokio::task::spawn_blocking(move || crate::stored_query::list(&root)).await {
+        Ok(all) => Json(serde_json::json!({ "queries": all })).into_response(),
+        Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, format!("listing the stored queries failed: {e}")),
+    }
+}
+
+/// `POST /git-lex/<squad>/<username>/query/<name>` with `{"params": {...}}`:
+/// one stored query with its parameters put in, for any service to run
+/// (goodlux, 2026-11-27). gitlexd hands the query out; it does not run it.
+/// `<name>` may be `kit/name`.
+async fn stored_one(
+    State(d): State<Arc<Daemon>>,
+    AxPath((squad, username, name)): AxPath<(String, String, String)>,
+    body: axum::body::Bytes,
+) -> Response {
+    let soul = match find(&d, &squad, &username) {
+        Ok(s) => s,
+        Err(r) => return *r,
+    };
+    let given: Vec<(String, String)> = if body.iter().all(u8::is_ascii_whitespace) {
+        Vec::new()
+    } else {
+        match serde_json::from_slice::<serde_json::Value>(&body) {
+            Ok(v) => match v.get("params") {
+                None | Some(serde_json::Value::Null) => Vec::new(),
+                Some(serde_json::Value::Object(m)) => {
+                    let mut out = Vec::new();
+                    for (k, v) in m {
+                        let text = match v {
+                            serde_json::Value::String(s) => s.clone(),
+                            serde_json::Value::Number(_) | serde_json::Value::Bool(_) => v.to_string(),
+                            other => return err(StatusCode::BAD_REQUEST, format!("the parameter '{k}' is {other}; give each value as text")),
+                        };
+                        out.push((k.clone(), text));
+                    }
+                    out
+                }
+                Some(other) => return err(StatusCode::BAD_REQUEST, format!("\"params\" is {other}; send an object of name: value")),
+            },
+            Err(e) => return err(StatusCode::BAD_REQUEST, format!("the body is not JSON: {e}. Send {{\"params\": {{...}}}} or nothing")),
+        }
+    };
+    let root = soul.path.clone();
+    match tokio::task::spawn_blocking(move || crate::stored_query::resolve(&root, &name, &given)).await {
+        Ok(Ok(found)) => Json(found).into_response(),
+        Ok(Err(why)) => err(StatusCode::BAD_REQUEST, why),
+        Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, format!("reading the stored query failed: {e}")),
+    }
+}
+
 /// The machine's key list, grants, owner and limits, as git-lex writes them
 /// under `~/.lex/identity/` and as tessera, the stack's shared checker,
 /// reads them. Off when there is no key list: nobody has an identity on
@@ -334,6 +395,8 @@ pub fn router(d: Arc<Daemon>) -> Router {
     Router::new()
         .route("/git-lex/{squad}/{username}/sparql", get(sparql_get).post(sparql_post))
         .route("/git-lex/{squad}/{username}/info", get(info))
+        .route("/git-lex/{squad}/{username}/query", get(stored_list))
+        .route("/git-lex/{squad}/{username}/query/{*name}", post(stored_one))
         .route("/git-lex/{squad}/{username}/sync", post(sync))
         .route("/git-lex/{squad}/{username}", delete(forget))
         .route("/git-lex/stores", get(stores))

@@ -402,7 +402,7 @@ neither can grepping for an `id:` line. Four channels illustrate why:
 Don't hand people an instruction, hand them the query:
 
 ```
-git lex query "SELECT ?source ?p ?dangling WHERE {
+git lex sparql "SELECT ?source ?p ?dangling WHERE {
   ?source ?p ?dangling .
   FILTER(CONTAINS(STR(?p), \"relatedTo\"))
   FILTER(isIRI(?dangling))
@@ -425,7 +425,7 @@ unresolvable references before they are committed.
 > graph what Files it believes in, then check the filesystem.
 >
 > ```
-> git lex query 'SELECT ?s WHERE { ?s a <https://repolex.ai/ontology/git-lex/File> }' \
+> git lex sparql 'SELECT ?s WHERE { ?s a <https://repolex.ai/ontology/git-lex/File> }' \
 >   | grep -o 'git-lex/File/[^ |]*' | sed 's|git-lex/File/||' | sort -u \
 >   | while read -r f; do [ -e "$f" ] || echo "GHOST: $f"; done
 > ```
@@ -489,7 +489,7 @@ or stale predicate IRI is indistinguishable from a clean bill of health — and 
 the reassuring answer, so nobody looks twice:
 
 ```
-git lex query "SELECT (COUNT(*) AS ?n) WHERE { ?s <https://repolex.ai/ontology/git-lex/relatedToId> ?o }"
+git lex sparql "SELECT (COUNT(*) AS ?n) WHERE { ?s <https://repolex.ai/ontology/git-lex/relatedToId> ?o }"
 ```
 
 If *that* is also zero, you have not audited your references; you have missed the

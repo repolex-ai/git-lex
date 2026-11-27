@@ -2,7 +2,7 @@
 
 Two querying doors:
 
-- **`git lex query "SPARQL"`** — your soul's synced store, through
+- **`git lex sparql "SPARQL"`** — your soul's synced store, through
   [gitlexd](gitlexd.md): current documents, files, commits, and the full
   history of every statement. The query is tied to the repository your
   session started in, whatever directory the shell is in now. Starts

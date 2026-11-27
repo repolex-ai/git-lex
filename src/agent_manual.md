@@ -11,7 +11,7 @@ This file is generated. `git lex --skill` prints it fresh.
 git lex list                       # every document class you can create
 git lex create <class> <id>        # new document; the id becomes the filename
 git lex save "what changed — you"  # validate, extract, commit. Use this, not git commit
-git lex query "<sparql>"           # ask your soul's graph, history included
+git lex sparql "<sparql>"           # ask your soul's graph, history included
 ```
 
 Add `--json` to `list`, `create` or `query` for structured output.

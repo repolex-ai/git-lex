@@ -57,30 +57,27 @@ enum Commands {
         #[arg(long)]
         kit: Option<String>,
     },
-    /// Ask your soul's graph a SPARQL question, through gitlexd.
+    /// Run a STORED query: a Query document saved in your soul or delivered by a kit.
     ///
-    /// The query goes to the soul your session started in. Nothing to pass
-    /// and nothing to set: the soul is read from the process that started
-    /// the session, whatever directory the shell is in now. The store holds
-    /// everything: current documents, files, commits, and the full history
-    /// of every statement (see docs/using/queries.md). Prefixes for the
-    /// installed kits are added for you; a pattern with no GRAPH clause
-    /// sees every graph.
+    /// `git lex query <name>` runs a stored query by name. `git lex sparql "<text>"`
+    /// runs SPARQL you type. `git lex query` alone lists the stored queries.
     ///
-    /// Starts gitlexd if none is running. `git lex direct`
-    /// reads the working tree on its own.
+    /// Every stored query names the service it runs against (`service` in its
+    /// frontmatter). git-lex runs only `git-lex` queries. A query for pan,
+    /// ravel, horae, punctum or syrinx is refused, and `syrinx query <name>`
+    /// runs it.
+    ///
+    /// The query goes to the soul your session started in, through gitlexd,
+    /// which is started if none is running.
     ///
     /// Examples:
-    ///   git lex query "SELECT * WHERE { ?s ?p ?o } LIMIT 10"
-    ///   git lex query "SELECT ?c WHERE { ?c a git2:Commit } LIMIT 5"
-    ///   git lex query recent
-    ///
-    /// A bare name runs the STORED query saved as .lex/query/<name>.md in
-    /// the soul — plain markdown whose first code block is the query.
+    ///   git lex query                       list the stored queries
+    ///   git lex query recent                run one
+    ///   git lex query copia/being-description being=sylkie-glitch
     Query {
-        /// SPARQL text, or the name of a saved query (`recent`, or
-        /// `kit/name` when two kits share a name)
-        query: String,
+        /// The stored query's name (`recent`, or `kit/name` when two kits share
+        /// a name). Leave it out to list them.
+        name: Option<String>,
         /// Values for a saved query's parameters, each written name=value
         /// (`being=sylkie`). The query document declares what it takes,
         /// and of what kind; a value is text unless its parameter says
@@ -88,6 +85,23 @@ enum Commands {
         params: Vec<String>,
         /// Emit SPARQL 1.1 JSON Results format on stdout. Suppresses the
         /// human-readable table and the trailing stats line (stats go to stderr).
+        #[arg(long)]
+        json: bool,
+    },
+    /// Run SPARQL you type against your soul's own store, through gitlexd.
+    ///
+    /// For a STORED query, use `git lex query <name>`. The store holds current
+    /// documents, files, commits, and the full history of every statement (see
+    /// docs/using/queries.md). Prefixes for the installed kits are added for
+    /// you; a pattern with no GRAPH clause sees every graph.
+    ///
+    /// Examples:
+    ///   git lex sparql "SELECT * WHERE { ?s ?p ?o } LIMIT 10"
+    ///   git lex sparql "SELECT ?c WHERE { ?c a git2:Commit } LIMIT 5"
+    Sparql {
+        /// The SPARQL text
+        query: String,
+        /// Emit SPARQL 1.1 JSON Results format on stdout.
         #[arg(long)]
         json: bool,
     },
@@ -376,7 +390,8 @@ fn run(command: Commands) -> Outcome {
             Ok(())
         }
         Commands::Save { message, dry_run, mechanical } => save::cmd_save(&message, dry_run, mechanical),
-        Commands::Query { query, params, json } => query::cmd_query(query, params, json),
+        Commands::Query { name, params, json } => query::cmd_query(name, params, json),
+        Commands::Sparql { query, json } => query::cmd_sparql(query, json),
         Commands::Direct { query, params, json } => query::cmd_direct(query, params, json),
         Commands::Hook { event } => {
             match event.as_str() {

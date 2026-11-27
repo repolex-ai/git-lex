@@ -187,6 +187,126 @@ pub fn names(root: &Path) -> Vec<String> {
     out
 }
 
+/// The last segment of the frontmatter key that names the service a query
+/// runs against (`soul.Query.service`): `git-lex`, `pan`, `ravel`, `horae`,
+/// `punctum` or `syrinx` (goodlux, 2026-11-27).
+pub const SERVICE_KEY: &str = "service";
+
+/// The service git-lex itself is. The only one `git lex query` runs.
+pub const GIT_LEX_SERVICE: &str = "git-lex";
+
+/// One text value of a frontmatter key whose last dotted segment is `last`.
+fn frontmatter_text(frontmatter: Option<&str>, last: &str) -> Option<String> {
+    let map = crate::parse_frontmatter_map(frontmatter?).ok()?;
+    map.iter().find_map(|(k, v)| {
+        (k.as_str()?.rsplit('.').next() == Some(last)).then(|| v.as_str().map(|s| s.trim().to_string())).flatten()
+    }).filter(|s| !s.is_empty())
+}
+
+/// A stored query, found and with its parameters put in.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct Resolved {
+    pub name: String,
+    pub file: String,
+    pub service: String,
+    pub title: Option<String>,
+    /// The parameters as the document declares them (`name[:kind][=default]`).
+    pub parameters: Vec<String>,
+    /// The query text with every parameter put in as a value.
+    pub sparql: String,
+}
+
+/// One line of the list of stored queries.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct Listed {
+    pub name: String,
+    pub service: Option<String>,
+    pub title: Option<String>,
+    pub parameters: Vec<String>,
+}
+
+fn file_of(root: &Path, name: &str) -> Option<PathBuf> {
+    let (want_kit, id) = match name.split_once('/') {
+        Some((k, i)) => (Some(k), i),
+        None => (None, name),
+    };
+    let hits: Vec<PathBuf> = kit_query_dirs(root)
+        .into_iter()
+        .filter(|(kit, _)| want_kit.is_none_or(|w| w == kit))
+        .map(|(_, dir)| dir.join(format!("{id}.md")))
+        .filter(|f| f.is_file())
+        .collect();
+    match hits.as_slice() {
+        [one] => Some(one.clone()),
+        [] if want_kit.is_none() => Some(crate::layout::query_dir(root).join(format!("{id}.md"))).filter(|f| f.is_file()),
+        _ => None,
+    }
+}
+
+fn declared_words(frontmatter: Option<&str>) -> Vec<String> {
+    let Some(map) = frontmatter.and_then(|y| crate::parse_frontmatter_map(y).ok()) else { return Vec::new() };
+    map.iter()
+        .filter(|(k, _)| k.as_str().and_then(|k| k.rsplit('.').next()) == Some(crate::query_params::PARAMETER_KEY))
+        .flat_map(|(_, v)| match v {
+            serde_yaml::Value::String(s) => vec![s.clone()],
+            serde_yaml::Value::Sequence(items) => items.iter().filter_map(|i| i.as_str().map(str::to_string)).collect(),
+            _ => Vec::new(),
+        })
+        .collect()
+}
+
+/// Find a stored query by name and put in the caller's parameters. Every
+/// failure is one plain sentence saying what to do. A query that names no
+/// service is refused: the service is required (goodlux, 2026-11-27).
+pub fn resolve(root: &Path, name: &str, given: &[(String, String)]) -> Result<Resolved, String> {
+    match find(root, name) {
+        Found::Query { text, file, params } => {
+            let md = std::fs::read_to_string(root.join(&file)).unwrap_or_default();
+            let (frontmatter, _) = crate::split_frontmatter(&md);
+            let service = frontmatter_text(frontmatter, SERVICE_KEY).ok_or_else(|| {
+                format!("{file} names no service. Add `service: \"git-lex\"` (or the service it is for: pan, ravel, horae, punctum, syrinx) to its frontmatter, under its class, as soul.Query.service.")
+            })?;
+            let declared = params.map_err(|e| format!("{file}: {e}"))?;
+            let sparql = crate::query_params::bind(Some(root), &text, &declared, given)?;
+            Ok(Resolved {
+                name: name.to_string(),
+                file,
+                service,
+                title: frontmatter_text(frontmatter, "title"),
+                parameters: declared_words(frontmatter),
+                sparql,
+            })
+        }
+        Found::Ambiguous(forms) => Err(format!("More than one kit has a stored query named '{name}'. Say which: {}", forms.join(", "))),
+        Found::NoBlock(file) => Err(format!("{file} holds no query. The query is the first fenced code block in the document's body; add one.")),
+        Found::Missing => {
+            let have = names(root);
+            if have.is_empty() {
+                Err(format!("No stored query named '{name}', and this soul has none yet. Make one with `git lex create query {name}` and put the query in a code block in its body."))
+            } else {
+                Err(format!("No stored query named '{name}'. Stored queries: {}", have.join(", ")))
+            }
+        }
+    }
+}
+
+/// Every stored query, with its service, title and parameters.
+pub fn list(root: &Path) -> Vec<Listed> {
+    names(root)
+        .into_iter()
+        .map(|name| {
+            let md = file_of(root, &name).and_then(|f| std::fs::read_to_string(f).ok()).unwrap_or_default();
+            let (frontmatter, _) = crate::split_frontmatter(&md);
+            Listed {
+                service: frontmatter_text(frontmatter, SERVICE_KEY),
+                title: frontmatter_text(frontmatter, "title"),
+                parameters: declared_words(frontmatter),
+                name,
+            }
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -263,6 +383,30 @@ mod tests {
         // A Query document with no code block is reported, not run as prose.
         std::fs::write(root.join("Soul/Query/empty.md"), "---\ntype: Query\n---\n\njust words\n").unwrap();
         assert_eq!(find(&root, "empty"), Found::NoBlock("Soul/Query/empty.md".into()));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The service is required, is handed out with the query, and parameters
+    /// are put in as values.
+    #[test]
+    fn a_stored_query_carries_its_service_and_has_to_have_one() {
+        let root = repo("service");
+        let with = |extra: &str, sparql: &str| format!("---\nsoul.Query.title: \"Recent\"\n{extra}---\n\n```sparql\n{sparql}\n```\n");
+        std::fs::write(root.join("Soul/Query/mine.md"), with("soul.Query.service: \"git-lex\"\nsoul.Query.parameter: \"n:integer=3\"\n", "SELECT ?s WHERE { ?s ?p ?n }")).unwrap();
+        std::fs::write(root.join("Soul/Query/pics.md"), with("soul.Query.service: \"pan\"\n", "ASK { ?s ?p ?o }")).unwrap();
+        std::fs::write(root.join("Soul/Query/bare.md"), with("", "ASK { ?s ?p ?o }")).unwrap();
+
+        let r = resolve(&root, "mine", &[("n".into(), "7".into())]).unwrap();
+        assert_eq!((r.service.as_str(), r.title.as_deref()), ("git-lex", Some("Recent")));
+        assert_eq!(r.parameters, vec!["n:integer=3".to_string()]);
+        assert!(r.sparql.contains('7') && !r.sparql.contains("?n "), "{}", r.sparql);
+        assert_eq!(resolve(&root, "pics", &[]).unwrap().service, "pan");
+        let why = resolve(&root, "bare", &[]).unwrap_err();
+        assert!(why.contains("names no service"), "{why}");
+        assert!(resolve(&root, "nope", &[]).unwrap_err().contains("Stored queries: bare, mine, pics"));
+
+        let listed: Vec<(String, Option<String>)> = list(&root).into_iter().map(|q| (q.name, q.service)).collect();
+        assert_eq!(listed, vec![("bare".into(), None), ("mine".into(), Some("git-lex".into())), ("pics".into(), Some("pan".into()))]);
         let _ = std::fs::remove_dir_all(&root);
     }
 }
