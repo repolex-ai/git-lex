@@ -168,7 +168,7 @@ pub(crate) fn run_query(store: &Store, query: &str, store_type: &str, json: bool
     Ok(())
 }
 
-/// Saved queries: `git lex query <name>` runs a query saved as a document.
+/// Stored queries: `git lex query '<soul/Query/recent>'` runs a Query document.
 /// The lookup and the format are `git_lex::stored_query`: the installed
 /// kits' `Query/` folders first, `.lex/query/` after. One door, the same one
 /// inline queries use.
@@ -176,70 +176,6 @@ pub(crate) fn run_query(store: &Store, query: &str, store_type: &str, json: bool
 /// `Ok(Some(text))` is the query to run; `Ok(None)` means the argument is
 /// not a saved query's name and runs as SPARQL text; `Err` has already told
 /// the person what is wrong.
-fn resolve_stored_query(arg: &str, params: &[String]) -> Result<Option<String>, ()> {
-    match git_lex::find_git_root() {
-        Some(root) => resolve_stored_query_in(&root, arg, params),
-        None if params.is_empty() => Ok(None),
-        None => {
-            eprintln!("{PARAMS_NEED_A_NAME}");
-            Err(())
-        }
-    }
-}
-
-const PARAMS_NEED_A_NAME: &str =
-    "Parameters (name=value) go with a saved query's name. Query text written on the command line takes none: put the value in the text.";
-
-/// `params` are the `name=value` words after the name. They are put into the
-/// query as values (git_lex::query_params), never as text.
-fn resolve_stored_query_in(root: &std::path::Path, arg: &str, params: &[String]) -> Result<Option<String>, ()> {
-    use git_lex::stored_query::{find, names, Found};
-    // Anything with whitespace or a brace is SPARQL text, never a name.
-    if arg.contains(char::is_whitespace) || arg.contains('{') {
-        if !params.is_empty() {
-            eprintln!("{PARAMS_NEED_A_NAME}");
-            return Err(());
-        }
-        return Ok(None);
-    }
-    match find(root, arg) {
-        Found::Query { text, file, params: declared } => {
-            eprintln!("Saved query: {file}");
-            let bound = declared
-                .map_err(|e| format!("{file}: {e}"))
-                .and_then(|declared| Ok((git_lex::query_params::read_given(params)?, declared)))
-                .and_then(|(given, declared)| git_lex::query_params::bind(Some(root), &text, &declared, &given));
-            match bound {
-                Ok(query) => Ok(Some(query)),
-                Err(why) => {
-                    eprintln!("{why}");
-                    Err(())
-                }
-            }
-        }
-        Found::Ambiguous(forms) => {
-            eprintln!("More than one kit has a saved query named '{arg}'. Say which: {}", forms.join(", "));
-            Err(())
-        }
-        Found::NoBlock(file) => {
-            eprintln!("{file} holds no query. The query is the first fenced code block in the document's body; add one.");
-            Err(())
-        }
-        Found::Missing => {
-            let have = names(root);
-            if have.is_empty() {
-                eprintln!(
-                    "No saved query named '{arg}', and this repo has none yet. Make one with \
-                     `git lex create query {arg}` and put the query in a code block in its body."
-                );
-            } else {
-                eprintln!("No saved query named '{arg}'. Available: {}", have.join(", "));
-            }
-            Err(())
-        }
-    }
-}
-
 /// The query text of a `.lex/query/` file, the earlier format: skip YAML
 /// frontmatter, then the first fenced block; a file with no fence is all
 /// query.
@@ -253,11 +189,9 @@ pub(crate) fn cmd_direct(query: String, params: Vec<String>, json: bool) -> Outc
     // Stored-query resolution first: a name that matches .lex/query/<name>.md
     // runs that file's query; anything else runs as SPARQL text. A name-like
     // miss gets the available list instead of a SPARQL parse error.
-    let query = match resolve_stored_query(&query, &params) {
-        Ok(Some(q)) => q,
-        Ok(None) => query,
-        Err(()) => return Err(Failure::new("")),
-    };
+    if !params.is_empty() || query.trim_start().starts_with('<') {
+        return Err(Failure::new("`git lex direct` runs SPARQL text. A stored query runs with `git lex query '<soul/Query/recent>'`."));
+    }
     // B2 FIX (w4r3z, Day 40): `query` now builds the "now" view from the WORKING
     // TREE every time, so the documented `create → save → query` flow surfaces a
     // doc's own frontmatter immediately — no `git lex sync` required first.
@@ -331,7 +265,7 @@ pub(crate) fn cmd_direct(query: String, params: Vec<String>, json: bool) -> Outc
 pub(crate) fn cmd_query(name: Option<String>, params: Vec<String>, json: bool) -> Outcome {
     use git_lex::stored_query::{self, GIT_LEX_SERVICE};
     let soul = git_lex::gitlexd::session::session_soul().map_err(|e| Failure::new(e.to_string()))?;
-    let Some(name) = name else {
+    let Some(id) = name else {
         let all = stored_query::list(&soul.root);
         if json {
             println!("{}", serde_json::json!({ "queries": all }));
@@ -339,23 +273,23 @@ pub(crate) fn cmd_query(name: Option<String>, params: Vec<String>, json: bool) -
             println!("This soul has no stored queries yet. Make one with `git lex create query <name>`.");
         } else {
             for q in &all {
-                println!("{:<28} {:<9} {}", q.name, q.service.as_deref().unwrap_or("(none)"), q.title.as_deref().unwrap_or(""));
+                println!("{:<36} {:<9} {}", q.id, q.service.as_deref().unwrap_or("(none)"), q.title.as_deref().unwrap_or(""));
             }
         }
         return Ok(());
     };
     // Anything with whitespace or a brace is SPARQL text, never a name.
-    if name.contains(char::is_whitespace) || name.contains('{') {
+    if id.contains(char::is_whitespace) || id.contains('{') {
         return Err(Failure::new(
             "That is SPARQL text. `git lex query` runs a stored query by name; run text with `git lex sparql \"...\"`.",
         ));
     }
     let given = git_lex::query_params::read_given(&params).map_err(Failure::new)?;
-    let found = stored_query::resolve(&soul.root, &name, &given).map_err(Failure::new)?;
+    let found = stored_query::resolve(&soul.root, &id, &given).map_err(Failure::new)?;
     if found.service != GIT_LEX_SERVICE {
         return Err(Failure::new(format!(
-            "This query runs against {}. git-lex runs only git-lex queries.\nRun it with: syrinx query {name}",
-            found.service
+            "This query runs against {}. git-lex runs only git-lex queries.\nRun it with: syrinx query '{}'",
+            found.service, found.id
         )));
     }
     eprintln!("Stored query: {}", found.file);
@@ -490,60 +424,6 @@ pub(crate) fn print_w3c_table(body: &str) -> Outcome<usize> {
     Ok(rows.len())
 }
 
-/// Scaffold the default stored queries into `.lex/query/` — ONLY when the
-/// folder does not exist yet. A folder that exists is the operator's,
-/// whatever is or isn't in it; re-running init/kit-update never overwrites
-/// or re-adds. (Soul-kit override — `Soul/Query/` replacing this folder
-/// wholesale — is the kit's move, not built here.)
-pub(crate) fn scaffold_default_queries(root: &std::path::Path) {
-    let dir = git_lex::layout::query_dir(root);
-    if dir.exists() {
-        return;
-    }
-    if std::fs::create_dir_all(&dir).is_err() {
-        return;
-    }
-    let starters: &[(&str, &str)] = &[
-        (
-            "things",
-            "# Everything in this repo, by class\n\n\
-             Counts every typed thing in the live view — documents, commits,\n\
-             files, facts of every class. A quick shape-of-the-repo check.\n\n\
-             ```sparql\n\
-             SELECT ?class (COUNT(?s) AS ?count)\n\
-             WHERE { ?s a ?class }\n\
-             GROUP BY ?class\n\
-             ORDER BY DESC(?count)\n\
-             ```\n",
-        ),
-        (
-            "recent",
-            "# What changed lately\n\n\
-             Documents by their last change, newest first. The date is\n\
-             maintained by git-lex at commit time (updatedDate) — documents\n\
-             that predate the stamping appear once they are next saved.\n\n\
-             ```sparql\n\
-             SELECT ?doc ?date\n\
-             WHERE { ?doc <https://repolex.ai/ontology/git-lex/updatedDate> ?date }\n\
-             ORDER BY DESC(?date)\n\
-             LIMIT 20\n\
-             ```\n",
-        ),
-    ];
-    let mut written = 0;
-    for (name, body) in starters {
-        if std::fs::write(dir.join(format!("{}.md", name)), body).is_ok() {
-            written += 1;
-        }
-    }
-    if written > 0 {
-        println!(
-            "Stored queries: .lex/query/ created with {} starter(s) — run one \
-             with `git lex query <name>`, add your own as .lex/query/<name>.md",
-            written
-        );
-    }
-}
 
 #[cfg(test)]
 mod w3c_table_tests {

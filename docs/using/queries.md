@@ -84,25 +84,30 @@ It lives only in the synced store (it is loaded at `init` and `kit-update`),
 so this query runs through `git lex query` — `git lex direct` returns zero rows
 for it.
 
-## Saved Queries
+## Stored Queries
 
-A query you run frequently does not need to be retyped. `git lex query <name>`
-runs the query saved at `.lex/query/<name>.md`:
+A query you run often is saved as a Query document, and run by its id,
+exactly as stored, in quotes:
 
 ```bash
-git lex query recent      # runs .lex/query/recent.md
-git lex query things
+git lex query                                  # list them, with their service
+git lex query '<soul/Query/recent>'            # run one
+git lex query '<copia/Query/being-description>' being=sylkie-glitch
 ```
 
-A saved query is plain Markdown. **The first fenced code block is the query**;
-everything else in the file is documentation for the query — what it
-answers, parameters to edit, and how it is structured. Frontmatter, if present, is
-skipped. A file with no code fence is treated entirely as the query.
+The quotes matter: in a shell, `<` on its own reads a file.
+
+A stored query lives in its kit's `Query/` folder (`Soul/Query/recent.md` has
+the id `<soul/Query/recent>`). **The first fenced code block is the query**;
+everything else in the document says what it answers. Its frontmatter names
+the service it runs against, and may declare parameters:
 
 ````markdown
-# What changed lately
-
-Documents by their last change, newest first.
+---
+soul.Query.id: <soul/Query/recent>
+soul.Query.title: "What changed lately"
+soul.Query.service: "git-lex"
+---
 
 ```sparql
 SELECT ?doc ?date
@@ -112,22 +117,14 @@ LIMIT 20
 ```
 ````
 
-Two starters — `things` (every typed thing in the repo, counted by class) and
-`recent` (documents by last change) — are written into `.lex/query/` the first
-time the folder is created. After that the folder is fully user-managed: `init` and
-`kit-update` never overwrite what is in it. Save custom queries
-alongside them as `.lex/query/<name>.md`.
+`service` is required: `git-lex`, `pan`, `ravel`, `horae`, `punctum` or
+`syrinx`. git-lex runs only `git-lex` queries. Any other is refused with the
+command that runs it, `syrinx query '<id>'`. Syrinx, Pan, Ravel and Horae
+fetch stored queries from gitlexd (`GET` and `POST /git-lex/{org}/{store}/query`)
+and run their own.
 
-Anything that is not a saved-query name runs as SPARQL text, so inline queries
-work seamlessly. A name-shaped argument that matches no file lists what
-is available:
-
-```
-No stored query named 'recnt'. Available: recent, things
-```
-
-Saved queries run through either door: `git lex query <name>` asks the
-soul's store, `git lex direct <name>` the live view of the working tree.
+SPARQL you type runs with `git lex sparql "..."`, or `git lex direct "..."`
+for the live working tree.
 
 ## Starters
 
@@ -158,7 +155,7 @@ SELECT ?c WHERE { ?c a git2:Commit } LIMIT 5
 
 ## History: "When did this change, and who changed it?"
 
-Run with `git lex query` (or any SPARQL client against gitlexd) — not
+Run with `git lex sparql` (or any SPARQL client against gitlexd) — not
 `git lex direct`, which has no history. Replace `day-56` with any fragment of the
 document's IRI:
 

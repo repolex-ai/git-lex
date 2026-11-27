@@ -236,7 +236,6 @@ pub(crate) fn cmd_init(directory: Option<String>, kit: Option<String>) -> Outcom
     }
 
     // Stored-query starters — .lex/query/ with the defaults, first init only.
-    crate::query::scaffold_default_queries(&root);
 
     // Collect kit-declared init variables (agent name, etc.) by prompting
     // the user. On re-init, reuse values carried over from the previous

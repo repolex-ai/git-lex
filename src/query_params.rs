@@ -9,7 +9,7 @@
 //! query compares the value with and the caller often does not. With no kind
 //! a value is text, always: nothing is guessed from how a value looks, so an
 //! id of `42` stays the text 42. A stated kind is checked.
-//! It is run as `git lex query copia/being-description being=sylkie-glitch`.
+//! It is run as `git lex query '<copia/Query/being-description>' being=sylkie-glitch`.
 //!
 //! A parameter is a VALUE. It is put into the parsed query in place of the
 //! variable, the way SHACL pre-binds `sh:parameter` values, and the query is

@@ -1782,7 +1782,7 @@ pub fn service_hint(e: String) -> String {
     if e.to_ascii_lowercase().contains("service") {
         format!(
             "{e} — git-lex answers for its own store only; a query across stores (pan, ravel) goes to Syrinx: \
-             `syrinx query <name>` runs a saved one"
+             `syrinx query '<soul/Query/name>'` runs a stored one"
         )
     } else {
         e
