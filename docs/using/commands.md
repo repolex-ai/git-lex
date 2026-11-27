@@ -11,7 +11,7 @@ page), and every subcommand answers `--help` too.
 | `git lex sync` | Compile committed history into the persistent store (Oxigraph). Handed to `gitlexd` when running (waits for result); prints a per-phase elapsed timing breakdown. Refuses without `.lex/repo.yml`. |
 | `git lex export-spine` | Write the semantic index as one TSV spine for LLM context caches (`.lex/_ignore/spine/<synced-commit>.spine.tsv`). |
 | `git lex --skill` | Print the agent manual plus this repo's compact ontology (every class and property of the installed kits). The same text is kept current in `.lex/COMPACT-ONTOLOGY.md`. |
-| `git lex query ['<id>' [name=value ...]] [--json]` | Run a STORED query by its id, quoted: `git lex query '<soul/Query/recent>'`. Alone, lists them with their service. Runs only queries whose `service` is `git-lex`; any other is refused and named for `syrinx query '<id>'`. |
+| `git lex query ['<id>' [name=value ...]] [--json]` | Run a STORED query by its id, quoted: `git lex query '<soul/Query/soul-kit-recent>'`. Alone, lists them with their service. Runs only queries whose `service` is `git-lex`; any other is refused and named for `syrinx query '<id>'`. |
 | `git lex sparql "SPARQL" [--json]` | Ask your soul's graph SPARQL you type, through `gitlexd`: current state and full history. Auto-starts `gitlexd` if not running; refuses without `.lex/repo.yml`. |
 | `git lex direct "SPARQL"\|<name> [--json]` | Query a fresh in-memory view of the working tree (unsaved edits included, no history, no `gitlexd` needed). Follows the shell's current directory. |
 | `git lex list [--json]` | List every document class the installed kits define. |

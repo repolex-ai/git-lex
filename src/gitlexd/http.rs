@@ -3,7 +3,7 @@
 //! | `GET`/`POST /git-lex/<squad>/<username>/sparql` | W3C SPARQL protocol over that store |
 //! | `GET /git-lex/<squad>/<username>/info`          | synced-to commit, sync in flight, counts, graphs |
 //! | `GET /git-lex/<squad>/<username>/query`         | the soul's stored queries: id, service, title, parameters |
-//! | `POST /git-lex/<squad>/<username>/query`        | one stored query, parameters put in (`{"id":"<soul/Query/recent>","params":{...}}`) |
+//! | `POST /git-lex/<squad>/<username>/query`        | one stored query, parameters put in (`{"id":"<soul/Query/soul-kit-recent>","params":{...}}`) |
 //! | `POST /git-lex/<squad>/<username>/sync`         | nudge; `?wait=1` returns when the sync is done |
 //! | `GET /git-lex/stores`                           | every store held, with its state |
 //! | `GET /git-lex/health`                           | up, uptime, stores open |
@@ -197,7 +197,7 @@ async fn stored_list(State(d): State<Arc<Daemon>>, AxPath((squad, username)): Ax
 }
 
 /// `POST /git-lex/<squad>/<username>/query` with
-/// `{"id": "<soul/Query/recent>", "params": {...}}`: one stored query with its
+/// `{"id": "<soul/Query/soul-kit-recent>", "params": {...}}`: one stored query with its
 /// parameters put in, for any service to run (goodlux, 2026-11-27). The id
 /// goes in the body because `<` cannot go in an address. gitlexd hands the
 /// query out; it does not run it.
@@ -212,10 +212,10 @@ async fn stored_one(
     };
     let v = match serde_json::from_slice::<serde_json::Value>(&body) {
         Ok(v) => v,
-        Err(e) => return err(StatusCode::BAD_REQUEST, format!("the body is not JSON: {e}. Send {{\"id\": \"<soul/Query/recent>\", \"params\": {{...}}}}")),
+        Err(e) => return err(StatusCode::BAD_REQUEST, format!("the body is not JSON: {e}. Send {{\"id\": \"<soul/Query/soul-kit-recent>\", \"params\": {{...}}}}")),
     };
     let Some(id) = v.get("id").and_then(|i| i.as_str()).map(str::to_string) else {
-        return err(StatusCode::BAD_REQUEST, "the body needs \"id\": the stored query's id, such as \"<soul/Query/recent>\"".to_string());
+        return err(StatusCode::BAD_REQUEST, "the body needs \"id\": the stored query's id, such as \"<soul/Query/soul-kit-recent>\"".to_string());
     };
     let given: Vec<(String, String)> = match v.get("params") {
                 None | Some(serde_json::Value::Null) => Vec::new(),

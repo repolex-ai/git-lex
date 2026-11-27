@@ -41,7 +41,7 @@ committed until the whole save passes.
 - Prefixes for every installed kit are added for you. Do not declare them.
 - A document is `?d a <kit>:<Class>`. Its properties are the IRIs in the
   ontology section, for example `git-lex:title`.
-- `git lex query '<soul/Query/recent>'` runs a stored query by its id, in quotes. `git lex query` alone lists them.
+- `git lex query '<soul/Query/soul-kit-recent>'` runs a stored query by its id, in quotes. `git lex query` alone lists them.
 - `git lex query` answers from your soul's store through gitlexd: current
   documents, files, commits, and the history of every statement ("when did
   this change?"). It is tied to the soul your session started in, and

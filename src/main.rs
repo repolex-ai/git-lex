@@ -60,7 +60,7 @@ enum Commands {
     /// Run a STORED query: a Query document saved in your soul or delivered by a kit.
     ///
     /// `git lex query '<id>'` runs a stored query, named by its id exactly as
-    /// stored, in quotes: `git lex query '<soul/Query/recent>'`.
+    /// stored, in quotes: `git lex query '<soul/Query/soul-kit-recent>'`.
     /// `git lex sparql "<text>"` runs SPARQL you type. `git lex query` alone
     /// lists the stored queries.
     ///
@@ -74,11 +74,11 @@ enum Commands {
     ///
     /// Examples:
     ///   git lex query                       list the stored queries
-    ///   git lex query '<soul/Query/recent>'
+    ///   git lex query '<soul/Query/soul-kit-recent>'
     ///   git lex query '<copia/Query/being-description>' being=sylkie-glitch
     Query {
         /// The stored query's id in angle brackets, quoted:
-        /// '<soul/Query/recent>'. Leave it out to list them.
+        /// '<soul/Query/soul-kit-recent>'. Leave it out to list them.
         name: Option<String>,
         /// Values for a saved query's parameters, each written name=value
         /// (`being=sylkie`). The query document declares what it takes,
@@ -92,7 +92,7 @@ enum Commands {
     },
     /// Run SPARQL you type against your soul's own store, through gitlexd.
     ///
-    /// For a STORED query, use `git lex query '<soul/Query/recent>'`. The store holds current
+    /// For a STORED query, use `git lex query '<soul/Query/soul-kit-recent>'`. The store holds current
     /// documents, files, commits, and the full history of every statement (see
     /// docs/using/queries.md). Prefixes for the installed kits are added for
     /// you; a pattern with no GRAPH clause sees every graph.

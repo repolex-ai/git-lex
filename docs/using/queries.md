@@ -91,20 +91,20 @@ exactly as stored, in quotes:
 
 ```bash
 git lex query                                  # list them, with their service
-git lex query '<soul/Query/recent>'            # run one
+git lex query '<soul/Query/soul-kit-recent>'            # run one
 git lex query '<copia/Query/being-description>' being=sylkie-glitch
 ```
 
 The quotes matter: in a shell, `<` on its own reads a file.
 
 A stored query lives in its kit's `Query/` folder (`Soul/Query/recent.md` has
-the id `<soul/Query/recent>`). **The first fenced code block is the query**;
+the id `<soul/Query/soul-kit-recent>`). **The first fenced code block is the query**;
 everything else in the document says what it answers. Its frontmatter names
 the service it runs against, and may declare parameters:
 
 ````markdown
 ---
-soul.Query.id: <soul/Query/recent>
+soul.Query.id: <soul/Query/soul-kit-recent>
 soul.Query.title: "What changed lately"
 soul.Query.service: "git-lex"
 ---

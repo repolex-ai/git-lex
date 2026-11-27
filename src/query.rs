@@ -168,7 +168,7 @@ pub(crate) fn run_query(store: &Store, query: &str, store_type: &str, json: bool
     Ok(())
 }
 
-/// Stored queries: `git lex query '<soul/Query/recent>'` runs a Query document.
+/// Stored queries: `git lex query '<soul/Query/soul-kit-recent>'` runs a Query document.
 /// The lookup and the format are `git_lex::stored_query`: the installed
 /// kits' `Query/` folders first, `.lex/query/` after. One door, the same one
 /// inline queries use.
@@ -190,7 +190,7 @@ pub(crate) fn cmd_direct(query: String, params: Vec<String>, json: bool) -> Outc
     // runs that file's query; anything else runs as SPARQL text. A name-like
     // miss gets the available list instead of a SPARQL parse error.
     if !params.is_empty() || query.trim_start().starts_with('<') {
-        return Err(Failure::new("`git lex direct` runs SPARQL text. A stored query runs with `git lex query '<soul/Query/recent>'`."));
+        return Err(Failure::new("`git lex direct` runs SPARQL text. A stored query runs with `git lex query '<soul/Query/soul-kit-recent>'`."));
     }
     // B2 FIX (w4r3z, Day 40): `query` now builds the "now" view from the WORKING
     // TREE every time, so the documented `create → save → query` flow surfaces a

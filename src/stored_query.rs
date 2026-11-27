@@ -3,12 +3,12 @@
 //! A saved query is a document of a `Query` class (`git-lex:Query`, and each
 //! kit's own subclass such as `soul:Query`), in that kit's `Query/` folder.
 //! The query a person reads and edits is the FIRST FENCED CODE BLOCK in the
-//! body. That block is the one source: `git lex query '<soul/Query/recent>'` runs it, and at
+//! body. That block is the one source: `git lex query '<soul/Query/soul-kit-recent>'` runs it, and at
 //! save git-lex derives the `sparql` property from it, so a service can fetch
 //! a query by its address and run it.
 //!
 //! A stored query is named by its id, exactly as stored:
-//! `<soul/Query/recent>` (goodlux, 2026-11-27). The earlier home,
+//! `<soul/Query/soul-kit-recent>` (goodlux, 2026-11-27). The earlier home,
 //! `.lex/query/<name>.md`, has no id and is no longer read.
 
 use std::path::{Path, PathBuf};
@@ -113,12 +113,12 @@ fn is_template(name: &str) -> bool {
 }
 
 /// A stored query is named by its id, exactly as stored, angle brackets and
-/// all: `<soul/Query/recent>` (goodlux, 2026-11-27). The store's full address
+/// all: `<soul/Query/soul-kit-recent>` (goodlux, 2026-11-27). The store's full address
 /// (`<https://repolex.ai/7r1pl3f0rc3/w4r3z/soul/Query/recent>`) is the same
 /// id. Returns the kit's name and the document's name, or a sentence saying
 /// how to write it.
 pub fn parse_id(root: &Path, given: &str) -> Result<(String, String), String> {
-    let example = "<soul/Query/recent>";
+    let example = "<soul/Query/soul-kit-recent>";
     let Some(inner) = given.trim().strip_prefix('<').and_then(|s| s.strip_suffix('>')) else {
         return Err(format!(
             "'{given}' is not a query id. A stored query is named by its id in angle brackets, in quotes on the command line: '{example}'."
@@ -341,7 +341,7 @@ mod tests {
         for wrong in ["recent", "soul/Query/recent", "<soul/recent>", "<soul/Query/__Query>", "<soul/Query/nope>"] {
             assert_eq!(find(&root, wrong), Found::Missing, "{wrong}");
         }
-        assert!(parse_id(&root, "soul/Query/recent").unwrap_err().contains("'<soul/Query/recent>'"));
+        assert!(parse_id(&root, "soul/Query/recent").unwrap_err().contains("'<soul/Query/soul-kit-recent>'"));
         assert_eq!(names(&root), vec!["<copia/Query/recent>", "<soul/Query/recent>"]);
 
         std::fs::write(root.join("Soul/Query/empty.md"), "---\ntype: Query\n---\n\njust words\n").unwrap();
